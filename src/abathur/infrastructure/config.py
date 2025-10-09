@@ -1,0 +1,233 @@
+"""Configuration management with hierarchical loading."""
+
+import os
+from pathlib import Path
+from typing import Any
+
+import keyring
+import yaml
+from pydantic import BaseModel, Field
+
+
+class QueueConfig(BaseModel):
+    """Queue configuration."""
+
+    max_size: int = Field(default=1000, ge=1)
+    default_priority: int = Field(default=5, ge=0, le=10)
+    retry_attempts: int = Field(default=3, ge=0)
+    retry_backoff_initial: str = "10s"
+    retry_backoff_max: str = "5m"
+
+
+class SwarmConfig(BaseModel):
+    """Swarm orchestration configuration."""
+
+    max_concurrent_agents: int = Field(default=10, ge=1)
+    agent_spawn_timeout: str = "5s"
+    agent_idle_timeout: str = "5m"
+    hierarchical_depth_limit: int = Field(default=3, ge=1)
+
+
+class LoopConfig(BaseModel):
+    """Loop execution configuration."""
+
+    max_iterations: int = Field(default=10, ge=1)
+    default_timeout: str = "1h"
+    checkpoint_interval: int = Field(default=1, ge=1)
+
+
+class ResourceConfig(BaseModel):
+    """Resource limits configuration."""
+
+    max_memory_per_agent: str = "512MB"
+    max_total_memory: str = "4GB"
+    adaptive_cpu: bool = True
+
+
+class MonitoringConfig(BaseModel):
+    """Monitoring and logging configuration."""
+
+    log_rotation_days: int = Field(default=30, ge=1)
+    audit_retention_days: int = Field(default=90, ge=1)
+    metrics_enabled: bool = True
+
+
+class Config(BaseModel):
+    """Main configuration model."""
+
+    version: str = "0.1.0"
+    log_level: str = "INFO"
+    queue: QueueConfig = Field(default_factory=QueueConfig)
+    swarm: SwarmConfig = Field(default_factory=SwarmConfig)
+    loop: LoopConfig = Field(default_factory=LoopConfig)
+    resources: ResourceConfig = Field(default_factory=ResourceConfig)
+    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
+
+
+class ConfigManager:
+    """Manage configuration loading from multiple sources with hierarchy."""
+
+    def __init__(self, project_root: Path | None = None) -> None:
+        """Initialize config manager.
+
+        Args:
+            project_root: Root directory of the project (default: current directory)
+        """
+        self.project_root = project_root or Path.cwd()
+        self._config: Config | None = None
+
+    def load_config(self) -> Config:
+        """Load configuration from all sources in hierarchy order.
+
+        Configuration hierarchy (highest priority last):
+        1. System defaults (embedded in Config model)
+        2. Template defaults (.abathur/config.yaml)
+        3. User overrides (~/.abathur/config.yaml)
+        4. Project overrides (.abathur/local.yaml)
+        5. Environment variables (ABATHUR_* prefix)
+
+        Returns:
+            Merged configuration
+        """
+        if self._config is not None:
+            return self._config
+
+        # Start with system defaults
+        config_dict: dict[str, Any] = {}
+
+        # Load template defaults
+        template_config_path = self.project_root / ".abathur" / "config.yaml"
+        if template_config_path.exists():
+            config_dict = self._merge_dicts(config_dict, self._load_yaml(template_config_path))
+
+        # Load user overrides
+        user_config_path = Path.home() / ".abathur" / "config.yaml"
+        if user_config_path.exists():
+            config_dict = self._merge_dicts(config_dict, self._load_yaml(user_config_path))
+
+        # Load project overrides
+        local_config_path = self.project_root / ".abathur" / "local.yaml"
+        if local_config_path.exists():
+            config_dict = self._merge_dicts(config_dict, self._load_yaml(local_config_path))
+
+        # Apply environment variables
+        config_dict = self._apply_env_vars(config_dict)
+
+        # Create and validate config
+        self._config = Config(**config_dict)
+        return self._config
+
+    def _load_yaml(self, path: Path) -> dict[str, Any]:
+        """Load YAML configuration file."""
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+
+    def _merge_dicts(self, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        """Recursively merge two dictionaries."""
+        result = base.copy()
+        for key, value in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = self._merge_dicts(result[key], value)
+            else:
+                result[key] = value
+        return result
+
+    def _apply_env_vars(self, config_dict: dict[str, Any]) -> dict[str, Any]:
+        """Apply environment variables with ABATHUR_ prefix."""
+        # Map of env var names to config paths
+        env_mappings = {
+            "ABATHUR_LOG_LEVEL": ["log_level"],
+            "ABATHUR_QUEUE_MAX_SIZE": ["queue", "max_size"],
+            "ABATHUR_MAX_CONCURRENT_AGENTS": ["swarm", "max_concurrent_agents"],
+            "ABATHUR_MAX_ITERATIONS": ["loop", "max_iterations"],
+        }
+
+        for env_var, path in env_mappings.items():
+            value = os.getenv(env_var)
+            if value is not None:
+                # Navigate to the nested dict
+                current = config_dict
+                for key in path[:-1]:
+                    if key not in current:
+                        current[key] = {}
+                    current = current[key]
+                # Set the value (convert to int if needed)
+                try:
+                    current[path[-1]] = int(value)
+                except ValueError:
+                    current[path[-1]] = value
+
+        return config_dict
+
+    def get_api_key(self) -> str:
+        """Get Anthropic API key from environment, keychain, or .env file.
+
+        Priority:
+        1. ANTHROPIC_API_KEY environment variable
+        2. System keychain
+        3. .env file
+
+        Returns:
+            API key
+
+        Raises:
+            ValueError: If API key not found
+        """
+        # 1. Environment variable
+        if key := os.getenv("ANTHROPIC_API_KEY"):
+            return key
+
+        # 2. System keychain
+        try:
+            key = keyring.get_password("abathur", "anthropic_api_key")
+            if key:
+                return key
+        except Exception:
+            pass
+
+        # 3. .env file
+        env_file = self.project_root / ".env"
+        if env_file.exists():
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("ANTHROPIC_API_KEY="):
+                        return line.split("=", 1)[1].strip().strip('"').strip("'")
+
+        raise ValueError(
+            "ANTHROPIC_API_KEY not found. Set it via:\n"
+            "  1. Environment variable: export ANTHROPIC_API_KEY=your-key\n"
+            "  2. Keychain: abathur config set-key\n"
+            "  3. .env file: echo 'ANTHROPIC_API_KEY=your-key' > .env"
+        )
+
+    def set_api_key(self, api_key: str, use_keychain: bool = True) -> None:
+        """Store API key in keychain or .env file.
+
+        Args:
+            api_key: The API key to store
+            use_keychain: If True, store in keychain; otherwise in .env file
+        """
+        if use_keychain:
+            try:
+                keyring.set_password("abathur", "anthropic_api_key", api_key)
+                return
+            except Exception as e:
+                raise ValueError(f"Failed to store API key in keychain: {e}") from e
+        else:
+            # Store in .env file
+            env_file = self.project_root / ".env"
+            with open(env_file, "a") as f:
+                f.write(f"\nANTHROPIC_API_KEY={api_key}\n")
+
+    def get_database_path(self) -> Path:
+        """Get path to SQLite database."""
+        db_dir = self.project_root / ".abathur"
+        db_dir.mkdir(exist_ok=True)
+        return db_dir / "abathur.db"
+
+    def get_log_dir(self) -> Path:
+        """Get path to log directory."""
+        log_dir = self.project_root / ".abathur" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return log_dir

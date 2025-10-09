@@ -1,0 +1,71 @@
+# Abathur Docker Compose Configuration
+
+version: '3.8'
+
+services:
+  abathur:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: abathur:latest
+    container_name: abathur
+    volumes:
+      # Persistent data
+      - abathur-data:/data
+      # Configuration (mount your config files)
+      - ~/.abathur:/home/abathur/.abathur:ro
+      # Templates cache
+      - ~/.abathur/cache:/home/abathur/.abathur/cache
+    environment:
+      # Set via .env file or export
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ABATHUR_LOG_LEVEL=${ABATHUR_LOG_LEVEL:-INFO}
+      - ABATHUR_MAX_CONCURRENT_AGENTS=${ABATHUR_MAX_CONCURRENT_AGENTS:-10}
+    command: status
+    restart: unless-stopped
+    networks:
+      - abathur-network
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 512M
+
+  # Optional: Run swarm in background
+  abathur-swarm:
+    image: abathur:latest
+    container_name: abathur-swarm
+    volumes:
+      - abathur-data:/data
+      - ~/.abathur:/home/abathur/.abathur:ro
+      - ~/.abathur/cache:/home/abathur/.abathur/cache
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - ABATHUR_LOG_LEVEL=${ABATHUR_LOG_LEVEL:-INFO}
+      - ABATHUR_MAX_CONCURRENT_AGENTS=${ABATHUR_MAX_CONCURRENT_AGENTS:-10}
+    command: swarm start --max-agents 10
+    restart: unless-stopped
+    networks:
+      - abathur-network
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+        reservations:
+          cpus: '2.0'
+          memory: 1G
+    profiles:
+      - swarm  # Start with: docker-compose --profile swarm up
+
+volumes:
+  abathur-data:
+    driver: local
+
+networks:
+  abathur-network:
+    driver: bridge

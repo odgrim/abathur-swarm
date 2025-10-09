@@ -1,0 +1,87 @@
+[tool.poetry]
+name = "abathur"
+version = "0.1.0"
+description = "Hivemind Swarm Management System - CLI orchestration for specialized Claude agents"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+license = "MIT"
+packages = [{include = "abathur", from = "src"}]
+
+[tool.poetry.scripts]
+abathur = "abathur.cli.main:main"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+anthropic = "^0.18.0"
+typer = {extras = ["all"], version = "^0.12.0"}
+click = ">=8.1.0,<8.2.0"
+rich = "^13.7.0"
+pydantic = "^2.5.0"
+python-dotenv = "^1.0.0"
+keyring = "^24.3.0"
+structlog = "^24.1.0"
+aiosqlite = "^0.19.0"
+psutil = "^5.9.0"
+pyyaml = "^6.0.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+pytest-asyncio = "^0.21.0"
+pytest-cov = "^4.1.0"
+mypy = "^1.7.0"
+ruff = "^0.1.9"
+black = "^23.12.0"
+pre-commit = "^3.6.0"
+types-pyyaml = "^6.0.12.20250915"
+types-psutil = "^7.0.0.20251001"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_calls = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+strict_equality = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra -q --strict-markers --cov=abathur --cov-report=term-missing --cov-report=html"
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*", "*/site-packages/*"]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
