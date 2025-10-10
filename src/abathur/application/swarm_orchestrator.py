@@ -124,7 +124,12 @@ class SwarmOrchestrator:
                 if result.success:
                     await self.task_coordinator.update_task_status(task.id, TaskStatus.COMPLETED)
                 else:
-                    # Check if we should retry
+                    # Always mark as FAILED first
+                    await self.task_coordinator.update_task_status(
+                        task.id, TaskStatus.FAILED, error_message=result.error
+                    )
+
+                    # Then check if we should retry
                     task_obj = await self.task_coordinator.get_task(task.id)
                     if task_obj and task_obj.retry_count < task_obj.max_retries:
                         logger.info(
@@ -133,10 +138,6 @@ class SwarmOrchestrator:
                             retry_count=task_obj.retry_count,
                         )
                         await self.task_coordinator.retry_task(task.id)
-                    else:
-                        await self.task_coordinator.update_task_status(
-                            task.id, TaskStatus.FAILED, error_message=result.error
-                        )
 
                 self.results.append(result)
                 return result
