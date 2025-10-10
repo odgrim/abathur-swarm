@@ -74,7 +74,7 @@ async def _resolve_task_id(task_id_prefix: str, services: dict[str, Any]) -> UUI
 
 # Helper to get database and services
 async def _get_services() -> dict[str, Any]:
-    """Get initialized services with dual-mode authentication."""
+    """Get initialized services with API key or Claude CLI authentication."""
     from abathur.application import (
         AgentExecutor,
         ClaudeClient,
@@ -88,8 +88,8 @@ async def _get_services() -> dict[str, Any]:
     )
     from abathur.infrastructure import ConfigManager, Database
     from abathur.infrastructure.api_key_auth import APIKeyAuthProvider
+    from abathur.infrastructure.claude_cli_auth import ClaudeCLIAuthProvider
     from abathur.infrastructure.logger import get_logger
-    from abathur.infrastructure.oauth_auth import OAuthAuthProvider
 
     logger = get_logger(__name__)
 
@@ -108,21 +108,16 @@ async def _get_services() -> dict[str, Any]:
         auth_provider = APIKeyAuthProvider(api_key)
         logger.info("auth_initialized", method="api_key")
     except ValueError:
-        # API key not found, try OAuth
+        # API key not found, try Claude CLI
         try:
-            access_token, refresh_token, expires_at = await config_manager.get_oauth_token()
-            auth_provider = OAuthAuthProvider(
-                access_token=access_token,
-                refresh_token=refresh_token,
-                expires_at=expires_at,
-                config_manager=config_manager,
-            )
-            logger.info("auth_initialized", method="oauth")
-        except ValueError as e:
+            auth_provider = ClaudeCLIAuthProvider()
+            logger.info("auth_initialized", method="claude_cli")
+        except Exception as e:
             raise ValueError(
                 "No authentication configured.\n"
-                "Set API key: abathur config set-key <key>\n"
-                "Or ensure Claude Code is configured with OAuth authentication."
+                "Please either:\n"
+                "  1. Set API key: abathur config set-key <key>\n"
+                "  2. Install Claude CLI and authenticate: https://docs.anthropic.com/claude/docs/quickstart"
             ) from e
 
     task_coordinator = TaskCoordinator(database)

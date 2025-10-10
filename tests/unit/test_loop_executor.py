@@ -29,7 +29,9 @@ async def loop_executor(database: Database) -> LoopExecutor:
     from abathur.application import AgentExecutor, ClaudeClient, TaskCoordinator
 
     task_coordinator = TaskCoordinator(database)
-    claude_client = ClaudeClient(api_key="test-key")
+    claude_client = ClaudeClient(
+        api_key="sk-ant-api-test-key-00000000000000000000000000000000000000000000"
+    )
     agent_executor = AgentExecutor(database, claude_client)
 
     return LoopExecutor(task_coordinator, agent_executor, database)

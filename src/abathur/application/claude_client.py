@@ -15,6 +15,20 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _is_claude_cli_provider(auth_provider: "AuthProvider") -> bool:
+    """Check if the auth provider is Claude CLI based.
+
+    Args:
+        auth_provider: Authentication provider to check
+
+    Returns:
+        True if provider is Claude CLI, False otherwise
+    """
+    from abathur.infrastructure.claude_cli_auth import ClaudeCLIAuthProvider
+
+    return isinstance(auth_provider, ClaudeCLIAuthProvider)
+
+
 class ClaudeClient:
     """Wrapper for Anthropic Claude API."""
 
@@ -156,6 +170,45 @@ class ClaudeClient:
                 percentage=round(estimated_tokens / self.context_limit * 100, 1),
             )
 
+        # Check if using Claude CLI provider
+        if _is_claude_cli_provider(self.auth_provider):
+            from abathur.infrastructure.claude_cli_auth import ClaudeCLIAuthProvider
+
+            cli_provider = self.auth_provider
+            assert isinstance(cli_provider, ClaudeCLIAuthProvider)
+
+            result = await cli_provider.execute_prompt(
+                system_prompt=system_prompt,
+                user_message=user_message,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                model=model_to_use,
+            )
+
+            error_msg = result.get("error", "")
+            content = result.get("content", "")
+
+            if error_msg:
+                return {
+                    "success": False,
+                    "content": "",
+                    "stop_reason": "error",
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                    "error": error_msg,
+                }
+
+            return {
+                "success": True,
+                "content": content,
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": estimated_tokens,
+                    "output_tokens": len(content) // 4,
+                },
+                "error": None,
+            }
+
+        # Standard SDK-based execution
         try:
             # Configure SDK with current credentials
             await self._configure_sdk_auth()
@@ -182,7 +235,13 @@ class ClaudeClient:
                 if hasattr(block, "text"):
                     content_text += block.text
 
-            result = {
+            logger.info(
+                "claude_task_completed",
+                tokens_used=response.usage.input_tokens + response.usage.output_tokens,
+                stop_reason=response.stop_reason,
+            )
+
+            return {
                 "success": True,
                 "content": content_text,
                 "stop_reason": response.stop_reason,
@@ -192,14 +251,6 @@ class ClaudeClient:
                 },
                 "error": None,
             }
-
-            logger.info(
-                "claude_task_completed",
-                tokens_used=response.usage.input_tokens + response.usage.output_tokens,
-                stop_reason=response.stop_reason,
-            )
-
-            return result
 
         except Exception as e:
             logger.error("claude_task_failed", error=str(e))

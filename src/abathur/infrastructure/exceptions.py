@@ -32,45 +32,6 @@ class AuthenticationError(AbathurError):
         return str(self.args[0])
 
 
-class OAuthTokenExpiredError(AuthenticationError):
-    """OAuth token expired and automatic refresh failed.
-
-    This error indicates that the OAuth access token has expired
-    and attempts to refresh it using the refresh token have failed.
-    User must re-authenticate.
-    """
-
-    def __init__(self, message: str = "OAuth token expired and refresh failed"):
-        """Initialize OAuth token expired error.
-
-        Args:
-            message: Optional custom error message
-        """
-        super().__init__(
-            message=message, remediation="Re-authenticate with: abathur config oauth-login"
-        )
-
-
-class OAuthRefreshError(AuthenticationError):
-    """Failed to refresh OAuth token due to network or server error.
-
-    This error indicates a transient failure during token refresh,
-    such as network issues or server errors. Users should check
-    their connection and try again.
-    """
-
-    def __init__(self, message: str = "Token refresh failed"):
-        """Initialize OAuth refresh error.
-
-        Args:
-            message: Optional custom error message
-        """
-        super().__init__(
-            message=message,
-            remediation="Check network connection or re-authenticate: abathur config oauth-login",
-        )
-
-
 class APIKeyInvalidError(AuthenticationError):
     """API key is invalid, malformed, or not configured.
 
@@ -96,7 +57,7 @@ class ContextWindowExceededError(AbathurError):
     This error is raised when a task's input (system prompt + user message)
     exceeds the context window limit for the current authentication method:
     - API Key: 1,000,000 tokens
-    - OAuth: 200,000 tokens
+    - Claude CLI: 200,000 tokens
 
     Attributes:
         tokens: Estimated token count of the task input
@@ -110,7 +71,7 @@ class ContextWindowExceededError(AbathurError):
         Args:
             tokens: Estimated token count
             limit: Context window limit
-            auth_method: Authentication method ("api_key" or "oauth")
+            auth_method: Authentication method ("api_key" or "claude_cli")
         """
         message = (
             f"Task input ({tokens:,} tokens) exceeds {auth_method} "
