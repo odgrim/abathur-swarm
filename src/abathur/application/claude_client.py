@@ -36,7 +36,7 @@ class ClaudeClient:
         self,
         api_key: str | None = None,
         auth_provider: "AuthProvider | None" = None,
-        model: str = "claude-sonnet-4-20250514",
+        model: str = "claude-sonnet-4-5-20250929",
         max_retries: int = 3,
         timeout: int = 300,
     ):
@@ -326,7 +326,7 @@ class ClaudeClient:
 
             # Make a minimal test request
             await self.async_client.messages.create(
-                model="claude-3-haiku-20240307",  # Use smallest/fastest model
+                model="claude-3-5-haiku-20241022",  # Use smallest/fastest model
                 max_tokens=10,
                 messages=[{"role": "user", "content": "test"}],
             )

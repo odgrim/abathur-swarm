@@ -66,7 +66,7 @@ class Agent(BaseModel):
     specialization: str
     task_id: UUID
     state: AgentState = Field(default=AgentState.SPAWNING)
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-sonnet-4-5-20250929"
     spawned_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     terminated_at: datetime | None = None
     resource_usage: dict[str, Any] = Field(default_factory=dict)

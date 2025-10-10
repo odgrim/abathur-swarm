@@ -57,7 +57,7 @@ class AgentExecutor:
                 specialization=agent_def.get("specialization", task.agent_type),
                 task_id=task.id,
                 state=AgentState.SPAWNING,
-                model=agent_def.get("model", "claude-sonnet-4-20250514"),
+                model=agent_def.get("model", "claude-sonnet-4-5-20250929"),
             )
 
             await self.database.insert_agent(agent)

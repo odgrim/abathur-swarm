@@ -93,7 +93,7 @@ class TestAgent:
         assert agent.specialization == "testing"
         assert agent.task_id == task_id
         assert agent.state == AgentState.SPAWNING
-        assert agent.model == "claude-sonnet-4-20250514"
+        assert agent.model == "claude-sonnet-4-5-20250929"
         assert isinstance(agent.spawned_at, datetime)
         assert agent.terminated_at is None
         assert agent.resource_usage == {}

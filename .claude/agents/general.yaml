@@ -20,7 +20,7 @@ system_prompt: |
   If you're unsure about something, say so rather than guessing.
 
 # Model configuration
-model: claude-sonnet-4-20250514
+model: claude-sonnet-4-5-20250929
 
 # Resource limits
 resource_limits:

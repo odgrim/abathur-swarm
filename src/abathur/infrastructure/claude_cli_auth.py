@@ -136,7 +136,6 @@ class ClaudeCLIAuthProvider(AuthProvider):
 
             process = await asyncio.create_subprocess_exec(
                 self.cli_path,
-                "--no-interactive",
                 "--format",
                 "json",
                 stdin=asyncio.subprocess.PIPE,
