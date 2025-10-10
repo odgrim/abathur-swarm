@@ -41,6 +41,9 @@ class Database:
             await conn.execute("PRAGMA foreign_keys=ON")
             await conn.execute("PRAGMA busy_timeout=5000")
 
+            # Run migrations before creating tables
+            await self._run_migrations(conn)
+
             # Create tables
             await self._create_tables(conn)
             await conn.commit()
@@ -53,6 +56,105 @@ class Database:
         async with aiosqlite.connect(str(self.db_path)) as conn:
             conn.row_factory = aiosqlite.Row
             yield conn
+
+    async def _run_migrations(self, conn: Connection) -> None:
+        """Run database migrations."""
+        # Check if tasks table exists and has old schema
+        cursor = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'"
+        )
+        table_exists = await cursor.fetchone()
+
+        if table_exists:
+            # Check if old schema (has template_name column)
+            cursor = await conn.execute("PRAGMA table_info(tasks)")
+            columns = await cursor.fetchall()
+            column_names = [col["name"] for col in columns]
+
+            if "template_name" in column_names and "prompt" not in column_names:
+                # Migrate from old schema to new schema
+                print("Migrating database schema: template_name → prompt + agent_type")
+
+                # Temporarily disable foreign keys for migration
+                await conn.execute("PRAGMA foreign_keys=OFF")
+
+                # Create new table with updated schema
+                await conn.execute(
+                    """
+                    CREATE TABLE tasks_new (
+                        id TEXT PRIMARY KEY,
+                        prompt TEXT NOT NULL,
+                        agent_type TEXT NOT NULL DEFAULT 'general',
+                        priority INTEGER NOT NULL DEFAULT 5,
+                        status TEXT NOT NULL,
+                        input_data TEXT NOT NULL,
+                        result_data TEXT,
+                        error_message TEXT,
+                        retry_count INTEGER DEFAULT 0,
+                        max_retries INTEGER DEFAULT 3,
+                        submitted_at TIMESTAMP NOT NULL,
+                        started_at TIMESTAMP,
+                        completed_at TIMESTAMP,
+                        created_by TEXT,
+                        parent_task_id TEXT,
+                        dependencies TEXT,
+                        FOREIGN KEY (parent_task_id) REFERENCES tasks(id)
+                    )
+                    """
+                )
+
+                # Copy data from old table to new table
+                # template_name becomes prompt, agent_type defaults to 'general'
+                await conn.execute(
+                    """
+                    INSERT INTO tasks_new (
+                        id, prompt, agent_type, priority, status, input_data,
+                        result_data, error_message, retry_count, max_retries,
+                        submitted_at, started_at, completed_at, created_by,
+                        parent_task_id, dependencies
+                    )
+                    SELECT
+                        id, template_name, 'general', priority, status, input_data,
+                        result_data, error_message, retry_count, max_retries,
+                        submitted_at, started_at, completed_at, created_by,
+                        parent_task_id, dependencies
+                    FROM tasks
+                    """
+                )
+
+                # Drop old table
+                await conn.execute("DROP TABLE tasks")
+
+                # Rename new table to tasks
+                await conn.execute("ALTER TABLE tasks_new RENAME TO tasks")
+
+                # Recreate indexes
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tasks_status_priority
+                    ON tasks(status, priority DESC, submitted_at ASC)
+                    """
+                )
+
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tasks_submitted_at
+                    ON tasks(submitted_at)
+                    """
+                )
+
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tasks_parent
+                    ON tasks(parent_task_id)
+                    """
+                )
+
+                # Re-enable foreign keys
+                await conn.execute("PRAGMA foreign_keys=ON")
+
+                await conn.commit()
+                print("Database migration completed successfully")
 
     async def _create_tables(self, conn: Connection) -> None:
         """Create database tables."""
