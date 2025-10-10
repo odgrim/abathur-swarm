@@ -38,12 +38,12 @@ class TaskCoordinator:
                 task_id=task.id,
                 action_type="task_submitted",
                 action_data={
-                    "template": task.template_name,
+                    "agent_type": task.agent_type,
                     "priority": task.priority,
                 },
                 result="success",
             )
-            logger.info("task_submitted", task_id=str(task.id), template=task.template_name)
+            logger.info("task_submitted", task_id=str(task.id), agent_type=task.agent_type)
             return task.id
         except Exception as e:
             logger.error("task_submit_failed", error=str(e))

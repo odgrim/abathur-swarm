@@ -22,10 +22,11 @@ class Task(BaseModel):
     """Represents a unit of work in the task queue."""
 
     id: UUID = Field(default_factory=uuid4)
-    template_name: str
+    prompt: str  # The actual instruction/task to execute
+    agent_type: str = "general"  # Agent definition to use (defaults to general)
     priority: int = Field(default=5, ge=0, le=10)
     status: TaskStatus = Field(default=TaskStatus.PENDING)
-    input_data: dict[str, Any]
+    input_data: dict[str, Any] = Field(default_factory=dict)
     result_data: dict[str, Any] | None = None
     error_message: str | None = None
     retry_count: int = Field(default=0, ge=0)

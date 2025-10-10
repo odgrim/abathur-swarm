@@ -61,7 +61,8 @@ class Database:
             """
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
-                template_name TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                agent_type TEXT NOT NULL DEFAULT 'general',
                 priority INTEGER NOT NULL DEFAULT 5,
                 status TEXT NOT NULL,
                 input_data TEXT NOT NULL,
@@ -243,15 +244,16 @@ class Database:
             await conn.execute(
                 """
                 INSERT INTO tasks (
-                    id, template_name, priority, status, input_data,
+                    id, prompt, agent_type, priority, status, input_data,
                     result_data, error_message, retry_count, max_retries,
                     submitted_at, started_at, completed_at, created_by,
                     parent_task_id, dependencies
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(task.id),
-                    task.template_name,
+                    task.prompt,
+                    task.agent_type,
                     task.priority,
                     task.status.value,
                     json.dumps(task.input_data),
@@ -356,7 +358,8 @@ class Database:
         """Convert database row to Task model."""
         return Task(
             id=UUID(row["id"]),
-            template_name=row["template_name"],
+            prompt=row["prompt"],
+            agent_type=row["agent_type"],
             priority=row["priority"],
             status=TaskStatus(row["status"]),
             input_data=json.loads(row["input_data"]),

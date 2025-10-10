@@ -39,8 +39,8 @@ async def loop_executor(database: Database) -> LoopExecutor:
 async def test_loop_executor_threshold_convergence(loop_executor: LoopExecutor) -> None:
     """Test loop executor with threshold convergence."""
     task = Task(
-        template_name="test-agent",
-        input_data={"prompt": "test"},
+        prompt="test task prompt",
+        agent_type="test-agent",
     )
 
     criteria = ConvergenceCriteria(
@@ -81,8 +81,8 @@ async def test_loop_executor_threshold_convergence(loop_executor: LoopExecutor) 
 async def test_loop_executor_stability_convergence(loop_executor: LoopExecutor) -> None:
     """Test loop executor with stability convergence."""
     task = Task(
-        template_name="test-agent",
-        input_data={"prompt": "test"},
+        prompt="test task prompt",
+        agent_type="test-agent",
     )
 
     criteria = ConvergenceCriteria(
@@ -121,8 +121,8 @@ async def test_loop_executor_stability_convergence(loop_executor: LoopExecutor) 
 async def test_loop_executor_max_iterations(loop_executor: LoopExecutor) -> None:
     """Test loop executor reaches max iterations."""
     task = Task(
-        template_name="test-agent",
-        input_data={"prompt": "test"},
+        prompt="test task prompt",
+        agent_type="test-agent",
     )
 
     criteria = ConvergenceCriteria(
@@ -159,8 +159,8 @@ async def test_loop_executor_checkpoint_save(
 ) -> None:
     """Test loop executor saves checkpoints."""
     task = Task(
-        template_name="test-agent",
-        input_data={"prompt": "test"},
+        prompt="test task prompt",
+        agent_type="test-agent",
     )
     await database.insert_task(task)
 

@@ -13,12 +13,13 @@ class TestTask:
     def test_create_task_with_defaults(self) -> None:
         """Test creating a task with default values."""
         task = Task(
-            template_name="test-template",
+            prompt="Test task prompt",
             input_data={"key": "value"},
         )
 
         assert task.id is not None
-        assert task.template_name == "test-template"
+        assert task.prompt == "Test task prompt"
+        assert task.agent_type == "general"  # Default agent type
         assert task.priority == 5
         assert task.status == TaskStatus.PENDING
         assert task.input_data == {"key": "value"}
@@ -31,8 +32,7 @@ class TestTask:
     def test_create_task_with_custom_priority(self) -> None:
         """Test creating a task with custom priority."""
         task = Task(
-            template_name="test-template",
-            input_data={"key": "value"},
+            prompt="Test task with custom priority",
             priority=8,
         )
 
@@ -42,15 +42,13 @@ class TestTask:
         """Test that task priority is validated."""
         with pytest.raises(ValueError):
             Task(
-                template_name="test-template",
-                input_data={"key": "value"},
+                prompt="Test task",
                 priority=11,  # Invalid: > 10
             )
 
         with pytest.raises(ValueError):
             Task(
-                template_name="test-template",
-                input_data={"key": "value"},
+                prompt="Test task",
                 priority=-1,  # Invalid: < 0
             )
 
@@ -58,8 +56,7 @@ class TestTask:
         """Test creating a child task with parent reference."""
         parent_id = uuid4()
         task = Task(
-            template_name="child-template",
-            input_data={},
+            prompt="Child task prompt",
             parent_task_id=parent_id,
         )
 
@@ -70,8 +67,7 @@ class TestTask:
         dep1 = uuid4()
         dep2 = uuid4()
         task = Task(
-            template_name="test-template",
-            input_data={},
+            prompt="Task with dependencies",
             dependencies=[dep1, dep2],
         )
 

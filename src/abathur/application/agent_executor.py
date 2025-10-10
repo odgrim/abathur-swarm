@@ -48,13 +48,13 @@ class AgentExecutor:
 
         try:
             # Load agent definition
-            agent_def = self._load_agent_definition(task.template_name)
+            agent_def = self._load_agent_definition(task.agent_type)
 
             # Create agent record
             agent = Agent(
                 id=agent_id,
-                name=task.template_name,
-                specialization=agent_def.get("specialization", task.template_name),
+                name=task.agent_type,
+                specialization=agent_def.get("specialization", task.agent_type),
                 task_id=task.id,
                 state=AgentState.SPAWNING,
                 model=agent_def.get("model", "claude-sonnet-4-20250514"),
@@ -67,7 +67,7 @@ class AgentExecutor:
                 "agent_spawned",
                 agent_id=str(agent_id),
                 task_id=str(task.id),
-                template=task.template_name,
+                agent_type=task.agent_type,
             )
 
             # Update agent to busy
@@ -113,7 +113,7 @@ class AgentExecutor:
                 agent_id=agent_id,
                 action_type="task_executed",
                 action_data={
-                    "template": task.template_name,
+                    "agent_type": task.agent_type,
                     "tokens_used": sum(response["usage"].values()),
                 },
                 result="success" if response["success"] else "failed",
@@ -149,11 +149,11 @@ class AgentExecutor:
                 error=f"Execution error: {e}",
             )
 
-    def _load_agent_definition(self, template_name: str) -> dict[str, Any]:
+    def _load_agent_definition(self, agent_type: str) -> dict[str, Any]:
         """Load agent definition from YAML file.
 
         Args:
-            template_name: Name of agent template
+            agent_type: Type of agent (e.g., 'general', 'code-reviewer', etc.)
 
         Returns:
             Agent definition dictionary
@@ -161,7 +161,7 @@ class AgentExecutor:
         Raises:
             FileNotFoundError: If agent definition not found
         """
-        agent_file = self.agents_dir / f"{template_name}.yaml"
+        agent_file = self.agents_dir / f"{agent_type}.yaml"
 
         if not agent_file.exists():
             raise FileNotFoundError(f"Agent definition not found: {agent_file}")
@@ -181,26 +181,12 @@ class AgentExecutor:
         Returns:
             User message string
         """
-        # If task has a specific prompt, use that
-        if "prompt" in task.input_data:
-            prompt = task.input_data["prompt"]
-            return str(prompt) if prompt is not None else ""
+        # Start with the task prompt (which is now a required field)
+        message_parts: list[str] = [task.prompt]
 
-        # Otherwise, format the inputs
-        message_parts: list[str] = []
+        # Add any additional context from input_data
+        if task.input_data:
+            message_parts.append("\nAdditional Context:")
+            message_parts.append(json.dumps(task.input_data, indent=2))
 
-        # Add task description if present
-        if "description" in task.input_data:
-            desc = task.input_data["description"]
-            if isinstance(desc, str):
-                message_parts.append(desc)
-
-        # Add any other inputs as context
-        other_inputs = {
-            k: v for k, v in task.input_data.items() if k not in ("prompt", "description")
-        }
-        if other_inputs:
-            message_parts.append("\nContext:")
-            message_parts.append(json.dumps(other_inputs, indent=2))
-
-        return "\n\n".join(message_parts) if message_parts else "Please complete the assigned task."
+        return "\n\n".join(message_parts)

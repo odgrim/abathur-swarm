@@ -119,26 +119,40 @@ app.add_typer(task_app, name="task")
 
 @task_app.command("submit")
 def submit(
-    template: str = typer.Argument(..., help="Template name"),
-    input_file: Path | None = typer.Option(None, help="JSON file with input data"),  # noqa: B008
+    prompt: str = typer.Argument(..., help="Task prompt/instruction"),
+    agent_type: str = typer.Option("general", help="Agent type to use"),  # noqa: B008
+    input_file: Path
+    | None = typer.Option(None, help="JSON file with additional context data"),  # noqa: B008
+    input_json: str
+    | None = typer.Option(None, help="JSON string with additional context data"),  # noqa: B008
     priority: int = typer.Option(5, help="Task priority (0-10)"),  # noqa: B008
 ) -> None:
-    """Submit a new task to the queue."""
+    """Submit a new task to the queue.
+
+    Examples:
+        abathur task submit "Review the code in src/main.py"
+        abathur task submit "Fix the authentication bug" --agent-type code-reviewer
+        abathur task submit "Analyze performance" --input-file context.json
+        abathur task submit "Generate report" --input-json '{"format": "pdf"}'
+    """
 
     async def _submit() -> UUID:
         services = await _get_services()
         from abathur.domain.models import Task
 
-        # Load input data
+        # Load additional context data
         input_data = {}
         if input_file and input_file.exists():
             with open(input_file) as f:
                 input_data = json.load(f)
+        elif input_json:
+            input_data = json.loads(input_json)
 
-        task = Task(template_name=template, input_data=input_data, priority=priority)
+        task = Task(prompt=prompt, agent_type=agent_type, input_data=input_data, priority=priority)
         task_id: UUID = await services["task_coordinator"].submit_task(task)
 
         console.print(f"[green]✓[/green] Task submitted: [cyan]{task_id}[/cyan]")
+        console.print(f"[dim]Agent type: {agent_type}[/dim]")
         return task_id
 
     asyncio.run(_submit())
@@ -160,15 +174,19 @@ def list_tasks(
 
         table = Table(title="Tasks")
         table.add_column("ID", style="cyan")
-        table.add_column("Template", style="green")
+        table.add_column("Agent Type", style="green")
+        table.add_column("Prompt", style="white")
         table.add_column("Priority", justify="center")
         table.add_column("Status", style="yellow")
         table.add_column("Submitted", style="blue")
 
         for task in tasks:
+            # Truncate prompt for display
+            prompt_preview = task.prompt[:50] + "..." if len(task.prompt) > 50 else task.prompt
             table.add_row(
                 str(task.id)[:8],
-                task.template_name,
+                task.agent_type,
+                prompt_preview,
                 str(task.priority),
                 task.status.value,
                 task.submitted_at.strftime("%Y-%m-%d %H:%M"),
@@ -192,7 +210,8 @@ def task_status(task_id: str = typer.Argument(..., help="Task ID")) -> None:
             return
 
         console.print(f"[bold]Task {task.id}[/bold]")
-        console.print(f"Template: {task.template_name}")
+        console.print(f"Prompt: {task.prompt}")
+        console.print(f"Agent Type: {task.agent_type}")
         console.print(f"Priority: {task.priority}")
         console.print(f"Status: {task.status.value}")
         console.print(f"Submitted: {task.submitted_at}")
@@ -200,8 +219,11 @@ def task_status(task_id: str = typer.Argument(..., help="Task ID")) -> None:
             console.print(f"Started: {task.started_at}")
         if task.completed_at:
             console.print(f"Completed: {task.completed_at}")
+        if task.input_data:
+            console.print("\n[dim]Additional Context:[/dim]")
+            console.print(json.dumps(task.input_data, indent=2))
         if task.error_message:
-            console.print(f"[red]Error:[/red] {task.error_message}")
+            console.print(f"\n[red]Error:[/red] {task.error_message}")
 
     asyncio.run(_status())
 

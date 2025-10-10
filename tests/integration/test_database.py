@@ -27,7 +27,8 @@ class TestDatabaseTaskOperations:
     async def test_insert_and_get_task(self, database: Database) -> None:
         """Test inserting and retrieving a task."""
         task = Task(
-            template_name="test-template",
+            prompt="Test task prompt",
+            agent_type="test-agent",
             input_data={"key": "value"},
             priority=7,
         )
@@ -39,7 +40,8 @@ class TestDatabaseTaskOperations:
 
         assert retrieved_task is not None
         assert retrieved_task.id == task.id
-        assert retrieved_task.template_name == "test-template"
+        assert retrieved_task.prompt == "Test task prompt"
+        assert retrieved_task.agent_type == "test-agent"
         assert retrieved_task.priority == 7
         assert retrieved_task.input_data == {"key": "value"}
         assert retrieved_task.status == TaskStatus.PENDING
@@ -48,8 +50,7 @@ class TestDatabaseTaskOperations:
     async def test_update_task_status(self, database: Database) -> None:
         """Test updating task status."""
         task = Task(
-            template_name="test-template",
-            input_data={},
+            prompt="Test task",
         )
 
         await database.insert_task(task)
@@ -74,9 +75,9 @@ class TestDatabaseTaskOperations:
     async def test_list_tasks(self, database: Database) -> None:
         """Test listing tasks."""
         # Create several tasks
-        task1 = Task(template_name="template1", input_data={}, priority=5)
-        task2 = Task(template_name="template2", input_data={}, priority=8)
-        task3 = Task(template_name="template3", input_data={}, priority=3)
+        task1 = Task(prompt="Task 1", priority=5)
+        task2 = Task(prompt="Task 2", priority=8)
+        task3 = Task(prompt="Task 3", priority=3)
 
         await database.insert_task(task1)
         await database.insert_task(task2)
@@ -95,8 +96,8 @@ class TestDatabaseTaskOperations:
     async def test_list_tasks_by_status(self, database: Database) -> None:
         """Test listing tasks filtered by status."""
         # Create tasks with different statuses
-        task1 = Task(template_name="template1", input_data={})
-        task2 = Task(template_name="template2", input_data={})
+        task1 = Task(prompt="Task 1")
+        task2 = Task(prompt="Task 2")
 
         await database.insert_task(task1)
         await database.insert_task(task2)
@@ -118,9 +119,9 @@ class TestDatabaseTaskOperations:
     async def test_dequeue_next_task(self, database: Database) -> None:
         """Test dequeuing the next highest priority task."""
         # Create tasks with different priorities
-        task1 = Task(template_name="template1", input_data={}, priority=5)
-        task2 = Task(template_name="template2", input_data={}, priority=8)
-        task3 = Task(template_name="template3", input_data={}, priority=3)
+        task1 = Task(prompt="Task 1", priority=5)
+        task2 = Task(prompt="Task 2", priority=8)
+        task3 = Task(prompt="Task 3", priority=3)
 
         await database.insert_task(task1)
         await database.insert_task(task2)
@@ -143,12 +144,11 @@ class TestDatabaseTaskOperations:
     @pytest.mark.asyncio
     async def test_task_with_parent(self, database: Database) -> None:
         """Test task with parent relationship."""
-        parent_task = Task(template_name="parent", input_data={})
+        parent_task = Task(prompt="Parent task")
         await database.insert_task(parent_task)
 
         child_task = Task(
-            template_name="child",
-            input_data={},
+            prompt="Child task",
             parent_task_id=parent_task.id,
         )
         await database.insert_task(child_task)
