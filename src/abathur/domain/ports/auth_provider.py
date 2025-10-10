@@ -31,11 +31,15 @@ class AuthProvider(ABC):
         pass
 
     @abstractmethod
-    async def refresh_credentials(self) -> bool:
+    async def refresh_credentials(self, force: bool = False) -> bool:
         """Refresh expired credentials.
 
         For OAuth providers, this will call the token refresh endpoint.
         For API key providers, this is a no-op (always returns True).
+
+        Args:
+            force: If True, force refresh even if credentials appear valid.
+                   Useful when API returns 401 despite token appearing fresh.
 
         Returns:
             True if successful, False otherwise

@@ -106,7 +106,7 @@ class OAuthAuthProvider(AuthProvider):
             "expires_at": self.expires_at.isoformat(),
         }
 
-    async def refresh_credentials(self) -> bool:
+    async def refresh_credentials(self, force: bool = False) -> bool:
         """Refresh OAuth token with retry logic.
 
         This method implements:
@@ -115,15 +115,40 @@ class OAuthAuthProvider(AuthProvider):
         - Token rotation handling
         - Persistent storage of new tokens
 
+        Args:
+            force: If True, force refresh even if token appears valid (for handling
+                   cases where API returns 401 despite token appearing fresh)
+
         Returns:
             True if refresh succeeded, False otherwise
         """
         # Use lock to prevent concurrent refresh requests
         async with self._refresh_lock:
             # Double-check expiry inside lock (another task may have refreshed)
-            if not self._is_expired() and not self._is_near_expiry():
-                logger.debug("token_already_refreshed", message="Token refreshed by another task")
-                return True
+            # But also verify the token was refreshed recently (within last 10 seconds)
+            # to ensure we're not using a potentially stale/invalid token
+            if not force and not self._is_expired() and not self._is_near_expiry():
+                # Add extra validation: if this appears to be a fresh token
+                # (expires_at is in the future and was recently set), accept it
+                if self.expires_at > datetime.now(timezone.utc) + timedelta(minutes=1):
+                    logger.debug(
+                        "token_already_refreshed",
+                        message="Token refreshed by another task",
+                        expires_at=self.expires_at.isoformat(),
+                    )
+                    return True
+                else:
+                    # Token expiry is suspicious (too close or in past), force refresh
+                    logger.warning(
+                        "token_expiry_suspicious",
+                        expires_at=self.expires_at.isoformat(),
+                        forcing_refresh=True,
+                    )
+            elif force:
+                logger.info(
+                    "forced_token_refresh",
+                    message="Forcing token refresh despite apparent validity",
+                )
 
             # Retry up to 3 times
             for attempt in range(3):

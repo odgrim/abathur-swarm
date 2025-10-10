@@ -157,6 +157,10 @@ class ClaudeClient:
             )
 
         # Retry loop for 401 errors (OAuth token refresh)
+        # Track if we've already attempted refresh to detect refresh failures
+        refresh_attempted = False
+        consecutive_401s = 0
+
         for attempt in range(self.max_retries):
             try:
                 # Configure SDK with current credentials (lazy initialization)
@@ -209,31 +213,78 @@ class ClaudeClient:
                 error_str = str(e).lower()
                 is_401 = "401" in error_str or "unauthorized" in error_str
 
-                if is_401 and attempt < self.max_retries - 1:
-                    logger.warning(
-                        "auth_failed_attempting_refresh",
-                        attempt=attempt + 1,
-                        max_retries=self.max_retries,
-                    )
+                if is_401:
+                    consecutive_401s += 1
 
-                    # Attempt to refresh credentials
-                    if await self.auth_provider.refresh_credentials():
-                        logger.info("credentials_refreshed_retrying")
-                        continue
-                    else:
-                        # Refresh failed - return error
+                    # If we get multiple 401s in a row after refresh, the token is truly invalid
+                    if consecutive_401s > 1 and refresh_attempted:
+                        logger.error(
+                            "repeated_auth_failures_after_refresh",
+                            consecutive_401s=consecutive_401s,
+                            message="Token refresh succeeded but token still invalid",
+                        )
                         from abathur.infrastructure.exceptions import OAuthRefreshError
 
-                        logger.error("credential_refresh_failed")
                         return {
                             "success": False,
                             "content": "",
                             "stop_reason": "error",
                             "usage": {"input_tokens": 0, "output_tokens": 0},
-                            "error": f"Authentication failed: {str(OAuthRefreshError())}",
+                            "error": f"Authentication failed after refresh: {str(OAuthRefreshError())}",
+                        }
+
+                    if attempt < self.max_retries - 1:
+                        logger.warning(
+                            "auth_failed_attempting_refresh",
+                            attempt=attempt + 1,
+                            max_retries=self.max_retries,
+                            consecutive_401s=consecutive_401s,
+                        )
+
+                        # Attempt to refresh credentials
+                        refresh_attempted = True
+
+                        # Force refresh if this is a repeat 401 (don't trust "already refreshed" status)
+                        force_refresh = consecutive_401s > 1
+
+                        if force_refresh:
+                            logger.warning(
+                                "forcing_token_refresh",
+                                reason="repeated_401_after_claimed_refresh",
+                                consecutive_401s=consecutive_401s,
+                            )
+                            # Add small delay to avoid rate limiting
+                            await asyncio.sleep(0.5)
+
+                        if await self.auth_provider.refresh_credentials(force=force_refresh):
+                            logger.info("credentials_refreshed_retrying")
+                            # Add small delay to ensure token propagates
+                            await asyncio.sleep(0.1)
+                            continue
+                        else:
+                            # Refresh failed - return error
+                            from abathur.infrastructure.exceptions import OAuthRefreshError
+
+                            logger.error("credential_refresh_failed")
+                            return {
+                                "success": False,
+                                "content": "",
+                                "stop_reason": "error",
+                                "usage": {"input_tokens": 0, "output_tokens": 0},
+                                "error": f"Authentication failed: {str(OAuthRefreshError())}",
+                            }
+                    else:
+                        # Last attempt, can't refresh anymore
+                        logger.error("claude_task_failed", error=str(e), is_auth_error=is_401)
+                        return {
+                            "success": False,
+                            "content": "",
+                            "stop_reason": "error",
+                            "usage": {"input_tokens": 0, "output_tokens": 0},
+                            "error": str(e),
                         }
                 else:
-                    # Non-401 error or max retries exceeded
+                    # Non-401 error
                     logger.error("claude_task_failed", error=str(e), is_auth_error=is_401)
                     return {
                         "success": False,

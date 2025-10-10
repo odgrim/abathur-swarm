@@ -48,10 +48,13 @@ class APIKeyAuthProvider(AuthProvider):
         """
         return {"type": "api_key", "value": self.api_key}
 
-    async def refresh_credentials(self) -> bool:
+    async def refresh_credentials(self, force: bool = False) -> bool:
         """Refresh credentials (no-op for API keys).
 
         API keys do not expire, so this always returns True.
+
+        Args:
+            force: Ignored for API keys (they don't need refreshing)
 
         Returns:
             True (API keys don't need refreshing)
