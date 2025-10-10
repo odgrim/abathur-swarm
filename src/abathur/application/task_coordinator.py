@@ -79,30 +79,46 @@ class TaskCoordinator:
         )
         logger.info("task_status_updated", task_id=str(task_id), status=status.value)
 
-    async def cancel_task(self, task_id: UUID) -> bool:
-        """Cancel a pending task.
+    async def cancel_task(self, task_id: UUID, force: bool = False) -> bool:
+        """Cancel a pending or running task.
 
         Args:
             task_id: Task ID to cancel
+            force: If True, allow canceling RUNNING tasks (default: False)
 
         Returns:
-            True if cancelled, False if task not found or already running/completed
+            True if cancelled, False if task not found or already completed
         """
         task = await self.database.get_task(task_id)
         if not task:
             logger.warning("task_not_found", task_id=str(task_id))
             return False
 
-        if task.status not in (TaskStatus.PENDING,):
+        # Allow canceling pending tasks always, running tasks only with force=True
+        if task.status == TaskStatus.PENDING:
+            await self.update_task_status(task_id, TaskStatus.CANCELLED)
+            return True
+        elif task.status == TaskStatus.RUNNING and force:
+            await self.update_task_status(
+                task_id, TaskStatus.CANCELLED, error_message="Task cancelled by user"
+            )
+            logger.info("running_task_cancelled", task_id=str(task_id))
+            return True
+        elif task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
             logger.warning(
-                "task_cannot_cancel",
+                "task_already_terminated",
                 task_id=str(task_id),
                 status=task.status.value,
             )
             return False
-
-        await self.update_task_status(task_id, TaskStatus.CANCELLED)
-        return True
+        else:
+            logger.warning(
+                "task_cannot_cancel",
+                task_id=str(task_id),
+                status=task.status.value,
+                force=force,
+            )
+            return False
 
     async def get_task(self, task_id: UUID) -> Task | None:
         """Get task by ID.
@@ -160,3 +176,61 @@ class TaskCoordinator:
         await self.update_task_status(task_id, TaskStatus.PENDING)
         logger.info("task_retry_scheduled", task_id=str(task_id))
         return True
+
+    async def handle_stale_tasks(self) -> list[UUID]:
+        """Detect and handle stale running tasks that have exceeded their timeout.
+
+        Tasks that have exceeded their timeout will be:
+        - Marked as FAILED if they've exceeded max retries
+        - Marked as PENDING for retry if retries are available
+
+        Returns:
+            List of task IDs that were handled
+        """
+        stale_tasks = await self.database.get_stale_running_tasks()
+        handled_task_ids = []
+
+        for task in stale_tasks:
+            logger.warning(
+                "stale_task_detected",
+                task_id=str(task.id),
+                started_at=task.started_at.isoformat() if task.started_at else None,
+                last_updated_at=task.last_updated_at.isoformat(),
+                timeout_seconds=task.max_execution_timeout_seconds,
+            )
+
+            # Increment retry count
+            await self.database.increment_task_retry_count(task.id)
+
+            # Check if max retries exceeded (task.retry_count is the old value, now it's +1)
+            if task.retry_count + 1 >= task.max_retries:
+                # Max retries exceeded, mark as failed
+                await self.update_task_status(
+                    task.id,
+                    TaskStatus.FAILED,
+                    error_message=f"Task exceeded timeout ({task.max_execution_timeout_seconds}s) and max retries",
+                )
+                logger.error(
+                    "task_timeout_failed",
+                    task_id=str(task.id),
+                    retry_count=task.retry_count + 1,
+                )
+            else:
+                # Reset to pending for retry
+                await self.update_task_status(task.id, TaskStatus.PENDING, error_message=None)
+                logger.info(
+                    "task_timeout_retry",
+                    task_id=str(task.id),
+                    retry_count=task.retry_count + 1,
+                )
+
+            handled_task_ids.append(task.id)
+
+        if handled_task_ids:
+            logger.info(
+                "stale_tasks_handled",
+                count=len(handled_task_ids),
+                task_ids=[str(tid) for tid in handled_task_ids],
+            )
+
+        return handled_task_ids

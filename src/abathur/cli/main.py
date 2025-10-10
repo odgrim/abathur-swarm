@@ -24,6 +24,54 @@ app = typer.Typer(
 console = Console()
 
 
+# Helper to resolve UUID prefix to full UUID
+async def _resolve_task_id(task_id_prefix: str, services: dict[str, Any]) -> UUID | None:
+    """Resolve a task ID prefix to a full UUID.
+
+    Args:
+        task_id_prefix: Full UUID or prefix (e.g., 'ebec23ad')
+        services: Services dictionary with task_coordinator
+
+    Returns:
+        Full UUID if exactly one match found, None otherwise
+
+    Raises:
+        typer.Exit: If no matches or multiple matches found
+    """
+    from abathur.domain.models import TaskStatus
+
+    # Try to parse as full UUID first
+    try:
+        return UUID(task_id_prefix)
+    except ValueError:
+        pass
+
+    # Search for prefix match across all tasks
+    from abathur.domain.models import Task
+
+    all_tasks: list[Task] = []
+    for status in TaskStatus:
+        tasks = await services["task_coordinator"].list_tasks(status, limit=10000)
+        all_tasks.extend(tasks)
+
+    # Find matches
+    matches = [task for task in all_tasks if str(task.id).startswith(task_id_prefix.lower())]
+
+    if len(matches) == 0:
+        console.print(f"[red]Error:[/red] No task found matching prefix '{task_id_prefix}'")
+        raise typer.Exit(1)
+    elif len(matches) > 1:
+        console.print(f"[red]Error:[/red] Multiple tasks match prefix '{task_id_prefix}':")
+        for task in matches:
+            console.print(f"  - {task.id} ({task.status.value})")
+        console.print(
+            "\n[yellow]Please provide a longer prefix to uniquely identify the task[/yellow]"
+        )
+        raise typer.Exit(1)
+
+    return matches[0].id
+
+
 # Helper to get database and services
 async def _get_services() -> dict[str, Any]:
     """Get initialized services with dual-mode authentication."""
@@ -173,7 +221,7 @@ def list_tasks(
         tasks = await services["task_coordinator"].list_tasks(task_status, limit)
 
         table = Table(title="Tasks")
-        table.add_column("ID", style="cyan")
+        table.add_column("ID", style="cyan", no_wrap=True)
         table.add_column("Agent Type", style="green")
         table.add_column("Prompt", style="white")
         table.add_column("Priority", justify="center")
@@ -181,7 +229,7 @@ def list_tasks(
         table.add_column("Submitted", style="blue")
 
         for task in tasks:
-            # Truncate prompt for display
+            # Truncate prompt and ID for display
             prompt_preview = task.prompt[:50] + "..." if len(task.prompt) > 50 else task.prompt
             table.add_row(
                 str(task.id)[:8],
@@ -198,12 +246,15 @@ def list_tasks(
 
 
 @task_app.command("status")
-def task_status(task_id: str = typer.Argument(..., help="Task ID")) -> None:
+def task_status(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> None:
     """Get detailed task status."""
 
     async def _status() -> None:
+        from datetime import datetime, timezone
+
         services = await _get_services()
-        task = await services["task_coordinator"].get_task(UUID(task_id))
+        resolved_id = await _resolve_task_id(task_id, services)
+        task = await services["task_coordinator"].get_task(resolved_id)
 
         if not task:
             console.print(f"[red]Error:[/red] Task {task_id} not found")
@@ -214,11 +265,28 @@ def task_status(task_id: str = typer.Argument(..., help="Task ID")) -> None:
         console.print(f"Agent Type: {task.agent_type}")
         console.print(f"Priority: {task.priority}")
         console.print(f"Status: {task.status.value}")
+        console.print(f"Retry Count: {task.retry_count}/{task.max_retries}")
+        console.print(f"Timeout: {task.max_execution_timeout_seconds}s")
         console.print(f"Submitted: {task.submitted_at}")
         if task.started_at:
             console.print(f"Started: {task.started_at}")
         if task.completed_at:
             console.print(f"Completed: {task.completed_at}")
+        console.print(f"Last Updated: {task.last_updated_at}")
+
+        # Show time since last update for running tasks
+        if task.status.value == "running":
+            now = datetime.now(timezone.utc)
+            time_since_update = (now - task.last_updated_at).total_seconds()
+            console.print(f"Time Since Update: {int(time_since_update)}s")
+
+            # Warn if approaching timeout
+            if time_since_update > task.max_execution_timeout_seconds * 0.8:
+                console.print(
+                    f"[yellow]⚠[/yellow]  Task approaching timeout "
+                    f"({int(time_since_update)}s / {task.max_execution_timeout_seconds}s)"
+                )
+
         if task.input_data:
             console.print("\n[dim]Additional Context:[/dim]")
             console.print(json.dumps(task.input_data, indent=2))
@@ -229,29 +297,43 @@ def task_status(task_id: str = typer.Argument(..., help="Task ID")) -> None:
 
 
 @task_app.command("cancel")
-def cancel(task_id: str = typer.Argument(..., help="Task ID to cancel")) -> None:
-    """Cancel a pending/running task."""
+def cancel(
+    task_id: str = typer.Argument(..., help="Task ID or prefix"),
+    force: bool = typer.Option(False, help="Force cancel running tasks"),
+) -> None:
+    """Cancel a pending/running task.
+
+    Use --force to cancel running tasks. Without --force, only pending tasks can be cancelled.
+    """
 
     async def _cancel() -> None:
         services = await _get_services()
+        resolved_id = await _resolve_task_id(task_id, services)
 
-        success = await services["task_coordinator"].cancel_task(UUID(task_id))
+        success = await services["task_coordinator"].cancel_task(resolved_id, force=force)
 
         if success:
             console.print(f"[green]✓[/green] Task {task_id} cancelled")
         else:
-            console.print(f"[red]Error:[/red] Failed to cancel task {task_id}")
+            if not force:
+                console.print(
+                    f"[red]Error:[/red] Failed to cancel task {task_id}. "
+                    "Use --force to cancel running tasks."
+                )
+            else:
+                console.print(f"[red]Error:[/red] Failed to cancel task {task_id}")
 
     asyncio.run(_cancel())
 
 
 @task_app.command("retry")
-def retry(task_id: str = typer.Argument(..., help="Task ID to retry")) -> None:
+def retry(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> None:
     """Retry a failed task."""
 
     async def _retry() -> None:
         services = await _get_services()
-        success = await services["task_coordinator"].retry_task(UUID(task_id))
+        resolved_id = await _resolve_task_id(task_id, services)
+        success = await services["task_coordinator"].retry_task(resolved_id)
 
         if success:
             console.print(f"[green]✓[/green] Task {task_id} queued for retry")
@@ -259,6 +341,26 @@ def retry(task_id: str = typer.Argument(..., help="Task ID to retry")) -> None:
             console.print(f"[red]Error:[/red] Failed to retry task {task_id}")
 
     asyncio.run(_retry())
+
+
+@task_app.command("check-stale")
+def check_stale() -> None:
+    """Check for and handle stale running tasks that have exceeded their timeout."""
+
+    async def _check_stale() -> None:
+        services = await _get_services()
+
+        console.print("[blue]Checking for stale running tasks...[/blue]")
+        handled_task_ids = await services["task_coordinator"].handle_stale_tasks()
+
+        if not handled_task_ids:
+            console.print("[green]✓[/green] No stale tasks found")
+        else:
+            console.print(f"[yellow]![/yellow] Handled {len(handled_task_ids)} stale task(s):")
+            for task_id in handled_task_ids:
+                console.print(f"  - {task_id}")
+
+    asyncio.run(_check_stale())
 
 
 # ===== Swarm Commands =====
@@ -478,7 +580,7 @@ app.add_typer(loop_app, name="loop")
 
 @loop_app.command("start")
 def loop_start(
-    task_id: str = typer.Argument(..., help="Task ID to execute in loop"),
+    task_id: str = typer.Argument(..., help="Task ID or prefix"),
     max_iterations: int = typer.Option(10, help="Maximum iterations"),
     convergence_threshold: float = typer.Option(0.95, help="Convergence threshold"),
 ) -> None:
@@ -488,7 +590,8 @@ def loop_start(
         services = await _get_services()
         from abathur.application import ConvergenceCriteria, ConvergenceType
 
-        task = await services["task_coordinator"].get_task(UUID(task_id))
+        resolved_id = await _resolve_task_id(task_id, services)
+        task = await services["task_coordinator"].get_task(resolved_id)
         if not task:
             console.print(f"[red]Error:[/red] Task {task_id} not found")
             return
@@ -555,7 +658,7 @@ def dlq_list() -> None:
             return
 
         table = Table(title="Dead Letter Queue")
-        table.add_column("Task ID", style="cyan")
+        table.add_column("Task ID", style="cyan", no_wrap=True)
 
         for task_id in dlq_tasks:
             table.add_row(str(task_id))
@@ -566,12 +669,13 @@ def dlq_list() -> None:
 
 
 @dlq_app.command("reprocess")
-def dlq_reprocess(task_id: str = typer.Argument(..., help="Task ID")) -> None:
+def dlq_reprocess(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> None:
     """Reprocess a task from DLQ."""
 
     async def _reprocess() -> None:
         services = await _get_services()
-        success = await services["failure_recovery"].reprocess_dlq_task(UUID(task_id))
+        resolved_id = await _resolve_task_id(task_id, services)
+        success = await services["failure_recovery"].reprocess_dlq_task(resolved_id)
 
         if success:
             console.print(f"[green]✓[/green] Task {task_id} requeued from DLQ")

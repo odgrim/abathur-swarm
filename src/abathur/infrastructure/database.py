@@ -156,6 +156,51 @@ class Database:
                 await conn.commit()
                 print("Database migration completed successfully")
 
+            # Migration: Add last_updated_at and max_execution_timeout_seconds columns
+            if "last_updated_at" not in column_names:
+                print(
+                    "Migrating database schema: adding last_updated_at and max_execution_timeout_seconds columns"
+                )
+
+                # Add last_updated_at column
+                await conn.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN last_updated_at TIMESTAMP
+                    """
+                )
+
+                # Set last_updated_at to submitted_at for existing tasks
+                await conn.execute(
+                    """
+                    UPDATE tasks
+                    SET last_updated_at = COALESCE(completed_at, started_at, submitted_at)
+                    WHERE last_updated_at IS NULL
+                    """
+                )
+
+                # Add max_execution_timeout_seconds column with default of 1 hour (3600 seconds)
+                await conn.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN max_execution_timeout_seconds INTEGER DEFAULT 3600
+                    """
+                )
+
+                # Create index for efficient timeout detection queries
+                await conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tasks_running_timeout
+                    ON tasks(status, last_updated_at)
+                    WHERE status = 'running'
+                    """
+                )
+
+                await conn.commit()
+                print(
+                    "Added last_updated_at and max_execution_timeout_seconds columns successfully"
+                )
+
     async def _create_tables(self, conn: Connection) -> None:
         """Create database tables."""
         # Tasks table
@@ -172,9 +217,11 @@ class Database:
                 error_message TEXT,
                 retry_count INTEGER DEFAULT 0,
                 max_retries INTEGER DEFAULT 3,
+                max_execution_timeout_seconds INTEGER DEFAULT 3600,
                 submitted_at TIMESTAMP NOT NULL,
                 started_at TIMESTAMP,
                 completed_at TIMESTAMP,
+                last_updated_at TIMESTAMP NOT NULL,
                 created_by TEXT,
                 parent_task_id TEXT,
                 dependencies TEXT,
@@ -201,6 +248,14 @@ class Database:
             """
             CREATE INDEX IF NOT EXISTS idx_tasks_parent
             ON tasks(parent_task_id)
+        """
+        )
+
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tasks_running_timeout
+            ON tasks(status, last_updated_at)
+            WHERE status = 'running'
         """
         )
 
@@ -348,9 +403,10 @@ class Database:
                 INSERT INTO tasks (
                     id, prompt, agent_type, priority, status, input_data,
                     result_data, error_message, retry_count, max_retries,
-                    submitted_at, started_at, completed_at, created_by,
-                    parent_task_id, dependencies
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    max_execution_timeout_seconds,
+                    submitted_at, started_at, completed_at, last_updated_at,
+                    created_by, parent_task_id, dependencies
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(task.id),
@@ -363,9 +419,11 @@ class Database:
                     task.error_message,
                     task.retry_count,
                     task.max_retries,
+                    task.max_execution_timeout_seconds,
                     task.submitted_at.isoformat(),
                     task.started_at.isoformat() if task.started_at else None,
                     task.completed_at.isoformat() if task.completed_at else None,
+                    task.last_updated_at.isoformat(),
                     task.created_by,
                     str(task.parent_task_id) if task.parent_task_id else None,
                     json.dumps([str(dep) for dep in task.dependencies]),
@@ -376,24 +434,37 @@ class Database:
     async def update_task_status(
         self, task_id: UUID, status: TaskStatus, error_message: str | None = None
     ) -> None:
-        """Update task status."""
+        """Update task status and last_updated_at timestamp."""
         async with self._get_connection() as conn:
             now = datetime.now(timezone.utc).isoformat()
             if status == TaskStatus.RUNNING:
                 await conn.execute(
-                    "UPDATE tasks SET status = ?, started_at = ? WHERE id = ?",
-                    (status.value, now, str(task_id)),
+                    "UPDATE tasks SET status = ?, started_at = ?, last_updated_at = ? WHERE id = ?",
+                    (status.value, now, now, str(task_id)),
                 )
             elif status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
                 await conn.execute(
-                    "UPDATE tasks SET status = ?, completed_at = ?, error_message = ? WHERE id = ?",
-                    (status.value, now, error_message, str(task_id)),
+                    "UPDATE tasks SET status = ?, completed_at = ?, error_message = ?, last_updated_at = ? WHERE id = ?",
+                    (status.value, now, error_message, now, str(task_id)),
                 )
             else:
                 await conn.execute(
-                    "UPDATE tasks SET status = ? WHERE id = ?",
-                    (status.value, str(task_id)),
+                    "UPDATE tasks SET status = ?, last_updated_at = ? WHERE id = ?",
+                    (status.value, now, str(task_id)),
                 )
+            await conn.commit()
+
+    async def increment_task_retry_count(self, task_id: UUID) -> None:
+        """Increment the retry count for a task.
+
+        Args:
+            task_id: Task ID
+        """
+        async with self._get_connection() as conn:
+            await conn.execute(
+                "UPDATE tasks SET retry_count = retry_count + 1 WHERE id = ?",
+                (str(task_id),),
+            )
             await conn.commit()
 
     async def get_task(self, task_id: UUID) -> Task | None:
@@ -456,27 +527,58 @@ class Database:
                 return task
             return None
 
+    async def get_stale_running_tasks(self) -> list[Task]:
+        """Get running tasks that have exceeded their execution timeout.
+
+        Returns:
+            List of stale running tasks that need to be handled
+        """
+        async with self._get_connection() as conn:
+            now = datetime.now(timezone.utc)
+            cursor = await conn.execute(
+                """
+                SELECT * FROM tasks
+                WHERE status = ?
+                AND (julianday(?) - julianday(last_updated_at)) * 86400 > max_execution_timeout_seconds
+                ORDER BY last_updated_at ASC
+                """,
+                (TaskStatus.RUNNING.value, now.isoformat()),
+            )
+            rows = await cursor.fetchall()
+            return [self._row_to_task(row) for row in rows]
+
     def _row_to_task(self, row: aiosqlite.Row) -> Task:
         """Convert database row to Task model."""
+        # Convert row to dict for easier access with fallbacks
+        row_dict = dict(row)
+
         return Task(
-            id=UUID(row["id"]),
-            prompt=row["prompt"],
-            agent_type=row["agent_type"],
-            priority=row["priority"],
-            status=TaskStatus(row["status"]),
-            input_data=json.loads(row["input_data"]),
-            result_data=json.loads(row["result_data"]) if row["result_data"] else None,
-            error_message=row["error_message"],
-            retry_count=row["retry_count"],
-            max_retries=row["max_retries"],
-            submitted_at=datetime.fromisoformat(row["submitted_at"]),
-            started_at=datetime.fromisoformat(row["started_at"]) if row["started_at"] else None,
+            id=UUID(row_dict["id"]),
+            prompt=row_dict["prompt"],
+            agent_type=row_dict["agent_type"],
+            priority=row_dict["priority"],
+            status=TaskStatus(row_dict["status"]),
+            input_data=json.loads(row_dict["input_data"]),
+            result_data=json.loads(row_dict["result_data"]) if row_dict["result_data"] else None,
+            error_message=row_dict["error_message"],
+            retry_count=row_dict["retry_count"],
+            max_retries=row_dict["max_retries"],
+            max_execution_timeout_seconds=row_dict.get("max_execution_timeout_seconds", 3600),
+            submitted_at=datetime.fromisoformat(row_dict["submitted_at"]),
+            started_at=datetime.fromisoformat(row_dict["started_at"])
+            if row_dict["started_at"]
+            else None,
             completed_at=(
-                datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None
+                datetime.fromisoformat(row_dict["completed_at"])
+                if row_dict["completed_at"]
+                else None
             ),
-            created_by=row["created_by"],
-            parent_task_id=UUID(row["parent_task_id"]) if row["parent_task_id"] else None,
-            dependencies=[UUID(dep) for dep in json.loads(row["dependencies"])],
+            last_updated_at=datetime.fromisoformat(row_dict["last_updated_at"])
+            if row_dict.get("last_updated_at")
+            else datetime.now(timezone.utc),
+            created_by=row_dict["created_by"],
+            parent_task_id=UUID(row_dict["parent_task_id"]) if row_dict["parent_task_id"] else None,
+            dependencies=[UUID(dep) for dep in json.loads(row_dict["dependencies"])],
         )
 
     # Agent operations

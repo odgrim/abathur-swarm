@@ -556,7 +556,8 @@ class LoopExecutor:
 
         # Create new task with refined input
         refined_task = Task(
-            template_name=task.template_name,
+            prompt=task.prompt,
+            agent_type=task.agent_type,
             input_data=refined_input,
             priority=task.priority,
             max_retries=task.max_retries,

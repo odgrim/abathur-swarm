@@ -31,9 +31,11 @@ class Task(BaseModel):
     error_message: str | None = None
     retry_count: int = Field(default=0, ge=0)
     max_retries: int = Field(default=3, ge=0)
+    max_execution_timeout_seconds: int = Field(default=3600, ge=60)  # Default 1 hour
     submitted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    last_updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     created_by: str | None = None
     parent_task_id: UUID | None = None
     dependencies: list[UUID] = Field(default_factory=list)
