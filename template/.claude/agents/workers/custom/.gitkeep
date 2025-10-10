@@ -1,0 +1,5 @@
+# Custom Agents
+
+This directory is for agents dynamically created by the `agent-creator` specialist or manually added by users.
+
+Agents created here will be automatically discovered and registered by the Abathur orchestrator.
