@@ -256,6 +256,7 @@ async def test_handle_stale_tasks_max_retries(
     assert updated_task is not None
     assert updated_task.status == TaskStatus.FAILED
     assert updated_task.retry_count == 3
+    assert updated_task.error_message is not None
     assert "timeout" in updated_task.error_message.lower()
     assert "max retries" in updated_task.error_message.lower()
 

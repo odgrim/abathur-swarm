@@ -34,19 +34,19 @@ class AuthProvider(ABC):
     async def refresh_credentials(self, force: bool = False) -> bool:
         """Refresh expired credentials.
 
-        For OAuth providers, this will call the token refresh endpoint.
+        For OAuth providers using Claude Code integration, this is a no-op
+        as token refresh is handled externally by Claude Code.
         For API key providers, this is a no-op (always returns True).
 
         Args:
-            force: If True, force refresh even if credentials appear valid.
-                   Useful when API returns 401 despite token appearing fresh.
+            force: Ignored for OAuth providers (Claude Code handles refresh)
 
         Returns:
-            True if successful, False otherwise
+            Always returns True (no-op)
 
         Note:
-            This method does not raise exceptions - it returns False
-            on failure instead.
+            This method exists for interface compatibility but does not
+            perform any actual token refresh operations.
         """
         pass
 

@@ -1,4 +1,4 @@
-"""Claude API client wrapper with retry logic and rate limiting."""
+"""Claude API client wrapper for task execution."""
 
 import asyncio
 import os
@@ -16,7 +16,7 @@ logger = get_logger(__name__)
 
 
 class ClaudeClient:
-    """Wrapper for Anthropic Claude API with retry logic and rate limiting."""
+    """Wrapper for Anthropic Claude API."""
 
     def __init__(
         self,
@@ -126,7 +126,7 @@ class ClaudeClient:
         temperature: float = 0.7,
         model: str | None = None,
     ) -> dict[str, Any]:
-        """Execute a task using Claude with automatic token refresh on 401.
+        """Execute a task using Claude.
 
         Args:
             system_prompt: System prompt defining agent behavior
@@ -156,152 +156,60 @@ class ClaudeClient:
                 percentage=round(estimated_tokens / self.context_limit * 100, 1),
             )
 
-        # Retry loop for 401 errors (OAuth token refresh)
-        # Track if we've already attempted refresh to detect refresh failures
-        refresh_attempted = False
-        consecutive_401s = 0
+        try:
+            # Configure SDK with current credentials
+            await self._configure_sdk_auth()
+            assert self.async_client is not None
 
-        for attempt in range(self.max_retries):
-            try:
-                # Configure SDK with current credentials (lazy initialization)
-                await self._configure_sdk_auth()
-                assert self.async_client is not None
+            logger.info(
+                "executing_claude_task",
+                model=model_to_use,
+                auth_method=self.auth_provider.get_auth_method(),
+            )
 
-                logger.info(
-                    "executing_claude_task",
-                    model=model_to_use,
-                    auth_method=self.auth_provider.get_auth_method(),
-                    attempt=attempt + 1,
-                )
+            response = await self.async_client.messages.create(
+                model=model_to_use,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_message}],
+                timeout=self.timeout,
+            )
 
-                response = await self.async_client.messages.create(
-                    model=model_to_use,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    system=system_prompt,
-                    messages=[{"role": "user", "content": user_message}],
-                    timeout=self.timeout,
-                )
+            # Extract text content
+            content_text = ""
+            for block in response.content:
+                if hasattr(block, "text"):
+                    content_text += block.text
 
-                # Extract text content
-                content_text = ""
-                for block in response.content:
-                    if hasattr(block, "text"):
-                        content_text += block.text
+            result = {
+                "success": True,
+                "content": content_text,
+                "stop_reason": response.stop_reason,
+                "usage": {
+                    "input_tokens": response.usage.input_tokens,
+                    "output_tokens": response.usage.output_tokens,
+                },
+                "error": None,
+            }
 
-                result = {
-                    "success": True,
-                    "content": content_text,
-                    "stop_reason": response.stop_reason,
-                    "usage": {
-                        "input_tokens": response.usage.input_tokens,
-                        "output_tokens": response.usage.output_tokens,
-                    },
-                    "error": None,
-                }
+            logger.info(
+                "claude_task_completed",
+                tokens_used=response.usage.input_tokens + response.usage.output_tokens,
+                stop_reason=response.stop_reason,
+            )
 
-                logger.info(
-                    "claude_task_completed",
-                    tokens_used=response.usage.input_tokens + response.usage.output_tokens,
-                    stop_reason=response.stop_reason,
-                )
+            return result
 
-                return result
-
-            except Exception as e:
-                # Check for 401 Unauthorized (OAuth token expired)
-                error_str = str(e).lower()
-                is_401 = "401" in error_str or "unauthorized" in error_str
-
-                if is_401:
-                    consecutive_401s += 1
-
-                    # If we get multiple 401s in a row after refresh, the token is truly invalid
-                    if consecutive_401s > 1 and refresh_attempted:
-                        logger.error(
-                            "repeated_auth_failures_after_refresh",
-                            consecutive_401s=consecutive_401s,
-                            message="Token refresh succeeded but token still invalid",
-                        )
-                        from abathur.infrastructure.exceptions import OAuthRefreshError
-
-                        return {
-                            "success": False,
-                            "content": "",
-                            "stop_reason": "error",
-                            "usage": {"input_tokens": 0, "output_tokens": 0},
-                            "error": f"Authentication failed after refresh: {str(OAuthRefreshError())}",
-                        }
-
-                    if attempt < self.max_retries - 1:
-                        logger.warning(
-                            "auth_failed_attempting_refresh",
-                            attempt=attempt + 1,
-                            max_retries=self.max_retries,
-                            consecutive_401s=consecutive_401s,
-                        )
-
-                        # Attempt to refresh credentials
-                        refresh_attempted = True
-
-                        # Force refresh if this is a repeat 401 (don't trust "already refreshed" status)
-                        force_refresh = consecutive_401s > 1
-
-                        if force_refresh:
-                            logger.warning(
-                                "forcing_token_refresh",
-                                reason="repeated_401_after_claimed_refresh",
-                                consecutive_401s=consecutive_401s,
-                            )
-                            # Add small delay to avoid rate limiting
-                            await asyncio.sleep(0.5)
-
-                        if await self.auth_provider.refresh_credentials(force=force_refresh):
-                            logger.info("credentials_refreshed_retrying")
-                            # Add small delay to ensure token propagates
-                            await asyncio.sleep(0.1)
-                            continue
-                        else:
-                            # Refresh failed - return error
-                            from abathur.infrastructure.exceptions import OAuthRefreshError
-
-                            logger.error("credential_refresh_failed")
-                            return {
-                                "success": False,
-                                "content": "",
-                                "stop_reason": "error",
-                                "usage": {"input_tokens": 0, "output_tokens": 0},
-                                "error": f"Authentication failed: {str(OAuthRefreshError())}",
-                            }
-                    else:
-                        # Last attempt, can't refresh anymore
-                        logger.error("claude_task_failed", error=str(e), is_auth_error=is_401)
-                        return {
-                            "success": False,
-                            "content": "",
-                            "stop_reason": "error",
-                            "usage": {"input_tokens": 0, "output_tokens": 0},
-                            "error": str(e),
-                        }
-                else:
-                    # Non-401 error
-                    logger.error("claude_task_failed", error=str(e), is_auth_error=is_401)
-                    return {
-                        "success": False,
-                        "content": "",
-                        "stop_reason": "error",
-                        "usage": {"input_tokens": 0, "output_tokens": 0},
-                        "error": str(e),
-                    }
-
-        # Should never reach here, but satisfy mypy
-        return {
-            "success": False,
-            "content": "",
-            "stop_reason": "error",
-            "usage": {"input_tokens": 0, "output_tokens": 0},
-            "error": "Max retries exceeded",
-        }
+        except Exception as e:
+            logger.error("claude_task_failed", error=str(e))
+            return {
+                "success": False,
+                "content": "",
+                "stop_reason": "error",
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+                "error": str(e),
+            }
 
     async def stream_task(
         self,
@@ -359,7 +267,6 @@ class ClaudeClient:
 
         Note:
             This method makes an actual API request to validate credentials.
-            For OAuth, this will also trigger token refresh if needed.
         """
         try:
             # Configure SDK with current credentials
