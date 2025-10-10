@@ -119,12 +119,22 @@ class AgentExecutor:
                 result="success" if response["success"] else "failed",
             )
 
-            logger.info(
-                "task_execution_complete",
-                task_id=str(task.id),
-                agent_id=str(agent_id),
-                success=result.success,
-            )
+            if result.success:
+                logger.info(
+                    "task_execution_complete",
+                    task_id=str(task.id),
+                    agent_id=str(agent_id),
+                    success=True,
+                )
+            else:
+                logger.error(
+                    "task_execution_failed",
+                    task_id=str(task.id),
+                    agent_id=str(agent_id),
+                    error=result.error,
+                    stop_reason=response["stop_reason"],
+                    agent_type=task.agent_type,
+                )
 
             return result
 
@@ -133,7 +143,9 @@ class AgentExecutor:
                 "task_execution_error",
                 task_id=str(task.id),
                 agent_id=str(agent_id),
+                agent_type=task.agent_type,
                 error=str(e),
+                error_type=type(e).__name__,
             )
 
             # Try to update agent state
@@ -146,7 +158,7 @@ class AgentExecutor:
                 task_id=task.id,
                 agent_id=agent_id,
                 success=False,
-                error=f"Execution error: {e}",
+                error=f"Execution error ({type(e).__name__}): {e}",
             )
 
     def _load_agent_definition(self, agent_type: str) -> dict[str, Any]:

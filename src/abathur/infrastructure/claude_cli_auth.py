@@ -147,9 +147,27 @@ class ClaudeCLIAuthProvider(AuthProvider):
             stdout, stderr = await process.communicate(input=full_prompt.encode())
 
             if process.returncode != 0:
-                error_msg = stderr.decode() if stderr else "Unknown error"
-                logger.error("claude_cli_failed", error=error_msg)
-                return {"content": "", "error": error_msg}
+                error_msg = stderr.decode().strip() if stderr else "Unknown error"
+                stdout_msg = stdout.decode().strip() if stdout else ""
+
+                logger.error(
+                    "claude_cli_failed",
+                    error=error_msg,
+                    stdout=stdout_msg,
+                    return_code=process.returncode,
+                    cli_path=self.cli_path,
+                    prompt_length=len(full_prompt),
+                )
+
+                # Provide more detailed error message
+                detailed_error = f"Claude CLI failed with exit code {process.returncode}"
+                if error_msg:
+                    detailed_error += f": {error_msg}"
+                if stdout_msg and not error_msg:
+                    # Sometimes error details are in stdout
+                    detailed_error += f": {stdout_msg}"
+
+                return {"content": "", "error": detailed_error}
 
             # Parse JSON response
             try:
@@ -165,5 +183,13 @@ class ClaudeCLIAuthProvider(AuthProvider):
                 return {"content": content, "error": ""}
 
         except Exception as e:
-            logger.error("claude_cli_execution_failed", error=str(e))
-            return {"content": "", "error": str(e)}
+            logger.error(
+                "claude_cli_execution_failed",
+                error=str(e),
+                error_type=type(e).__name__,
+                cli_path=self.cli_path,
+            )
+            return {
+                "content": "",
+                "error": f"Claude CLI execution failed ({type(e).__name__}): {str(e)}",
+            }

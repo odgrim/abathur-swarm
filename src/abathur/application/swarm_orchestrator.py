@@ -92,7 +92,13 @@ class SwarmOrchestrator:
             return self.results
 
         except Exception as e:
-            logger.error("swarm_error", error=str(e))
+            logger.error(
+                "swarm_error",
+                error=str(e),
+                error_type=type(e).__name__,
+                tasks_processed=tasks_processed,
+                active_tasks_count=len(active_tasks),
+            )
             # Cancel all active tasks
             for task in active_tasks:
                 if not task.done():
@@ -124,6 +130,15 @@ class SwarmOrchestrator:
                 if result.success:
                     await self.task_coordinator.update_task_status(task.id, TaskStatus.COMPLETED)
                 else:
+                    # Log detailed error information
+                    logger.error(
+                        "task_failed_in_swarm",
+                        task_id=str(task.id),
+                        agent_id=str(result.agent_id),
+                        error=result.error,
+                        metadata=result.metadata,
+                    )
+
                     # Always mark as FAILED first
                     await self.task_coordinator.update_task_status(
                         task.id, TaskStatus.FAILED, error_message=result.error
@@ -143,9 +158,15 @@ class SwarmOrchestrator:
                 return result
 
             except Exception as e:
-                logger.error("agent_execution_exception", task_id=str(task.id), error=str(e))
+                logger.error(
+                    "agent_execution_exception",
+                    task_id=str(task.id),
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    agent_type=task.agent_type,
+                )
                 await self.task_coordinator.update_task_status(
-                    task.id, TaskStatus.FAILED, error_message=str(e)
+                    task.id, TaskStatus.FAILED, error_message=f"{type(e).__name__}: {e}"
                 )
                 error_result = Result(
                     task_id=task.id,
