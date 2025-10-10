@@ -8,6 +8,9 @@ REPO_URL="git@github.com:odgrim/abathur-claude-template.git"
 TEMP_DIR=$(mktemp -d)
 BRANCH="main"
 
+# Convert TEMPLATE_DIR to absolute path
+TEMPLATE_DIR=$(cd "$TEMPLATE_DIR" && pwd)
+
 # Colors for output
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -25,35 +28,25 @@ fi
 
 echo -e "${GREEN}✓${NC} Found template directory"
 
-# Copy template to temp directory
-echo -e "${BLUE}Copying template to temporary directory...${NC}"
-cp -R "$TEMPLATE_DIR"/* "$TEMP_DIR/"
-cp -R "$TEMPLATE_DIR"/.* "$TEMP_DIR/" 2>/dev/null || true
-echo -e "${GREEN}✓${NC} Template copied to: $TEMP_DIR"
-
-# Navigate to temp directory
+# Clone the template repository to temp directory
+echo -e "${BLUE}Cloning template repository...${NC}"
+git clone "$REPO_URL" "$TEMP_DIR"
 cd "$TEMP_DIR"
+git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH"
+echo -e "${GREEN}✓${NC} Repository cloned to: $TEMP_DIR"
 
-# Initialize git if not already a repo
-if [ ! -d ".git" ]; then
-    echo -e "${BLUE}Initializing git repository...${NC}"
-    git clone $REPO_URL
-    git checkout -b "$BRANCH" 2>/dev/null || git checkout "$BRANCH"
-    echo -e "${GREEN}✓${NC} Git repository initialized"
-else
-    echo -e "${GREEN}✓${NC} Git repository already exists"
-fi
+# Remove all files except .git directory
+echo -e "${BLUE}Clearing existing template files...${NC}"
+find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+echo -e "${GREEN}✓${NC} Existing files cleared"
 
-# Add remote if not exists
-if ! git remote | grep -q origin; then
-    echo -e "${BLUE}Adding remote repository...${NC}"
-    git remote add origin "$REPO_URL"
-    echo -e "${GREEN}✓${NC} Remote added: $REPO_URL"
-else
-    echo -e "${BLUE}Updating remote repository URL...${NC}"
-    git remote set-url origin "$REPO_URL"
-    echo -e "${GREEN}✓${NC} Remote updated: $REPO_URL"
-fi
+# Copy template to temp directory
+echo -e "${BLUE}Copying new template files...${NC}"
+cp -R "$TEMPLATE_DIR"/* ./ 2>/dev/null || true
+cp -R "$TEMPLATE_DIR"/.* ./ 2>/dev/null || true
+# Remove . and .. if they were copied
+rm -rf ./. ./.. 2>/dev/null || true
+echo -e "${GREEN}✓${NC} Template files copied"
 
 # Stage all files
 echo -e "${BLUE}Staging files...${NC}"
