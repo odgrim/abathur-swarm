@@ -26,7 +26,7 @@ console = Console()
 
 # Helper to get database and services
 async def _get_services() -> dict[str, Any]:
-    """Get initialized services."""
+    """Get initialized services with dual-mode authentication."""
     from abathur.application import (
         AgentExecutor,
         ClaudeClient,
@@ -39,13 +39,46 @@ async def _get_services() -> dict[str, Any]:
         TemplateManager,
     )
     from abathur.infrastructure import ConfigManager, Database
+    from abathur.infrastructure.api_key_auth import APIKeyAuthProvider
+    from abathur.infrastructure.logger import get_logger
+    from abathur.infrastructure.oauth_auth import OAuthAuthProvider
+
+    logger = get_logger(__name__)
 
     config_manager = ConfigManager()
     database = Database(config_manager.get_database_path())
     await database.initialize()
 
+    # Detect and initialize authentication
+    from abathur.domain.ports.auth_provider import AuthProvider
+
+    auth_provider: AuthProvider | None = None
+
+    try:
+        # Try API key first (environment variable precedence)
+        api_key = config_manager.get_api_key()
+        auth_provider = APIKeyAuthProvider(api_key)
+        logger.info("auth_initialized", method="api_key")
+    except ValueError:
+        # API key not found, try OAuth
+        try:
+            access_token, refresh_token, expires_at = await config_manager.get_oauth_token()
+            auth_provider = OAuthAuthProvider(
+                access_token=access_token,
+                refresh_token=refresh_token,
+                expires_at=expires_at,
+                config_manager=config_manager,
+            )
+            logger.info("auth_initialized", method="oauth")
+        except ValueError as e:
+            raise ValueError(
+                "No authentication configured. Options:\n"
+                "  1. Set API key: abathur config set-key <key>\n"
+                "  2. Login with OAuth: abathur config oauth-login"
+            ) from e
+
     task_coordinator = TaskCoordinator(database)
-    claude_client = ClaudeClient(api_key=config_manager.get_api_key())
+    claude_client = ClaudeClient(auth_provider=auth_provider)
     agent_executor = AgentExecutor(database, claude_client)
     swarm_orchestrator = SwarmOrchestrator(
         task_coordinator, agent_executor, max_concurrent_agents=10
@@ -68,6 +101,7 @@ async def _get_services() -> dict[str, Any]:
         "failure_recovery": failure_recovery,
         "resource_monitor": resource_monitor,
         "loop_executor": loop_executor,
+        "config_manager": config_manager,
     }
 
 
@@ -582,6 +616,191 @@ def config_set_key(
         console.print(f"[green]✓[/green] API key stored in {storage}")
     except Exception as e:
         console.print(f"[red]✗[/red] Failed to store API key: {e}")
+        raise typer.Exit(1) from e
+
+
+@config_app.command("oauth-login")
+def config_oauth_login(
+    manual: bool = typer.Option(False, help="Manual token input mode"),
+    use_keychain: bool = typer.Option(True, help="Store in system keychain"),
+) -> None:
+    """Authenticate with OAuth and store tokens."""
+
+    async def _login() -> None:
+        from datetime import datetime as dt
+        from datetime import timedelta, timezone
+
+        from abathur.infrastructure.config import ConfigManager
+
+        config_manager = ConfigManager()
+
+        if manual:
+            # Manual token input
+            console.print("[yellow]Enter OAuth tokens manually:[/yellow]")
+            console.print("[dim]Obtain tokens from Claude Code or console.anthropic.com[/dim]\n")
+
+            access_token = typer.prompt("Access token", hide_input=True)
+            refresh_token = typer.prompt("Refresh token", hide_input=True)
+            expires_in = typer.prompt("Expires in (seconds)", type=int, default=3600)
+
+            expires_at = dt.now(timezone.utc) + timedelta(seconds=expires_in)
+
+            await config_manager.set_oauth_token(
+                access_token, refresh_token, expires_at, use_keychain=use_keychain
+            )
+
+            storage = "keychain" if use_keychain else ".env file"
+            console.print(f"\n[green]✓[/green] OAuth tokens stored in {storage}")
+            console.print(f"[dim]Expires: {expires_at.strftime('%Y-%m-%d %H:%M:%S UTC')}[/dim]")
+        else:
+            # TODO: Interactive OAuth flow (browser-based)
+            console.print(
+                "[yellow]Interactive OAuth flow not yet implemented.[/yellow]\n"
+                "Use [cyan]--manual[/cyan] flag to enter tokens manually:\n"
+                "  abathur config oauth-login --manual"
+            )
+            raise typer.Exit(1)
+
+    try:
+        asyncio.run(_login())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Cancelled[/yellow]")
+        raise typer.Exit(130) from None
+    except Exception as e:
+        console.print(f"[red]✗[/red] OAuth login failed: {e}")
+        raise typer.Exit(1) from e
+
+
+@config_app.command("oauth-logout")
+def config_oauth_logout() -> None:
+    """Clear stored OAuth tokens."""
+    try:
+        from abathur.infrastructure.config import ConfigManager
+
+        config_manager = ConfigManager()
+        config_manager.clear_oauth_tokens()
+
+        console.print("[green]✓[/green] OAuth tokens cleared")
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to clear tokens: {e}")
+        raise typer.Exit(1) from e
+
+
+@config_app.command("oauth-status")
+def config_oauth_status() -> None:
+    """Display OAuth authentication status."""
+
+    async def _status() -> None:
+        from datetime import datetime as dt
+        from datetime import timezone
+
+        from abathur.infrastructure.config import ConfigManager
+
+        config_manager = ConfigManager()
+
+        # Try to detect auth method
+        auth_method = None
+        context_limit = None
+        expiry_info = None
+
+        try:
+            # Try API key
+            config_manager.get_api_key()
+            auth_method = "API Key"
+            context_limit = "1,000,000 tokens"
+            expiry_info = "Never"
+        except ValueError:
+            # Try OAuth
+            try:
+                access_token, refresh_token, expires_at = await config_manager.get_oauth_token()
+                auth_method = "OAuth"
+                context_limit = "200,000 tokens"
+
+                now = dt.now(timezone.utc)
+                if now >= expires_at:
+                    expiry_info = "[red]Expired[/red]"
+                else:
+                    delta = expires_at - now
+                    hours = int(delta.total_seconds() // 3600)
+                    minutes = int((delta.total_seconds() % 3600) // 60)
+                    expiry_info = f"{hours}h {minutes}m remaining"
+            except ValueError:
+                auth_method = "[red]None[/red]"
+                context_limit = "N/A"
+                expiry_info = "N/A"
+
+        table = Table(title="Authentication Status")
+        table.add_column("Property", style="cyan")
+        table.add_column("Value", style="green")
+
+        table.add_row("Auth Method", auth_method)
+        table.add_row("Context Limit", context_limit)
+        if expiry_info:
+            table.add_row("Token Expiry", expiry_info)
+
+        console.print(table)
+
+        if auth_method == "[red]None[/red]":
+            console.print(
+                "\n[yellow]No authentication configured.[/yellow]\n"
+                "Configure authentication:\n"
+                "  1. API key: [cyan]abathur config set-key <key>[/cyan]\n"
+                "  2. OAuth:   [cyan]abathur config oauth-login --manual[/cyan]"
+            )
+
+    try:
+        asyncio.run(_status())
+    except Exception as e:
+        console.print(f"[red]✗[/red] Failed to get status: {e}")
+        raise typer.Exit(1) from e
+
+
+@config_app.command("oauth-refresh")
+def config_oauth_refresh() -> None:
+    """Manually refresh OAuth tokens."""
+
+    async def _refresh() -> None:
+        from abathur.infrastructure.config import ConfigManager
+        from abathur.infrastructure.oauth_auth import OAuthAuthProvider
+
+        config_manager = ConfigManager()
+
+        try:
+            access_token, refresh_token, expires_at = await config_manager.get_oauth_token()
+        except ValueError as e:
+            console.print(
+                "[red]✗[/red] No OAuth tokens found. "
+                "Login first: [cyan]abathur config oauth-login --manual[/cyan]"
+            )
+            raise typer.Exit(1) from e
+
+        provider = OAuthAuthProvider(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_at=expires_at,
+            config_manager=config_manager,
+        )
+
+        console.print("[blue]Refreshing OAuth tokens...[/blue]")
+
+        if await provider.refresh_credentials():
+            console.print(
+                f"[green]✓[/green] Token refreshed successfully\n"
+                f"[dim]Expires: {provider.expires_at.strftime('%Y-%m-%d %H:%M:%S UTC')}[/dim]"
+            )
+        else:
+            console.print(
+                "[red]✗[/red] Token refresh failed\n"
+                "Re-authenticate: [cyan]abathur config oauth-login --manual[/cyan]"
+            )
+            raise typer.Exit(1)
+
+    try:
+        asyncio.run(_refresh())
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]✗[/red] Refresh failed: {e}")
         raise typer.Exit(1) from e
 
 
