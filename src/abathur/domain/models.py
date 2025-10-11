@@ -39,6 +39,7 @@ class Task(BaseModel):
     created_by: str | None = None
     parent_task_id: UUID | None = None
     dependencies: list[UUID] = Field(default_factory=list)
+    session_id: str | None = None  # Link to session for memory context
 
     model_config = ConfigDict(
         json_encoders={
@@ -70,6 +71,7 @@ class Agent(BaseModel):
     spawned_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     terminated_at: datetime | None = None
     resource_usage: dict[str, Any] = Field(default_factory=dict)
+    session_id: str | None = None  # Link to session for memory context
 
     model_config = ConfigDict(
         json_encoders={

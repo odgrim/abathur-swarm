@@ -367,26 +367,47 @@ app.add_typer(swarm_app, name="swarm")
 def start_swarm(
     task_limit: int | None = typer.Option(None, help="Max tasks to process"),
     max_agents: int = typer.Option(10, help="Max concurrent agents"),
+    no_mcp: bool = typer.Option(False, help="Disable auto-start of MCP memory server"),
 ) -> None:
-    """Start the swarm orchestrator."""
+    """Start the swarm orchestrator.
+
+    Automatically starts the MCP memory server for agent memory access.
+    Use --no-mcp to disable auto-start of the memory server.
+    """
 
     async def _start() -> None:
+        from abathur.mcp.server_manager import MemoryServerManager
+
         services = await _get_services()
 
         console.print("[blue]Starting swarm orchestrator...[/blue]")
+
+        # Auto-start MCP memory server
+        mcp_manager = None
+        if not no_mcp:
+            console.print("[dim]Starting MCP memory server...[/dim]")
+            mcp_manager = MemoryServerManager(services["config_manager"].get_database_path())
+            await mcp_manager.start()
+            console.print("[dim]✓ MCP memory server running[/dim]")
 
         # Start monitoring
         await services["resource_monitor"].start_monitoring()
         await services["failure_recovery"].start_recovery_monitor()
 
-        # Start swarm
-        results = await services["swarm_orchestrator"].start_swarm(task_limit)
+        try:
+            # Start swarm
+            results = await services["swarm_orchestrator"].start_swarm(task_limit)
 
-        console.print(f"[green]✓[/green] Swarm completed {len(results)} tasks")
+            console.print(f"[green]✓[/green] Swarm completed {len(results)} tasks")
+        finally:
+            # Stop monitoring
+            await services["resource_monitor"].stop_monitoring()
+            await services["failure_recovery"].stop_recovery_monitor()
 
-        # Stop monitoring
-        await services["resource_monitor"].stop_monitoring()
-        await services["failure_recovery"].stop_recovery_monitor()
+            # Stop MCP memory server
+            if mcp_manager:
+                console.print("[dim]Stopping MCP memory server...[/dim]")
+                await mcp_manager.stop()
 
     asyncio.run(_start())
 
@@ -568,6 +589,102 @@ def mcp_restart(server: str = typer.Argument(..., help="Server name")) -> None:
     asyncio.run(_restart())
 
 
+@mcp_app.command("start-memory")
+def mcp_start_memory(
+    foreground: bool = False,
+    db_path: Path | None = None,
+) -> None:
+    """Start the Abathur Memory MCP server.
+
+    This server exposes memory/session/document tools to Claude agents via MCP protocol.
+    Use --foreground to run in the foreground for testing/debugging.
+    """
+
+    async def _start() -> None:
+        from abathur.infrastructure import ConfigManager
+        from abathur.mcp.server_manager import MemoryServerManager
+
+        config_manager = ConfigManager()
+        db_path_resolved = db_path or config_manager.get_database_path()
+
+        if foreground:
+            # Run in foreground (blocking)
+            console.print("[blue]Starting Memory MCP server in foreground...[/blue]")
+            console.print(f"[dim]Database: {db_path_resolved}[/dim]")
+            console.print("[dim]Press Ctrl+C to stop[/dim]\n")
+
+            from abathur.mcp.memory_server import AbathurMemoryServer
+
+            server = AbathurMemoryServer(db_path_resolved)
+            await server.run()
+        else:
+            # Run in background
+            manager = MemoryServerManager(db_path_resolved)
+            success = await manager.start()
+
+            if success:
+                console.print("[green]✓[/green] Memory MCP server started in background")
+                console.print(f"[dim]Database: {db_path_resolved}[/dim]")
+                console.print(
+                    f"[dim]PID: {manager.process.pid if manager.process else 'N/A'}[/dim]"
+                )
+                console.print("\n[dim]Configure in Claude Desktop:[/dim]")
+                console.print(
+                    f'[dim]  "abathur-memory": {{"command": "abathur-mcp", "args": ["--db-path", "{db_path_resolved}"]}}[/dim]'
+                )
+            else:
+                console.print("[red]Error:[/red] Failed to start Memory MCP server")
+
+    try:
+        asyncio.run(_start())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Server stopped[/yellow]")
+
+
+@mcp_app.command("stop-memory")
+def mcp_stop_memory() -> None:
+    """Stop the Abathur Memory MCP server."""
+
+    async def _stop() -> None:
+        from abathur.infrastructure import ConfigManager
+        from abathur.mcp.server_manager import MemoryServerManager
+
+        config_manager = ConfigManager()
+        manager = MemoryServerManager(config_manager.get_database_path())
+
+        success = await manager.stop()
+
+        if success:
+            console.print("[green]✓[/green] Memory MCP server stopped")
+        else:
+            console.print("[red]Error:[/red] Failed to stop Memory MCP server")
+
+    asyncio.run(_stop())
+
+
+@mcp_app.command("status-memory")
+def mcp_status_memory() -> None:
+    """Show Memory MCP server status."""
+
+    async def _status() -> None:
+        from abathur.infrastructure import ConfigManager
+        from abathur.mcp.server_manager import MemoryServerManager
+
+        config_manager = ConfigManager()
+        manager = MemoryServerManager(config_manager.get_database_path())
+
+        status = manager.get_status()
+        is_running = await manager.is_running()
+
+        console.print("[bold]Memory MCP Server Status[/bold]")
+        console.print(f"Running: {'[green]Yes[/green]' if is_running else '[red]No[/red]'}")
+        if status["pid"]:
+            console.print(f"PID: {status['pid']}")
+        console.print(f"Database: {status['db_path']}")
+
+    asyncio.run(_status())
+
+
 # ===== Loop Commands =====
 loop_app = typer.Typer(help="Iterative loop execution", no_args_is_help=True)
 app.add_typer(loop_app, name="loop")
@@ -578,12 +695,19 @@ def loop_start(
     task_id: str = typer.Argument(..., help="Task ID or prefix"),
     max_iterations: int = typer.Option(10, help="Maximum iterations"),
     convergence_threshold: float = typer.Option(0.95, help="Convergence threshold"),
+    no_mcp: bool = typer.Option(False, help="Disable auto-start of MCP memory server"),
 ) -> None:
-    """Start an iterative refinement loop."""
+    """Start an iterative refinement loop.
+
+    Automatically starts the MCP memory server for agent memory access.
+    Use --no-mcp to disable auto-start of the memory server.
+    """
 
     async def _start() -> None:
-        services = await _get_services()
         from abathur.application import ConvergenceCriteria, ConvergenceType
+        from abathur.mcp.server_manager import MemoryServerManager
+
+        services = await _get_services()
 
         resolved_id = await _resolve_task_id(task_id, services)
         task = await services["task_coordinator"].get_task(resolved_id)
@@ -598,14 +722,28 @@ def loop_start(
 
         console.print(f"[blue]Starting loop execution for task {task_id}...[/blue]")
 
-        result = await services["loop_executor"].execute_loop(task, criteria, max_iterations)
+        # Auto-start MCP memory server
+        mcp_manager = None
+        if not no_mcp:
+            console.print("[dim]Starting MCP memory server...[/dim]")
+            mcp_manager = MemoryServerManager(services["config_manager"].get_database_path())
+            await mcp_manager.start()
+            console.print("[dim]✓ MCP memory server running[/dim]")
 
-        if result.converged:
-            console.print(f"[green]✓[/green] Converged after {result.iterations} iterations")
-        else:
-            console.print(
-                f"[yellow]![/yellow] Did not converge ({result.reason}) after {result.iterations} iterations"
-            )
+        try:
+            result = await services["loop_executor"].execute_loop(task, criteria, max_iterations)
+
+            if result.converged:
+                console.print(f"[green]✓[/green] Converged after {result.iterations} iterations")
+            else:
+                console.print(
+                    f"[yellow]![/yellow] Did not converge ({result.reason}) after {result.iterations} iterations"
+                )
+        finally:
+            # Stop MCP memory server
+            if mcp_manager:
+                console.print("[dim]Stopping MCP memory server...[/dim]")
+                await mcp_manager.stop()
 
     asyncio.run(_start())
 

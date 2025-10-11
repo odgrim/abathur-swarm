@@ -26,7 +26,7 @@ if [ ! -d "$TEMPLATE_DIR" ]; then
     exit 1
 fi
 
-echo -e "${GREEN}✓${NC} Found template directory"
+echo -e "${GREEN}✓${NC} Found template directory at $TEMPLATE_DIR"
 
 # Clone the template repository to temp directory
 echo -e "${BLUE}Cloning template repository...${NC}"
@@ -41,11 +41,12 @@ find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
 echo -e "${GREEN}✓${NC} Existing files cleared"
 
 # Copy template to temp directory
+echo -e "${BLUE}listing contents of template dir...${NC}"
+ls -la "$TEMPLATE_DIR"/*
 echo -e "${BLUE}Copying new template files...${NC}"
 cp -R "$TEMPLATE_DIR"/* ./ 2>/dev/null || true
-cp -R "$TEMPLATE_DIR"/.* ./ 2>/dev/null || true
+cp -R "$TEMPLATE_DIR"/.{gitignore,claude,abathur} ./ 2>/dev/null || true
 # Remove . and .. if they were copied
-rm -rf ./. ./.. 2>/dev/null || true
 echo -e "${GREEN}✓${NC} Template files copied"
 
 # Stage all files
@@ -78,7 +79,7 @@ echo -e "${GREEN}✓${NC} Commit created"
 
 # Push to remote
 echo -e "${BLUE}Pushing to remote repository...${NC}"
-#git push -u origin "$BRANCH" --force
+git push -u origin "$BRANCH"
 echo -e "${GREEN}✓${NC} Pushed to remote"
 
 echo ""
