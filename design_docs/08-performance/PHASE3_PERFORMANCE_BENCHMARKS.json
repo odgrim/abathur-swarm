@@ -1,0 +1,57 @@
+{
+  "benchmarks": [
+    {
+      "test_name": "single_priority_calculation",
+      "iterations": 100,
+      "total_time_ms": 10.116708930581808,
+      "avg_time_ms": 0.10116708930581808,
+      "target_ms": 5.0,
+      "status": "PASS",
+      "timestamp": "2025-10-11T05:46:07.137244+00:00"
+    },
+    {
+      "test_name": "batch_priority_calculation_100_tasks",
+      "task_count": 100,
+      "elapsed_ms": 28.357500210404396,
+      "target_ms": 50.0,
+      "avg_per_task_ms": 0.28357500210404396,
+      "status": "PASS",
+      "timestamp": "2025-10-11T05:46:07.187487+00:00"
+    },
+    {
+      "test_name": "single_priority_calculation",
+      "iterations": 100,
+      "total_time_ms": 10.41204109787941,
+      "avg_time_ms": 0.1041204109787941,
+      "target_ms": 5.0,
+      "status": "PASS",
+      "timestamp": "2025-10-11T05:46:37.403059+00:00"
+    },
+    {
+      "test_name": "batch_priority_calculation_100_tasks",
+      "task_count": 100,
+      "elapsed_ms": 28.95233314484358,
+      "target_ms": 50.0,
+      "avg_per_task_ms": 0.2895233314484358,
+      "status": "PASS",
+      "timestamp": "2025-10-11T05:46:37.453284+00:00"
+    },
+    {
+      "test_name": "priority_recalculation_cascade_10_levels",
+      "levels": 10,
+      "tasks_per_level": 5,
+      "total_tasks": 50,
+      "elapsed_ms": 15.941166784614325,
+      "target_ms": 100.0,
+      "tasks_recalculated": 49,
+      "status": "PASS",
+      "timestamp": "2025-10-11T05:46:37.490368+00:00"
+    }
+  ],
+  "summary": {
+    "total_tests": 5,
+    "passed": 5,
+    "failed": 0,
+    "timestamp": "2025-10-11T05:46:37.490547+00:00"
+  }
+}

@@ -115,6 +115,69 @@ After execution, you will have:
 - **Phase 4:** Compilation & Finalization (~1 hour)
 - **Total:** ~8 hours for comprehensive PRD
 
+## Design Documentation Structure
+
+The `design_docs/` folder is organized hierarchically by topic. Each top-level folder represents a major area of the project, with subfolders for organization:
+
+### 00-overview/
+Project-wide documentation and decision points:
+- `ABATHUR_PRD.md` - Product Requirements Document
+- `EXECUTIVE_SUMMARY.md` - High-level project overview
+- `DECISION_POINTS.md` - Architectural decisions
+- `CLAUDE_CODE_KICKOFF_PROMPT.md` - Initial kickoff guidance
+
+### 01-schema-redesign/
+Database schema design and implementation:
+- `kickoff/` - Project initiation documents
+- `design/` - Schema tables, relationships, indexes, and architecture
+- `implementation/` - Technical specs and roadmap (formerly phase2 and phase3)
+- `validation/` - Phase validation reports
+- `reports/` - Completion and orchestration reports
+
+### 02-task-queue/
+Task queue system architecture and implementation:
+- `algorithms/` - Dependency resolution and priority algorithms
+- `reports/` - Orchestration and validation reports
+- Core architecture, index, and decision documents
+
+### 03-vector-search/
+Vector search integration and semantic memory:
+- Phase completion reports
+
+### 04-agent-teams/
+Agent coordination and team design:
+- Agent team visualizations
+- Implementation team design reports
+
+### 05-prd-development/
+PRD creation process and supporting materials:
+- `deliverables/` - PRD artifacts and outputs
+- `oauth-spawning/` - OAuth-based agent spawning research
+- Orchestrator handoff documentation
+
+### 06-tech-specs/
+Technical specifications and orchestration:
+- Tech spec kickoff, handoff, and final reports
+- Executive summaries
+
+### 07-milestones/
+Milestone tracking and validation:
+- `milestone1/` - Core schema (execution context, performance, validation)
+- `milestone2/` - Memory system (performance reports)
+- `milestone4/` - Production deployment validation
+
+### 08-performance/
+Performance benchmarks and analysis:
+- Quick reference guides
+- Performance benchmark JSON files by phase
+
+### 09-validation/
+Cross-phase validation reports:
+- Phase 3 validation summary
+
+### File Size Guidelines
+All markdown files are kept under ~20,000 tokens (approximately 15,000 words) for maintainability. Larger documents are split across multiple files or organized into subdirectories.
+
 ## Repository Files
 
 ### Agent Definitions
@@ -122,12 +185,6 @@ Located in `.claude/agents/`:
 - All 10 PRD development specialist agents
 - Each agent has specific tools, model class, and instructions
 - Designed for orchestrated collaboration
-
-### Documentation
-- `README.md` - This file
-- `DECISION_POINTS.md` - Architectural decisions to resolve before PRD development
-- `PRD_ORCHESTRATOR_HANDOFF.md` - Complete orchestration guide
-- `CLAUDE_CODE_KICKOFF_PROMPT.md` - Ready-to-use kickoff prompt
 
 ### Git Configuration
 - `.gitignore` - Configured for Python, environments, and sensitive files
