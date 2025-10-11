@@ -14,6 +14,10 @@ from rich.table import Table
 
 from abathur import __version__
 
+# Default template repository
+DEFAULT_TEMPLATE_REPO = "https://github.com/odgrim/abathur-claude-template.git"
+DEFAULT_TEMPLATE_VERSION = "main"
+
 # Initialize Typer app
 app = typer.Typer(
     name="abathur",
@@ -988,7 +992,7 @@ def config_set_key(
 def init(
     template: str | None = typer.Option(None, help="Template repository URL or name"),  # noqa: B008
     version_tag: str
-    | None = typer.Option("main", help="Template version (tag or branch)"),  # noqa: B008
+    | None = typer.Option(None, help="Template version (tag or branch)"),  # noqa: B008
     validate: bool = typer.Option(
         False, help="Run comprehensive database validation"
     ),  # noqa: B008
@@ -998,9 +1002,15 @@ def init(
     ),
     report_output: Path
     | None = typer.Option(None, help="Save validation report as JSON"),  # noqa: B008
+    skip_template: bool = typer.Option(False, help="Skip template installation"),  # noqa: B008
 ) -> None:
     """Initialize a new Abathur project with template.
 
+    By default, pulls the latest official template from GitHub and installs it
+    to your project directory (.claude/ and related files).
+
+    Use --skip-template to only initialize the database without installing templates.
+    Use --template to install a custom template instead of the default.
     Use --validate to run a comprehensive validation suite after initialization.
     This checks PRAGMA settings, foreign keys, indexes, and performance.
 
@@ -1008,6 +1018,9 @@ def init(
     Use --report-output to save the validation report as JSON (requires --validate).
 
     Examples:
+        abathur init                                    # Default: init DB + install template
+        abathur init --skip-template                    # Only init database
+        abathur init --template https://github.com/org/template.git
         abathur init --validate
         abathur init --validate --report-output validation.json
         abathur init --db-path /tmp/test.db --validate
@@ -1062,11 +1075,51 @@ def init(
         elif report_output:
             console.print("[yellow]Warning:[/yellow] --report-output requires --validate flag")
 
-        if template:
+        # Install template (unless skipped)
+        if not skip_template:
+            # Use custom template if provided, otherwise use default
+            template_url = template or DEFAULT_TEMPLATE_REPO
+            template_version = version_tag or DEFAULT_TEMPLATE_VERSION
+
+            console.print("\n[blue]Installing template...[/blue]")
+            console.print(f"[dim]Repository: {template_url}[/dim]")
+            console.print(f"[dim]Version: {template_version}[/dim]")
+
             services = await _get_services()
-            console.print(f"\n[blue]Cloning template: {template}...[/blue]")
-            tmpl = await services["template_manager"].clone_template(template, version_tag)
-            console.print(f"[green]✓[/green] Template installed: {tmpl.name}")
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                progress.add_task(description="Pulling template into cache...", total=None)
+
+                # Pull template into cache
+                tmpl = await services["template_manager"].clone_template(
+                    template_url, template_version
+                )
+
+            console.print(f"[green]✓[/green] Template cached: [cyan]{tmpl.name}[/cyan]")
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                progress.add_task(
+                    description="Copying template to project directory...", total=None
+                )
+
+                # Install template to project directory
+                await services["template_manager"].install_template(tmpl)
+
+            console.print("[green]✓[/green] Template installed to project directory")
+
+            # Show what was installed
+            if tmpl.agents:
+                console.print(
+                    f"[dim]Installed {len(tmpl.agents)} agent definition(s) to .claude/agents/[/dim]"
+                )
 
     asyncio.run(_init())
 

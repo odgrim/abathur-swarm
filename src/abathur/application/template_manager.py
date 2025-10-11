@@ -31,6 +31,11 @@ class ValidationResult:
     errors: list[str]
     warnings: list[str]
 
+    @property
+    def is_valid(self) -> bool:
+        """Alias for valid attribute for backwards compatibility."""
+        return self.valid
+
 
 class TemplateManager:
     """Manages agent templates - cloning, caching, and validation."""
@@ -306,6 +311,14 @@ class TemplateManager:
                     )
 
         return templates
+
+    def list_templates(self) -> list[Template]:
+        """List all templates (alias for list_cached_templates).
+
+        Returns:
+            List of cached Template objects
+        """
+        return self.list_cached_templates()
 
     def clear_cache(self, template_name: str | None = None) -> None:
         """Clear template cache.
