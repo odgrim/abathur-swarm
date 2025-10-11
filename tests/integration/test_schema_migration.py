@@ -16,7 +16,7 @@ from abathur.infrastructure.database import Database
 
 
 @pytest.mark.asyncio
-async def test_migration_adds_new_columns():
+async def test_migration_adds_new_columns() -> None:
     """Migration successfully adds enhanced task queue columns."""
     db = Database(Path(":memory:"))
     await db.initialize()
@@ -44,7 +44,7 @@ async def test_migration_adds_new_columns():
 
 
 @pytest.mark.asyncio
-async def test_task_dependencies_table_created():
+async def test_task_dependencies_table_created() -> None:
     """Migration creates task_dependencies table."""
     db = Database(Path(":memory:"))
     await db.initialize()
@@ -75,7 +75,7 @@ async def test_task_dependencies_table_created():
 
 
 @pytest.mark.asyncio
-async def test_foreign_key_constraints():
+async def test_foreign_key_constraints() -> None:
     """Foreign key constraints are enforced."""
     db = Database(Path(":memory:"))
     await db.initialize()
@@ -87,7 +87,7 @@ async def test_foreign_key_constraints():
 
 
 @pytest.mark.asyncio
-async def test_indexes_created():
+async def test_indexes_created() -> None:
     """All required indexes are created."""
     db = Database(Path(":memory:"))
     await db.initialize()
@@ -107,7 +107,7 @@ async def test_indexes_created():
 
 
 @pytest.mark.asyncio
-async def test_dependency_resolution():
+async def test_dependency_resolution() -> None:
     """Dependencies can be resolved correctly."""
     db = Database(Path(":memory:"))
     await db.initialize()
@@ -143,7 +143,7 @@ async def test_dependency_resolution():
 
 
 @pytest.mark.asyncio
-async def test_multiple_dependencies():
+async def test_multiple_dependencies() -> None:
     """Tasks can have multiple dependencies."""
     db = Database(Path(":memory:"))
     await db.initialize()
@@ -192,7 +192,7 @@ async def test_multiple_dependencies():
 
 
 @pytest.mark.asyncio
-async def test_backward_compatibility():
+async def test_backward_compatibility() -> None:
     """Tasks created without new fields still work."""
     db = Database(Path(":memory:"))
     await db.initialize()
@@ -213,7 +213,7 @@ async def test_backward_compatibility():
 
 
 @pytest.mark.asyncio
-async def test_task_status_values():
+async def test_task_status_values() -> None:
     """All TaskStatus values are supported."""
     db = Database(Path(":memory:"))
     await db.initialize()
@@ -240,7 +240,7 @@ async def test_task_status_values():
 
 
 @pytest.mark.asyncio
-async def test_task_source_values():
+async def test_task_source_values() -> None:
     """All TaskSource values are supported."""
     db = Database(Path(":memory:"))
     await db.initialize()
@@ -264,7 +264,7 @@ async def test_task_source_values():
 
 
 @pytest.mark.asyncio
-async def test_deadline_persistence():
+async def test_deadline_persistence() -> None:
     """Task deadlines are persisted correctly."""
     from datetime import datetime, timezone
 
@@ -290,7 +290,7 @@ async def test_deadline_persistence():
 
 
 @pytest.mark.asyncio
-async def test_query_plan_uses_indexes():
+async def test_query_plan_uses_indexes() -> None:
     """Verify critical queries use indexes."""
     db = Database(Path(":memory:"))
     await db.initialize()
@@ -322,7 +322,7 @@ async def test_query_plan_uses_indexes():
 
 
 @pytest.mark.asyncio
-async def test_unique_dependency_constraint():
+async def test_unique_dependency_constraint() -> None:
     """Cannot create duplicate dependencies between same tasks."""
     db = Database(Path(":memory:"))
     await db.initialize()

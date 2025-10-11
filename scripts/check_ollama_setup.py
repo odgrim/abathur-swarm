@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Validate vector search infrastructure setup."""
+"""Utility script to validate Ollama service setup for vector search.
+
+This script verifies that:
+- Ollama service is running and accessible
+- The nomic-embed-text-v1.5 model is available
+- Embedding generation is working correctly
+- Performance meets acceptable thresholds
+
+Run this before executing vector search integration tests.
+"""
 
 import asyncio
 import sys

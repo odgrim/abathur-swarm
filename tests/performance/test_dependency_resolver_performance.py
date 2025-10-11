@@ -12,6 +12,7 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 from abathur.domain.models import DependencyType, Task, TaskDependency, TaskStatus
@@ -20,7 +21,7 @@ from abathur.services.dependency_resolver import DependencyResolver
 
 
 @pytest.fixture
-async def db():
+async def db() -> Any:
     """Create an in-memory database for performance testing."""
     database = Database(db_path=Path(":memory:"))
     await database.initialize()
@@ -29,15 +30,15 @@ async def db():
 
 
 @pytest.fixture
-async def resolver(db):
+async def resolver(db: Any) -> Any:
     """Create a DependencyResolver instance."""
     return DependencyResolver(db, cache_ttl_seconds=60.0)
 
 
-def measure_time(func):
+def measure_time(func: Any) -> Any:
     """Decorator to measure execution time in milliseconds."""
 
-    async def wrapper(*args, **kwargs):
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
         start = time.perf_counter()
         result = await func(*args, **kwargs)
         end = time.perf_counter()
@@ -51,7 +52,7 @@ def measure_time(func):
 class TestCycleDetectionPerformance:
     """Performance tests for circular dependency detection."""
 
-    async def test_detect_cycles_100_task_graph(self, db, resolver):
+    async def test_detect_cycles_100_task_graph(self, db: Any, resolver: Any) -> None:
         """Test cycle detection performance on 100-task graph.
 
         Target: <10ms for 100-task graph
@@ -85,7 +86,7 @@ class TestCycleDetectionPerformance:
 
         # Measure cycle detection time (checking if adding edge would create cycle)
         @measure_time
-        async def detect_cycle():
+        async def detect_cycle() -> Any:
             try:
                 # This should NOT create a cycle (99 -> 50 is backward but not cyclic)
                 await resolver.detect_circular_dependencies([tasks[50].id], tasks[99].id)
@@ -100,7 +101,7 @@ class TestCycleDetectionPerformance:
 
         print(f"\n✓ Cycle detection (100 tasks): {elapsed_ms:.2f}ms")
 
-    async def test_detect_cycles_complex_graph_200_edges(self, db, resolver):
+    async def test_detect_cycles_complex_graph_200_edges(self, db: Any, resolver: Any) -> None:
         """Test cycle detection with 100 tasks and 200 edges.
 
         Target: <10ms
@@ -135,7 +136,7 @@ class TestCycleDetectionPerformance:
 
         # Measure cycle detection
         @measure_time
-        async def detect_cycle():
+        async def detect_cycle() -> Any:
             try:
                 await resolver.detect_circular_dependencies([tasks[0].id], tasks[99].id)
                 return True
@@ -153,7 +154,7 @@ class TestCycleDetectionPerformance:
 class TestTopologicalSortPerformance:
     """Performance tests for topological sorting."""
 
-    async def test_topological_sort_100_task_graph(self, db, resolver):
+    async def test_topological_sort_100_task_graph(self, db: Any, resolver: Any) -> None:
         """Test topological sort performance on 100-task graph.
 
         Target: <10ms for 100-task graph
@@ -186,7 +187,7 @@ class TestTopologicalSortPerformance:
 
         # Measure topological sort time
         @measure_time
-        async def topo_sort():
+        async def topo_sort() -> Any:
             task_ids = [t.id for t in tasks]
             return await resolver.get_execution_order(task_ids)
 
@@ -198,7 +199,7 @@ class TestTopologicalSortPerformance:
 
         print(f"✓ Topological sort (100 tasks): {elapsed_ms:.2f}ms")
 
-    async def test_topological_sort_1000_tasks(self, db, resolver):
+    async def test_topological_sort_1000_tasks(self, db: Any, resolver: Any) -> None:
         """Test topological sort scalability with 1000 tasks.
 
         Target: <50ms for 1000-task graph
@@ -221,7 +222,7 @@ class TestTopologicalSortPerformance:
 
         # Measure topological sort time
         @measure_time
-        async def topo_sort():
+        async def topo_sort() -> Any:
             task_ids = [t.id for t in tasks]
             return await resolver.get_execution_order(task_ids)
 
@@ -238,7 +239,7 @@ class TestTopologicalSortPerformance:
 class TestDepthCalculationPerformance:
     """Performance tests for dependency depth calculation."""
 
-    async def test_dependency_depth_10_levels(self, db, resolver):
+    async def test_dependency_depth_10_levels(self, db: Any, resolver: Any) -> None:
         """Test depth calculation performance for 10-level deep graph.
 
         Target: <5ms for 10-level graph
@@ -261,7 +262,7 @@ class TestDepthCalculationPerformance:
 
         # Measure depth calculation for deepest task
         @measure_time
-        async def calc_depth():
+        async def calc_depth() -> Any:
             return await resolver.calculate_dependency_depth(tasks[-1].id)
 
         depth, elapsed_ms = await calc_depth()
@@ -272,7 +273,7 @@ class TestDepthCalculationPerformance:
 
         print(f"✓ Depth calculation (10 levels): {elapsed_ms:.2f}ms")
 
-    async def test_dependency_depth_with_memoization(self, db, resolver):
+    async def test_dependency_depth_with_memoization(self, db: Any, resolver: Any) -> None:
         """Test that memoization improves depth calculation performance."""
         # Create 10-level dependency chain
         tasks = []
@@ -291,14 +292,14 @@ class TestDepthCalculationPerformance:
 
         # First calculation (cache miss)
         @measure_time
-        async def first_calc():
+        async def first_calc() -> Any:
             return await resolver.calculate_dependency_depth(tasks[-1].id)
 
         depth1, time1 = await first_calc()
 
         # Second calculation (cache hit)
         @measure_time
-        async def second_calc():
+        async def second_calc() -> Any:
             return await resolver.calculate_dependency_depth(tasks[-1].id)
 
         depth2, time2 = await second_calc()
@@ -314,7 +315,7 @@ class TestDepthCalculationPerformance:
 class TestGraphCachePerformance:
     """Performance tests for graph caching."""
 
-    async def test_graph_cache_hit_performance(self, db, resolver):
+    async def test_graph_cache_hit_performance(self, db: Any, resolver: Any) -> None:
         """Test graph cache hit performance.
 
         Target: <1ms for cache hit
@@ -336,14 +337,14 @@ class TestGraphCachePerformance:
 
         # First build (cache miss)
         @measure_time
-        async def first_build():
+        async def first_build() -> Any:
             return await resolver._build_dependency_graph()
 
         graph1, time1 = await first_build()
 
         # Second build (cache hit)
         @measure_time
-        async def second_build():
+        async def second_build() -> Any:
             return await resolver._build_dependency_graph()
 
         graph2, time2 = await second_build()
@@ -354,7 +355,7 @@ class TestGraphCachePerformance:
 
         print(f"✓ Graph cache: {time1:.2f}ms (miss) → {time2:.3f}ms (hit)")
 
-    async def test_graph_build_1000_tasks(self, db, resolver):
+    async def test_graph_build_1000_tasks(self, db: Any, resolver: Any) -> None:
         """Test graph building performance for 1000 tasks.
 
         Target: <50ms for 1000-task database
@@ -377,7 +378,7 @@ class TestGraphCachePerformance:
 
         # Measure graph building time
         @measure_time
-        async def build_graph():
+        async def build_graph() -> Any:
             return await resolver._build_dependency_graph()
 
         graph, elapsed_ms = await build_graph()
@@ -392,7 +393,7 @@ class TestGraphCachePerformance:
 class TestValidationPerformance:
     """Performance tests for dependency validation."""
 
-    async def test_validate_dependency_large_graph(self, db, resolver):
+    async def test_validate_dependency_large_graph(self, db: Any, resolver: Any) -> None:
         """Test validation performance on large graph.
 
         Target: <10ms for validation on 100-task graph
@@ -415,7 +416,7 @@ class TestValidationPerformance:
 
         # Measure validation time
         @measure_time
-        async def validate():
+        async def validate() -> Any:
             return await resolver.validate_new_dependency(tasks[99].id, tasks[50].id)
 
         is_valid, elapsed_ms = await validate()
@@ -430,10 +431,11 @@ class TestValidationPerformance:
 class TestPerformanceBenchmarkReport:
     """Generate comprehensive performance benchmark report."""
 
-    async def test_generate_performance_report(self, db, resolver):
+    async def test_generate_performance_report(self, db: Any, resolver: Any) -> None:
         """Generate comprehensive performance benchmark report."""
+        from typing import Any
 
-        results = {
+        results: dict[str, Any] = {
             "test_suite": "DependencyResolver Performance Benchmarks",
             "date": datetime.now(timezone.utc).isoformat(),
             "benchmarks": [],
@@ -455,7 +457,7 @@ class TestPerformanceBenchmarkReport:
             await db.insert_task_dependency(dep)
 
         @measure_time
-        async def cycle_detection():
+        async def cycle_detection() -> Any:
             try:
                 await resolver.detect_circular_dependencies([tasks_100[50].id], tasks_100[99].id)
                 return True
@@ -475,7 +477,7 @@ class TestPerformanceBenchmarkReport:
 
         # Benchmark 2: Topological sort (100 tasks)
         @measure_time
-        async def topo_sort():
+        async def topo_sort() -> Any:
             return await resolver.get_execution_order([t.id for t in tasks_100])
 
         _, topo_time = await topo_sort()
@@ -505,7 +507,7 @@ class TestPerformanceBenchmarkReport:
             await db.insert_task_dependency(dep)
 
         @measure_time
-        async def depth_calc():
+        async def depth_calc() -> Any:
             return await resolver.calculate_dependency_depth(tasks_10[-1].id)
 
         _, depth_time = await depth_calc()
@@ -523,7 +525,7 @@ class TestPerformanceBenchmarkReport:
         await resolver._build_dependency_graph()  # Prime cache
 
         @measure_time
-        async def cache_hit():
+        async def cache_hit() -> Any:
             return await resolver._build_dependency_graph()
 
         _, cache_time = await cache_hit()

@@ -1,28 +1,10 @@
-#!/usr/bin/env python3
-"""Database initialization and validation script for schema redesign.
+"""Database validation and integrity checking."""
 
-This script:
-1. Initializes the database with all tables and indexes
-2. Runs comprehensive validation checks
-3. Generates detailed validation report
-
-Usage:
-    python scripts/initialize_database.py [--db-path PATH]
-"""
-
-import argparse
-import asyncio
-import json
-import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
-# Add src directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
-from abathur.infrastructure.database import Database  # noqa: E402
+from abathur.infrastructure.database import Database
 
 
 class DatabaseValidator:
@@ -40,42 +22,52 @@ class DatabaseValidator:
             "issues": [],
         }
 
-    async def run_all_checks(self) -> dict[str, Any]:
-        """Run all validation checks."""
-        print("\n" + "=" * 70)
-        print("DATABASE VALIDATION REPORT")
-        print("=" * 70)
+    async def run_all_checks(self, verbose: bool = True) -> dict[str, Any]:
+        """Run all validation checks.
 
-        await self.check_pragma_settings()
-        await self.check_integrity()
-        await self.check_foreign_keys()
-        await self.check_tables()
-        await self.check_indexes()
-        await self.check_json_constraints()
-        await self.test_query_performance()
+        Args:
+            verbose: Print progress to stdout
 
-        print("\n" + "=" * 70)
-        print("VALIDATION SUMMARY")
-        print("=" * 70)
+        Returns:
+            Validation results dictionary
+        """
+        if verbose:
+            print("\n" + "=" * 70)
+            print("DATABASE VALIDATION REPORT")
+            print("=" * 70)
 
-        total_checks = len(self.results["checks"])
-        passed_checks = sum(1 for v in self.results["checks"].values() if v["status"] == "PASS")
-        print(f"Total Checks: {total_checks}")
-        print(f"Passed: {passed_checks}")
-        print(f"Failed: {total_checks - passed_checks}")
+        await self.check_pragma_settings(verbose)
+        await self.check_integrity(verbose)
+        await self.check_foreign_keys(verbose)
+        await self.check_tables(verbose)
+        await self.check_indexes(verbose)
+        await self.check_json_constraints(verbose)
+        await self.test_query_performance(verbose)
 
-        if self.results["issues"]:
-            print(f"\nISSUES FOUND: {len(self.results['issues'])}")
-            for issue in self.results["issues"]:
-                print(f"  - {issue}")
-        else:
-            print("\nNO ISSUES FOUND - DATABASE READY FOR USE")
+        if verbose:
+            print("\n" + "=" * 70)
+            print("VALIDATION SUMMARY")
+            print("=" * 70)
+
+            total_checks = len(self.results["checks"])
+            passed_checks = sum(1 for v in self.results["checks"].values() if v["status"] == "PASS")
+            print(f"Total Checks: {total_checks}")
+            print(f"Passed: {passed_checks}")
+            print(f"Failed: {total_checks - passed_checks}")
+
+            if self.results["issues"]:
+                print(f"\nISSUES FOUND: {len(self.results['issues'])}")
+                for issue in self.results["issues"]:
+                    print(f"  - {issue}")
+            else:
+                print("\nNO ISSUES FOUND - DATABASE READY FOR USE")
 
         return self.results
 
-    async def check_pragma_settings(self) -> None:
+    async def check_pragma_settings(self, verbose: bool = True) -> None:
         """Verify PRAGMA configuration."""
-        print("\n[1/7] Checking PRAGMA Settings...")
+        if verbose:
+            print("\n[1/7] Checking PRAGMA Settings...")
 
         async with self.db._get_connection() as conn:
             # Note: foreign_keys must be enabled per-connection, which Database class does
@@ -121,14 +113,16 @@ class DatabaseValidator:
                 "status": status,
                 "value": self.results["pragma_settings"][setting],
             }
-            print(f"  {setting}: {status} ({self.results['pragma_settings'][setting]}{note})")
+            if verbose:
+                print(f"  {setting}: {status} ({self.results['pragma_settings'][setting]}{note})")
 
             if not passed:
                 self.results["issues"].append(f"PRAGMA {setting} not configured correctly")
 
-    async def check_integrity(self) -> None:
+    async def check_integrity(self, verbose: bool = True) -> None:
         """Run PRAGMA integrity_check."""
-        print("\n[2/7] Checking Database Integrity...")
+        if verbose:
+            print("\n[2/7] Checking Database Integrity...")
 
         async with self.db._get_connection() as conn:
             cursor = await conn.execute("PRAGMA integrity_check")
@@ -140,14 +134,16 @@ class DatabaseValidator:
         status = "PASS" if passed else "FAIL"
         self.results["checks"]["integrity_check"] = {"status": status, "result": result}
 
-        print(f"  Integrity Check: {status}")
+        if verbose:
+            print(f"  Integrity Check: {status}")
 
         if not passed:
             self.results["issues"].append(f"Integrity check failed: {result}")
 
-    async def check_foreign_keys(self) -> None:
+    async def check_foreign_keys(self, verbose: bool = True) -> None:
         """Run PRAGMA foreign_key_check."""
-        print("\n[3/7] Checking Foreign Key Constraints...")
+        if verbose:
+            print("\n[3/7] Checking Foreign Key Constraints...")
 
         violations = await self.db.validate_foreign_keys()
 
@@ -159,14 +155,16 @@ class DatabaseValidator:
             "details": [str(v) for v in violations],
         }
 
-        print(f"  Foreign Key Check: {status} ({len(violations)} violations)")
+        if verbose:
+            print(f"  Foreign Key Check: {status} ({len(violations)} violations)")
 
         if not passed:
             self.results["issues"].append(f"Foreign key violations found: {violations}")
 
-    async def check_tables(self) -> None:
+    async def check_tables(self, verbose: bool = True) -> None:
         """Verify all required tables exist."""
-        print("\n[4/7] Checking Tables...")
+        if verbose:
+            print("\n[4/7] Checking Tables...")
 
         expected_tables = {
             # Memory tables
@@ -194,7 +192,8 @@ class DatabaseValidator:
             self.results["tables"][table] = {"exists": exists, "description": description}
             self.results["checks"][f"table_{table}"] = {"status": status}
 
-            print(f"  {table}: {status}")
+            if verbose:
+                print(f"  {table}: {status}")
 
             if not exists:
                 self.results["issues"].append(f"Table {table} does not exist")
@@ -209,9 +208,10 @@ class DatabaseValidator:
                     count = count_row[0]
                     self.results["tables"][table]["row_count"] = count
 
-    async def check_indexes(self) -> None:
+    async def check_indexes(self, verbose: bool = True) -> None:
         """Verify all required indexes exist."""
-        print("\n[5/7] Checking Indexes...")
+        if verbose:
+            print("\n[5/7] Checking Indexes...")
 
         index_info = await self.db.get_index_usage()
         index_count = index_info["index_count"]
@@ -229,7 +229,8 @@ class DatabaseValidator:
             "min_expected": min_expected,
         }
 
-        print(f"  Index Count: {status} ({index_count} indexes, expected >= {min_expected})")
+        if verbose:
+            print(f"  Index Count: {status} ({index_count} indexes, expected >= {min_expected})")
 
         if not passed:
             self.results["issues"].append(
@@ -244,12 +245,14 @@ class DatabaseValidator:
                 indexes_by_table[table] = []
             indexes_by_table[table].append(idx["name"])
 
-        for table, idxs in sorted(indexes_by_table.items()):
-            print(f"    {table}: {len(idxs)} indexes")
+        if verbose:
+            for table, idxs in sorted(indexes_by_table.items()):
+                print(f"    {table}: {len(idxs)} indexes")
 
-    async def check_json_constraints(self) -> None:
+    async def check_json_constraints(self, verbose: bool = True) -> None:
         """Test JSON validation constraints."""
-        print("\n[6/7] Checking JSON Validation Constraints...")
+        if verbose:
+            print("\n[6/7] Checking JSON Validation Constraints...")
 
         async with self.db._get_connection() as conn:
             # Test sessions.events JSON validation
@@ -260,14 +263,16 @@ class DatabaseValidator:
                 )
                 # Should not reach here
                 passed = False
-                print("  sessions.events: FAIL (invalid JSON accepted)")
+                if verbose:
+                    print("  sessions.events: FAIL (invalid JSON accepted)")
                 self.results["issues"].append(
                     "JSON validation constraint not working on sessions.events"
                 )
             except Exception:
                 # Expected to fail
                 passed = True
-                print("  sessions.events: PASS (invalid JSON rejected)")
+                if verbose:
+                    print("  sessions.events: PASS (invalid JSON rejected)")
 
             self.results["checks"]["json_validation_sessions"] = {
                 "status": "PASS" if passed else "FAIL"
@@ -280,19 +285,22 @@ class DatabaseValidator:
                        VALUES ('test', 'key', 'invalid json', 'semantic')"""
                 )
                 passed = False
-                print("  memory_entries.value: FAIL (invalid JSON accepted)")
+                if verbose:
+                    print("  memory_entries.value: FAIL (invalid JSON accepted)")
                 self.results["issues"].append("JSON validation not working on memory_entries.value")
             except Exception:
                 passed = True
-                print("  memory_entries.value: PASS (invalid JSON rejected)")
+                if verbose:
+                    print("  memory_entries.value: PASS (invalid JSON rejected)")
 
             self.results["checks"]["json_validation_memory"] = {
                 "status": "PASS" if passed else "FAIL"
             }
 
-    async def test_query_performance(self) -> None:
+    async def test_query_performance(self, verbose: bool = True) -> None:
         """Test query performance targets."""
-        print("\n[7/7] Testing Query Performance...")
+        if verbose:
+            print("\n[7/7] Testing Query Performance...")
 
         async with self.db._get_connection() as conn:
             # Test 1: Session retrieval
@@ -319,7 +327,8 @@ class DatabaseValidator:
                 "target_ms": target_ms,
             }
 
-            print(f"  Session Retrieval: {status} ({duration_ms:.2f}ms, target <{target_ms}ms)")
+            if verbose:
+                print(f"  Session Retrieval: {status} ({duration_ms:.2f}ms, target <{target_ms}ms)")
 
             # Test 2: Memory entry retrieval
             await conn.execute(
@@ -347,68 +356,10 @@ class DatabaseValidator:
                 "target_ms": target_ms,
             }
 
-            print(f"  Memory Retrieval: {status} ({duration_ms:.2f}ms, target <{target_ms}ms)")
+            if verbose:
+                print(f"  Memory Retrieval: {status} ({duration_ms:.2f}ms, target <{target_ms}ms)")
 
             # Clean up test data
             await conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             await conn.execute("DELETE FROM memory_entries WHERE namespace LIKE 'test:%'")
             await conn.commit()
-
-
-async def main() -> None:
-    """Main initialization and validation workflow."""
-    parser = argparse.ArgumentParser(description="Initialize and validate Abathur database")
-    parser.add_argument(
-        "--db-path",
-        type=Path,
-        default=Path.home() / ".abathur" / "abathur.db",
-        help="Path to database file",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        help="Path to save validation report JSON",
-    )
-    args = parser.parse_args()
-
-    print("=" * 70)
-    print("ABATHUR DATABASE INITIALIZATION")
-    print("=" * 70)
-    print(f"Database Path: {args.db_path}")
-    print(f"Database Exists: {args.db_path.exists()}")
-
-    # Initialize database
-    db = Database(args.db_path)
-
-    print("\nInitializing database schema...")
-    start_time = time.perf_counter()
-    await db.initialize()
-    init_duration = time.perf_counter() - start_time
-    print(f"Database initialized in {init_duration:.2f} seconds")
-
-    # Run validation
-    validator = DatabaseValidator(db)
-    results = await validator.run_all_checks()
-
-    # Add initialization metadata
-    results["database_path"] = str(args.db_path)
-    results["initialization_duration_seconds"] = round(init_duration, 2)
-
-    # Save report if requested
-    if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        with open(args.output, "w") as f:
-            json.dump(results, f, indent=2)
-        print(f"\nValidation report saved to: {args.output}")
-
-    # Exit with appropriate code
-    if results["issues"]:
-        print("\nVALIDATION FAILED - See issues above")
-        sys.exit(1)
-    else:
-        print("\nVALIDATION PASSED - Database ready for use")
-        sys.exit(0)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

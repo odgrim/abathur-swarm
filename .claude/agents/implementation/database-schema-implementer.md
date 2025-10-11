@@ -105,34 +105,37 @@ SELECT name FROM sqlite_master WHERE type='index' ORDER BY name;
       """Return EXPLAIN QUERY PLAN output for optimization."""
   ```
 
-### 6. Migration Script Creation
+### 6. Database Initialization and Validation
 
-**Generate reusable initialization script:**
+**Use the abathur CLI for initialization and validation:**
+```bash
+# Initialize database with validation
+abathur init --validate
+
+# Initialize custom database path with validation report
+abathur init --db-path /var/lib/abathur/abathur.db --validate --report-output validation.json
+```
+
+**For programmatic access:**
 ```python
-# File: scripts/initialize_database.py
-"""Database initialization script for schema redesign."""
-
-import asyncio
 from pathlib import Path
-from abathur.infrastructure.database import Database
+from abathur.infrastructure import Database, DatabaseValidator
 
-async def main():
+async def validate_database():
     db_path = Path("/var/lib/abathur/abathur.db")
     db = Database(db_path)
     await db.initialize()
-    print("Database initialized successfully")
 
-    # Run validation
-    violations = await db.validate_foreign_keys()
-    if violations:
-        print(f"WARNING: {len(violations)} foreign key violations found")
-        for violation in violations:
-            print(f"  - {violation}")
+    # Run comprehensive validation
+    validator = DatabaseValidator(db)
+    results = await validator.run_all_checks(verbose=True)
+
+    if results["issues"]:
+        print(f"WARNING: {len(results['issues'])} issues found")
+        for issue in results["issues"]:
+            print(f"  - {issue}")
     else:
-        print("Foreign key validation: PASSED")
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        print("All validation checks PASSED")
 ```
 
 ### 7. Error Handling and Escalation
@@ -169,11 +172,11 @@ Provide structured JSON output:
   },
   "deliverables": {
     "files_created": [
-      "/var/lib/abathur/abathur.db",
-      "/Users/odgrim/dev/home/agentics/abathur/scripts/initialize_database.py"
+      "/var/lib/abathur/abathur.db"
     ],
     "files_modified": [
-      "/Users/odgrim/dev/home/agentics/abathur/src/abathur/infrastructure/database.py"
+      "/Users/odgrim/dev/home/agentics/abathur/src/abathur/infrastructure/database.py",
+      "/Users/odgrim/dev/home/agentics/abathur/src/abathur/infrastructure/database_validator.py"
     ],
     "tables_created": ["tasks", "agents", "audit", "checkpoints", "sessions", "memory_entries", "document_index"],
     "indexes_created": ["count: 33 total"],

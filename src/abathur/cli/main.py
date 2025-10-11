@@ -986,26 +986,85 @@ def config_set_key(
 # ===== Database Commands =====
 @app.command()
 def init(
-    template: str | None = typer.Option(None, help="Template repository URL or name"),
-    version_tag: str | None = typer.Option("main", help="Template version (tag or branch)"),
+    template: str | None = typer.Option(None, help="Template repository URL or name"),  # noqa: B008
+    version_tag: str
+    | None = typer.Option("main", help="Template version (tag or branch)"),  # noqa: B008
+    validate: bool = typer.Option(
+        False, help="Run comprehensive database validation"
+    ),  # noqa: B008
+    db_path: Path
+    | None = typer.Option(  # noqa: B008
+        None, help="Custom database path (default: ~/.abathur/abathur.db)"
+    ),
+    report_output: Path
+    | None = typer.Option(None, help="Save validation report as JSON"),  # noqa: B008
 ) -> None:
-    """Initialize a new Abathur project with template."""
+    """Initialize a new Abathur project with template.
+
+    Use --validate to run a comprehensive validation suite after initialization.
+    This checks PRAGMA settings, foreign keys, indexes, and performance.
+
+    Use --db-path to initialize a database at a custom location.
+    Use --report-output to save the validation report as JSON (requires --validate).
+
+    Examples:
+        abathur init --validate
+        abathur init --validate --report-output validation.json
+        abathur init --db-path /tmp/test.db --validate
+    """
 
     async def _init() -> None:
-        from abathur.infrastructure import ConfigManager, Database
+        import time
+
+        from abathur.infrastructure import ConfigManager, Database, DatabaseValidator
 
         console.print("[blue]Initializing Abathur project...[/blue]")
 
-        # Initialize database
-        config_manager = ConfigManager()
-        database = Database(config_manager.get_database_path())
-        await database.initialize()
+        # Determine database path
+        if db_path:
+            database_path = db_path
+            console.print(f"[dim]Using custom database path: {database_path}[/dim]")
+        else:
+            config_manager = ConfigManager()
+            database_path = config_manager.get_database_path()
 
-        console.print("[green]✓[/green] Database initialized")
+        # Initialize database
+        database = Database(database_path)
+
+        start_time = time.perf_counter()
+        await database.initialize()
+        init_duration = time.perf_counter() - start_time
+
+        console.print(f"[green]✓[/green] Database initialized ({init_duration:.2f}s)")
+
+        # Run validation if requested
+        if validate:
+            console.print("\n[blue]Running database validation...[/blue]")
+            validator = DatabaseValidator(database)
+            results = await validator.run_all_checks(verbose=True)
+
+            # Add initialization metadata
+            results["database_path"] = str(database_path)
+            results["initialization_duration_seconds"] = round(init_duration, 2)
+
+            # Save report if requested
+            if report_output:
+                report_output.parent.mkdir(parents=True, exist_ok=True)
+                with open(report_output, "w") as f:
+                    json.dump(results, f, indent=2)
+                console.print(f"\n[green]✓[/green] Validation report saved to: {report_output}")
+
+            if results["issues"]:
+                console.print("\n[red]✗[/red] Validation failed - see issues above")
+                raise typer.Exit(1)
+            else:
+                console.print("\n[green]✓[/green] Validation passed - database ready for use")
+        elif report_output:
+            console.print("[yellow]Warning:[/yellow] --report-output requires --validate flag")
 
         if template:
             services = await _get_services()
-            console.print(f"[blue]Cloning template: {template}...[/blue]")
+            console.print(f"\n[blue]Cloning template: {template}...[/blue]")
             tmpl = await services["template_manager"].clone_template(template, version_tag)
             console.print(f"[green]✓[/green] Template installed: {tmpl.name}")
 

@@ -33,14 +33,15 @@ Successfully deployed the enhanced SQLite database schema with comprehensive mem
   - Enhanced `_run_migrations()` for backward compatibility with existing databases
   - Added `PRAGMA wal_autocheckpoint=1000` for WAL management
 
-**Initialization Script:**
-- `/Users/odgrim/dev/home/agentics/abathur/scripts/initialize_database.py`
+**Database Validation:**
+- `src/abathur/infrastructure/database_validator.py` - Reusable validation module
+- `abathur init --validate` CLI command
   - Comprehensive validation suite with 7 check categories
   - Automated PRAGMA verification
   - Foreign key constraint validation
   - JSON validation testing
   - Query performance benchmarking
-  - Detailed JSON report generation
+  - Detailed JSON report generation with `--report-output`
 
 ---
 
@@ -511,7 +512,8 @@ plan = await db.explain_query_plan(
 ### For test-automation-engineer:
 
 **Context Provided:**
-- Validation script: `/Users/odgrim/dev/home/agentics/abathur/scripts/initialize_database.py`
+- Validation module: `src/abathur/infrastructure/database_validator.py`
+- CLI command: `abathur init --validate --report-output validation.json`
 - Validation report schema: See `/tmp/validation_report.json`
 
 **Test Implementation Tasks:**
@@ -639,9 +641,10 @@ Successfully deployed the enhanced SQLite database schema with comprehensive mem
 **Ready for Next Phase:**
 The database infrastructure is production-ready and fully validated. The python-api-developer can now implement MemoryService, SessionService, and DocumentIndexService classes with confidence that the underlying schema will support all required operations at high performance.
 
-**Files Modified:**
+**Files Created/Modified:**
 - `/Users/odgrim/dev/home/agentics/abathur/src/abathur/infrastructure/database.py` - Enhanced with memory tables and validation methods
-- `/Users/odgrim/dev/home/agentics/abathur/scripts/initialize_database.py` - Comprehensive validation suite
+- `/Users/odgrim/dev/home/agentics/abathur/src/abathur/infrastructure/database_validator.py` - Reusable validation module
+- `/Users/odgrim/dev/home/agentics/abathur/src/abathur/cli/main.py` - Added `--validate`, `--db-path`, and `--report-output` flags to init command
 
 **Testing:**
 - Fresh start initialization: ✓ Passed
