@@ -11,11 +11,29 @@ from pydantic import BaseModel, ConfigDict, Field
 class TaskStatus(str, Enum):
     """Task lifecycle states."""
 
-    PENDING = "pending"
+    PENDING = "pending"  # Submitted, dependencies not yet checked
+    BLOCKED = "blocked"  # Waiting for dependencies
+    READY = "ready"  # Dependencies met, ready for execution
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class TaskSource(str, Enum):
+    """Origin of task submission."""
+
+    HUMAN = "human"
+    AGENT_REQUIREMENTS = "agent_requirements"
+    AGENT_PLANNER = "agent_planner"
+    AGENT_IMPLEMENTATION = "agent_implementation"
+
+
+class DependencyType(str, Enum):
+    """Type of dependency relationship."""
+
+    SEQUENTIAL = "sequential"  # B depends on A completing
+    PARALLEL = "parallel"  # C depends on A AND B both completing (AND logic)
 
 
 class Task(BaseModel):
@@ -40,6 +58,36 @@ class Task(BaseModel):
     parent_task_id: UUID | None = None
     dependencies: list[UUID] = Field(default_factory=list)
     session_id: str | None = None  # Link to session for memory context
+
+    # NEW: Source tracking
+    source: TaskSource = Field(default=TaskSource.HUMAN)
+
+    # NEW: Dependency type
+    dependency_type: DependencyType = Field(default=DependencyType.SEQUENTIAL)
+
+    # NEW: Priority calculation fields
+    calculated_priority: float = Field(default=5.0)
+    deadline: datetime | None = None
+    estimated_duration_seconds: int | None = None
+    dependency_depth: int = Field(default=0)
+
+    model_config = ConfigDict(
+        json_encoders={
+            UUID: str,
+            datetime: lambda v: v.isoformat(),
+        }
+    )
+
+
+class TaskDependency(BaseModel):
+    """Represents a dependency relationship between tasks."""
+
+    id: UUID = Field(default_factory=uuid4)
+    dependent_task_id: UUID  # Task that depends
+    prerequisite_task_id: UUID  # Task that must complete first
+    dependency_type: DependencyType
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    resolved_at: datetime | None = None  # When prerequisite completed
 
     model_config = ConfigDict(
         json_encoders={

@@ -11,7 +11,15 @@ from uuid import UUID
 import aiosqlite
 from aiosqlite import Connection
 
-from abathur.domain.models import Agent, AgentState, Task, TaskStatus
+from abathur.domain.models import (
+    Agent,
+    AgentState,
+    DependencyType,
+    Task,
+    TaskDependency,
+    TaskSource,
+    TaskStatus,
+)
 
 if TYPE_CHECKING:
     from abathur.services.document_index_service import DocumentIndexService
@@ -288,6 +296,61 @@ class Database:
                 )
                 await conn.commit()
                 print("Added session_id column to tasks")
+
+            # Migration: Add enhanced task queue columns
+            if "source" not in column_names:
+                print("Migrating database schema: adding enhanced task queue columns")
+
+                # Add source column
+                await conn.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN source TEXT NOT NULL DEFAULT 'human'
+                    """
+                )
+
+                # Add dependency_type column
+                await conn.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN dependency_type TEXT NOT NULL DEFAULT 'sequential'
+                    """
+                )
+
+                # Add calculated_priority column
+                await conn.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN calculated_priority REAL NOT NULL DEFAULT 5.0
+                    """
+                )
+
+                # Add deadline column
+                await conn.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN deadline TIMESTAMP
+                    """
+                )
+
+                # Add estimated_duration_seconds column
+                await conn.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN estimated_duration_seconds INTEGER
+                    """
+                )
+
+                # Add dependency_depth column
+                await conn.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN dependency_depth INTEGER DEFAULT 0
+                    """
+                )
+
+                await conn.commit()
+                print("Added enhanced task queue columns successfully")
 
         # Check if agents table exists and needs session_id column
         cursor = await conn.execute(
@@ -581,6 +644,12 @@ class Database:
                 parent_task_id TEXT,
                 dependencies TEXT,
                 session_id TEXT,
+                source TEXT NOT NULL DEFAULT 'human',
+                dependency_type TEXT NOT NULL DEFAULT 'sequential',
+                calculated_priority REAL NOT NULL DEFAULT 5.0,
+                deadline TIMESTAMP,
+                estimated_duration_seconds INTEGER,
+                dependency_depth INTEGER DEFAULT 0,
                 FOREIGN KEY (parent_task_id) REFERENCES tasks(id),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
             )
@@ -672,6 +741,26 @@ class Database:
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
             )
         """
+        )
+
+        # Task dependencies table
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_dependencies (
+                id TEXT PRIMARY KEY,
+                dependent_task_id TEXT NOT NULL,
+                prerequisite_task_id TEXT NOT NULL,
+                dependency_type TEXT NOT NULL DEFAULT 'sequential',
+                created_at TIMESTAMP NOT NULL,
+                resolved_at TIMESTAMP,
+
+                FOREIGN KEY (dependent_task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                FOREIGN KEY (prerequisite_task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                CHECK(dependency_type IN ('sequential', 'parallel')),
+                CHECK(dependent_task_id != prerequisite_task_id),
+                UNIQUE(dependent_task_id, prerequisite_task_id)
+            )
+            """
         )
 
     async def _create_indexes(self, conn: Connection) -> None:
@@ -808,6 +897,58 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints(task_id, iteration DESC)"
         )
 
+        # NEW: Task dependencies indexes (2 indexes)
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_task_dependencies_prerequisite
+            ON task_dependencies(prerequisite_task_id, resolved_at)
+            WHERE resolved_at IS NULL
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_task_dependencies_dependent
+            ON task_dependencies(dependent_task_id, resolved_at)
+            WHERE resolved_at IS NULL
+            """
+        )
+
+        # NEW: Priority queue index (composite for calculated priority)
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tasks_ready_priority
+            ON tasks(status, calculated_priority DESC, submitted_at ASC)
+            WHERE status = 'ready'
+            """
+        )
+
+        # NEW: Source tracking index
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tasks_source_created
+            ON tasks(source, created_by, submitted_at DESC)
+            """
+        )
+
+        # NEW: Deadline urgency index
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tasks_deadline
+            ON tasks(deadline, status)
+            WHERE deadline IS NOT NULL AND status IN ('pending', 'blocked', 'ready')
+            """
+        )
+
+        # NEW: Blocked tasks index
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tasks_blocked
+            ON tasks(status, submitted_at ASC)
+            WHERE status = 'blocked'
+            """
+        )
+
     # Task operations
     async def insert_task(self, task: Task) -> None:
         """Insert a new task into the database."""
@@ -819,8 +960,10 @@ class Database:
                     result_data, error_message, retry_count, max_retries,
                     max_execution_timeout_seconds,
                     submitted_at, started_at, completed_at, last_updated_at,
-                    created_by, parent_task_id, dependencies, session_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_by, parent_task_id, dependencies, session_id,
+                    source, dependency_type, calculated_priority, deadline,
+                    estimated_duration_seconds, dependency_depth
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(task.id),
@@ -842,6 +985,12 @@ class Database:
                     str(task.parent_task_id) if task.parent_task_id else None,
                     json.dumps([str(dep) for dep in task.dependencies]),
                     task.session_id,
+                    task.source.value,
+                    task.dependency_type.value,
+                    task.calculated_priority,
+                    task.deadline.isoformat() if task.deadline else None,
+                    task.estimated_duration_seconds,
+                    task.dependency_depth,
                 ),
             )
             await conn.commit()
@@ -995,6 +1144,75 @@ class Database:
             parent_task_id=UUID(row_dict["parent_task_id"]) if row_dict["parent_task_id"] else None,
             dependencies=[UUID(dep) for dep in json.loads(row_dict["dependencies"])],
             session_id=row_dict.get("session_id"),
+            # NEW: Enhanced task queue fields
+            source=TaskSource(row_dict.get("source", "human")),
+            dependency_type=DependencyType(row_dict.get("dependency_type", "sequential")),
+            calculated_priority=row_dict.get("calculated_priority", 5.0),
+            deadline=datetime.fromisoformat(row_dict["deadline"])
+            if row_dict.get("deadline")
+            else None,
+            estimated_duration_seconds=row_dict.get("estimated_duration_seconds"),
+            dependency_depth=row_dict.get("dependency_depth", 0),
+        )
+
+    # Task dependency operations
+    async def insert_task_dependency(self, dependency: TaskDependency) -> None:
+        """Insert a task dependency relationship."""
+        async with self._get_connection() as conn:
+            await conn.execute(
+                """
+                INSERT INTO task_dependencies (
+                    id, dependent_task_id, prerequisite_task_id,
+                    dependency_type, created_at, resolved_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(dependency.id),
+                    str(dependency.dependent_task_id),
+                    str(dependency.prerequisite_task_id),
+                    dependency.dependency_type.value,
+                    dependency.created_at.isoformat(),
+                    dependency.resolved_at.isoformat() if dependency.resolved_at else None,
+                ),
+            )
+            await conn.commit()
+
+    async def get_task_dependencies(self, task_id: UUID) -> list[TaskDependency]:
+        """Get all dependencies for a task."""
+        async with self._get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT * FROM task_dependencies
+                WHERE dependent_task_id = ?
+                ORDER BY created_at ASC
+                """,
+                (str(task_id),),
+            )
+            rows = await cursor.fetchall()
+            return [self._row_to_task_dependency(row) for row in rows]
+
+    async def resolve_dependency(self, prerequisite_task_id: UUID) -> None:
+        """Mark all dependencies on a prerequisite task as resolved."""
+        async with self._get_connection() as conn:
+            await conn.execute(
+                """
+                UPDATE task_dependencies
+                SET resolved_at = ?
+                WHERE prerequisite_task_id = ? AND resolved_at IS NULL
+                """,
+                (datetime.now(timezone.utc).isoformat(), str(prerequisite_task_id)),
+            )
+            await conn.commit()
+
+    def _row_to_task_dependency(self, row: aiosqlite.Row) -> TaskDependency:
+        """Convert database row to TaskDependency model."""
+        return TaskDependency(
+            id=UUID(row["id"]),
+            dependent_task_id=UUID(row["dependent_task_id"]),
+            prerequisite_task_id=UUID(row["prerequisite_task_id"]),
+            dependency_type=DependencyType(row["dependency_type"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            resolved_at=datetime.fromisoformat(row["resolved_at"]) if row["resolved_at"] else None,
         )
 
     # Agent operations
