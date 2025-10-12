@@ -1,0 +1,46 @@
+{
+  "mcpServers": {
+    "abathur-memory": {
+      "command": "venv/bin/python",
+      "args": [
+        "-m",
+        "abathur.mcp.memory_server",
+        "--db-path",
+        ".abathur/abathur.db"
+      ],
+      "description": "Abathur memory management server - provides access to long-term memory, session state, and semantic document search",
+      "tools": [
+        "memory_add",
+        "memory_get",
+        "memory_search",
+        "memory_update",
+        "memory_delete",
+        "session_create",
+        "session_get",
+        "session_append_event",
+        "session_get_state",
+        "session_set_state",
+        "document_semantic_search",
+        "document_index"
+      ]
+    },
+    "abathur-task-queue": {
+      "command": "venv/bin/python",
+      "args": [
+        "-m",
+        "abathur.mcp.task_queue_server",
+        "--db-path",
+        ".abathur/abathur.db"
+      ],
+      "description": "Abathur task queue management server - provides access to task enqueueing, monitoring, and dependency management",
+      "tools": [
+        "task_enqueue",
+        "task_list",
+        "task_get",
+        "task_queue_status",
+        "task_cancel",
+        "task_execution_plan"
+      ]
+    }
+  }
+}

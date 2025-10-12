@@ -94,6 +94,7 @@ async def _get_services() -> dict[str, Any]:
     from abathur.infrastructure.api_key_auth import APIKeyAuthProvider
     from abathur.infrastructure.claude_cli_auth import ClaudeCLIAuthProvider
     from abathur.infrastructure.logger import get_logger, setup_logging
+    from abathur.services import DependencyResolver, PriorityCalculator, TaskQueueService
 
     # Initialize config manager
     config_manager = ConfigManager()
@@ -130,11 +131,21 @@ async def _get_services() -> dict[str, Any]:
                 "  2. Install Claude CLI and authenticate: https://docs.anthropic.com/claude/docs/quickstart"
             ) from e
 
+    # Initialize task queue services
+    dependency_resolver = DependencyResolver(database)
+    priority_calculator = PriorityCalculator(dependency_resolver)
+    task_queue_service = TaskQueueService(database, dependency_resolver, priority_calculator)
+
+    # Initialize task coordinator (still used by some commands)
     task_coordinator = TaskCoordinator(database)
+
     claude_client = ClaudeClient(auth_provider=auth_provider)
     agent_executor = AgentExecutor(database, claude_client)
     swarm_orchestrator = SwarmOrchestrator(
-        task_coordinator, agent_executor, max_concurrent_agents=10
+        task_queue_service=task_queue_service,
+        agent_executor=agent_executor,
+        max_concurrent_agents=config.swarm.max_concurrent_agents,
+        poll_interval=2.0,
     )
     template_manager = TemplateManager()
     mcp_manager = MCPManager()
@@ -146,6 +157,7 @@ async def _get_services() -> dict[str, Any]:
     return {
         "database": database,
         "task_coordinator": task_coordinator,
+        "task_queue_service": task_queue_service,
         "claude_client": claude_client,
         "agent_executor": agent_executor,
         "swarm_orchestrator": swarm_orchestrator,
@@ -375,22 +387,39 @@ app.add_typer(swarm_app, name="swarm")
 
 @swarm_app.command("start")
 def start_swarm(
-    task_limit: int | None = typer.Option(None, help="Max tasks to process"),
+    task_limit: int | None = typer.Option(None, help="Max tasks to process before stopping"),
     max_agents: int = typer.Option(10, help="Max concurrent agents"),
     no_mcp: bool = typer.Option(False, help="Disable auto-start of MCP memory server"),
+    poll_interval: float = typer.Option(2.0, help="Polling interval in seconds"),
 ) -> None:
-    """Start the swarm orchestrator.
+    """Start the swarm orchestrator in continuous mode.
+
+    The swarm continuously polls the database for READY tasks and spawns agents
+    up to the max_concurrent_agents limit. It runs until interrupted with Ctrl+C
+    or until task_limit is reached (if specified).
 
     Automatically starts the MCP memory server for agent memory access.
     Use --no-mcp to disable auto-start of the memory server.
+
+    Examples:
+        abathur swarm start                         # Run continuously until Ctrl+C
+        abathur swarm start --task-limit 5          # Stop after processing 5 tasks
+        abathur swarm start --poll-interval 5.0     # Poll every 5 seconds
     """
 
     async def _start() -> None:
+        import signal as sig
+
         from abathur.mcp.server_manager import MemoryServerManager
 
         services = await _get_services()
 
-        console.print("[blue]Starting swarm orchestrator...[/blue]")
+        # Update poll interval if specified
+        if poll_interval != 2.0:
+            services["swarm_orchestrator"].poll_interval = poll_interval
+
+        console.print("[blue]Starting swarm orchestrator in continuous mode...[/blue]")
+        console.print("[dim]Press Ctrl+C to stop gracefully[/dim]")
 
         # Auto-start MCP memory server
         mcp_manager = None
@@ -400,15 +429,47 @@ def start_swarm(
             await mcp_manager.start()
             console.print("[dim]✓ MCP memory server running[/dim]")
 
+        # Setup signal handlers for graceful shutdown
+        shutdown_event = asyncio.Event()
+
+        def signal_handler(signum: int, frame: Any) -> None:
+            console.print("\n[yellow]Shutdown signal received, stopping gracefully...[/yellow]")
+            shutdown_event.set()
+
+        sig.signal(sig.SIGINT, signal_handler)
+        sig.signal(sig.SIGTERM, signal_handler)
+
         # Start monitoring
         await services["resource_monitor"].start_monitoring()
         await services["failure_recovery"].start_recovery_monitor()
 
         try:
-            # Start swarm
-            results = await services["swarm_orchestrator"].start_swarm(task_limit)
+            # Start swarm in a task so we can monitor shutdown signal
+            swarm_task = asyncio.create_task(services["swarm_orchestrator"].start_swarm(task_limit))
+
+            # Wait for either completion or shutdown signal
+            done, pending = await asyncio.wait(
+                [swarm_task, asyncio.create_task(shutdown_event.wait())],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # If shutdown was signaled, cancel swarm and wait for graceful stop
+            if shutdown_event.is_set():
+                console.print("[dim]Initiating graceful shutdown...[/dim]")
+                await services["swarm_orchestrator"].shutdown()
+                # Wait for swarm task to complete
+                try:
+                    results = await asyncio.wait_for(swarm_task, timeout=30.0)
+                except asyncio.TimeoutError:
+                    console.print("[yellow]Warning: Swarm shutdown timed out[/yellow]")
+                    swarm_task.cancel()
+                    results = []
+            else:
+                # Swarm completed naturally
+                results = await swarm_task
 
             console.print(f"[green]✓[/green] Swarm completed {len(results)} tasks")
+
         finally:
             # Stop monitoring
             await services["resource_monitor"].stop_monitoring()
@@ -419,7 +480,11 @@ def start_swarm(
                 console.print("[dim]Stopping MCP memory server...[/dim]")
                 await mcp_manager.stop()
 
-    asyncio.run(_start())
+    try:
+        asyncio.run(_start())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted[/yellow]")
+        pass
 
 
 @swarm_app.command("status")

@@ -5,9 +5,9 @@ from typing import Any
 from uuid import UUID
 
 from abathur.application.agent_executor import AgentExecutor
-from abathur.application.task_coordinator import TaskCoordinator
-from abathur.domain.models import Result, Task, TaskStatus
+from abathur.domain.models import Result, Task
 from abathur.infrastructure.logger import get_logger
+from abathur.services.task_queue_service import TaskQueueService
 
 logger = get_logger(__name__)
 
@@ -17,93 +17,127 @@ class SwarmOrchestrator:
 
     def __init__(
         self,
-        task_coordinator: TaskCoordinator,
+        task_queue_service: TaskQueueService,
         agent_executor: AgentExecutor,
         max_concurrent_agents: int = 10,
         agent_spawn_timeout: float = 5.0,
+        poll_interval: float = 2.0,
     ):
         """Initialize swarm orchestrator.
 
         Args:
-            task_coordinator: Task coordinator for queue management
+            task_queue_service: TaskQueueService for queue management and dependency resolution
             agent_executor: Agent executor for running tasks
             max_concurrent_agents: Maximum number of concurrent agents
             agent_spawn_timeout: Timeout for agent spawning in seconds
+            poll_interval: Interval in seconds between polling for new tasks
         """
-        self.task_coordinator = task_coordinator
+        self.task_queue_service = task_queue_service
         self.agent_executor = agent_executor
         self.max_concurrent_agents = max_concurrent_agents
         self.agent_spawn_timeout = agent_spawn_timeout
+        self.poll_interval = poll_interval
         self.semaphore = asyncio.Semaphore(max_concurrent_agents)
         self.active_agents: dict[UUID, Task] = {}
         self.results: list[Result] = []
+        self._shutdown_event = asyncio.Event()
+        self._running = False
 
     async def start_swarm(self, task_limit: int | None = None) -> list[Result]:
-        """Start the swarm and process tasks from the queue.
+        """Start the swarm in continuous mode with polling for new tasks.
 
-        Args:
-            task_limit: Maximum number of tasks to process (None for unlimited)
+        This mode keeps the swarm running indefinitely, continuously polling the
+        database for new READY tasks. It respects the max_concurrent_agents limit
+        and spawns new agent instances as slots become available.
+
+        The swarm will continue until:
+        - A shutdown signal is received (SIGINT or SIGTERM)
+        - The shutdown() method is called
 
         Returns:
             List of all execution results
         """
+        self._running = True
+        self._shutdown_event.clear()
+
         logger.info(
-            "starting_swarm",
+            "starting_continuous_swarm",
             max_concurrent=self.max_concurrent_agents,
-            task_limit=task_limit,
+            poll_interval=self.poll_interval,
         )
 
-        tasks_processed = 0
-        active_tasks: list[Any] = []
+        # Track active task coroutines
+        active_task_coroutines: set[asyncio.Task] = set()
 
         try:
-            while task_limit is None or tasks_processed < task_limit:
-                # Get next task
-                next_task = await self.task_coordinator.get_next_task()
-                if not next_task:
-                    # No more tasks, wait for active tasks to complete
-                    if active_tasks:
-                        logger.info("no_pending_tasks_waiting_for_active")
-                        await asyncio.gather(*active_tasks, return_exceptions=True)
-                    break
+            while self._running and not self._shutdown_event.is_set():
+                # Check if we have capacity for more tasks
+                if len(self.active_agents) < self.max_concurrent_agents:
+                    # Try to get next READY task
+                    next_task = await self.task_queue_service.get_next_task()
 
-                # Spawn agent for task
-                task_coroutine = asyncio.create_task(self._execute_with_semaphore(next_task))
-                active_tasks.append(task_coroutine)
-                tasks_processed += 1
+                    if next_task:
+                        # Spawn agent for task
+                        task_coroutine = asyncio.create_task(
+                            self._execute_with_semaphore(next_task)
+                        )
+                        active_task_coroutines.add(task_coroutine)
 
-                logger.info(
-                    "task_spawned",
-                    task_id=str(next_task.id),
-                    active_count=len(self.active_agents),
-                )
+                        # Remove completed tasks from tracking
+                        active_task_coroutines = {t for t in active_task_coroutines if not t.done()}
 
-            # Wait for all remaining tasks
-            if active_tasks:
-                logger.info("waiting_for_remaining_tasks", count=len(active_tasks))
-                await asyncio.gather(*active_tasks, return_exceptions=True)
+                        logger.info(
+                            "task_spawned_continuous",
+                            task_id=str(next_task.id),
+                            active_count=len(self.active_agents),
+                            available_slots=self.max_concurrent_agents - len(self.active_agents),
+                        )
+                    else:
+                        # No tasks available, wait before polling again
+                        logger.debug(
+                            "no_ready_tasks_polling",
+                            active_count=len(self.active_agents),
+                        )
+                        await asyncio.sleep(self.poll_interval)
+                else:
+                    # At capacity, wait before checking again
+                    logger.debug(
+                        "at_capacity_waiting",
+                        active_count=len(self.active_agents),
+                        max_concurrent=self.max_concurrent_agents,
+                    )
+                    await asyncio.sleep(self.poll_interval)
+
+                # Clean up completed tasks
+                active_task_coroutines = {t for t in active_task_coroutines if not t.done()}
+
+            logger.info("continuous_swarm_shutdown_initiated")
+
+            # Wait for all active tasks to complete
+            if active_task_coroutines:
+                logger.info("waiting_for_active_tasks_shutdown", count=len(active_task_coroutines))
+                await asyncio.gather(*active_task_coroutines, return_exceptions=True)
 
             logger.info(
-                "swarm_complete",
-                tasks_processed=tasks_processed,
-                results_count=len(self.results),
+                "continuous_swarm_stopped",
+                tasks_processed=len(self.results),
             )
 
             return self.results
 
         except Exception as e:
             logger.error(
-                "swarm_error",
+                "continuous_swarm_error",
                 error=str(e),
                 error_type=type(e).__name__,
-                tasks_processed=tasks_processed,
-                active_tasks_count=len(active_tasks),
             )
             # Cancel all active tasks
-            for task in active_tasks:
+            for task in active_task_coroutines:
                 if not task.done():
                     task.cancel()
             raise
+        finally:
+            self._running = False
 
     async def _execute_with_semaphore(self, task: Task) -> Result:
         """Execute a task with semaphore control for concurrency limiting.
@@ -128,7 +162,13 @@ class SwarmOrchestrator:
 
                 # Update task status based on result
                 if result.success:
-                    await self.task_coordinator.update_task_status(task.id, TaskStatus.COMPLETED)
+                    # Mark completed and unblock dependent tasks
+                    await self.task_queue_service.complete_task(task.id)
+                    logger.info(
+                        "task_completed_in_swarm",
+                        task_id=str(task.id),
+                        agent_id=str(result.agent_id),
+                    )
                 else:
                     # Log detailed error information
                     logger.error(
@@ -139,20 +179,10 @@ class SwarmOrchestrator:
                         metadata=result.metadata,
                     )
 
-                    # Always mark as FAILED first
-                    await self.task_coordinator.update_task_status(
-                        task.id, TaskStatus.FAILED, error_message=result.error
+                    # Mark as failed (TaskQueueService handles retry logic)
+                    await self.task_queue_service.fail_task(
+                        task.id, error_message=result.error or "Unknown error"
                     )
-
-                    # Then check if we should retry
-                    task_obj = await self.task_coordinator.get_task(task.id)
-                    if task_obj and task_obj.retry_count < task_obj.max_retries:
-                        logger.info(
-                            "task_will_retry",
-                            task_id=str(task.id),
-                            retry_count=task_obj.retry_count,
-                        )
-                        await self.task_coordinator.retry_task(task.id)
 
                 self.results.append(result)
                 return result
@@ -165,8 +195,9 @@ class SwarmOrchestrator:
                     error_type=type(e).__name__,
                     agent_type=task.agent_type,
                 )
-                await self.task_coordinator.update_task_status(
-                    task.id, TaskStatus.FAILED, error_message=f"{type(e).__name__}: {e}"
+                # Mark task as failed
+                await self.task_queue_service.fail_task(
+                    task.id, error_message=f"{type(e).__name__}: {e}"
                 )
                 error_result = Result(
                     task_id=task.id,
@@ -181,23 +212,20 @@ class SwarmOrchestrator:
                 if task.id in self.active_agents:
                     del self.active_agents[task.id]
 
-    async def execute_batch(self, tasks: list[Task]) -> list[Result]:
+    async def execute_batch(self, task_ids: list[UUID]) -> list[Result]:
         """Execute a batch of tasks concurrently.
 
         Args:
-            tasks: List of tasks to execute
+            task_ids: List of task IDs to execute (tasks must already be in queue)
 
         Returns:
             List of execution results
         """
-        logger.info("executing_batch", task_count=len(tasks))
+        logger.info("executing_batch", task_count=len(task_ids))
 
-        # Submit all tasks to queue
-        for task in tasks:
-            await self.task_coordinator.submit_task(task)
-
-        # Process the batch
-        return await self.start_swarm(task_limit=len(tasks))
+        # Tasks should already be in the queue with proper status
+        # Just process them - the swarm will pick them up
+        return await self.start_swarm(task_limit=len(task_ids))
 
     async def get_swarm_status(self) -> dict[str, Any]:
         """Get current swarm status.
@@ -218,12 +246,15 @@ class SwarmOrchestrator:
         """Gracefully shutdown the swarm."""
         logger.info("shutting_down_swarm", active_agents=len(self.active_agents))
 
+        # Signal shutdown
+        self._running = False
+        self._shutdown_event.set()
+
         # Wait for active agents to complete with timeout
         if self.active_agents:
             logger.warning("active_agents_during_shutdown", count=len(self.active_agents))
 
-        self.active_agents.clear()
-        self.results.clear()
+        logger.info("swarm_shutdown_complete")
 
     def reset(self) -> None:
         """Reset swarm state (for testing or re-initialization)."""
