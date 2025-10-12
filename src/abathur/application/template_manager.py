@@ -129,11 +129,17 @@ class TemplateManager:
         """
         name = template_dir.name
 
-        # Find agent definitions
+        # Find agent definitions (recursively search for .yaml and .md files)
         agents_dir = template_dir / ".claude" / "agents"
         agents = []
         if agents_dir.exists():
-            agents = [f.stem for f in agents_dir.glob("*.yaml")]
+            # Collect all agent files, including in subdirectories
+            agent_files = set()
+            for ext in ["*.yaml", "*.md"]:
+                for agent_file in agents_dir.rglob(ext):
+                    # Use the filename stem only
+                    agent_files.add(agent_file.stem)
+            agents = sorted(agent_files)
 
         # Find config files
         config_path_candidate = template_dir / ".abathur" / "config.yaml"
@@ -193,19 +199,50 @@ class TemplateManager:
 
         # Validate agent definitions
         for agent_name in template.agents:
-            agent_file = agents_dir / f"{agent_name}.yaml"
-            if agent_file.exists():
+            # Search for agent file in multiple locations
+            agent_file = None
+            for ext in [".yaml", ".md"]:
+                # Check abathur subdirectory first
+                candidate = agents_dir / "abathur" / f"{agent_name}{ext}"
+                if candidate.exists():
+                    agent_file = candidate
+                    break
+                # Check root agents directory
+                candidate = agents_dir / f"{agent_name}{ext}"
+                if candidate.exists():
+                    agent_file = candidate
+                    break
+
+            if agent_file and agent_file.exists():
                 try:
                     import yaml
 
                     with open(agent_file) as f:
-                        agent_def = yaml.safe_load(f)
+                        content = f.read()
+                        if agent_file.suffix == ".md":
+                            # Parse frontmatter from .md files
+                            if content.startswith("---"):
+                                parts = content.split("---", 2)
+                                if len(parts) >= 3:
+                                    agent_def = yaml.safe_load(parts[1])
+                                else:
+                                    errors.append(f"Agent {agent_name}: invalid frontmatter")
+                                    continue
+                            else:
+                                errors.append(
+                                    f"Agent {agent_name}: .md file must have YAML frontmatter"
+                                )
+                                continue
+                        else:
+                            agent_def = yaml.safe_load(content)
 
                     # Check required fields
                     if "name" not in agent_def:
                         errors.append(f"Agent {agent_name}: missing 'name' field")
-                    if "specialization" not in agent_def:
-                        warnings.append(f"Agent {agent_name}: missing 'specialization' field")
+                    if "description" not in agent_def and "specialization" not in agent_def:
+                        warnings.append(
+                            f"Agent {agent_name}: missing 'description' or 'specialization' field"
+                        )
                 except Exception as e:
                     errors.append(f"Agent {agent_name}: invalid YAML - {e}")
 

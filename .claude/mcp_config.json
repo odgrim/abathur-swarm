@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "abathur-memory": {
+      "command": "python",
+      "args": [
+        "-m",
+        "abathur.mcp.memory_server",
+        "--db-path",
+        "${workspaceFolder}/abathur.db"
+      ],
+      "description": "Abathur memory management server - provides access to long-term memory, session state, and semantic document search",
+      "tools": [
+        "memory_add",
+        "memory_get",
+        "memory_search",
+        "memory_update",
+        "memory_delete",
+        "session_create",
+        "session_get",
+        "session_append_event",
+        "session_get_state",
+        "session_set_state",
+        "document_semantic_search",
+        "document_index"
+      ]
+    }
+  }
+}

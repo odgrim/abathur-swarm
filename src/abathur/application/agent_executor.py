@@ -30,6 +30,7 @@ class AgentExecutor:
             database: Database for state persistence
             claude_client: Claude API client
             agents_dir: Directory containing agent definitions (default: .claude/agents)
+                        Core abathur agents are loaded from .claude/agents/abathur/
         """
         self.database = database
         self.claude_client = claude_client
@@ -162,7 +163,13 @@ class AgentExecutor:
             )
 
     def _load_agent_definition(self, agent_type: str) -> dict[str, Any]:
-        """Load agent definition from YAML file.
+        """Load agent definition from YAML or MD file.
+
+        Searches for agent definitions in the following order:
+        1. .claude/agents/abathur/{agent_type}.yaml
+        2. .claude/agents/abathur/{agent_type}.md
+        3. .claude/agents/{agent_type}.yaml
+        4. .claude/agents/{agent_type}.md
 
         Args:
             agent_type: Type of agent (e.g., 'general', 'code-reviewer', etc.)
@@ -173,13 +180,58 @@ class AgentExecutor:
         Raises:
             FileNotFoundError: If agent definition not found
         """
-        agent_file = self.agents_dir / f"{agent_type}.yaml"
+        # Search paths in priority order
+        search_paths = [
+            self.agents_dir / "abathur" / f"{agent_type}.yaml",
+            self.agents_dir / "abathur" / f"{agent_type}.md",
+            self.agents_dir / f"{agent_type}.yaml",
+            self.agents_dir / f"{agent_type}.md",
+        ]
 
-        if not agent_file.exists():
-            raise FileNotFoundError(f"Agent definition not found: {agent_file}")
+        agent_file = None
+        for path in search_paths:
+            if path.exists():
+                agent_file = path
+                break
+
+        if agent_file is None:
+            raise FileNotFoundError(
+                f"Agent definition not found: {agent_type} "
+                f"(searched in {self.agents_dir} and {self.agents_dir / 'abathur'})"
+            )
 
         with open(agent_file) as f:
-            agent_def: dict[str, Any] = yaml.safe_load(f)
+            if agent_file.suffix == ".md":
+                # Parse frontmatter from .md files
+                agent_def = self._parse_md_agent(f.read())
+            else:
+                agent_def = yaml.safe_load(f)
+
+        return agent_def
+
+    def _parse_md_agent(self, content: str) -> dict[str, Any]:
+        """Parse agent definition from markdown file with YAML frontmatter.
+
+        Args:
+            content: Markdown file content
+
+        Returns:
+            Agent definition dictionary
+        """
+        # Split frontmatter from content
+        if not content.startswith("---"):
+            raise ValueError("Markdown agent file must start with YAML frontmatter (---)")
+
+        parts = content.split("---", 2)
+        if len(parts) < 3:
+            raise ValueError("Invalid frontmatter format")
+
+        frontmatter = parts[1].strip()
+        agent_def: dict[str, Any] = yaml.safe_load(frontmatter)
+
+        # Store the markdown content as system_prompt if not already defined
+        if "system_prompt" not in agent_def:
+            agent_def["system_prompt"] = parts[2].strip()
 
         return agent_def
 
