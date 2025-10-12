@@ -93,11 +93,17 @@ async def _get_services() -> dict[str, Any]:
     from abathur.infrastructure import ConfigManager, Database
     from abathur.infrastructure.api_key_auth import APIKeyAuthProvider
     from abathur.infrastructure.claude_cli_auth import ClaudeCLIAuthProvider
-    from abathur.infrastructure.logger import get_logger
+    from abathur.infrastructure.logger import get_logger, setup_logging
+
+    # Initialize config manager
+    config_manager = ConfigManager()
+    config = config_manager.load_config()
+
+    # Setup logging to both console and file
+    setup_logging(log_level=config.log_level, log_dir=config_manager.get_log_dir())
 
     logger = get_logger(__name__)
 
-    config_manager = ConfigManager()
     database = Database(config_manager.get_database_path())
     await database.initialize()
 
