@@ -176,9 +176,8 @@ class TemplateManager:
         config_path_candidate = template_dir / ".abathur" / "config.yaml"
         config_path: Path | None = config_path_candidate if config_path_candidate.exists() else None
 
-        mcp_config_path_candidate = template_dir / ".claude" / "mcp.json"
-        if not mcp_config_path_candidate.exists():
-            mcp_config_path_candidate = template_dir / ".mcp.json"
+        # MCP config is now at root level
+        mcp_config_path_candidate = template_dir / ".mcp.json"
         mcp_config_path: Path | None = (
             mcp_config_path_candidate if mcp_config_path_candidate.exists() else None
         )
@@ -226,7 +225,7 @@ class TemplateManager:
 
         # Check MCP config
         if template.mcp_config_path is None:
-            warnings.append("No MCP configuration found (.claude/mcp.json or .mcp.json)")
+            warnings.append("No MCP configuration found (.mcp.json at template root)")
 
         # Validate agent definitions
         for agent_name in template.agents:
@@ -325,6 +324,13 @@ class TemplateManager:
                     shutil.copytree(abathur_src, abathur_dest, ignore=ignore_git)
                     logger.info("copied_abathur_dir", dest=str(abathur_dest))
 
+            # Merge .mcp.json from root to root (preserving user's custom servers)
+            mcp_src = template.path / ".mcp.json"
+            mcp_dest = self.project_root / ".mcp.json"
+            if mcp_src.exists():
+                self._merge_mcp_config(mcp_src, mcp_dest)
+                logger.info("merged_mcp_config", dest=str(mcp_dest))
+
             # Create metadata file
             metadata = {
                 "template_name": template.name,
@@ -408,14 +414,6 @@ class TemplateManager:
             if preserved_count > 0:
                 logger.info("preserved_custom_agents", count=preserved_count)
 
-        # Update MCP config files
-        for mcp_file in ["mcp_config.json", "mcp.json"]:
-            src_mcp = src_dir / mcp_file
-            dest_mcp = dest_dir / mcp_file
-            if src_mcp.exists():
-                shutil.copy2(src_mcp, dest_mcp)
-                logger.info("updated_mcp_config", file=mcp_file)
-
         # Update README and documentation
         for doc_file in ["README.md", "AGENTS.md"]:
             src_doc = src_dir / doc_file
@@ -423,6 +421,13 @@ class TemplateManager:
             if src_doc.exists():
                 shutil.copy2(src_doc, dest_doc)
                 logger.info("updated_documentation", file=doc_file)
+
+        # Update settings.json (Claude Code project settings)
+        src_settings = src_dir / "settings.json"
+        dest_settings = dest_dir / "settings.json"
+        if src_settings.exists():
+            shutil.copy2(src_settings, dest_settings)
+            logger.info("updated_settings", file="settings.json")
 
     def _merge_configs(self, src_dir: Path, dest_dir: Path) -> None:
         """Merge configuration files from source to destination.
@@ -438,6 +443,53 @@ class TemplateManager:
             if not dest_file.exists():
                 shutil.copy2(src_file, dest_file)
                 logger.info("copied_config_file", file=src_file.name)
+
+    def _merge_mcp_config(self, src_file: Path, dest_file: Path) -> None:
+        """Merge MCP configuration, only updating Abathur-specific servers.
+
+        This preserves any custom user-defined MCP servers while updating
+        only the Abathur servers (those with keys starting with "abathur-").
+
+        Args:
+            src_file: Source .mcp.json from template
+            dest_file: Destination .mcp.json in project
+        """
+        # Load template MCP config
+        with open(src_file) as f:
+            template_config = json.load(f)
+
+        # Load existing project MCP config if it exists
+        if dest_file.exists():
+            with open(dest_file) as f:
+                project_config = json.load(f)
+        else:
+            project_config = {"mcpServers": {}}
+
+        # Ensure mcpServers key exists
+        if "mcpServers" not in project_config:
+            project_config["mcpServers"] = {}
+        if "mcpServers" not in template_config:
+            template_config["mcpServers"] = {}
+
+        # Update only Abathur-specific servers (those starting with "abathur-")
+        abathur_servers = {
+            key: value
+            for key, value in template_config["mcpServers"].items()
+            if key.startswith("abathur-")
+        }
+
+        # Merge: update/add Abathur servers, preserve others
+        project_config["mcpServers"].update(abathur_servers)
+
+        # Write merged config
+        with open(dest_file, "w") as f:
+            json.dump(project_config, f, indent=2)
+
+        logger.info(
+            "merged_mcp_servers",
+            updated_servers=list(abathur_servers.keys()),
+            total_servers=len(project_config["mcpServers"]),
+        )
 
     def list_cached_templates(self) -> list[Template]:
         """List all cached templates.
