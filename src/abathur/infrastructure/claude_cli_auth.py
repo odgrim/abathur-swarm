@@ -134,14 +134,23 @@ class ClaudeCLIAuthProvider(AuthProvider):
                 prompt_length=len(full_prompt),
             )
 
+            # Import Path for cwd resolution
+            from pathlib import Path
+
+            # Pass current working directory to subprocess so it can access
+            # project-specific MCP server configurations and permissions
+            project_cwd = Path.cwd()
+
             process = await asyncio.create_subprocess_exec(
                 self.cli_path,
                 "--print",
                 "--output-format",
                 "json",
+                "--dangerously-skip-permissions",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=str(project_cwd),
             )
 
             stdout, stderr = await process.communicate(input=full_prompt.encode())
