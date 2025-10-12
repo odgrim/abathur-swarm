@@ -4,6 +4,9 @@ description: Use proactively for gathering and analyzing user requirements, clar
 model: sonnet
 color: Blue
 tools: Read, Write, Grep, Glob, WebFetch, Task
+mcp_servers:
+  - abathur-memory
+  - abathur-task-queue
 ---
 
 ## Purpose
@@ -38,11 +41,53 @@ When invoked, you must follow these steps:
    - Document validation methods
    - Establish quality gates
 
-5. **Requirements Documentation**
+5. **Task Enqueuing and Memory Storage**
+   After gathering requirements, use MCP tools to manage the task:
+   ```python
+   # Enqueue requirements task
+   requirements_task = task_enqueue({
+       "description": "Analyze and Document User Requirements",
+       "source": "requirements-gatherer",
+       "priority": 8,
+       "agent_type": "requirements-specialist",
+       "metadata": {
+           "domain_context": "...",
+           "constraints": "...",
+           "success_criteria": "..."
+       }
+   })
+
+   # Store requirements in memory
+   memory_add({
+       "namespace": f"task:{requirements_task['task_id']}:requirements",
+       "type": "semantic",
+       "data": {
+           "functional_requirements": functional_reqs,
+           "non_functional_requirements": non_func_reqs,
+           "constraints": constraints,
+           "success_criteria": success_criteria
+       }
+   })
+   ```
+
+6. **Requirements Documentation**
    - Structure requirements in clear, testable format
    - Prioritize requirements (must-have, should-have, nice-to-have)
    - Document assumptions and dependencies
-   - Prepare handoff to technical-requirements-specialist
+   - Prepare handoff to task-planner
+
+7. **Hand Off to Task Planner**
+   - After requirements are complete and saved to task and memory
+   - Use `task_enqueue` to invoke the task-planner agent
+   ```python
+   task_enqueue({
+       "description": "Create Technical Specification from Requirements",
+       "source": "requirements-gatherer",
+       "priority": 7,
+       "agent_type": "technical-architect",
+       "prerequisite_task_ids": [requirements_task['task_id']]
+   })
+   ```
 
 **Best Practices:**
 - Ask clarifying questions when requirements are ambiguous
@@ -57,7 +102,8 @@ When invoked, you must follow these steps:
 {
   "execution_status": {
     "status": "SUCCESS|NEEDS_CLARIFICATION|FAILURE",
-    "agent_name": "requirements-gatherer"
+    "agent_name": "requirements-gatherer",
+    "task_id": "generated-task-uuid"
   },
   "requirements": {
     "functional": [
@@ -93,8 +139,15 @@ When invoked, you must follow these steps:
     "Measurable success criterion"
   ],
   "orchestration_context": {
-    "next_recommended_action": "Invoke technical-requirements-specialist with requirements",
-    "ready_for_technical_spec": true,
+    "next_recommended_action": "Invoke task-planner with requirements",
+    "ready_for_planning": true,
+    "task_id": "task_id_for_memory_reference",
+    "task_status": {
+      "state": "ENQUEUED|IN_PROGRESS|COMPLETED",
+      "priority": 8,
+      "created_at": "ISO8601_TIMESTAMP",
+      "updated_at": "ISO8601_TIMESTAMP"
+    },
     "blockers": []
   }
 }

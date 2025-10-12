@@ -167,7 +167,7 @@ app.add_typer(task_app, name="task")
 @task_app.command("submit")
 def submit(
     prompt: str = typer.Argument(..., help="Task prompt/instruction"),
-    agent_type: str = typer.Option("general", help="Agent type to use"),  # noqa: B008
+    agent_type: str = typer.Option("requirements-gatherer", help="Agent type to use"),  # noqa: B008
     input_file: Path
     | None = typer.Option(None, help="JSON file with additional context data"),  # noqa: B008
     input_json: str

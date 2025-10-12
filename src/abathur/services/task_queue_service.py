@@ -121,7 +121,7 @@ class TaskQueueService:
         base_priority: int = 5,
         deadline: datetime | None = None,
         estimated_duration_seconds: int | None = None,
-        agent_type: str = "general",
+        agent_type: str = "requirements-gatherer",
         session_id: str | None = None,
         input_data: dict[str, Any] | None = None,
     ) -> Task:
@@ -145,7 +145,7 @@ class TaskQueueService:
             base_priority: User-specified priority (0-10, default 5)
             deadline: Task deadline (optional)
             estimated_duration_seconds: Estimated execution time in seconds (optional)
-            agent_type: Agent type to execute task (default "general")
+            agent_type: Agent type to execute task (default "requirements-gatherer")
             session_id: Session ID for memory context (optional)
             input_data: Additional input data (optional)
 

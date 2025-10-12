@@ -19,7 +19,7 @@ class TestTask:
 
         assert task.id is not None
         assert task.prompt == "Test task prompt"
-        assert task.agent_type == "general"  # Default agent type
+        assert task.agent_type == "requirements-gatherer"  # Default agent type
         assert task.priority == 5
         assert task.status == TaskStatus.PENDING
         assert task.input_data == {"key": "value"}

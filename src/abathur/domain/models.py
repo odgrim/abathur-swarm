@@ -41,7 +41,9 @@ class Task(BaseModel):
 
     id: UUID = Field(default_factory=uuid4)
     prompt: str  # The actual instruction/task to execute
-    agent_type: str = "general"  # Agent definition to use (defaults to general)
+    agent_type: str = (
+        "requirements-gatherer"  # Agent definition to use (defaults to requirements-gatherer)
+    )
     priority: int = Field(default=5, ge=0, le=10)
     status: TaskStatus = Field(default=TaskStatus.PENDING)
     input_data: dict[str, Any] = Field(default_factory=dict)
