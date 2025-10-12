@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "abathur-memory": {
-      "command": "python",
+      "command": "${workspaceFolder}/venv/bin/python",
       "args": [
         "-m",
         "abathur.mcp.memory_server",
@@ -25,7 +25,7 @@
       ]
     },
     "abathur-task-queue": {
-      "command": "python",
+      "command": "${workspaceFolder}/venv/bin/python",
       "args": [
         "-m",
         "abathur.mcp.task_queue_server",
