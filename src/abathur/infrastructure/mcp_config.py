@@ -37,6 +37,7 @@ class MCPConfigLoader:
         Checks for configuration in:
         1. .mcp.json (project root)
         2. .claude/mcp.json
+        3. .claude/mcp_config.json
 
         Returns:
             Dictionary mapping server names to MCPServer objects
@@ -45,6 +46,7 @@ class MCPConfigLoader:
         mcp_paths = [
             self.project_root / ".mcp.json",
             self.project_root / ".claude" / "mcp.json",
+            self.project_root / ".claude" / "mcp_config.json",
         ]
 
         for mcp_path in mcp_paths:
