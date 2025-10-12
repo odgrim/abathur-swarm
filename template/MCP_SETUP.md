@@ -1,10 +1,21 @@
 # Abathur MCP Server Setup
 
-This template includes configuration for the Abathur Memory MCP server, which gives Claude agents access to:
+This template includes configuration for two Abathur MCP servers:
 
+## Memory MCP Server
+
+Gives Claude agents access to:
 - **Long-term memory** - Store and retrieve facts, preferences, and learnings
 - **Session management** - Track conversation history and state
 - **Semantic document search** - Find relevant documents using natural language
+
+## Task Queue MCP Server
+
+Gives Claude agents access to:
+- **Task enqueueing** - Submit tasks with dependencies and priorities
+- **Task monitoring** - List, filter, and track task progress
+- **Dependency management** - Define task prerequisites and execution order
+- **Queue statistics** - Monitor overall queue health and performance
 
 ## Quick Start
 
@@ -26,11 +37,11 @@ type .claude\mcp_config.json
 
 Add the `abathur-memory` server to your `mcpServers` section.
 
-### 2. Start the Server
+### 2. Start the Servers
 
 #### Option A: Auto-start with Swarm/Loop (Recommended)
 
-The server starts automatically when you run:
+Both servers start automatically when you run:
 
 ```bash
 abathur swarm start
@@ -39,10 +50,11 @@ abathur loop start <task-id>
 
 Use `--no-mcp` to disable auto-start if needed.
 
-#### Option B: Standalone Server
+#### Option B: Standalone Servers
 
-Start the server manually:
+Start the servers manually:
 
+**Memory Server:**
 ```bash
 # Foreground (for testing)
 abathur mcp start-memory --foreground
@@ -57,14 +69,36 @@ abathur mcp status-memory
 abathur mcp stop-memory
 ```
 
+**Task Queue Server:**
+```bash
+# Foreground (for testing)
+python -m abathur.mcp.task_queue_server --db-path ./abathur.db
+
+# Background
+python -m abathur.mcp.task_queue_server_manager start --db-path ./abathur.db
+
+# Check status
+python -m abathur.mcp.task_queue_server_manager status
+
+# Stop
+python -m abathur.mcp.task_queue_server_manager stop
+```
+
 #### Option C: Direct Python
 
+**Memory Server:**
 ```bash
 # Using Python module
 python -m abathur.mcp.memory_server --db-path ./abathur.db
 
 # Using CLI entry point (after installation)
 abathur-mcp --db-path ./abathur.db
+```
+
+**Task Queue Server:**
+```bash
+# Using Python module
+python -m abathur.mcp.task_queue_server --db-path ./abathur.db
 ```
 
 ## Available Tools
@@ -89,6 +123,15 @@ abathur-mcp --db-path ./abathur.db
 
 - `document_semantic_search` - Search documents using natural language
 - `document_index` - Index document for semantic search
+
+### Task Queue Operations
+
+- `task_enqueue` - Submit new task with dependencies and priorities
+- `task_list` - List and filter tasks by status, source, or agent
+- `task_get` - Retrieve specific task details by ID
+- `task_queue_status` - Get overall queue statistics
+- `task_cancel` - Cancel task with cascade to dependents
+- `task_execution_plan` - Calculate execution order and dependencies
 
 ## Example Usage
 
@@ -170,6 +213,59 @@ Agents should use hierarchical namespaces:
     "namespace": "docs:architecture",
     "limit": 5
   }
+}
+```
+
+### Task Queue Pattern
+
+Agents use the task queue for managing complex workflows:
+
+**Submit a task:**
+```json
+{
+  "tool": "task_enqueue",
+  "arguments": {
+    "description": "Analyze requirements for new feature",
+    "source": "agent_planner",
+    "agent_type": "requirements-specialist",
+    "base_priority": 8,
+    "prerequisites": [],
+    "deadline": "2025-12-31T23:59:59Z"
+  }
+}
+```
+
+**Submit a dependent task:**
+```json
+{
+  "tool": "task_enqueue",
+  "arguments": {
+    "description": "Implement feature based on analysis",
+    "source": "agent_implementation",
+    "agent_type": "implementation-specialist",
+    "base_priority": 7,
+    "prerequisites": ["task-uuid-from-previous-task"]
+  }
+}
+```
+
+**Monitor task progress:**
+```json
+{
+  "tool": "task_list",
+  "arguments": {
+    "status": "ready",
+    "source": "agent_planner",
+    "limit": 50
+  }
+}
+```
+
+**Get queue statistics:**
+```json
+{
+  "tool": "task_queue_status",
+  "arguments": {}
 }
 ```
 
