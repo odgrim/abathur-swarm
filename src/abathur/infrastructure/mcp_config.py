@@ -35,20 +35,20 @@ class MCPConfigLoader:
         """Load MCP server configuration.
 
         Checks for configuration in:
-        1. .claude/settings.json (preferred)
-        2. .claude/settings.local.json (local overrides)
-        3. .mcp.json (project root, deprecated)
+        1. .mcp.json (project root, preferred per Claude Code docs)
+        2. .claude/settings.json (legacy, may have mcpServers)
+        3. .claude/settings.local.json (local overrides)
         4. .claude/mcp.json (deprecated)
         5. .claude/mcp_config.json (deprecated)
 
         Returns:
             Dictionary mapping server names to MCPServer objects
         """
-        # Try settings.json first (project-required servers), then local overrides
+        # Try .mcp.json first (current standard per docs)
         mcp_paths = [
+            self.project_root / ".mcp.json",
             self.project_root / ".claude" / "settings.json",
             self.project_root / ".claude" / "settings.local.json",
-            self.project_root / ".mcp.json",
             self.project_root / ".claude" / "mcp.json",
             self.project_root / ".claude" / "mcp_config.json",
         ]
