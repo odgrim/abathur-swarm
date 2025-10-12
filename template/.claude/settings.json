@@ -1,3 +1,9 @@
 {
-  "enableAllProjectMcpServers": true
+  "enableAllProjectMcpServers": true,
+  "permissions": {
+    "allow": [
+      "mcp__abathur-memory__*",
+      "mcp__abathur-task-queue__*"
+    ]
+  }
 }

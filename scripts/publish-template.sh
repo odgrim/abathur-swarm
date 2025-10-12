@@ -45,7 +45,7 @@ echo -e "${BLUE}listing contents of template dir...${NC}"
 ls -la "$TEMPLATE_DIR"/*
 echo -e "${BLUE}Copying new template files...${NC}"
 cp -R "$TEMPLATE_DIR"/* ./ 2>/dev/null || true
-cp -R "$TEMPLATE_DIR"/.{gitignore,claude,abathur} ./ 2>/dev/null || true
+cp -R "$TEMPLATE_DIR"/.{gitignore,claude,abathur,mcp.json} ./ 2>/dev/null || true
 # Remove . and .. if they were copied
 echo -e "${GREEN}✓${NC} Template files copied"
 
