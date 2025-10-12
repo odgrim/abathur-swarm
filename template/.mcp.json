@@ -6,7 +6,7 @@
         "-m",
         "abathur.mcp.memory_server",
         "--db-path",
-        "${workspaceFolder}/abathur.db"
+        "${workspaceFolder}/.abathur/abathur.db"
       ],
       "description": "Abathur memory management server - provides access to long-term memory, session state, and semantic document search",
       "tools": [
@@ -30,7 +30,7 @@
         "-m",
         "abathur.mcp.task_queue_server",
         "--db-path",
-        "${workspaceFolder}/abathur.db"
+        "${workspaceFolder}/.abathur/abathur.db"
       ],
       "description": "Abathur task queue management server - provides access to task enqueueing, monitoring, and dependency management",
       "tools": [
