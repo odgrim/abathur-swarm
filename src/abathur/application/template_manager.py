@@ -214,6 +214,11 @@ class TemplateManager:
     async def install_template(self, template: Template) -> None:
         """Install template to project directory.
 
+        Updates existing directories intelligently:
+        - Core agent templates are always updated
+        - MCP config is always updated
+        - Custom agents (not in template) are preserved
+
         Args:
             template: Template to install
 
@@ -229,7 +234,8 @@ class TemplateManager:
 
             if claude_src.exists():
                 if claude_dest.exists():
-                    logger.warning("claude_dir_exists", path=str(claude_dest))
+                    logger.info("updating_claude_dir", path=str(claude_dest))
+                    self._update_claude_directory(claude_src, claude_dest)
                 else:
                     shutil.copytree(claude_src, claude_dest)
                     logger.info("copied_claude_dir", dest=str(claude_dest))
@@ -264,6 +270,79 @@ class TemplateManager:
         except Exception as e:
             logger.error("template_install_error", error=str(e))
             raise RuntimeError(f"Failed to install template: {e}") from e
+
+    def _update_claude_directory(self, src_dir: Path, dest_dir: Path) -> None:
+        """Update .claude directory from template.
+
+        Updates:
+        - All agent files from template (overwrites existing)
+        - MCP config files (overwrites existing)
+        - README and documentation files
+
+        Preserves:
+        - Custom agents not in template
+        - Custom subdirectories
+
+        Args:
+            src_dir: Source .claude directory from template
+            dest_dir: Destination .claude directory in project
+        """
+        updated_count = 0
+        preserved_count = 0
+
+        # Update agents directory
+        src_agents = src_dir / "agents"
+        dest_agents = dest_dir / "agents"
+
+        if src_agents.exists():
+            dest_agents.mkdir(parents=True, exist_ok=True)
+
+            # Get list of template agent files (all .md and .yaml files recursively)
+            template_agents = set()
+            for ext in ["*.md", "*.yaml"]:
+                for agent_file in src_agents.rglob(ext):
+                    rel_path = agent_file.relative_to(src_agents)
+                    template_agents.add(str(rel_path))
+
+            # Update all agent files from template
+            for agent_rel_path in template_agents:
+                src_file = src_agents / agent_rel_path
+                dest_file = dest_agents / agent_rel_path
+
+                # Create subdirectories if needed
+                dest_file.parent.mkdir(parents=True, exist_ok=True)
+
+                # Copy/update file
+                shutil.copy2(src_file, dest_file)
+                updated_count += 1
+
+            logger.info("updated_agents", count=updated_count)
+
+            # Count custom agents that were preserved
+            for ext in ["*.md", "*.yaml"]:
+                for custom_file in dest_agents.rglob(ext):
+                    rel_path = custom_file.relative_to(dest_agents)
+                    if str(rel_path) not in template_agents:
+                        preserved_count += 1
+
+            if preserved_count > 0:
+                logger.info("preserved_custom_agents", count=preserved_count)
+
+        # Update MCP config files
+        for mcp_file in ["mcp_config.json", "mcp.json"]:
+            src_mcp = src_dir / mcp_file
+            dest_mcp = dest_dir / mcp_file
+            if src_mcp.exists():
+                shutil.copy2(src_mcp, dest_mcp)
+                logger.info("updated_mcp_config", file=mcp_file)
+
+        # Update README and documentation
+        for doc_file in ["README.md", "AGENTS.md"]:
+            src_doc = src_dir / doc_file
+            dest_doc = dest_dir / doc_file
+            if src_doc.exists():
+                shutil.copy2(src_doc, dest_doc)
+                logger.info("updated_documentation", file=doc_file)
 
     def _merge_configs(self, src_dir: Path, dest_dir: Path) -> None:
         """Merge configuration files from source to destination.

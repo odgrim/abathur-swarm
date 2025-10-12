@@ -1004,12 +1004,18 @@ def init(
     | None = typer.Option(None, help="Save validation report as JSON"),  # noqa: B008
     skip_template: bool = typer.Option(False, help="Skip template installation"),  # noqa: B008
 ) -> None:
-    """Initialize a new Abathur project with template.
+    """Initialize or update an Abathur project with latest template.
 
-    By default, pulls the latest official template from GitHub and installs it
+    By default, pulls the latest official template from GitHub and installs/updates it
     to your project directory (.claude/ and related files).
 
-    Use --skip-template to only initialize the database without installing templates.
+    Template Update Behavior:
+    - Core agent templates are always updated to latest version
+    - MCP config is always updated
+    - Custom agents (not in template) are preserved
+    - Documentation files are updated
+
+    Use --skip-template to only initialize the database without updating templates.
     Use --template to install a custom template instead of the default.
     Use --validate to run a comprehensive validation suite after initialization.
     This checks PRAGMA settings, foreign keys, indexes, and performance.
@@ -1018,7 +1024,7 @@ def init(
     Use --report-output to save the validation report as JSON (requires --validate).
 
     Examples:
-        abathur init                                    # Default: init DB + install template
+        abathur init                                    # Init DB + update templates
         abathur init --skip-template                    # Only init database
         abathur init --template https://github.com/org/template.git
         abathur init --validate
@@ -1107,18 +1113,21 @@ def init(
                 console=console,
             ) as progress:
                 progress.add_task(
-                    description="Copying template to project directory...", total=None
+                    description="Installing/updating template in project directory...", total=None
                 )
 
                 # Install template to project directory
                 await services["template_manager"].install_template(tmpl)
 
-            console.print("[green]✓[/green] Template installed to project directory")
+            console.print("[green]✓[/green] Template installed/updated in project directory")
+            console.print("[dim]  - Core agent templates updated from template[/dim]")
+            console.print("[dim]  - MCP config updated[/dim]")
+            console.print("[dim]  - Custom agents preserved (if any)[/dim]")
 
             # Show what was installed
             if tmpl.agents:
                 console.print(
-                    f"[dim]Installed {len(tmpl.agents)} agent definition(s) to .claude/agents/[/dim]"
+                    f"[dim]  - {len(tmpl.agents)} template agent(s) in .claude/agents/[/dim]"
                 )
 
     asyncio.run(_init())
