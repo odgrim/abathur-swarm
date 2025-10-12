@@ -72,9 +72,43 @@ class TemplateManager:
         repo_name = repo_url.rstrip(".git").split("/")[-1]
         dest_dir = self.cache_dir / f"{repo_name}-{version}"
 
-        # Check if already cached
+        # Check if already cached - pull latest if it exists
         if dest_dir.exists():
             logger.info("template_cache_hit", repo=repo_name, version=version)
+            try:
+                # Pull latest changes
+                logger.info("pulling_template_updates", repo=repo_name, version=version)
+
+                # Fetch and checkout the specified version
+                pull_cmd = ["git", "-C", str(dest_dir), "fetch", "origin"]
+                process = await asyncio.create_subprocess_exec(
+                    *pull_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                await process.communicate()
+
+                # Checkout the version (branch/tag)
+                checkout_cmd = ["git", "-C", str(dest_dir), "checkout", version]
+                process = await asyncio.create_subprocess_exec(
+                    *checkout_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                await process.communicate()
+
+                # Pull latest for the version
+                pull_cmd = ["git", "-C", str(dest_dir), "pull", "origin", version]
+                process = await asyncio.create_subprocess_exec(
+                    *pull_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
+
+                if process.returncode == 0:
+                    logger.info("template_updated", repo=repo_name, version=version)
+                else:
+                    logger.warning("template_pull_failed", error=stderr.decode())
+
+            except Exception as e:
+                logger.warning("template_update_error", error=str(e))
+                # Continue with cached version even if pull fails
+
             return await self._load_template(dest_dir, version)
 
         logger.info("cloning_template", repo=repo_url, version=version, dest=str(dest_dir))
@@ -83,8 +117,6 @@ class TemplateManager:
         cmd = [
             "git",
             "clone",
-            "--depth",
-            "1",
             "--branch",
             version,
             repo_url,
@@ -101,11 +133,6 @@ class TemplateManager:
                 error_msg = stderr.decode()
                 logger.error("template_clone_failed", error=error_msg)
                 raise RuntimeError(f"Failed to clone template: {error_msg}")
-
-            # Remove .git directory
-            git_dir = dest_dir / ".git"
-            if git_dir.exists():
-                shutil.rmtree(git_dir)
 
             logger.info("template_cloned", repo=repo_name, version=version)
             return await self._load_template(dest_dir, version)
@@ -134,9 +161,13 @@ class TemplateManager:
         agents = []
         if agents_dir.exists():
             # Collect all agent files, including in subdirectories
+            # Skip .git directories
             agent_files = set()
             for ext in ["*.yaml", "*.md"]:
                 for agent_file in agents_dir.rglob(ext):
+                    # Skip files in .git directories
+                    if ".git" in agent_file.parts:
+                        continue
                     # Use the filename stem only
                     agent_files.add(agent_file.stem)
             agents = sorted(agent_files)
@@ -264,6 +295,11 @@ class TemplateManager:
         """
         logger.info("installing_template", name=template.name, version=template.version)
 
+        # Ignore function to exclude .git directories
+        def ignore_git(src: str, names: list[str]) -> set[str]:
+            """Ignore .git directories when copying."""
+            return {".git"} if ".git" in names else set()
+
         try:
             # Copy .claude directory
             claude_src = template.path / ".claude"
@@ -274,7 +310,7 @@ class TemplateManager:
                     logger.info("updating_claude_dir", path=str(claude_dest))
                     self._update_claude_directory(claude_src, claude_dest)
                 else:
-                    shutil.copytree(claude_src, claude_dest)
+                    shutil.copytree(claude_src, claude_dest, ignore=ignore_git)
                     logger.info("copied_claude_dir", dest=str(claude_dest))
 
             # Copy .abathur directory
@@ -286,7 +322,7 @@ class TemplateManager:
                     # Merge config files
                     self._merge_configs(abathur_src, abathur_dest)
                 else:
-                    shutil.copytree(abathur_src, abathur_dest)
+                    shutil.copytree(abathur_src, abathur_dest, ignore=ignore_git)
                     logger.info("copied_abathur_dir", dest=str(abathur_dest))
 
             # Create metadata file
@@ -335,9 +371,13 @@ class TemplateManager:
             dest_agents.mkdir(parents=True, exist_ok=True)
 
             # Get list of template agent files (all .md and .yaml files recursively)
+            # Skip .git directories
             template_agents = set()
             for ext in ["*.md", "*.yaml"]:
                 for agent_file in src_agents.rglob(ext):
+                    # Skip files in .git directories
+                    if ".git" in agent_file.parts:
+                        continue
                     rel_path = agent_file.relative_to(src_agents)
                     template_agents.add(str(rel_path))
 
@@ -358,6 +398,9 @@ class TemplateManager:
             # Count custom agents that were preserved
             for ext in ["*.md", "*.yaml"]:
                 for custom_file in dest_agents.rglob(ext):
+                    # Skip files in .git directories
+                    if ".git" in custom_file.parts:
+                        continue
                     rel_path = custom_file.relative_to(dest_agents)
                     if str(rel_path) not in template_agents:
                         preserved_count += 1
