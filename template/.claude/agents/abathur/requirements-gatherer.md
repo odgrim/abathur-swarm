@@ -1,6 +1,6 @@
 ---
 name: requirements-gatherer
-description: Use proactively for gathering and analyzing user requirements, clarifying objectives, and identifying constraints. Keywords: requirements, objectives, constraints, user needs, problem definition
+description: "Use proactively for gathering and analyzing user requirements, clarifying objectives, and identifying constraints. Keywords: requirements, objectives, constraints, user needs, problem definition"
 model: sonnet
 color: Blue
 tools: Read, Write, Grep, Glob, WebFetch, Task

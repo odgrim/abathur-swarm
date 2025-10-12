@@ -1,6 +1,6 @@
 ---
 name: task-planner
-description: Use proactively for decomposing complex tasks into atomic, independently executable units with explicit dependencies. Keywords: task decomposition, planning, dependencies, subtasks
+description: "Use proactively for decomposing complex tasks into atomic, independently executable units with explicit dependencies. Keywords: task decomposition, planning, dependencies, subtasks"
 model: sonnet
 color: Blue
 tools: Read, Write, Grep, Glob, Task

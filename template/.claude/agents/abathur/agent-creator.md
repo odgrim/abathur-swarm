@@ -1,6 +1,6 @@
 ---
 name: agent-creator
-description: Use proactively for generating hyperspecialized agents dynamically when task requirements exceed existing agent capabilities. Keywords: agent generation, specialization, dynamic creation, new agents
+description: "Use proactively for generating hyperspecialized agents dynamically when task requirements exceed existing agent capabilities. Keywords: agent generation, specialization, dynamic creation, new agents"
 model: thinking
 color: Green
 tools: Read, Write, Grep, Glob, WebFetch, Bash
@@ -56,7 +56,7 @@ When invoked, you must follow these steps:
 ```markdown
 ---
 name: [highly-specific-kebab-case-name]
-description: Use proactively for [single micro-task]. Keywords: [5-7 relevant keywords]
+description: "Use proactively for [single micro-task]. Keywords: [5-7 relevant keywords]"
 model: [thinking|sonnet|haiku]
 color: [Red|Blue|Green|Yellow|Purple|Orange|Pink|Cyan]
 tools: [minimal-tool-set]
