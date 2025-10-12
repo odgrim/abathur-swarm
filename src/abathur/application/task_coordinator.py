@@ -23,6 +23,9 @@ class TaskCoordinator:
     async def submit_task(self, task: Task) -> UUID:
         """Submit a new task to the queue.
 
+        Automatically sets task status to READY if it has no dependencies,
+        aligning with TaskQueueService behavior.
+
         Args:
             task: Task to submit
 
@@ -33,6 +36,16 @@ class TaskCoordinator:
             RuntimeError: If submission fails
         """
         try:
+            # Auto-transition PENDING → READY if no dependencies
+            # This aligns with TaskQueueService.enqueue_task() behavior
+            if task.status == TaskStatus.PENDING and not task.dependencies:
+                task.status = TaskStatus.READY
+                logger.debug(
+                    "task_auto_transitioned_to_ready",
+                    task_id=str(task.id),
+                    reason="no_dependencies",
+                )
+
             await self.database.insert_task(task)
             await self.database.log_audit(
                 task_id=task.id,
@@ -40,10 +53,16 @@ class TaskCoordinator:
                 action_data={
                     "agent_type": task.agent_type,
                     "priority": task.priority,
+                    "status": task.status.value,
                 },
                 result="success",
             )
-            logger.info("task_submitted", task_id=str(task.id), agent_type=task.agent_type)
+            logger.info(
+                "task_submitted",
+                task_id=str(task.id),
+                agent_type=task.agent_type,
+                status=task.status.value,
+            )
             return task.id
         except Exception as e:
             logger.error("task_submit_failed", error=str(e))
