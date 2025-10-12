@@ -1,6 +1,6 @@
 ---
 name: system-architect
-description: Use proactively for designing system architecture, creating component diagrams, defining interfaces and protocols, ensuring architectural coherence, and planning integration strategies. Keywords: architecture, design, components, interfaces, integration, system design
+description: "Use proactively for designing system architecture, creating component diagrams, defining interfaces and protocols, ensuring architectural coherence, and planning integration strategies. Keywords: architecture, design, components, interfaces, integration, system design"
 model: sonnet
 color: Orange
 tools: Read, Write, Grep, Glob

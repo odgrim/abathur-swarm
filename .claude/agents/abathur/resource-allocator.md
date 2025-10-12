@@ -1,6 +1,6 @@
 ---
 name: resource-allocator
-description: Use proactively for managing computational resources, task priorities, and concurrency limits across the swarm. Keywords: resources, priorities, concurrency, allocation
+description: "Use proactively for managing computational resources, task priorities, and concurrency limits across the swarm. Keywords: resources, priorities, concurrency, allocation"
 model: sonnet
 color: Orange
 tools: Read, Write, Bash, Grep, Glob

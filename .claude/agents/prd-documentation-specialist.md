@@ -1,6 +1,6 @@
 ---
 name: prd-documentation-specialist
-description: Use proactively for creating comprehensive PRD documents, consolidating research findings, technical specifications, and implementation plans into cohesive product requirements documentation. Keywords: PRD, documentation, product requirements, technical writing, consolidation
+description: "Use proactively for creating comprehensive PRD documents, consolidating research findings, technical specifications, and implementation plans into cohesive product requirements documentation. Keywords: PRD, documentation, product requirements, technical writing, consolidation"
 model: haiku
 color: Cyan
 tools: Read, Write, Grep, Glob

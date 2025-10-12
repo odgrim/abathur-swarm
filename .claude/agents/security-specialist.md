@@ -1,6 +1,6 @@
 ---
 name: security-specialist
-description: Use proactively for security analysis, threat modeling, OAuth token security, credential management, encryption strategies, and ensuring security best practices across authentication mechanisms. Keywords: security, OAuth tokens, encryption, credentials, threat model, authentication security
+description: "Use proactively for security analysis, threat modeling, OAuth token security, credential management, encryption strategies, and ensuring security best practices across authentication mechanisms. Keywords: security, OAuth tokens, encryption, credentials, threat model, authentication security"
 model: sonnet
 color: Red
 tools: Read, Write, Grep, Glob

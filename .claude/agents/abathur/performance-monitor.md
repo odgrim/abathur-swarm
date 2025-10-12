@@ -1,6 +1,6 @@
 ---
 name: performance-monitor
-description: Use proactively for tracking swarm efficiency metrics and identifying optimization opportunities. Keywords: performance, metrics, optimization, monitoring
+description: "Use proactively for tracking swarm efficiency metrics and identifying optimization opportunities. Keywords: performance, metrics, optimization, monitoring"
 model: sonnet
 color: Yellow
 tools: Read, Bash, Grep, Glob

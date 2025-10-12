@@ -1,6 +1,6 @@
 ---
 name: swarm-coordinator
-description: Use proactively for managing swarm lifecycle, health monitoring, and agent coordination. Keywords: swarm health, agent pool, orchestration, coordination
+description: "Use proactively for managing swarm lifecycle, health monitoring, and agent coordination. Keywords: swarm health, agent pool, orchestration, coordination"
 model: sonnet
 color: Purple
 tools: Read, Write, Bash, Grep, Glob, Task

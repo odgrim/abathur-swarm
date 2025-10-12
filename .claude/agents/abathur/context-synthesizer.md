@@ -1,6 +1,6 @@
 ---
 name: context-synthesizer
-description: Use proactively for maintaining cross-swarm state coherence and synthesizing distributed context. Keywords: context coherence, state synthesis, cross-agent communication
+description: "Use proactively for maintaining cross-swarm state coherence and synthesizing distributed context. Keywords: context coherence, state synthesis, cross-agent communication"
 model: sonnet
 color: Cyan
 tools: Read, Grep, Glob, Task

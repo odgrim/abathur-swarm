@@ -132,7 +132,7 @@ Create your own agents in `workers/custom/`:
 ```markdown
 ---
 name: my-specialist
-description: What it does. Keywords: keyword1, keyword2
+description: "What it does. Keywords: keyword1, keyword2"
 model: thinking
 color: Blue
 tools: Read, Edit, Bash

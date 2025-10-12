@@ -1,6 +1,6 @@
 ---
 name: conflict-resolver
-description: Use proactively for resolving inter-agent state conflicts and coordination issues. Keywords: conflicts, resolution, state coherence, coordination
+description: "Use proactively for resolving inter-agent state conflicts and coordination issues. Keywords: conflicts, resolution, state coherence, coordination"
 model: sonnet
 color: Red
 tools: Read, Write, Edit, Bash, Grep, Glob

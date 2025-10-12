@@ -1,6 +1,6 @@
 ---
 name: learning-coordinator
-description: Use proactively for capturing patterns, improving agent performance, and coordinating swarm learning. Keywords: learning, patterns, improvement, optimization
+description: "Use proactively for capturing patterns, improving agent performance, and coordinating swarm learning. Keywords: learning, patterns, improvement, optimization"
 model: sonnet
 color: Pink
 tools: Read, Write, Grep, Glob

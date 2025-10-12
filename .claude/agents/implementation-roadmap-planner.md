@@ -1,6 +1,6 @@
 ---
 name: implementation-roadmap-planner
-description: Use proactively for creating phased implementation roadmaps, defining milestones and deliverables, estimating timelines, identifying dependencies, and planning rollout strategies. Keywords: roadmap, implementation plan, phases, milestones, timeline, rollout
+description: "Use proactively for creating phased implementation roadmaps, defining milestones and deliverables, estimating timelines, identifying dependencies, and planning rollout strategies. Keywords: roadmap, implementation plan, phases, milestones, timeline, rollout"
 model: sonnet
 color: Yellow
 tools: Read, Write, Grep, Glob

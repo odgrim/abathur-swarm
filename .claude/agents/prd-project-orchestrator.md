@@ -1,6 +1,6 @@
 ---
 name: prd-project-orchestrator
-description: Use proactively for coordinating multi-phase PRD development projects, managing agent workflows, conducting phase validations, and making go/no-go decisions for project progression. Keywords: orchestrator, coordinator, project management, phase validation, workflow
+description: "Use proactively for coordinating multi-phase PRD development projects, managing agent workflows, conducting phase validations, and making go/no-go decisions for project progression. Keywords: orchestrator, coordinator, project management, phase validation, workflow"
 model: sonnet
 color: Purple
 tools: Read, Write, Grep, Glob, Task

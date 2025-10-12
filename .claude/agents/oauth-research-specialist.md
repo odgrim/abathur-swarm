@@ -1,6 +1,6 @@
 ---
 name: oauth-research-specialist
-description: Use proactively for researching OAuth-based Claude interaction methods, comparing authentication approaches, analyzing rate limits and capabilities, and documenting all possible ways to use OAuth tokens with Claude services. Keywords: OAuth, research, authentication, Claude Max, API comparison
+description: "Use proactively for researching OAuth-based Claude interaction methods, comparing authentication approaches, analyzing rate limits and capabilities, and documenting all possible ways to use OAuth tokens with Claude services. Keywords: OAuth, research, authentication, Claude Max, API comparison"
 model: sonnet
 color: Blue
 tools: Read, Write, WebSearch, WebFetch, Grep, Glob

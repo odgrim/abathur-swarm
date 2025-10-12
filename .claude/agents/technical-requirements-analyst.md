@@ -1,6 +1,6 @@
 ---
 name: technical-requirements-analyst
-description: Use proactively for analyzing technical requirements, defining functional and non-functional specifications, creating detailed requirement matrices, and ensuring completeness of system specifications. Keywords: requirements, specifications, functional, non-functional, analysis
+description: "Use proactively for analyzing technical requirements, defining functional and non-functional specifications, creating detailed requirement matrices, and ensuring completeness of system specifications. Keywords: requirements, specifications, functional, non-functional, analysis"
 model: sonnet
 color: Green
 tools: Read, Write, Grep, Glob

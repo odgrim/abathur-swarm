@@ -1,6 +1,6 @@
 ---
 name: code-analysis-specialist
-description: Use proactively for analyzing existing codebases, identifying integration points, assessing architectural patterns, and documenting current implementation details. Keywords: code analysis, architecture review, integration points, codebase assessment
+description: "Use proactively for analyzing existing codebases, identifying integration points, assessing architectural patterns, and documenting current implementation details. Keywords: code analysis, architecture review, integration points, codebase assessment"
 model: thinking
 color: Pink
 tools: Read, Grep, Glob
