@@ -147,128 +147,42 @@ When invoked, you must follow these steps:
    - Prepare handoff to technical-requirements-specialist
 
 9. **Hand Off to Technical Requirements Specialist with Rich Context**
-   - After requirements are complete and saved to memory
-   - Use `task_enqueue` to invoke the technical-requirements-specialist agent
-   - **CRITICAL**: Provide comprehensive context in the task description
 
-   **BAD Example (DO NOT DO THIS):**
-   ```python
-   # ❌ BAD: Insufficient context
-   task_enqueue({
-       "description": "Create technical architecture based on product requirements",
-       "agent_type": "technical-requirements-specialist",
-       "source": "requirements-gatherer"
-   })
-   # The technical-requirements-specialist has no idea what requirements to use, where they are,
-   # what constraints exist, or what deliverables are expected!
-   ```
+   **CRITICAL**: Call task_enqueue EXACTLY ONCE to spawn the technical-requirements-specialist.
 
-   **GOOD Example (DO THIS):**
-   ```python
-   # First, search for any relevant memory entries using your current task_id
-   existing_context = memory_search({
-       "namespace_prefix": f"task:{current_task_id}",
-       "memory_type": "semantic",
-       "limit": 50
-   })
+   Follow these steps in order:
 
-   # Search for relevant documentation
-   relevant_docs = document_semantic_search({
-       "query_text": f"{problem_domain} requirements architecture",
-       "limit": 5
-   })
+   a. Build a comprehensive context description that includes:
+      - Task context header with current_task_id reference
+      - Core problem description (2-3 sentences from your analysis)
+      - Functional requirements summary (bullet points)
+      - Non-functional requirements summary (bullet points)
+      - Constraints list (from your gathered constraints)
+      - Success criteria (from your defined criteria)
+      - Memory namespace references (task:{current_task_id}:requirements)
+      - Specific memory keys (functional_requirements, non_functional_requirements, constraints, success_criteria)
+      - List of relevant documentation (from document_semantic_search results)
+      - Expected deliverables (architecture spec, data model, API definitions, tech stack, phases, risks)
+      - Research areas identified during requirements gathering
+      - Architectural considerations relevant to the domain
+      - Next steps instruction (spawn task-planner after completion)
 
-   # Build comprehensive context for the technical requirements specialist
-   context_description = f"""
-# Technical Requirements Analysis Task
+   b. Call task_enqueue with the following structure:
+      - description: The comprehensive context description from step (a)
+      - source: "requirements-gatherer"
+      - priority: 7
+      - agent_type: "technical-requirements-specialist"
+      - prerequisite_task_ids: [current_task_id]
+      - metadata: Include requirements_task_id, memory_namespace, problem_domain, related_docs, estimated_complexity
 
-## Requirements Context
-Based on the gathered requirements from task {current_task_id}, create a comprehensive technical specification and architecture design.
+   c. Store the returned task_id in memory for workflow tracking:
+      - namespace: f"task:{current_task_id}:workflow"
+      - key: "tech_spec_task"
+      - value: task_id, created_at, status, context_provided flag
 
-## Core Problem
-{core_problem_description}
+   **WARNING**: Do NOT call task_enqueue multiple times. Do NOT execute example code from documentation sections. Call it once with rich context as described above.
 
-## Functional Requirements Summary
-{functional_requirements_summary}
-
-## Non-Functional Requirements
-{non_functional_requirements_summary}
-
-## Constraints
-{constraints_list}
-
-## Success Criteria
-{success_criteria}
-
-## Memory References
-The complete requirements are stored in memory:
-- Namespace: task:{current_task_id}:requirements
-- Key: functional_requirements
-- Key: non_functional_requirements
-- Key: constraints
-- Key: success_criteria
-
-Use the memory_get MCP tool to retrieve detailed requirement data:
-```python
-memory_get({{
-    "namespace": "task:{current_task_id}:requirements",
-    "key": "functional_requirements"
-}})
-```
-
-## Relevant Documentation
-{relevant_docs_list}
-
-## Expected Deliverables
-1. System architecture specification with component diagrams
-2. Data model design and schema specifications
-3. API/Interface definitions
-4. Technology stack recommendations with rationale
-5. Implementation phases and milestones
-6. Risk assessment and mitigation strategies
-
-## Research Areas
-{research_areas_identified}
-
-## Architectural Considerations
-- Clean Architecture principles (see design_docs/prd_deliverables/03_ARCHITECTURE.md)
-- SOLID design patterns
-- {specific_architectural_patterns_needed}
-
-## Next Steps After Completion
-After creating the technical specification, spawn task-planner agent to decompose into executable tasks.
-"""
-
-   # Enqueue with rich context
-   tech_spec_task = task_enqueue({
-       "description": context_description,
-       "source": "requirements-gatherer",
-       "priority": 7,
-       "agent_type": "technical-requirements-specialist",
-       "prerequisite_task_ids": [current_task_id],
-       "metadata": {
-           "requirements_task_id": current_task_id,
-           "memory_namespace": f"task:{current_task_id}:requirements",
-           "problem_domain": problem_domain,
-           "related_docs": [doc['file_path'] for doc in relevant_docs],
-           "estimated_complexity": complexity_estimate
-       }
-   })
-
-   # Store the technical specification task reference in memory for future reference
-   memory_add({
-       "namespace": f"task:{current_task_id}:workflow",
-       "key": "tech_spec_task",
-       "value": {
-           "task_id": tech_spec_task['task_id'],
-           "created_at": "timestamp",
-           "status": "pending",
-           "context_provided": True
-       },
-       "memory_type": "episodic",
-       "created_by": "requirements-gatherer"
-   })
-   ```
+   See "Implementation Reference" section at the end of this document for a detailed code example.
 
 **Best Practices:**
 - Ask clarifying questions when requirements are ambiguous
@@ -363,4 +277,116 @@ After creating the technical specification, spawn task-planner agent to decompos
     "blockers": []
   }
 }
+```
+
+## Implementation Reference
+
+This section provides a detailed code example for spawning the technical-requirements-specialist task. This is FOR REFERENCE ONLY - do not execute this code multiple times. Follow the instructions in step 9 above.
+
+```python
+# Example: Building and enqueueing technical-requirements-specialist task
+
+# First, search for any relevant memory entries using your current task_id
+existing_context = memory_search({
+    "namespace_prefix": f"task:{current_task_id}",
+    "memory_type": "semantic",
+    "limit": 50
+})
+
+# Search for relevant documentation
+relevant_docs = document_semantic_search({
+    "query_text": f"{problem_domain} requirements architecture",
+    "limit": 5
+})
+
+# Build comprehensive context for the technical requirements specialist
+context_description = f"""
+# Technical Requirements Analysis Task
+
+## Requirements Context
+Based on the gathered requirements from task {current_task_id}, create a comprehensive technical specification and architecture design.
+
+## Core Problem
+{core_problem_description}
+
+## Functional Requirements Summary
+{functional_requirements_summary}
+
+## Non-Functional Requirements
+{non_functional_requirements_summary}
+
+## Constraints
+{constraints_list}
+
+## Success Criteria
+{success_criteria}
+
+## Memory References
+The complete requirements are stored in memory:
+- Namespace: task:{current_task_id}:requirements
+- Key: functional_requirements
+- Key: non_functional_requirements
+- Key: constraints
+- Key: success_criteria
+
+Use the memory_get MCP tool to retrieve detailed requirement data:
+```python
+memory_get({{
+    "namespace": "task:{current_task_id}:requirements",
+    "key": "functional_requirements"
+}})
+```
+
+## Relevant Documentation
+{relevant_docs_list}
+
+## Expected Deliverables
+1. System architecture specification with component diagrams
+2. Data model design and schema specifications
+3. API/Interface definitions
+4. Technology stack recommendations with rationale
+5. Implementation phases and milestones
+6. Risk assessment and mitigation strategies
+
+## Research Areas
+{research_areas_identified}
+
+## Architectural Considerations
+- Clean Architecture principles (see design_docs/prd_deliverables/03_ARCHITECTURE.md)
+- SOLID design patterns
+- {specific_architectural_patterns_needed}
+
+## Next Steps After Completion
+After creating the technical specification, spawn task-planner agent to decompose into executable tasks.
+"""
+
+# Enqueue with rich context - DO THIS EXACTLY ONCE
+tech_spec_task = task_enqueue({
+    "description": context_description,
+    "source": "requirements-gatherer",
+    "priority": 7,
+    "agent_type": "technical-requirements-specialist",
+    "prerequisite_task_ids": [current_task_id],
+    "metadata": {
+        "requirements_task_id": current_task_id,
+        "memory_namespace": f"task:{current_task_id}:requirements",
+        "problem_domain": problem_domain,
+        "related_docs": [doc['file_path'] for doc in relevant_docs],
+        "estimated_complexity": complexity_estimate
+    }
+})
+
+# Store the technical specification task reference in memory for future reference
+memory_add({
+    "namespace": f"task:{current_task_id}:workflow",
+    "key": "tech_spec_task",
+    "value": {
+        "task_id": tech_spec_task['task_id'],
+        "created_at": "timestamp",
+        "status": "pending",
+        "context_provided": True
+    },
+    "memory_type": "episodic",
+    "created_by": "requirements-gatherer"
+})
 ```
