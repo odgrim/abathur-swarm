@@ -1,7 +1,7 @@
 ---
 name: requirements-gatherer
 description: "Use proactively for gathering and analyzing user requirements, clarifying objectives, and identifying constraints. You ARE the requirements specialist - there is no separate requirements-specialist agent. Keywords: requirements, requirements specialist, objectives, constraints, user needs, problem definition, requirements analysis"
-model: opus
+model: sonnet
 color: Blue
 tools: Read, Write, Grep, Glob, WebFetch, Task
 mcp_servers:
