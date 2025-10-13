@@ -2,6 +2,7 @@
 .abathur/*.db
 .abathur/*.db-*
 .abathur/*.log
+.abathur/worktrees/
 
 # Environment
 .env
