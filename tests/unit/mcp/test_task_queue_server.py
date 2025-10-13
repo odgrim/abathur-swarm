@@ -77,6 +77,30 @@ class MockAbathurTaskQueueServer:
                 "message": f"base_priority must be an integer in range [0, 10], got {base_priority}",
             }
 
+        # Validate agent_type - reject generic/invalid agent types
+        invalid_agent_types = [
+            "general-purpose",
+            "general",
+            "python-backend-developer",
+            "implementation-specialist",
+            "backend-developer",
+            "frontend-developer",
+            "developer",
+        ]
+        if agent_type.lower() in invalid_agent_types:
+            return {
+                "error": "ValidationError",
+                "message": (
+                    f"Invalid agent_type: '{agent_type}'. "
+                    "Generic agent types are not allowed. "
+                    "You must use a hyperspecialized agent type from the agent registry. "
+                    "Valid examples: 'requirements-gatherer', 'task-planner', "
+                    "'technical-requirements-specialist', 'agent-creator', etc. "
+                    "If you need a specialized implementation agent, ensure it was created "
+                    "by the agent-creator first."
+                ),
+            }
+
         # Validate source enum
         valid_sources = ["human", "agent_requirements", "agent_planner", "agent_implementation"]
         if source not in valid_sources:
@@ -522,6 +546,81 @@ async def test_task_enqueue_invalid_priority_range(mock_server, mock_task_queue_
     result = await mock_server._handle_task_enqueue(arguments)
     assert result["error"] == "ValidationError"
     assert "[0, 10]" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_task_enqueue_invalid_agent_type_general_purpose(mock_server, mock_task_queue_service):
+    """Test task enqueue fails with 'general-purpose' agent type."""
+    mock_server.task_queue_service = mock_task_queue_service
+
+    arguments = {
+        "description": "Test task",
+        "source": "human",
+        "agent_type": "general-purpose",
+    }
+
+    result = await mock_server._handle_task_enqueue(arguments)
+
+    assert result["error"] == "ValidationError"
+    assert "Invalid agent_type" in result["message"]
+    assert "general-purpose" in result["message"]
+    assert "Generic agent types are not allowed" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_task_enqueue_invalid_agent_type_generic(mock_server, mock_task_queue_service):
+    """Test task enqueue fails with generic agent types."""
+    mock_server.task_queue_service = mock_task_queue_service
+
+    generic_types = [
+        "general",
+        "python-backend-developer",
+        "implementation-specialist",
+        "backend-developer",
+        "frontend-developer",
+        "developer",
+    ]
+
+    for agent_type in generic_types:
+        arguments = {
+            "description": "Test task",
+            "source": "human",
+            "agent_type": agent_type,
+        }
+
+        result = await mock_server._handle_task_enqueue(arguments)
+
+        assert result["error"] == "ValidationError", f"Failed for {agent_type}"
+        assert "Invalid agent_type" in result["message"], f"Failed for {agent_type}"
+        assert "Generic agent types are not allowed" in result["message"], f"Failed for {agent_type}"
+
+
+@pytest.mark.asyncio
+async def test_task_enqueue_valid_specialized_agent_types(mock_server, mock_task_queue_service, sample_task):
+    """Test task enqueue succeeds with valid specialized agent types."""
+    mock_server.task_queue_service = mock_task_queue_service
+    mock_task_queue_service.enqueue_task.return_value = sample_task
+
+    valid_types = [
+        "requirements-gatherer",
+        "task-planner",
+        "technical-requirements-specialist",
+        "agent-creator",
+        "python-task-queue-domain-model-specialist",
+        "python-repository-implementation-specialist",
+    ]
+
+    for agent_type in valid_types:
+        arguments = {
+            "description": "Test task",
+            "source": "human",
+            "agent_type": agent_type,
+        }
+
+        result = await mock_server._handle_task_enqueue(arguments)
+
+        assert "error" not in result, f"Should succeed for {agent_type}: {result}"
+        assert result["task_id"] == str(sample_task.id)
 
 
 @pytest.mark.asyncio

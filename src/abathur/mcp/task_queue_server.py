@@ -310,6 +310,30 @@ class AbathurTaskQueueServer:
         input_data = arguments.get("input_data", {})
         parent_task_id = arguments.get("parent_task_id")
 
+        # Validate agent_type - reject generic/invalid agent types
+        invalid_agent_types = [
+            "general-purpose",
+            "general",
+            "python-backend-developer",
+            "implementation-specialist",
+            "backend-developer",
+            "frontend-developer",
+            "developer",
+        ]
+        if agent_type.lower() in invalid_agent_types:
+            return {
+                "error": "ValidationError",
+                "message": (
+                    f"Invalid agent_type: '{agent_type}'. "
+                    "Generic agent types are not allowed. "
+                    "You must use a hyperspecialized agent type from the agent registry. "
+                    "Valid examples: 'requirements-gatherer', 'task-planner', "
+                    "'technical-requirements-specialist', 'agent-creator', etc. "
+                    "If you need a specialized implementation agent, ensure it was created "
+                    "by the agent-creator first."
+                ),
+            }
+
         # Validate priority range
         if not isinstance(base_priority, int) or not 0 <= base_priority <= 10:
             return {
