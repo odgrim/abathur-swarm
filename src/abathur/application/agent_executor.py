@@ -165,11 +165,13 @@ class AgentExecutor:
     def _load_agent_definition(self, agent_type: str) -> dict[str, Any]:
         """Load agent definition from YAML or MD file.
 
-        Searches for agent definitions in the following order:
-        1. .claude/agents/abathur/{agent_type}.yaml
-        2. .claude/agents/abathur/{agent_type}.md
-        3. .claude/agents/{agent_type}.yaml
-        4. .claude/agents/{agent_type}.md
+        Searches for agent definitions recursively in .claude/agents/ with priority:
+        1. .claude/agents/abathur/{agent_type}.yaml (core agents)
+        2. .claude/agents/abathur/{agent_type}.md (core agents)
+        3. .claude/agents/{agent_type}.yaml (root level)
+        4. .claude/agents/{agent_type}.md (root level)
+        5. Recursively searches all subdirectories for {agent_type}.yaml
+        6. Recursively searches all subdirectories for {agent_type}.md
 
         Args:
             agent_type: Type of agent (e.g., 'general', 'code-reviewer', etc.)
@@ -180,24 +182,38 @@ class AgentExecutor:
         Raises:
             FileNotFoundError: If agent definition not found
         """
-        # Search paths in priority order
-        search_paths = [
+        # Priority search paths (checked first)
+        priority_search_paths = [
             self.agents_dir / "abathur" / f"{agent_type}.yaml",
             self.agents_dir / "abathur" / f"{agent_type}.md",
             self.agents_dir / f"{agent_type}.yaml",
             self.agents_dir / f"{agent_type}.md",
         ]
 
+        # Check priority paths first
         agent_file = None
-        for path in search_paths:
+        for path in priority_search_paths:
             if path.exists():
                 agent_file = path
                 break
 
+        # If not found in priority paths, search recursively
+        if agent_file is None:
+            # Search for .yaml files recursively
+            for yaml_file in self.agents_dir.rglob(f"{agent_type}.yaml"):
+                agent_file = yaml_file
+                break
+
+            # If still not found, search for .md files recursively
+            if agent_file is None:
+                for md_file in self.agents_dir.rglob(f"{agent_type}.md"):
+                    agent_file = md_file
+                    break
+
         if agent_file is None:
             raise FileNotFoundError(
                 f"Agent definition not found: {agent_type} "
-                f"(searched in {self.agents_dir} and {self.agents_dir / 'abathur'})"
+                f"(searched recursively in {self.agents_dir})"
             )
 
         with open(agent_file) as f:
