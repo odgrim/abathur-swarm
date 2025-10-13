@@ -227,7 +227,7 @@ Agents use the task queue for managing complex workflows:
   "arguments": {
     "description": "Analyze requirements for new feature",
     "source": "agent_planner",
-    "agent_type": "requirements-specialist",
+    "agent_type": "requirements-gatherer",
     "base_priority": 8,
     "prerequisites": [],
     "deadline": "2025-12-31T23:59:59Z"

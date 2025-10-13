@@ -36,7 +36,7 @@ task_enqueue({
     "description": "Process user requirements",
     "source": "requirements-gatherer",
     "priority": 5,  # 1-10 scale
-    "agent_type": "requirements-specialist",
+    "agent_type": "requirements-gatherer",
     "prerequisite_task_ids": [],  # Optional task dependencies
     "deadline": "2025-12-31T23:59:59Z"  # Optional deadline
 })
@@ -78,7 +78,7 @@ requirements_task = task_enqueue({
     "description": "Gather Initial User Requirements",
     "source": "workflow-orchestrator",
     "priority": 8,
-    "agent_type": "requirements-specialist"
+    "agent_type": "requirements-gatherer"
 })
 
 # Technical Specification Phase
