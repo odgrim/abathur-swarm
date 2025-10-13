@@ -38,7 +38,9 @@ When invoked, you must follow these steps:
        "limit": 50
    })
 
-   # Check filesystem for existing agent files
+   # Check filesystem for existing agent files in BOTH directories
+   # Search .claude/agents/abathur/ for core orchestration agents
+   # Search .claude/agents/workers/ for specialist agents
    # Use Glob to find all agent files
    # Compare required capabilities with existing agents
    ```
@@ -66,7 +68,9 @@ When invoked, you must follow these steps:
 
 4. **Agent File Creation**
    - Generate complete agent markdown file
-   - Save to .claude/agents/workers/[agent-name].md
+   - **ALWAYS save to .claude/agents/workers/[agent-name].md** (NOT .claude/agents/abathur/)
+   - The abathur/ directory is reserved for core orchestration agents only
+   - All new specialist/worker agents MUST go in workers/ directory
    - Validate frontmatter syntax
    - Verify file was created successfully
 
@@ -110,11 +114,15 @@ When invoked, you must follow these steps:
 - Always research domain best practices before creation
 - **ALWAYS check for existing agents before creating new ones**:
   - Search memory at namespace agents:registry
-  - Use Glob to find agent files
+  - Use Glob to find agent files in both .claude/agents/abathur/ and .claude/agents/workers/
   - Compare capabilities to avoid duplication
 - **ALWAYS load technical specifications from memory** if task provides namespace
 - **ALWAYS store created agents in memory** at agents:registry namespace
-- Each agent should follow the template patterns from other agents in this directory
+- **CRITICAL: All new agents MUST be created in .claude/agents/workers/ directory**
+  - The .claude/agents/abathur/ directory is ONLY for core orchestration agents
+  - Never create new agents in .claude/agents/abathur/ - this pollutes the core agent directory
+  - Always use path: .claude/agents/workers/[agent-name].md
+- Each agent should follow the template patterns from existing agents
 - Include MCP server access if the agent needs memory or task queue
 - Provide rich context examples in the agent's instructions
 - Document what the agent should NOT do as well as what it should do
@@ -162,7 +170,7 @@ When invoked, you must follow these steps:
   },
   "deliverables": {
     "files_created": [
-      "/path/to/agent-name.md"
+      ".claude/agents/workers/agent-name.md"
     ],
     "agent_specifications": [
       {
