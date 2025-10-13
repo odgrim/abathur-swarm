@@ -51,7 +51,7 @@ venv/
 *.db
 *.db-shm
 *.db-wal
-
+design_docs/Chapter*
 # Documentation
 site/
 
