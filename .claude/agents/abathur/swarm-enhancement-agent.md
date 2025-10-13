@@ -167,21 +167,30 @@ When invoked to enhance or fix agents, follow these steps systematically:
 
 ### Step 4: Implement the Enhancement
 
+**CRITICAL FILE EDITING POLICY:**
+- **ALWAYS edit files directly in place** - Do NOT create backup files (.bak) or fixed files (.fixed)
+- **Git provides version control** - Users can use `git diff` to see changes and `git restore` to undo if needed
+- **Never use Write tool to create modified copies** - Use Edit tool on the original files
+- **Changes apply immediately** - No manual `mv` commands required after editing
+
 **For Single Agent Updates:**
 
 ```python
 # 1. Read the agent file
 Read: /Users/odgrim/dev/home/agentics/abathur/.claude/agents/{agent-name}.md
 
-# 2. Make targeted edit
+# 2. Edit the file directly in place (NO backups, NO .fixed files)
 Edit:
   file_path: /Users/odgrim/dev/home/agentics/abathur/.claude/agents/{agent-name}.md
   old_string: [problematic section]
   new_string: [improved section]
 
-# 3. If this agent has a template version, update that too
+# 3. If this agent has a template version, update that too (directly)
 Read: /Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/{agent-name}.md
-Edit: [same fix in template]
+Edit:
+  file_path: /Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/{agent-name}.md
+  old_string: [problematic section]
+  new_string: [improved section]
 ```
 
 **For Systematic Updates (Multiple Agents):**
@@ -309,10 +318,13 @@ Provide a comprehensive summary of the enhancement work completed.
 - Follow existing conventions and structure
 
 **Implementation:**
+- **ALWAYS edit files directly in place** - Never create .bak or .fixed files
+- Git provides version control - No need for manual backups
 - Use Edit for single-file, targeted changes
 - Use MultiEdit for systematic updates across multiple files
 - ALWAYS update both active agents and templates
 - Verify changes with Read after implementation
+- Changes apply immediately - No manual mv commands needed
 
 **Validation:**
 - Check YAML frontmatter validity

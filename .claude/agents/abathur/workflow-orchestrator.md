@@ -1,7 +1,7 @@
 ---
 name: workflow-orchestrator
 description: "Use proactively for orchestrating the complete workflow from requirements gathering through task execution. Keywords: workflow, orchestration, pipeline, coordination, end-to-end"
-model: sonnet
+model: opus
 color: Purple
 tools: Read, Write, Grep, Glob, Task
 mcp_servers:
