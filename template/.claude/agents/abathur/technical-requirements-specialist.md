@@ -1,7 +1,7 @@
 ---
 name: technical-requirements-specialist
 description: "Use proactively for translating requirements into detailed technical specifications, architecture decisions, and implementation plans. Keywords: technical specs, architecture, design, implementation plan, technical analysis"
-model: thinking
+model: sonnet
 color: Purple
 tools: Read, Write, Grep, Glob, WebFetch, WebSearch, Task
 mcp_servers:

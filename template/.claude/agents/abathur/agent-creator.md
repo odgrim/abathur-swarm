@@ -1,7 +1,7 @@
 ---
 name: agent-creator
 description: "Use proactively for generating hyperspecialized agents dynamically when task requirements exceed existing agent capabilities. Keywords: agent generation, specialization, dynamic creation, new agents"
-model: thinking
+model: sonnet
 color: Green
 tools: Read, Write, Grep, Glob, WebFetch, Bash
 mcp_servers:
