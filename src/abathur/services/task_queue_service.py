@@ -166,6 +166,12 @@ class TaskQueueService:
             prerequisites = prerequisites or []
             input_data = input_data or {}
 
+            # Generate summary if not provided
+            if summary is None:
+                summary = description[:100].strip()
+                if not summary:
+                    summary = "Task"
+
             # Validate base_priority range
             if not 0 <= base_priority <= 10:
                 raise ValueError(f"base_priority must be in range [0, 10], got {base_priority}")
