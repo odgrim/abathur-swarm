@@ -1406,7 +1406,7 @@ class Database:
             else datetime.now(timezone.utc),
             created_by=row_dict["created_by"],
             parent_task_id=UUID(row_dict["parent_task_id"]) if row_dict["parent_task_id"] else None,
-            dependencies=[UUID(dep) for dep in json.loads(row_dict["dependencies"])],
+            dependencies=[UUID(dep) for dep in json.loads(row_dict["dependencies"])] if row_dict.get("dependencies") else [],
             session_id=row_dict.get("session_id"),
             summary=row_dict.get("summary"),
             # NEW: Enhanced task queue fields

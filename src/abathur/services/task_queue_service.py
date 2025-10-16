@@ -20,6 +20,7 @@ Performance targets:
 - Execution plan: <30ms (100-task graph)
 """
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -253,7 +254,7 @@ class TaskQueueService:
                         task.last_updated_at.isoformat(),
                         None,  # created_by
                         str(parent_task_id) if parent_task_id else None,
-                        "[]",  # dependencies as JSON array
+                        json.dumps([str(pid) for pid in prerequisites]),  # dependencies as JSON array
                         session_id,
                         task.source.value,
                         DependencyType.SEQUENTIAL.value,
