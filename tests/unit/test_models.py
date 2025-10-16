@@ -130,35 +130,35 @@ class TestTask:
         assert serialized["summary"] is None
 
     def test_task_summary_max_length_at_boundary(self) -> None:
-        """Test summary field validation at exact boundary (max_length=200)."""
-        # Arrange - create summary with exactly 200 characters
-        summary_200_chars = "x" * 200
+        """Test summary field validation at exact boundary (max_length=500)."""
+        # Arrange - create summary with exactly 500 characters
+        summary_500_chars = "x" * 500
 
         # Act
         task = Task(
-            prompt="Test task with 200 char summary",
-            summary=summary_200_chars,
+            prompt="Test task with 500 char summary",
+            summary=summary_500_chars,
         )
 
-        # Assert - should accept exactly 200 characters
-        assert task.summary == summary_200_chars
-        assert len(task.summary) == 200
+        # Assert - should accept exactly 500 characters
+        assert task.summary == summary_500_chars
+        assert len(task.summary) == 500
 
     def test_task_summary_exceeds_max_length(self) -> None:
-        """Test Pydantic enforces max_length=200 constraint on summary field."""
-        # Arrange - create summary with 201 characters (exceeds limit)
-        summary_201_chars = "x" * 201
+        """Test Pydantic enforces max_length=500 constraint on summary field."""
+        # Arrange - create summary with 501 characters (exceeds limit)
+        summary_501_chars = "x" * 501
 
         # Act & Assert - should raise ValidationError
         with pytest.raises(ValidationError) as exc_info:
             Task(
                 prompt="Test task with too long summary",
-                summary=summary_201_chars,
+                summary=summary_501_chars,
             )
 
         # Verify error message mentions max_length constraint
         error_str = str(exc_info.value).lower()
-        assert "max_length" in error_str or "maximum" in error_str or "200" in error_str
+        assert "max_length" in error_str or "maximum" in error_str or "500" in error_str
 
     def test_task_summary_empty_string(self) -> None:
         """Test summary field accepts empty string."""

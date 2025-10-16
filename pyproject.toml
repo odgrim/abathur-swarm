@@ -78,6 +78,9 @@ strict_equality = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra -q --strict-markers --cov=abathur --cov-report=term-missing --cov-report=html"
+markers = [
+    "performance: marks tests as performance tests (deselect with '-m \"not performance\"')",
+]
 
 [tool.coverage.run]
 source = ["src"]

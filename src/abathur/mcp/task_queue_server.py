@@ -139,7 +139,8 @@ class AbathurTaskQueueServer:
                             },
                             "summary": {
                                 "type": "string",
-                                "description": "Brief human-readable task summary (max 200 characters)",
+                                "description": "Brief human-readable task summary (max 500 characters)",
+                                "maxLength": 500,
                             },
                         },
                         "required": ["description", "source"],
