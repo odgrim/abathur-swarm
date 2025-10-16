@@ -37,9 +37,16 @@ class DependencyType(str, Enum):
 
 
 class Task(BaseModel):
-    """Represents a unit of work in the task queue."""
+    """Represents a unit of work in the task queue.
+
+    Attributes:
+        id: Unique task identifier
+        summary: Short, human-readable task summary for display (3-200 chars)
+        prompt: The actual instruction/task to execute
+    """
 
     id: UUID = Field(default_factory=uuid4)
+    summary: str = Field(min_length=3, max_length=200, description="Short, human-readable task summary for display")
     prompt: str  # The actual instruction/task to execute
     agent_type: str = (
         "requirements-gatherer"  # Agent definition to use (defaults to requirements-gatherer)
@@ -60,12 +67,6 @@ class Task(BaseModel):
     parent_task_id: UUID | None = None
     dependencies: list[UUID] = Field(default_factory=list)
     session_id: str | None = None  # Link to session for memory context
-    # Human-readable task summary (max 500 chars)
-    summary: str | None = Field(
-        default=None,
-        max_length=500,
-        description="Optional concise summary of task (1-2 sentences, max 500 chars)"
-    )
 
     # NEW: Source tracking
     source: TaskSource = Field(default=TaskSource.HUMAN)
