@@ -125,6 +125,7 @@ class TaskQueueService:
         session_id: str | None = None,
         input_data: dict[str, Any] | None = None,
         feature_branch: str | None = None,
+        task_branch: str | None = None,
     ) -> Task:
         """Enqueue a new task with dependency validation and priority calculation.
 
@@ -150,6 +151,7 @@ class TaskQueueService:
             session_id: Session ID for memory context (optional)
             input_data: Additional input data (optional)
             feature_branch: Feature branch that task changes get merged into (optional)
+            task_branch: Individual task branch for isolated work, merges into feature_branch (optional)
 
         Returns:
             Created task with calculated priority and initial status
@@ -210,6 +212,7 @@ class TaskQueueService:
                 calculated_priority=0.0,  # Will be calculated after depth known
                 dependency_depth=0,  # Will be calculated after dependencies inserted
                 feature_branch=feature_branch,
+                task_branch=task_branch,
                 submitted_at=datetime.now(timezone.utc),
                 last_updated_at=datetime.now(timezone.utc),
             )
@@ -226,8 +229,8 @@ class TaskQueueService:
                         submitted_at, started_at, completed_at, last_updated_at,
                         created_by, parent_task_id, dependencies, session_id,
                         source, dependency_type, calculated_priority, deadline,
-                        estimated_duration_seconds, dependency_depth, feature_branch
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        estimated_duration_seconds, dependency_depth, feature_branch, task_branch
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         str(task.id),
@@ -256,6 +259,7 @@ class TaskQueueService:
                         task.estimated_duration_seconds,
                         0,  # dependency_depth (will update after calculation)
                         feature_branch,
+                        task_branch,
                     ),
                 )
 

@@ -504,6 +504,153 @@ When breaking down a feature into multiple tasks:
            pass
    ```
 
+## Task Branch Workflow
+
+**Purpose**: Individual `task_branch` allows isolated work for specific tasks (e.g., writing a single Python function) that eventually merges into the main `feature_branch`.
+
+### When to Create Task Branches
+
+Create a `task_branch` for tasks that:
+1. **Require isolated git branches** for code changes (e.g., implementing a new function, refactoring a module)
+2. **Will be merged into the feature branch** after completion
+3. **Need separate code review** or testing before integration
+4. **May have experimental or iterative development**
+
+**Example Use Case**: A task to implement a new `calculate_priority()` function that will:
+- Have its own git branch for isolated development
+- Be reviewed and tested independently
+- Eventually merge into `feature/task-queue-enhancements`
+
+### Task Branch Pattern
+
+When creating a task that needs isolated work:
+
+```python
+feature_branch_name = "feature/task-queue-enhancements"
+task_branch_name = f"task/calculate-priority-function"
+
+# 1. Create the implementation task with task_branch
+implementation_task = task_enqueue({
+    "description": """
+# Implement calculate_priority() Function
+
+Write a new `calculate_priority()` function in `src/priority_calculator.py`
+that computes task priority based on deadline, dependencies, and base priority.
+
+## Branch Information
+- Feature Branch: feature/task-queue-enhancements
+- Task Branch: task/calculate-priority-function
+- This task has an isolated branch - work will be committed here first
+
+## Implementation Requirements
+[detailed requirements...]
+
+## Deliverables
+1. Function implementation
+2. Unit tests
+3. Committed to task branch: task/calculate-priority-function
+""",
+    "feature_branch": feature_branch_name,  # Parent feature
+    "task_branch": task_branch_name,        # Individual task branch
+    "agent_type": "python-implementation-specialist",
+    "source": "agent_planner",
+})
+
+# 2. Create follow-up merge task to integrate into feature branch
+merge_task = task_enqueue({
+    "description": """
+# Merge task/calculate-priority-function into feature/task-queue-enhancements
+
+Merge the completed work from task branch into the main feature branch.
+
+## Steps
+1. Verify all tests pass on task branch
+2. Checkout feature branch: feature/task-queue-enhancements
+3. Merge task branch: git merge task/calculate-priority-function
+4. Resolve any conflicts
+5. Run full test suite
+6. Push to feature branch
+
+## Prerequisites
+- Task {implementation_task['task_id']} must be completed
+- All tests must pass
+""",
+    "feature_branch": feature_branch_name,  # Still part of same feature
+    "task_branch": None,  # Merge tasks don't need their own branch
+    "agent_type": "integration-specialist",
+    "source": "agent_planner",
+    "prerequisites": [implementation_task['task_id']],  # Wait for impl to finish
+})
+```
+
+### Task Branch vs Feature Branch
+
+| Aspect | Feature Branch | Task Branch |
+|--------|---------------|-------------|
+| **Scope** | Entire feature (5-15 tasks) | Single task (1 task) |
+| **Lifetime** | Until feature complete | Until merged to feature branch |
+| **Merge Target** | Main branch | Feature branch |
+| **Usage** | All tasks for feature | Specific isolated work |
+| **Example** | `feature/task-queue-enhancements` | `task/calculate-priority-function` |
+
+### Best Practices
+
+1. **Naming Convention for Task Branches**
+   - Format: `task/descriptive-name`
+   - Keep names short and focused
+   - Examples: `task/add-validation`, `task/refactor-parser`
+
+2. **Always Create Merge Tasks**
+   - After creating a task with `task_branch`, create a follow-up merge task
+   - Merge task should depend on the implementation task (use prerequisites)
+   - Merge task integrates work back into `feature_branch`
+
+3. **When NOT to Use Task Branches**
+   - Agent creation tasks (they only modify `.claude/agents/*.md`)
+   - Simple read-only analysis tasks
+   - Documentation-only updates
+   - Tasks that can commit directly to feature branch
+
+4. **Coordination Pattern**
+   ```python
+   # All tasks share the same feature_branch for tracking
+   feature_branch = "feature/memory-service"
+
+   # Some tasks need isolated work (get task_branch)
+   task_branch_for_task_1 = "task/implement-memory-store"
+   task_branch_for_task_2 = "task/add-memory-search"
+
+   # Create tasks with appropriate branches
+   task1 = task_enqueue({
+       "description": "...",
+       "feature_branch": feature_branch,
+       "task_branch": task_branch_for_task_1,  # Isolated work
+       # ...
+   })
+
+   task2 = task_enqueue({
+       "description": "...",
+       "feature_branch": feature_branch,
+       "task_branch": task_branch_for_task_2,  # Isolated work
+       # ...
+   })
+
+   # Create merge tasks
+   merge1 = task_enqueue({
+       "description": "Merge task/implement-memory-store into feature/memory-service",
+       "feature_branch": feature_branch,
+       "task_branch": None,  # No isolated branch for merges
+       "prerequisites": [task1['task_id']],
+   })
+
+   merge2 = task_enqueue({
+       "description": "Merge task/add-memory-search into feature/memory-service",
+       "feature_branch": feature_branch,
+       "task_branch": None,
+       "prerequisites": [task2['task_id']],
+   })
+   ```
+
 **Deliverable Output Format:**
 ```json
 {

@@ -133,6 +133,10 @@ class AbathurTaskQueueServer:
                                 "type": "string",
                                 "description": "Feature branch that task changes get merged into",
                             },
+                            "task_branch": {
+                                "type": "string",
+                                "description": "Individual task branch for isolated work, merges into feature_branch",
+                            },
                         },
                         "required": ["description", "source"],
                     },
@@ -366,6 +370,7 @@ class AbathurTaskQueueServer:
         input_data = arguments.get("input_data", {})
         parent_task_id = arguments.get("parent_task_id")
         feature_branch = arguments.get("feature_branch")
+        task_branch = arguments.get("task_branch")
 
         # Validate agent_type - reject generic/invalid agent types
         invalid_agent_types = [
@@ -442,6 +447,7 @@ class AbathurTaskQueueServer:
                 session_id=session_id,
                 input_data=input_data,
                 feature_branch=feature_branch,
+                task_branch=task_branch,
             )
 
             return {
@@ -704,6 +710,7 @@ class AbathurTaskQueueServer:
             "result_data": task.result_data,
             "error_message": task.error_message,
             "feature_branch": task.feature_branch,
+            "task_branch": task.task_branch,
         }
 
     async def run(self) -> None:

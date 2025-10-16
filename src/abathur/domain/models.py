@@ -76,6 +76,9 @@ class Task(BaseModel):
     # NEW: Feature branch tracking
     feature_branch: str | None = None  # Feature branch that task changes get merged into
 
+    # NEW: Task branch tracking
+    task_branch: str | None = None  # Individual task branch for isolated work (merges into feature_branch)
+
     model_config = ConfigDict(
         json_encoders={
             UUID: str,
