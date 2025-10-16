@@ -137,6 +137,10 @@ class AbathurTaskQueueServer:
                                 "type": "string",
                                 "description": "Individual task branch for isolated work, merges into feature_branch",
                             },
+                            "summary": {
+                                "type": "string",
+                                "description": "Brief human-readable task summary (max 200 characters)",
+                            },
                         },
                         "required": ["description", "source"],
                     },
@@ -371,6 +375,7 @@ class AbathurTaskQueueServer:
         parent_task_id = arguments.get("parent_task_id")
         feature_branch = arguments.get("feature_branch")
         task_branch = arguments.get("task_branch")
+        summary = arguments.get("summary")
 
         # Validate agent_type - reject generic/invalid agent types
         invalid_agent_types = [
@@ -448,6 +453,7 @@ class AbathurTaskQueueServer:
                 input_data=input_data,
                 feature_branch=feature_branch,
                 task_branch=task_branch,
+                summary=summary,
             )
 
             return {
@@ -689,26 +695,49 @@ class AbathurTaskQueueServer:
             return {"error": "InternalError", "message": str(e)}
 
     def _serialize_task(self, task: Any) -> dict[str, Any]:
-        """Serialize Task object to JSON-compatible dict."""
+        """Serialize Task object to JSON-compatible dict with ALL 28 Task model fields."""
         return {
+            # Core identification
             "id": str(task.id),
             "prompt": task.prompt,
             "agent_type": task.agent_type,
             "priority": task.priority,
             "status": task.status.value,
-            "calculated_priority": task.calculated_priority,
-            "dependency_depth": task.dependency_depth,
-            "source": task.source.value,
-            "parent_task_id": str(task.parent_task_id) if task.parent_task_id else None,
-            "session_id": task.session_id,
-            "submitted_at": task.submitted_at.isoformat(),
-            "started_at": task.started_at.isoformat() if task.started_at else None,
-            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
-            "deadline": task.deadline.isoformat() if task.deadline else None,
-            "estimated_duration_seconds": task.estimated_duration_seconds,
+
+            # Data fields
             "input_data": task.input_data,
             "result_data": task.result_data,
             "error_message": task.error_message,
+
+            # Retry and timeout fields
+            "retry_count": task.retry_count,
+            "max_retries": task.max_retries,
+            "max_execution_timeout_seconds": task.max_execution_timeout_seconds,
+
+            # Timestamp fields
+            "submitted_at": task.submitted_at.isoformat(),
+            "started_at": task.started_at.isoformat() if task.started_at else None,
+            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+            "last_updated_at": task.last_updated_at.isoformat(),
+
+            # Relationship fields
+            "created_by": task.created_by,
+            "parent_task_id": str(task.parent_task_id) if task.parent_task_id else None,
+            "dependencies": [str(dep) for dep in task.dependencies],
+            "session_id": task.session_id,
+
+            # Summary field (new)
+            "summary": task.summary,
+
+            # Enhanced task queue fields
+            "source": task.source.value,
+            "dependency_type": task.dependency_type.value,
+            "calculated_priority": task.calculated_priority,
+            "deadline": task.deadline.isoformat() if task.deadline else None,
+            "estimated_duration_seconds": task.estimated_duration_seconds,
+            "dependency_depth": task.dependency_depth,
+
+            # Branch tracking fields
             "feature_branch": task.feature_branch,
             "task_branch": task.task_branch,
         }

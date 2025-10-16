@@ -60,6 +60,11 @@ class Task(BaseModel):
     parent_task_id: UUID | None = None
     dependencies: list[UUID] = Field(default_factory=list)
     session_id: str | None = None  # Link to session for memory context
+    summary: str | None = Field(
+        default=None,
+        max_length=200,
+        description="Human-readable task summary (max 200 chars)"
+    )
 
     # NEW: Source tracking
     source: TaskSource = Field(default=TaskSource.HUMAN)

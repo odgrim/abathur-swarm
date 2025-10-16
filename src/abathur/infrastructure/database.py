@@ -376,6 +376,18 @@ class Database:
                 await conn.commit()
                 print("Added task_branch column to tasks")
 
+            # Migration: Add summary column to tasks
+            if "summary" not in column_names:
+                print("Migrating database schema: adding summary to tasks")
+                await conn.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN summary TEXT
+                    """
+                )
+                await conn.commit()
+                print("Added summary column to tasks")
+
         # Check if agents table exists and needs session_id column
         cursor = await conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='agents'"
@@ -676,6 +688,7 @@ class Database:
                 dependency_depth INTEGER DEFAULT 0,
                 feature_branch TEXT,
                 task_branch TEXT,
+                summary TEXT,
                 FOREIGN KEY (parent_task_id) REFERENCES tasks(id),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
             )
@@ -997,8 +1010,8 @@ class Database:
                     submitted_at, started_at, completed_at, last_updated_at,
                     created_by, parent_task_id, dependencies, session_id,
                     source, dependency_type, calculated_priority, deadline,
-                    estimated_duration_seconds, dependency_depth, feature_branch, task_branch
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    estimated_duration_seconds, dependency_depth, feature_branch, task_branch, summary
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(task.id),
@@ -1028,6 +1041,7 @@ class Database:
                     task.dependency_depth,
                     task.feature_branch,
                     task.task_branch,
+                    task.summary,
                 ),
             )
             await conn.commit()
@@ -1394,6 +1408,7 @@ class Database:
             parent_task_id=UUID(row_dict["parent_task_id"]) if row_dict["parent_task_id"] else None,
             dependencies=[UUID(dep) for dep in json.loads(row_dict["dependencies"])],
             session_id=row_dict.get("session_id"),
+            summary=row_dict.get("summary"),
             # NEW: Enhanced task queue fields
             source=TaskSource(row_dict.get("source", "human")),
             dependency_type=DependencyType(row_dict.get("dependency_type", "sequential")),
