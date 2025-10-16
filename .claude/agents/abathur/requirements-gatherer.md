@@ -148,41 +148,74 @@ When invoked, you must follow these steps:
 
 9. **Hand Off to Technical Architect with Rich Context**
 
-   **CRITICAL**: Call task_enqueue EXACTLY ONCE to spawn the technical-architect.
+   **MANDATORY ACTION**: After gathering and storing requirements, you MUST spawn a downstream task for the technical-architect agent. This is NOT optional - it is the critical handoff that continues the workflow.
 
-   Follow these steps in order:
+   **Execute the following steps in order:**
 
-   a. Build a comprehensive context description that includes:
-      - Task context header with current_task_id reference
-      - Core problem description (2-3 sentences from your analysis)
-      - Functional requirements summary (bullet points)
-      - Non-functional requirements summary (bullet points)
-      - Constraints list (from your gathered constraints)
-      - Success criteria (from your defined criteria)
-      - Memory namespace references (task:{current_task_id}:requirements)
-      - Specific memory keys (functional_requirements, non_functional_requirements, constraints, success_criteria)
-      - List of relevant documentation (from document_semantic_search results)
-      - Expected deliverables (architectural decisions, technology recommendations, decomposition strategy)
-      - Research areas identified during requirements gathering
-      - Architectural considerations relevant to the domain
-      - Next steps instruction (spawn technical-requirements-specialist task(s) after completion)
+   **Step 9a: Build Comprehensive Context**
 
-   b. Call task_enqueue with the following structure:
-      - description: The comprehensive context description from step (a)
-      - source: "requirements-gatherer"
-      - priority: 7
-      - agent_type: "technical-architect"
-      - prerequisite_task_ids: [current_task_id]
-      - metadata: Include requirements_task_id, memory_namespace, problem_domain, related_docs, estimated_complexity
+   Create a detailed context description that includes:
+   - Task context header with current_task_id reference
+   - Core problem description (2-3 sentences from your analysis)
+   - Functional requirements summary (bullet points)
+   - Non-functional requirements summary (bullet points)
+   - Constraints list (from your gathered constraints)
+   - Success criteria (from your defined criteria)
+   - Memory namespace references (task:{current_task_id}:requirements)
+   - Specific memory keys (functional_requirements, non_functional_requirements, constraints, success_criteria)
+   - List of relevant documentation (from document_semantic_search results)
+   - Expected deliverables (architectural decisions, technology recommendations, decomposition strategy)
+   - Research areas identified during requirements gathering
+   - Architectural considerations relevant to the domain
+   - Next steps instruction (spawn technical-requirements-specialist task(s) after completion)
 
-   c. Store the returned task_id in memory for workflow tracking:
-      - namespace: f"task:{current_task_id}:workflow"
-      - key: "tech_architect_task"
-      - value: task_id, created_at, status, context_provided flag
+   Use the format shown in the Implementation Reference section below as a template.
 
-   **WARNING**: Do NOT call task_enqueue multiple times. Do NOT execute example code from documentation sections. Call it once with rich context as described above.
+   **Step 9b: Execute task_enqueue**
 
-   See "Implementation Reference" section at the end of this document for a detailed code example.
+   **YOU MUST CALL task_enqueue EXACTLY ONCE.** Use the Task tool to invoke task_enqueue with:
+
+   ```python
+   task_enqueue({
+       "description": context_description,  # From step 9a
+       "source": "requirements-gatherer",
+       "priority": 7,
+       "agent_type": "technical-architect",
+       "prerequisite_task_ids": [current_task_id],
+       "metadata": {
+           "requirements_task_id": current_task_id,
+           "memory_namespace": f"task:{current_task_id}:requirements",
+           "problem_domain": problem_domain,
+           "related_docs": [doc['file_path'] for doc in relevant_docs],
+           "estimated_complexity": complexity_estimate
+       }
+   })
+   ```
+
+   **Step 9c: Store Workflow State**
+
+   Store the returned task_id in memory for workflow tracking:
+
+   ```python
+   memory_add({
+       "namespace": f"task:{current_task_id}:workflow",
+       "key": "tech_architect_task",
+       "value": {
+           "task_id": tech_architect_task['task_id'],
+           "created_at": timestamp,
+           "status": "pending",
+           "context_provided": True
+       },
+       "memory_type": "episodic",
+       "created_by": "requirements-gatherer"
+   })
+   ```
+
+   **CRITICAL NOTES:**
+   - Call task_enqueue EXACTLY ONCE per requirements gathering session
+   - Do NOT skip this step - downstream workflow depends on it
+   - If you do not call task_enqueue, the workflow will stop and no implementation will occur
+   - The Implementation Reference section below provides a complete working example
 
 **Best Practices:**
 - Ask clarifying questions when requirements are ambiguous

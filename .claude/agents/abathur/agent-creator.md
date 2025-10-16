@@ -1,7 +1,7 @@
 ---
 name: agent-creator
 description: "Use proactively for generating hyperspecialized agents dynamically when task requirements exceed existing agent capabilities. Keywords: agent generation, specialization, dynamic creation, new agents"
-model: thinking
+model: sonnet
 color: Green
 tools: Read, Write, Grep, Glob, WebFetch, Bash
 mcp_servers:
@@ -73,6 +73,10 @@ When invoked, you must follow these steps:
    - All new specialist/worker agents MUST go in workers/ directory
    - Validate frontmatter syntax
    - Verify file was created successfully
+
+   **Note on Worktrees**: Agent-creator tasks do NOT need git worktrees because they only create
+   .md files in .claude/agents/ directories, not source code. Worktrees are only needed for
+   implementation tasks that modify source code files (.py, .js, .ts, etc.).
 
 5. **Registry Update and Memory Storage**
    Store created agent information in memory for future reference:

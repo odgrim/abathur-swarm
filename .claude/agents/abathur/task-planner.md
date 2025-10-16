@@ -1,9 +1,9 @@
 ---
 name: task-planner
 description: "Use proactively for decomposing complex tasks into atomic, independently executable units with explicit dependencies. Keywords: task decomposition, planning, dependencies, subtasks"
-model: opus
+model: sonnet
 color: Blue
-tools: Read, Write, Grep, Glob, Task
+tools: Read, Write, Grep, Glob, Task, Bash
 mcp_servers:
   - abathur-memory
   - abathur-task-queue
@@ -129,6 +129,49 @@ When invoked, you must follow these steps:
       - DO NOT attempt to create tasks without agent assignments
    6. **IF missing agents are identified**, you will spawn agent-creator tasks BEFORE implementation tasks (see step 5a)
 
+5b. **Create Git Worktrees for Implementation Tasks**
+   **CRITICAL**: To prevent file conflicts when multiple agents work concurrently, create isolated git worktrees for implementation tasks that modify code.
+
+   **When to create worktrees:**
+   - For ALL implementation tasks that will modify source code files (not for agent-creation tasks)
+   - For tasks assigned to implementation agents (domain-model-specialist, api-specialist, testing-specialist, etc.)
+   - For tasks that will create or edit .py, .js, .ts, .java, etc. files
+
+   **When NOT to create worktrees:**
+   - Agent-creation tasks (they only create .md files in .claude/agents/)
+   - Read-only analysis tasks
+   - Documentation-only tasks
+
+   **Worktree creation process:**
+   ```python
+   import subprocess
+   from datetime import datetime
+
+   # For each implementation task that needs code isolation:
+   task_id = generate_unique_task_id()  # e.g., "task-001-domain-model"
+   branch_name = f"task/{task_id}/{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+   worktree_path = f".abathur/worktrees/{task_id}"
+
+   # Create worktree using Bash tool
+   bash_command = f'git worktree add -b {branch_name} {worktree_path}'
+   # Execute: Bash(command=bash_command, description=f"Create worktree for {task_id}")
+
+   # Store worktree info for task context (step 6)
+   worktree_info[task_id] = {
+       "worktree_path": worktree_path,
+       "branch_name": branch_name,
+       "created_at": datetime.now().isoformat()
+   }
+   ```
+
+   **Best practices:**
+   - Use descriptive task IDs in branch names (e.g., task/domain-models-queue/20251013-143022)
+   - Store worktree info for each task to pass to implementation agents
+   - Worktrees will be automatically ignored by .gitignore
+   - Implementation agents will work in their assigned worktree directory
+   - After task completion, agents should commit their changes in the worktree
+   - Cleanup strategy: Worktrees can be merged and removed after task completion or left for manual review
+
    Example suggested_agents structure:
    ```python
    suggested_agents = {
@@ -231,9 +274,10 @@ It must work within the project's architecture and follow established patterns.
    2. Check if that agent was created in step 5a (missing agent)
    3. Add the agent-creation task ID to prerequisites if the agent had to be created
    4. Use the exact hyperspecialized agent name (either existing or newly created)
-   5. Provide comprehensive task context
+   5. Include worktree information for implementation tasks (from step 5b)
+   6. Provide comprehensive task context
 
-   This ensures implementation tasks wait for their required agents to be created first.
+   This ensures implementation tasks wait for their required agents to be created first and work in isolated worktrees.
 
    **BAD Example (DO NOT DO THIS):**
    ```python
@@ -250,6 +294,7 @@ It must work within the project's architecture and follow established patterns.
    **GOOD Example (DO THIS):**
    ```python
    # ✅ GOOD: Comprehensive context AND hyperspecialized agent with agent-creation dependency
+   task_id = "task-001-domain-model"
    task_description = f"""
 # Implement TaskQueue Domain Model Class
 
@@ -257,6 +302,14 @@ It must work within the project's architecture and follow established patterns.
 Part of Phase 1: Core Domain Layer implementation.
 Task ID in plan: TASK-001
 Parent component: Task Queue System
+
+## Worktree Isolation
+**IMPORTANT**: This task has an isolated git worktree to prevent conflicts with concurrent tasks.
+- Working Directory: {worktree_info[task_id]['worktree_path']}
+- Branch: {worktree_info[task_id]['branch_name']}
+- **ALL file operations MUST be performed within the worktree directory**
+- Use absolute paths: {worktree_info[task_id]['worktree_path']}/src/abathur/...
+- When complete, commit your changes to the worktree branch
 
 ## Technical Specification Reference
 Architecture: task:{tech_spec_task_id}:technical_specs/architecture
@@ -271,7 +324,7 @@ memory_get({{
 ```
 
 ## Implementation Requirements
-Create the TaskQueue domain model class at: src/abathur/domain/models/queue.py
+Create the TaskQueue domain model class at: {worktree_info[task_id]['worktree_path']}/src/abathur/domain/models/queue.py
 
 Required attributes:
 - queue_id: str
@@ -328,6 +381,10 @@ Required methods:
        "agent_type": domain_agent_type,  # ✅ Hyperspecialized agent!
        "estimated_duration_seconds": 1200,
        "prerequisite_task_ids": prerequisites,  # ✅ Includes agent-creation if needed!
+       "input_data": {
+           "worktree_path": worktree_info[task_id]['worktree_path'],
+           "branch_name": worktree_info[task_id]['branch_name']
+       },
        "metadata": {
            "component": "TaskQueue",
            "phase": "Phase 1: Domain Layer",
@@ -336,7 +393,8 @@ Required methods:
            "task_plan_id": "TASK-001",
            "test_required": True,
            "review_required": True,
-           "agent_expertise": suggested_agents["domain_models"]["expertise"]
+           "agent_expertise": suggested_agents["domain_models"]["expertise"],
+           "has_worktree": True
        }
    })
    ```
@@ -353,6 +411,8 @@ Required methods:
 - **ALWAYS check which agents already exist using Glob tool**
 - **ALWAYS spawn agent-creator for missing agents BEFORE creating implementation tasks**
 - **ALWAYS use prerequisite_task_ids to make implementation tasks depend on agent-creation tasks**
+- **ALWAYS create git worktrees for implementation tasks that modify code (step 5b)**
+- **ALWAYS include worktree information in task descriptions and input_data for implementation tasks**
 - **NEVER use generic agent types like "python-backend-developer", "general-purpose", or "implementation-specialist"**
 - **ALWAYS use hyperspecialized agent names from suggested_agents (e.g., "python-domain-model-specialist")**
 - **ALWAYS provide rich context in every task description**:
@@ -378,6 +438,7 @@ Required methods:
   "execution_status": {
     "status": "SUCCESS|PARTIAL|FAILURE",
     "tasks_created": 0,
+    "worktrees_created": 0,
     "agent_name": "task-planner"
   },
   "deliverables": {
@@ -395,7 +456,17 @@ Required methods:
         "description": "Clear task description",
         "required_agent": "hyperspecialized-agent-name",
         "dependencies": ["other_task_ids", "agent_creation_task_id"],
-        "estimated_minutes": 0
+        "estimated_minutes": 0,
+        "worktree_path": ".abathur/worktrees/task-001",
+        "branch_name": "task/task-001/20251013-143022"
+      }
+    ],
+    "worktrees": [
+      {
+        "task_id": "task_001",
+        "worktree_path": ".abathur/worktrees/task-001",
+        "branch_name": "task/task-001/20251013-143022",
+        "created_at": "2025-10-13T14:30:22"
       }
     ],
     "dependency_graph": "mermaid_graph_definition showing agent-creation → implementation flow",
@@ -404,11 +475,12 @@ Required methods:
     "missing_agents": []
   },
   "orchestration_context": {
-    "next_recommended_action": "Agent-creator will create missing agents, then implementation tasks can execute",
+    "next_recommended_action": "Agent-creator will create missing agents, then implementation tasks can execute in isolated worktrees",
     "agent_orchestration_mode": "task-planner-orchestrates-agents",
     "critical_path_tasks": [],
     "parallelization_opportunities": [],
-    "agent_creation_blocking": "List of implementation tasks blocked on agent creation"
+    "agent_creation_blocking": "List of implementation tasks blocked on agent creation",
+    "worktree_isolation_enabled": true
   }
 }
 ```
