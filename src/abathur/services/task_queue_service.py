@@ -116,6 +116,7 @@ class TaskQueueService:
         self,
         description: str,
         source: TaskSource,
+        summary: str | None = None,
         parent_task_id: UUID | None = None,
         prerequisites: list[UUID] | None = None,
         base_priority: int = 5,
@@ -142,6 +143,7 @@ class TaskQueueService:
         Args:
             description: Task description/instruction
             source: Task source (HUMAN or AGENT_*)
+            summary: Brief human-readable task summary (max 200 characters, optional)
             parent_task_id: Parent task ID (for hierarchical tasks)
             prerequisites: List of prerequisite task IDs
             base_priority: User-specified priority (0-10, default 5)
@@ -204,6 +206,7 @@ class TaskQueueService:
                 priority=base_priority,
                 status=initial_status,
                 source=source,
+                summary=summary,
                 parent_task_id=parent_task_id,
                 session_id=session_id,
                 input_data=input_data,
@@ -229,8 +232,8 @@ class TaskQueueService:
                         submitted_at, started_at, completed_at, last_updated_at,
                         created_by, parent_task_id, dependencies, session_id,
                         source, dependency_type, calculated_priority, deadline,
-                        estimated_duration_seconds, dependency_depth, feature_branch, task_branch
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        estimated_duration_seconds, dependency_depth, feature_branch, task_branch, summary
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         str(task.id),
@@ -260,6 +263,7 @@ class TaskQueueService:
                         0,  # dependency_depth (will update after calculation)
                         feature_branch,
                         task_branch,
+                        summary,
                     ),
                 )
 
