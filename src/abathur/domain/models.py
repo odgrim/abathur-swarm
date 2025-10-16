@@ -79,6 +79,13 @@ class Task(BaseModel):
     # NEW: Task branch tracking
     task_branch: str | None = None  # Individual task branch for isolated work (merges into feature_branch)
 
+    # NEW: Summary field
+    summary: str | None = Field(
+        default=None,
+        max_length=200,
+        description="Optional human-readable summary of task (max 200 chars)"
+    )
+
     model_config = ConfigDict(
         json_encoders={
             UUID: str,
