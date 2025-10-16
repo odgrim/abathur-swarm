@@ -82,6 +82,11 @@ class AbathurTaskQueueServer:
                                 "type": "string",
                                 "description": "Task description/instruction",
                             },
+                            "summary": {
+                                "type": "string",
+                                "description": "Optional brief summary of task (max 200 chars)",
+                                "maxLength": 200,
+                            },
                             "source": {
                                 "type": "string",
                                 "enum": [
@@ -361,6 +366,7 @@ class AbathurTaskQueueServer:
         source = arguments["source"]
 
         # Optional parameters with defaults
+        summary = arguments.get("summary")
         agent_type = arguments.get("agent_type", "requirements-gatherer")
         base_priority = arguments.get("base_priority", 5)
         prerequisites = arguments.get("prerequisites", [])
@@ -448,6 +454,7 @@ class AbathurTaskQueueServer:
                 input_data=input_data,
                 feature_branch=feature_branch,
                 task_branch=task_branch,
+                summary=summary,
             )
 
             return {
@@ -693,6 +700,7 @@ class AbathurTaskQueueServer:
         return {
             "id": str(task.id),
             "prompt": task.prompt,
+            "summary": task.summary,
             "agent_type": task.agent_type,
             "priority": task.priority,
             "status": task.status.value,
