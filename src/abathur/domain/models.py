@@ -5,7 +5,9 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 
 class TaskStatus(str, Enum):
@@ -60,9 +62,8 @@ class Task(BaseModel):
     parent_task_id: UUID | None = None
     dependencies: list[UUID] = Field(default_factory=list)
     session_id: str | None = None  # Link to session for memory context
-    summary: str | None = Field(
+    summary: Annotated[str, StringConstraints(max_length=200)] | None = Field(
         default=None,
-        max_length=200,
         description="Human-readable task summary (max 200 chars)"
     )
 
