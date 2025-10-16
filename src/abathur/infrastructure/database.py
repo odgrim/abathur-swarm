@@ -385,8 +385,19 @@ class Database:
                     ADD COLUMN summary TEXT
                     """
                 )
+                # Backfill existing rows with auto-generated summaries
+                await conn.execute(
+                    """
+                    UPDATE tasks
+                    SET summary = CASE
+                        WHEN prompt = '' OR prompt IS NULL THEN 'Task'
+                        ELSE SUBSTR(prompt, 1, 100)
+                    END
+                    WHERE summary IS NULL OR summary = ''
+                    """
+                )
                 await conn.commit()
-                print("Added summary column to tasks")
+                print("Added summary column to tasks and backfilled existing rows")
 
         # Check if agents table exists and needs session_id column
         cursor = await conn.execute(
