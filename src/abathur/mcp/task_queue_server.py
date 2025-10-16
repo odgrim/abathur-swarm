@@ -191,6 +191,10 @@ class AbathurTaskQueueServer:
                                 "type": "string",
                                 "description": "Filter by agent type",
                             },
+                            "feature_branch": {
+                                "type": "string",
+                                "description": "Filter by feature branch name",
+                            },
                         },
                     },
                 ),
@@ -229,6 +233,42 @@ class AbathurTaskQueueServer:
                             },
                         },
                         "required": ["task_ids"],
+                    },
+                ),
+                Tool(
+                    name="feature_branch_summary",
+                    description="Get comprehensive summary of all tasks for a feature branch including status breakdown, progress metrics, and agent distribution",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "feature_branch": {
+                                "type": "string",
+                                "description": "Feature branch name",
+                            },
+                        },
+                        "required": ["feature_branch"],
+                    },
+                ),
+                Tool(
+                    name="feature_branch_list",
+                    description="List all feature branches with task statistics and completion rates",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {},
+                    },
+                ),
+                Tool(
+                    name="feature_branch_blockers",
+                    description="Identify blocking issues (failed or blocked tasks) preventing feature branch completion",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "feature_branch": {
+                                "type": "string",
+                                "description": "Feature branch name",
+                            },
+                        },
+                        "required": ["feature_branch"],
                     },
                 ),
             ]
@@ -270,6 +310,18 @@ class AbathurTaskQueueServer:
 
                 elif name == "task_execution_plan":
                     result = await self._handle_task_execution_plan(arguments)
+                    return [TextContent(type="text", text=json.dumps(result, default=str))]
+
+                elif name == "feature_branch_summary":
+                    result = await self._handle_feature_branch_summary(arguments)
+                    return [TextContent(type="text", text=json.dumps(result, default=str))]
+
+                elif name == "feature_branch_list":
+                    result = await self._handle_feature_branch_list(arguments)
+                    return [TextContent(type="text", text=json.dumps(result, default=str))]
+
+                elif name == "feature_branch_blockers":
+                    result = await self._handle_feature_branch_blockers(arguments)
                     return [TextContent(type="text", text=json.dumps(result, default=str))]
 
                 else:
@@ -445,6 +497,7 @@ class AbathurTaskQueueServer:
         limit = arguments.get("limit", 50)
         source_filter = arguments.get("source")
         agent_type_filter = arguments.get("agent_type")
+        feature_branch_filter = arguments.get("feature_branch")
 
         # Validate limit
         if not isinstance(limit, int) or limit < 1:
@@ -493,6 +546,8 @@ class AbathurTaskQueueServer:
                 filters["source"] = TaskSource(source_filter)
             if agent_type_filter:
                 filters["agent_type"] = agent_type_filter
+            if feature_branch_filter:
+                filters["feature_branch"] = feature_branch_filter
 
             tasks = await self._db.list_tasks(limit=limit, **filters)
 
@@ -582,6 +637,49 @@ class AbathurTaskQueueServer:
         except CircularDependencyError as e:
             return {"error": "CircularDependencyError", "message": str(e)}
         except Exception as e:
+            return {"error": "InternalError", "message": str(e)}
+
+    async def _handle_feature_branch_summary(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Handle feature_branch_summary tool invocation."""
+        feature_branch = arguments.get("feature_branch")
+        if not feature_branch:
+            return {"error": "ValidationError", "message": "feature_branch is required"}
+
+        try:
+            assert self._db is not None
+            summary = await self._db.get_feature_branch_summary(feature_branch)
+            return summary
+        except Exception as e:
+            logger.error("feature_branch_summary_error", feature_branch=feature_branch, error=str(e))
+            return {"error": "InternalError", "message": str(e)}
+
+    async def _handle_feature_branch_list(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Handle feature_branch_list tool invocation."""
+        try:
+            assert self._db is not None
+            branches = await self._db.list_feature_branches()
+            return {"feature_branches": branches, "count": len(branches)}
+        except Exception as e:
+            logger.error("feature_branch_list_error", error=str(e))
+            return {"error": "InternalError", "message": str(e)}
+
+    async def _handle_feature_branch_blockers(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Handle feature_branch_blockers tool invocation."""
+        feature_branch = arguments.get("feature_branch")
+        if not feature_branch:
+            return {"error": "ValidationError", "message": "feature_branch is required"}
+
+        try:
+            assert self._db is not None
+            blockers = await self._db.get_feature_branch_blockers(feature_branch)
+            return {
+                "feature_branch": feature_branch,
+                "blockers": blockers,
+                "blocker_count": len(blockers),
+                "has_blockers": len(blockers) > 0,
+            }
+        except Exception as e:
+            logger.error("feature_branch_blockers_error", feature_branch=feature_branch, error=str(e))
             return {"error": "InternalError", "message": str(e)}
 
     def _serialize_task(self, task: Any) -> dict[str, Any]:

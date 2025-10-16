@@ -432,6 +432,78 @@ Required methods:
 - Map every task back to original requirements (traceability)
 - Verify that every agent_type used either exists already OR has an agent-creation task in prerequisites
 
+## Feature Branch Coordination
+
+**CRITICAL**: All tasks for a single feature MUST use the same `feature_branch` value to enable proper coordination and progress tracking.
+
+### Purpose
+
+The `feature_branch` field coordinates multiple related tasks that together implement a single feature. This enables:
+
+1. **Progress Visibility**: See overall completion status for an entire feature
+2. **Blocker Identification**: Quickly identify failed/blocked tasks preventing feature completion
+3. **Resource Coordination**: Understand which agents are working on which features
+4. **Merge Planning**: Know when all tasks are complete and ready to merge
+
+### Usage Pattern
+
+When breaking down a feature into multiple tasks:
+
+1. **Generate a descriptive feature branch name** based on the feature
+   - Format: `feature/descriptive-name`
+   - Example: `feature/task-queue-enhancements`, `feature/memory-service-refactor`
+
+2. **Pass the SAME feature_branch to ALL related tasks**
+   - Code implementation tasks
+   - Test tasks
+   - Documentation tasks
+   - Integration tasks
+   - Example tasks
+   - Agent creation tasks for the feature
+
+3. **Monitor progress** using feature branch tools
+   - `feature_branch_summary`: Get overall status
+   - `feature_branch_blockers`: Identify issues
+   - `task_list(feature_branch=...)`: List all tasks
+
+### Best Practices
+
+1. **Naming Convention**
+   - Use descriptive, kebab-case branch names
+   - Prefix with `feature/`, `bugfix/`, or `refactor/`
+   - Examples: `feature/authentication-system`, `bugfix/task-timeout-handling`
+
+2. **Granularity**
+   - Feature branch = logical feature unit (not too broad, not too narrow)
+   - Too broad: `feature/backend-improvements` (vague, many unrelated tasks)
+   - Too narrow: `feature/add-one-field` (single task, no coordination needed)
+   - Just right: `feature/task-priority-scheduling` (5-10 related tasks)
+
+3. **Apply to ALL tasks in step 6** when populating the task queue:
+   ```python
+   feature_branch_name = "feature/task-queue-enhancements"
+
+   # All tasks for this feature use the same branch name
+   task_enqueue({
+       "description": task_description,
+       "feature_branch": feature_branch_name,  # ✅ Shared branch
+       # ... other params
+   })
+   ```
+
+4. **Monitoring Workflow**
+   ```python
+   # Before creating dependent tasks, check status
+   summary = feature_branch_summary({"feature_branch": branch_name})
+
+   # If completion rate is low, check for blockers
+   if summary["progress"]["completion_rate"] < 50:
+       blockers = feature_branch_blockers({"feature_branch": branch_name})
+       if blockers["has_blockers"]:
+           # Handle blockers before proceeding
+           pass
+   ```
+
 **Deliverable Output Format:**
 ```json
 {
@@ -439,7 +511,8 @@ Required methods:
     "status": "SUCCESS|PARTIAL|FAILURE",
     "tasks_created": 0,
     "worktrees_created": 0,
-    "agent_name": "task-planner"
+    "agent_name": "task-planner",
+    "feature_branch": "feature/descriptive-name"
   },
   "deliverables": {
     "agent_creation_tasks": [
@@ -447,7 +520,8 @@ Required methods:
         "task_id": "agent_creation_task_id",
         "agent_name": "hyperspecialized-agent-name",
         "domain": "domain-area",
-        "status": "created"
+        "status": "created",
+        "feature_branch": "feature/descriptive-name"
       }
     ],
     "atomic_tasks": [
@@ -458,7 +532,8 @@ Required methods:
         "dependencies": ["other_task_ids", "agent_creation_task_id"],
         "estimated_minutes": 0,
         "worktree_path": ".abathur/worktrees/task-001",
-        "branch_name": "task/task-001/20251013-143022"
+        "branch_name": "task/task-001/20251013-143022",
+        "feature_branch": "feature/descriptive-name"
       }
     ],
     "worktrees": [
@@ -472,7 +547,8 @@ Required methods:
     "dependency_graph": "mermaid_graph_definition showing agent-creation → implementation flow",
     "agents_existing": ["list of agents that already existed"],
     "agents_created": ["list of agents created by agent-creator tasks"],
-    "missing_agents": []
+    "missing_agents": [],
+    "feature_branch": "feature/descriptive-name"
   },
   "orchestration_context": {
     "next_recommended_action": "Agent-creator will create missing agents, then implementation tasks can execute in isolated worktrees",
@@ -480,7 +556,8 @@ Required methods:
     "critical_path_tasks": [],
     "parallelization_opportunities": [],
     "agent_creation_blocking": "List of implementation tasks blocked on agent creation",
-    "worktree_isolation_enabled": true
+    "worktree_isolation_enabled": true,
+    "feature_branch": "feature/descriptive-name"
   }
 }
 ```

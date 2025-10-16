@@ -962,6 +962,15 @@ class Database:
             """
         )
 
+        # Feature branch coordination index
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_tasks_feature_branch
+            ON tasks(feature_branch, status, submitted_at ASC)
+            WHERE feature_branch IS NOT NULL
+            """
+        )
+
     # Task operations
     async def insert_task(self, task: Task) -> None:
         """Insert a new task into the database."""
@@ -1057,28 +1066,58 @@ class Database:
                 return self._row_to_task(row)
             return None
 
-    async def list_tasks(self, status: TaskStatus | None = None, limit: int = 100) -> list[Task]:
-        """List tasks with optional status filter."""
+    async def list_tasks(
+        self,
+        status: TaskStatus | None = None,
+        limit: int = 100,
+        source: TaskSource | None = None,
+        agent_type: str | None = None,
+        feature_branch: str | None = None,
+    ) -> list[Task]:
+        """List tasks with optional filters.
+
+        Args:
+            status: Filter by task status
+            limit: Maximum number of tasks to return
+            source: Filter by task source
+            agent_type: Filter by agent type
+            feature_branch: Filter by feature branch
+
+        Returns:
+            List of tasks matching the filters
+        """
         async with self._get_connection() as conn:
+            # Build dynamic query based on filters
+            where_clauses: list[str] = []
+            params: list[Any] = []
+
             if status:
-                cursor = await conn.execute(
-                    """
-                    SELECT * FROM tasks
-                    WHERE status = ?
-                    ORDER BY priority DESC, submitted_at ASC
-                    LIMIT ?
-                    """,
-                    (status.value, limit),
-                )
-            else:
-                cursor = await conn.execute(
-                    """
-                    SELECT * FROM tasks
-                    ORDER BY priority DESC, submitted_at ASC
-                    LIMIT ?
-                    """,
-                    (limit,),
-                )
+                where_clauses.append("status = ?")
+                params.append(status.value)
+
+            if source:
+                where_clauses.append("source = ?")
+                params.append(source.value)
+
+            if agent_type:
+                where_clauses.append("agent_type = ?")
+                params.append(agent_type)
+
+            if feature_branch:
+                where_clauses.append("feature_branch = ?")
+                params.append(feature_branch)
+
+            where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+            query = f"""
+                SELECT * FROM tasks
+                {where_sql}
+                ORDER BY priority DESC, submitted_at ASC
+                LIMIT ?
+            """
+            params.append(limit)
+
+            cursor = await conn.execute(query, tuple(params))
             rows = await cursor.fetchall()
             return [self._row_to_task(row) for row in rows]
 
@@ -1124,6 +1163,189 @@ class Database:
             )
             rows = await cursor.fetchall()
             return [self._row_to_task(row) for row in rows]
+
+    async def get_feature_branch_summary(self, feature_branch: str) -> dict[str, Any]:
+        """Get comprehensive summary of all tasks for a feature branch.
+
+        Args:
+            feature_branch: Feature branch name to summarize
+
+        Returns:
+            Dictionary with task counts, status breakdown, and progress metrics
+        """
+        async with self._get_connection() as conn:
+            # Get overall task counts by status
+            cursor = await conn.execute(
+                """
+                SELECT status, COUNT(*) as count
+                FROM tasks
+                WHERE feature_branch = ?
+                GROUP BY status
+                """,
+                (feature_branch,),
+            )
+            status_counts = {row["status"]: row["count"] for row in await cursor.fetchall()}
+
+            # Get total task count
+            total_tasks = sum(status_counts.values())
+
+            # Calculate progress metrics
+            completed_count = status_counts.get(TaskStatus.COMPLETED.value, 0)
+            failed_count = status_counts.get(TaskStatus.FAILED.value, 0)
+            running_count = status_counts.get(TaskStatus.RUNNING.value, 0)
+            pending_count = status_counts.get(TaskStatus.PENDING.value, 0)
+            blocked_count = status_counts.get(TaskStatus.BLOCKED.value, 0)
+            ready_count = status_counts.get(TaskStatus.READY.value, 0)
+
+            # Get earliest and latest task timestamps
+            cursor = await conn.execute(
+                """
+                SELECT MIN(submitted_at) as earliest,
+                       MAX(COALESCE(completed_at, last_updated_at)) as latest
+                FROM tasks
+                WHERE feature_branch = ?
+                """,
+                (feature_branch,),
+            )
+            timestamps = await cursor.fetchone()
+
+            # Get agent type breakdown
+            cursor = await conn.execute(
+                """
+                SELECT agent_type, COUNT(*) as count,
+                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed
+                FROM tasks
+                WHERE feature_branch = ?
+                GROUP BY agent_type
+                ORDER BY count DESC
+                """,
+                (feature_branch,),
+            )
+            agent_breakdown = [
+                {
+                    "agent_type": row["agent_type"],
+                    "total": row["count"],
+                    "completed": row["completed"],
+                }
+                for row in await cursor.fetchall()
+            ]
+
+            return {
+                "feature_branch": feature_branch,
+                "total_tasks": total_tasks,
+                "status_breakdown": status_counts,
+                "progress": {
+                    "completed": completed_count,
+                    "failed": failed_count,
+                    "running": running_count,
+                    "pending": pending_count,
+                    "blocked": blocked_count,
+                    "ready": ready_count,
+                    "completion_rate": (
+                        round(completed_count / total_tasks * 100, 2) if total_tasks > 0 else 0
+                    ),
+                },
+                "agent_breakdown": agent_breakdown,
+                "timestamps": {
+                    "earliest_task": timestamps["earliest"] if timestamps["earliest"] else None,
+                    "latest_activity": timestamps["latest"] if timestamps["latest"] else None,
+                },
+            }
+
+    async def get_feature_branch_tasks(
+        self, feature_branch: str, status: TaskStatus | None = None
+    ) -> list[Task]:
+        """Get all tasks for a specific feature branch, optionally filtered by status.
+
+        Args:
+            feature_branch: Feature branch name
+            status: Optional status filter
+
+        Returns:
+            List of tasks for the feature branch
+        """
+        return await self.list_tasks(feature_branch=feature_branch, status=status, limit=1000)
+
+    async def get_feature_branch_blockers(self, feature_branch: str) -> list[dict[str, Any]]:
+        """Identify blocking issues for a feature branch.
+
+        Returns tasks that are failed or blocked, potentially preventing feature completion.
+
+        Args:
+            feature_branch: Feature branch name
+
+        Returns:
+            List of blocker task information
+        """
+        async with self._get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT id, prompt, agent_type, status, error_message, retry_count,
+                       submitted_at, started_at
+                FROM tasks
+                WHERE feature_branch = ?
+                  AND status IN ('failed', 'blocked')
+                ORDER BY submitted_at ASC
+                """,
+                (feature_branch,),
+            )
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "task_id": row["id"],
+                    "prompt": row["prompt"],
+                    "agent_type": row["agent_type"],
+                    "status": row["status"],
+                    "error_message": row["error_message"],
+                    "retry_count": row["retry_count"],
+                    "submitted_at": row["submitted_at"],
+                    "started_at": row["started_at"],
+                }
+                for row in rows
+            ]
+
+    async def list_feature_branches(self) -> list[dict[str, Any]]:
+        """List all feature branches with task statistics.
+
+        Returns:
+            List of feature branch summaries
+        """
+        async with self._get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT feature_branch,
+                       COUNT(*) as total_tasks,
+                       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed,
+                       SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) as running,
+                       SUM(CASE WHEN status IN ('pending', 'blocked', 'ready') THEN 1 ELSE 0 END) as pending,
+                       MIN(submitted_at) as earliest_task,
+                       MAX(last_updated_at) as latest_activity
+                FROM tasks
+                WHERE feature_branch IS NOT NULL
+                GROUP BY feature_branch
+                ORDER BY latest_activity DESC
+                """
+            )
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "feature_branch": row["feature_branch"],
+                    "total_tasks": row["total_tasks"],
+                    "completed": row["completed"],
+                    "failed": row["failed"],
+                    "running": row["running"],
+                    "pending": row["pending"],
+                    "completion_rate": (
+                        round(row["completed"] / row["total_tasks"] * 100, 2)
+                        if row["total_tasks"] > 0
+                        else 0
+                    ),
+                    "earliest_task": row["earliest_task"],
+                    "latest_activity": row["latest_activity"],
+                }
+                for row in rows
+            ]
 
     def _row_to_task(self, row: aiosqlite.Row) -> Task:
         """Convert database row to Task model."""

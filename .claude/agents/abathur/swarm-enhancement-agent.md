@@ -167,11 +167,13 @@ When invoked to enhance or fix agents, follow these steps systematically:
 
 ### Step 4: Implement the Enhancement
 
-**CRITICAL FILE EDITING POLICY:**
-- **ALWAYS edit files directly in place** - Do NOT create backup files (.bak) or fixed files (.fixed)
+**CRITICAL WORKFLOW: Template-First Approach**
+- **ALWAYS work on template files FIRST** - Edit templates in `/Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/`
+- **Use `cp` to publish to active agents** - Copy from template to `.claude/agents/` directory
+- **Make changes ONCE, not twice** - Avoid duplicate editing work
 - **Git provides version control** - Users can use `git diff` to see changes and `git restore` to undo if needed
-- **Never use Write tool to create modified copies** - Use Edit tool on the original files
-- **Changes apply immediately** - No manual `mv` commands required after editing
+- **Do NOT create backup files** - No .bak or .fixed files
+- **Do NOT use scripts to publish** - Simple `cp` command is sufficient
 
 **For Single Agent Updates:**
 
