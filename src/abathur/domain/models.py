@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TaskStatus(str, Enum):
@@ -83,6 +83,14 @@ class Task(BaseModel):
 
     # NEW: Task branch tracking
     task_branch: str | None = None  # Individual task branch for isolated work (merges into feature_branch)
+
+    @field_validator('summary')
+    @classmethod
+    def validate_summary_length(cls, v: str | None) -> str | None:
+        """Validate summary field max_length constraint."""
+        if v is not None and len(v) > 200:
+            raise ValueError(f"summary must not exceed 200 characters (got {len(v)})")
+        return v
 
     model_config = ConfigDict(
         json_encoders={
