@@ -124,6 +124,7 @@ class TaskQueueService:
         agent_type: str = "requirements-gatherer",
         session_id: str | None = None,
         input_data: dict[str, Any] | None = None,
+        feature_branch: str | None = None,
     ) -> Task:
         """Enqueue a new task with dependency validation and priority calculation.
 
@@ -148,6 +149,7 @@ class TaskQueueService:
             agent_type: Agent type to execute task (default "requirements-gatherer")
             session_id: Session ID for memory context (optional)
             input_data: Additional input data (optional)
+            feature_branch: Feature branch that task changes get merged into (optional)
 
         Returns:
             Created task with calculated priority and initial status
@@ -207,6 +209,7 @@ class TaskQueueService:
                 estimated_duration_seconds=estimated_duration_seconds,
                 calculated_priority=0.0,  # Will be calculated after depth known
                 dependency_depth=0,  # Will be calculated after dependencies inserted
+                feature_branch=feature_branch,
                 submitted_at=datetime.now(timezone.utc),
                 last_updated_at=datetime.now(timezone.utc),
             )
@@ -223,8 +226,8 @@ class TaskQueueService:
                         submitted_at, started_at, completed_at, last_updated_at,
                         created_by, parent_task_id, dependencies, session_id,
                         source, dependency_type, calculated_priority, deadline,
-                        estimated_duration_seconds, dependency_depth
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        estimated_duration_seconds, dependency_depth, feature_branch
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         str(task.id),
@@ -252,6 +255,7 @@ class TaskQueueService:
                         task.deadline.isoformat() if task.deadline else None,
                         task.estimated_duration_seconds,
                         0,  # dependency_depth (will update after calculation)
+                        feature_branch,
                     ),
                 )
 

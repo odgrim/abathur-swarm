@@ -73,6 +73,9 @@ class Task(BaseModel):
     estimated_duration_seconds: int | None = None
     dependency_depth: int = Field(default=0)
 
+    # NEW: Feature branch tracking
+    feature_branch: str | None = None  # Feature branch that task changes get merged into
+
     model_config = ConfigDict(
         json_encoders={
             UUID: str,

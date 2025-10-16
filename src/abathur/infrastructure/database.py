@@ -352,6 +352,18 @@ class Database:
                 await conn.commit()
                 print("Added enhanced task queue columns successfully")
 
+            # Migration: Add feature_branch column to tasks
+            if "feature_branch" not in column_names:
+                print("Migrating database schema: adding feature_branch to tasks")
+                await conn.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN feature_branch TEXT
+                    """
+                )
+                await conn.commit()
+                print("Added feature_branch column to tasks")
+
         # Check if agents table exists and needs session_id column
         cursor = await conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='agents'"
@@ -650,6 +662,7 @@ class Database:
                 deadline TIMESTAMP,
                 estimated_duration_seconds INTEGER,
                 dependency_depth INTEGER DEFAULT 0,
+                feature_branch TEXT,
                 FOREIGN KEY (parent_task_id) REFERENCES tasks(id),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
             )
@@ -962,8 +975,8 @@ class Database:
                     submitted_at, started_at, completed_at, last_updated_at,
                     created_by, parent_task_id, dependencies, session_id,
                     source, dependency_type, calculated_priority, deadline,
-                    estimated_duration_seconds, dependency_depth
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    estimated_duration_seconds, dependency_depth, feature_branch
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(task.id),
@@ -991,6 +1004,7 @@ class Database:
                     task.deadline.isoformat() if task.deadline else None,
                     task.estimated_duration_seconds,
                     task.dependency_depth,
+                    task.feature_branch,
                 ),
             )
             await conn.commit()
@@ -1153,6 +1167,7 @@ class Database:
             else None,
             estimated_duration_seconds=row_dict.get("estimated_duration_seconds"),
             dependency_depth=row_dict.get("dependency_depth", 0),
+            feature_branch=row_dict.get("feature_branch"),
         )
 
     # Task dependency operations
