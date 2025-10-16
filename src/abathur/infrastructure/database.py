@@ -376,6 +376,18 @@ class Database:
                 await conn.commit()
                 print("Added task_branch column to tasks")
 
+            # Migration: Add summary column to tasks
+            if "summary" not in column_names:
+                print("Migrating database schema: adding summary to tasks")
+                await conn.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN summary TEXT
+                    """
+                )
+                await conn.commit()
+                print("Added summary column to tasks")
+
         # Check if agents table exists and needs session_id column
         cursor = await conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='agents'"
@@ -997,8 +1009,9 @@ class Database:
                     submitted_at, started_at, completed_at, last_updated_at,
                     created_by, parent_task_id, dependencies, session_id,
                     source, dependency_type, calculated_priority, deadline,
-                    estimated_duration_seconds, dependency_depth, feature_branch, task_branch
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    estimated_duration_seconds, dependency_depth, feature_branch, task_branch,
+                    summary
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(task.id),
@@ -1028,6 +1041,7 @@ class Database:
                     task.dependency_depth,
                     task.feature_branch,
                     task.task_branch,
+                    task.summary,
                 ),
             )
             await conn.commit()
@@ -1405,6 +1419,7 @@ class Database:
             dependency_depth=row_dict.get("dependency_depth", 0),
             feature_branch=row_dict.get("feature_branch"),
             task_branch=row_dict.get("task_branch"),
+            summary=row_dict.get("summary"),
         )
 
     # Task dependency operations
