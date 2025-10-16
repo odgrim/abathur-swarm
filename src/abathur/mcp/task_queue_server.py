@@ -139,8 +139,9 @@ class AbathurTaskQueueServer:
                             },
                             "summary": {
                                 "type": "string",
-                                "description": "Brief human-readable task summary (max 500 characters)",
-                                "maxLength": 500,
+                                "description": "Short, human-readable task summary (3-200 chars). If not provided, will be auto-generated from description.",
+                                "minLength": 3,
+                                "maxLength": 200,
                             },
                         },
                         "required": ["description", "source"],
@@ -377,6 +378,14 @@ class AbathurTaskQueueServer:
         feature_branch = arguments.get("feature_branch")
         task_branch = arguments.get("task_branch")
         summary = arguments.get("summary")
+
+        # Validate summary length if provided
+        if summary is not None:
+            if len(summary) < 3 or len(summary) > 200:
+                return {
+                    "error": "ValidationError",
+                    "message": "summary must be between 3 and 200 characters",
+                }
 
         # Validate agent_type - reject generic/invalid agent types
         invalid_agent_types = [
