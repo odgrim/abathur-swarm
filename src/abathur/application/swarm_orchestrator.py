@@ -97,7 +97,9 @@ class SwarmOrchestrator:
 
         # Track active task coroutines
         active_task_coroutines: set[asyncio.Task] = set()
-        tasks_processed = 0  # Track tasks spawned for task_limit enforcement
+
+        # Track tasks spawned for task_limit enforcement
+        tasks_processed = 0
 
         try:
             while self._running and not self._shutdown_event.is_set():
@@ -116,7 +118,7 @@ class SwarmOrchestrator:
                     next_task = await self.task_queue_service.get_next_task()
 
                     if next_task:
-                        # CRITICAL: Increment BEFORE spawning for spawn-time counting
+                        # CRITICAL: Increment BEFORE create_task for spawn-time counting
                         # This prevents race condition where tasks spawn faster than counter increments
                         tasks_processed += 1
 
