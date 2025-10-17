@@ -157,6 +157,211 @@ class TestDatabaseTaskOperations:
         assert retrieved_child is not None
         assert retrieved_child.parent_task_id == parent_task.id
 
+    @pytest.mark.asyncio
+    async def test_delete_task_by_id_success(self, database: Database) -> None:
+        """Test successful deletion of a task by ID."""
+        task = Task(prompt="Task to delete", summary="Delete test task")
+        await database.insert_task(task)
+
+        # Verify task exists
+        retrieved_task = await database.get_task(task.id)
+        assert retrieved_task is not None
+
+        # Delete the task
+        result = await database.delete_task_by_id(task.id)
+        assert result is True
+
+        # Verify task is deleted
+        deleted_task = await database.get_task(task.id)
+        assert deleted_task is None
+
+    @pytest.mark.asyncio
+    async def test_delete_task_by_id_not_found(self, database: Database) -> None:
+        """Test deletion of non-existent task returns False."""
+        non_existent_id = uuid4()
+
+        # Try to delete non-existent task
+        result = await database.delete_task_by_id(non_existent_id)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_delete_task_by_id_cascade(self, database: Database) -> None:
+        """Verify CASCADE deletes agents and checkpoints."""
+        # Create a task
+        task = Task(prompt="Task with dependencies", summary="CASCADE test task")
+        await database.insert_task(task)
+
+        # Create an agent for the task
+        agent = Agent(
+            name="test-agent",
+            specialization="testing",
+            task_id=task.id,
+        )
+        await database.insert_agent(agent)
+
+        # Create a checkpoint for the task
+        async with database._get_connection() as conn:
+            await conn.execute(
+                """
+                INSERT INTO checkpoints (task_id, iteration, state, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (str(task.id), 1, '{"test": "data"}', "2024-01-01T00:00:00"),
+            )
+            await conn.commit()
+
+        # Verify task, agent, and checkpoint exist
+        retrieved_task = await database.get_task(task.id)
+        assert retrieved_task is not None
+
+        async with database._get_connection() as conn:
+            # Check agent exists
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM agents WHERE task_id = ?",
+                (str(task.id),),
+            )
+            agent_count = (await cursor.fetchone())[0]
+            assert agent_count == 1
+
+            # Check checkpoint exists
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?",
+                (str(task.id),),
+            )
+            checkpoint_count = (await cursor.fetchone())[0]
+            assert checkpoint_count == 1
+
+        # Delete the task
+        result = await database.delete_task_by_id(task.id)
+        assert result is True
+
+        # Verify CASCADE deleted agents and checkpoints
+        async with database._get_connection() as conn:
+            # Check agent was deleted
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM agents WHERE task_id = ?",
+                (str(task.id),),
+            )
+            agent_count = (await cursor.fetchone())[0]
+            assert agent_count == 0
+
+            # Check checkpoint was deleted
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?",
+                (str(task.id),),
+            )
+            checkpoint_count = (await cursor.fetchone())[0]
+            assert checkpoint_count == 0
+
+    @pytest.mark.asyncio
+    async def test_delete_tasks_by_status_success(self, database: Database) -> None:
+        """Test successful deletion of multiple tasks by status."""
+        # Create tasks with different statuses
+        task1 = Task(prompt="Task 1", summary="Task 1 summary")
+        task2 = Task(prompt="Task 2", summary="Task 2 summary")
+        task3 = Task(prompt="Task 3", summary="Task 3 summary")
+
+        await database.insert_task(task1)
+        await database.insert_task(task2)
+        await database.insert_task(task3)
+
+        # Update task2 and task3 to completed
+        await database.update_task_status(task2.id, TaskStatus.COMPLETED)
+        await database.update_task_status(task3.id, TaskStatus.COMPLETED)
+
+        # Delete all completed tasks
+        deleted_count = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
+        assert deleted_count == 2
+
+        # Verify tasks are deleted
+        retrieved_task2 = await database.get_task(task2.id)
+        retrieved_task3 = await database.get_task(task3.id)
+        assert retrieved_task2 is None
+        assert retrieved_task3 is None
+
+        # Verify task1 still exists
+        retrieved_task1 = await database.get_task(task1.id)
+        assert retrieved_task1 is not None
+        assert retrieved_task1.status == TaskStatus.PENDING
+
+    @pytest.mark.asyncio
+    async def test_delete_tasks_by_status_no_tasks(self, database: Database) -> None:
+        """Test deletion when no tasks match status (returns 0)."""
+        # Create a pending task
+        task = Task(prompt="Task 1", summary="Task 1 summary")
+        await database.insert_task(task)
+
+        # Try to delete completed tasks (none exist)
+        deleted_count = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
+        assert deleted_count == 0
+
+        # Verify task still exists
+        retrieved_task = await database.get_task(task.id)
+        assert retrieved_task is not None
+
+    @pytest.mark.asyncio
+    async def test_delete_tasks_by_status_cascade(self, database: Database) -> None:
+        """Verify CASCADE deletes agents and checkpoints for all tasks."""
+        # Create multiple tasks
+        task1 = Task(prompt="Task 1", summary="Task 1 summary")
+        task2 = Task(prompt="Task 2", summary="Task 2 summary")
+
+        await database.insert_task(task1)
+        await database.insert_task(task2)
+
+        # Update both to completed
+        await database.update_task_status(task1.id, TaskStatus.COMPLETED)
+        await database.update_task_status(task2.id, TaskStatus.COMPLETED)
+
+        # Create agents for both tasks
+        agent1 = Agent(name="agent-1", specialization="test", task_id=task1.id)
+        agent2 = Agent(name="agent-2", specialization="test", task_id=task2.id)
+
+        await database.insert_agent(agent1)
+        await database.insert_agent(agent2)
+
+        # Create checkpoints for both tasks
+        async with database._get_connection() as conn:
+            await conn.execute(
+                """
+                INSERT INTO checkpoints (task_id, iteration, state, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (str(task1.id), 1, '{"test": "data1"}', "2024-01-01T00:00:00"),
+            )
+            await conn.execute(
+                """
+                INSERT INTO checkpoints (task_id, iteration, state, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (str(task2.id), 1, '{"test": "data2"}', "2024-01-01T00:00:00"),
+            )
+            await conn.commit()
+
+        # Verify agents and checkpoints exist
+        async with database._get_connection() as conn:
+            cursor = await conn.execute("SELECT COUNT(*) FROM agents")
+            agent_count = (await cursor.fetchone())[0]
+            assert agent_count == 2
+
+            cursor = await conn.execute("SELECT COUNT(*) FROM checkpoints")
+            checkpoint_count = (await cursor.fetchone())[0]
+            assert checkpoint_count == 2
+
+        # Delete all completed tasks
+        deleted_count = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
+        assert deleted_count == 2
+
+        # Verify CASCADE deleted all agents and checkpoints
+        async with database._get_connection() as conn:
+            cursor = await conn.execute("SELECT COUNT(*) FROM agents")
+            agent_count = (await cursor.fetchone())[0]
+            assert agent_count == 0
+
+            cursor = await conn.execute("SELECT COUNT(*) FROM checkpoints")
+            checkpoint_count = (await cursor.fetchone())[0]
+            assert checkpoint_count == 0
+
 
 class TestDatabaseAgentOperations:
     """Tests for database agent operations."""
