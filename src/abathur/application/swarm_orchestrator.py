@@ -47,7 +47,7 @@ class SwarmOrchestrator:
         """Start the swarm orchestrator and process tasks from the queue.
 
         Args:
-            task_limit: Optional maximum number of tasks to complete. If None, continues indefinitely.
+            task_limit: Optional maximum number of tasks to spawn. If None, continues indefinitely.
 
         This mode keeps the swarm running, continuously polling the
         database for new READY tasks. It respects the max_concurrent_agents limit
@@ -59,27 +59,28 @@ class SwarmOrchestrator:
         3. Wait for all active agents to complete
         4. Exit gracefully when task_limit reached or queue empty
 
-        Tasks are counted when completed (successful or failed), not when spawned.
-        Active tasks spawned before reaching the limit are allowed to complete.
+        Tasks are counted when spawned (before task creation), not when completed.
+        This ensures exactly task_limit tasks are created, preventing over-spawning
+        due to race conditions where tasks complete faster than counter updates.
 
         The swarm will continue until:
         - task_limit is reached (if specified)
         - A shutdown signal is received (SIGINT or SIGTERM)
         - The shutdown() method is called
-        - The task_limit is reached (if specified)
 
         Args:
-            task_limit: Maximum number of tasks to complete before stopping the swarm.
+            task_limit: Maximum number of tasks to spawn before stopping the swarm.
                        - None (default): Runs indefinitely until shutdown() is called
                        - 0: Exits immediately without processing any tasks
-                       - N: Processes exactly N tasks, then stops gracefully
+                       - N: Spawns exactly N tasks, then stops gracefully
 
-                       IMPORTANT: Tasks are counted when COMPLETED, not when spawned.
+                       IMPORTANT: Tasks are counted when SPAWNED, not when completed.
                        This means the swarm stops spawning new tasks once N tasks
-                       have finished, ensuring exactly N tasks complete.
+                       have been created, ensuring exactly N tasks are spawned.
+                       All spawned tasks are allowed to complete.
 
                        Failed tasks (both Result.success=False and exception-based
-                       failures) count toward the limit.
+                       failures) count toward the limit at spawn time.
 
         Returns:
             List of all execution results
