@@ -2,17 +2,24 @@
 
 import asyncio
 import json
+import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 import typer
+from pydantic import ValidationError
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from abathur import __version__
+from abathur.cli.utils import parse_duration_to_days
+from abathur.infrastructure.database import PruneFilters
+
+logger = logging.getLogger(__name__)
 
 # Initialize Typer app
 app = typer.Typer(
@@ -382,6 +389,9 @@ def retry(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> None:
 def prune(
     task_ids: list[str] = typer.Argument(None, help="Task IDs or prefixes to delete"),
     status: str | None = typer.Option(None, "--status", help="Delete all tasks with this status (pending|blocked|ready|running|completed|failed|cancelled)"),
+    older_than: str | None = typer.Option(None, "--older-than", help="Delete tasks older than duration (e.g., 30d, 2w, 6m, 1y)"),
+    before: str | None = typer.Option(None, "--before", help="Delete tasks before date (ISO 8601: YYYY-MM-DD)"),
+    limit: int | None = typer.Option(None, "--limit", help="Maximum tasks to delete", min=1),
     force: bool = typer.Option(False, "--force", help="Skip confirmation prompt"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be deleted without deleting"),
 ) -> None:
@@ -396,12 +406,39 @@ def prune(
     """
     from abathur.domain.models import TaskStatus
 
-    # Parameter validation (before async)
-    if task_ids and status:
-        raise typer.BadParameter("Cannot specify both task IDs and --status. Choose one filter method.")
+    # Parameter validation (fail fast - before async)
+    # Mutual exclusion: task_ids XOR time-based filters XOR status
+    filter_count = sum([
+        bool(task_ids),
+        bool(older_than or before),
+        bool(status)
+    ])
 
-    if not task_ids and not status:
-        raise typer.BadParameter("Must specify either task IDs or --status filter.")
+    if filter_count == 0:
+        raise typer.BadParameter(
+            "Must specify at least one filter method.\n"
+            "Options:\n"
+            "  - Task IDs: abathur task prune <task-id-1> <task-id-2>\n"
+            "  - Time-based: abathur task prune --older-than 30d\n"
+            "  - Status: abathur task prune --status completed"
+        )
+
+    if filter_count > 1:
+        filters_used = []
+        if task_ids:
+            filters_used.append("task IDs")
+        if older_than or before:
+            filters_used.append("time-based filters (--older-than or --before)")
+        if status:
+            filters_used.append("--status")
+
+        raise typer.BadParameter(
+            f"Cannot use multiple filter methods together: {', '.join(filters_used)}.\n"
+            "Choose one filter method:\n"
+            "  - Task IDs only\n"
+            "  - Time-based filters only (--older-than or --before)\n"
+            "  - Status only (--status)"
+        )
 
     # Validate status enum value
     task_status = None
@@ -414,9 +451,123 @@ def prune(
                 f"Invalid status '{status}'. Valid values: {valid_values}"
             ) from None
 
+    # Parse --older-than duration
+    older_than_days = None
+    if older_than:
+        try:
+            older_than_days = parse_duration_to_days(older_than)
+        except ValueError as e:
+            raise typer.BadParameter(
+                f"Invalid duration format: {older_than}. "
+                f"Use format <number><unit> (e.g., 30d, 2w, 6m, 1y). "
+                f"Error: {e}"
+            ) from None
+
+    # Parse --before date
+    before_date = None
+    if before:
+        try:
+            before_date = datetime.fromisoformat(before)
+            if before_date.tzinfo is None:
+                before_date = before_date.replace(tzinfo=timezone.utc)
+        except ValueError as e:
+            raise typer.BadParameter(
+                f"Invalid date format: {before}. "
+                f"Use ISO 8601 format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS). "
+                f"Examples: 2025-01-01, 2025-01-01T12:00:00. "
+                f"Error: {e}"
+            ) from None
+
     async def _prune() -> None:
         services = await _get_services()
 
+        # Routing decision: time filters -> prune_tasks(), else -> delete_tasks()
+        # This enables advanced time-based filtering while preserving backward compatibility
+        has_time_filters = older_than is not None or before is not None
+
+        if has_time_filters:
+            # Phase 2: PruneFilters construction and child validation
+            # Construct PruneFilters from parsed CLI parameters
+            try:
+                # Construct with explicit parameters to satisfy type checker
+                if task_status is not None:
+                    # Status specified - use single-status list
+                    filters = PruneFilters(
+                        older_than_days=older_than_days,
+                        before_date=before_date,
+                        statuses=[task_status],
+                        limit=limit,
+                        dry_run=dry_run
+                    )
+                else:
+                    # No status specified - use default (COMPLETED, FAILED, CANCELLED)
+                    filters = PruneFilters(
+                        older_than_days=older_than_days,
+                        before_date=before_date,
+                        limit=limit,
+                        dry_run=dry_run
+                    )
+            except ValidationError as e:
+                raise typer.BadParameter(f"Invalid filter parameters: {e}") from None
+
+            # CLI-007: Task ID preview query for child validation
+            # CRITICAL: WHERE clause logic must match database.py:1847-1864 exactly
+            # to ensure preview query matches prune_tasks() deletion query
+
+            # Build WHERE clause from PruneFilters (reuse database.py logic)
+            where_clauses = []
+            params = []
+
+            # Time filter (required - validated by PruneFilters model)
+            if filters.older_than_days is not None:
+                where_clauses.append(
+                    "(completed_at < date('now', ?) OR "
+                    "(completed_at IS NULL AND submitted_at < date('now', ?)))"
+                )
+                days_param = f"-{filters.older_than_days} days"
+                params.extend([days_param, days_param])
+            elif filters.before_date is not None:
+                where_clauses.append(
+                    "(completed_at < ? OR (completed_at IS NULL AND submitted_at < ?))"
+                )
+                before_iso = filters.before_date.isoformat()
+                params.extend([before_iso, before_iso])
+
+            # Status filter (always present - has default)
+            status_placeholders = ",".join("?" * len(filters.statuses))
+            where_clauses.append(f"status IN ({status_placeholders})")
+            params.extend([status.value for status in filters.statuses])
+
+            where_sql = " AND ".join(where_clauses)
+
+            # Build complete preview query
+            limit_sql = f" LIMIT {filters.limit}" if filters.limit else ""
+            preview_query = f"""
+                SELECT id FROM tasks
+                WHERE {where_sql}
+                ORDER BY submitted_at ASC
+                {limit_sql}
+            """
+
+            # Execute preview query to get task IDs
+            async with services["database"]._get_connection() as conn:
+                cursor = await conn.execute(preview_query, tuple(params))
+                rows = await cursor.fetchall()
+                preview_task_ids = [row["id"] for row in rows]
+
+            # Early return if no tasks match
+            if not preview_task_ids:
+                console.print("[yellow]No tasks match the specified filters.[/yellow]")
+                return
+
+            # Phase 3: prune_tasks() execution and result display
+            # TODO: Implement child validation and prune execution in subsequent tasks (CLI-008 through CLI-013)
+            console.print(f"[yellow]![/yellow] Preview found {len(preview_task_ids)} task(s) matching filters")
+            console.print(f"[dim]Preview task IDs: {[tid[:8] for tid in preview_task_ids[:5]]}{'...' if len(preview_task_ids) > 5 else ''}[/dim]")
+            console.print("[dim]Coming soon: child validation and prune execution[/dim]")
+            raise typer.Exit(1)
+
+        # Existing delete_tasks() path - preserved unchanged for backward compatibility
         # Task selection logic
         selected_task_ids: list[UUID] = []
 
@@ -517,14 +668,42 @@ def prune(
             console.print("\n[yellow]Delete child tasks first before deleting parent tasks.[/yellow]")
             return
 
-        # Execute deletion
+        # Execute deletion with database error handling
         console.print("[blue]Deleting tasks...[/blue]")
-        deleted_count = await services["database"].delete_tasks(selected_task_ids)
+        try:
+            result = await services["database"].delete_tasks(selected_task_ids)
+            deleted_count = result['deleted_count']
+        except Exception as e:
+            console.print(
+                f"[red]Error:[/red] Database operation failed: {type(e).__name__}: {e}"
+            )
+            logger.exception(
+                "Database error during task deletion",
+                extra={
+                    "operation": "task_prune",
+                    "task_count": len(selected_task_ids),
+                    "error_type": type(e).__name__
+                }
+            )
+            raise typer.Exit(1)
 
         # Display results
         console.print(
             f"[green]✓[/green] Deleted {deleted_count} task(s)"
         )
+
+        # Display additional information if present
+        if result.get('blocked_deletions'):
+            console.print(
+                f"[yellow]![/yellow] Warning: {len(result['blocked_deletions'])} task(s) could not be deleted (have children)"
+            )
+
+        if result.get('errors'):
+            console.print(
+                f"[red]✗[/red] {len(result['errors'])} error(s) occurred during deletion"
+            )
+            for error in result['errors']:
+                console.print(f"  [dim]- {error}[/dim]")
 
     asyncio.run(_prune())
 

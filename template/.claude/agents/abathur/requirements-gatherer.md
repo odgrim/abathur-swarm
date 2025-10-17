@@ -198,6 +198,9 @@ When invoked, you must follow these steps:
    **Step 9a: Build Comprehensive Context**
 
    Create a detailed context description that includes:
+   - **SCOPE DEFINITION** (from Step 9b) - clearly define discrete, non-overlapping purpose
+   - **ANTI-DUPLICATION INSTRUCTIONS**: Explicit instructions for the architect to prevent spawning overlapping downstream tasks
+   - **CLEAR BOUNDARIES**: What is in scope vs out of scope
    - Task context header with current_task_id reference
    - Core problem description (2-3 sentences from your analysis)
    - Functional requirements summary (bullet points)
@@ -215,7 +218,7 @@ When invoked, you must follow these steps:
 
    Use the format shown in the Implementation Reference section below as a template.
 
-   **Step 9b: Execute task_enqueue**
+   **Step 9d: Execute task_enqueue**
 
    **YOU MUST CALL task_enqueue EXACTLY ONCE.** Use the Task tool to invoke task_enqueue with:
 
@@ -237,7 +240,7 @@ When invoked, you must follow these steps:
    })
    ```
 
-   **Step 9c: Store Workflow State**
+   **Step 9e: Store Workflow State**
 
    Store the returned task_id in memory for workflow tracking:
 
@@ -263,6 +266,9 @@ When invoked, you must follow these steps:
    - The Implementation Reference section below provides a complete working example
 
 **Best Practices:**
+- **PREVENT DUPLICATION**: Always check for existing technical-architect tasks before spawning
+- **DEFINE DISCRETE SCOPES**: Ensure each technical-architect has a clearly bounded, non-overlapping purpose
+- **ONE ARCHITECT PER DOMAIN**: Spawn exactly ONE technical-architect task per unique problem domain
 - **AUTONOMOUS MODE**: Do NOT ask clarifying questions or wait for user input - make reasonable assumptions
 - Focus on the "what" and "why", not the "how"
 - Document everything, including implicit requirements and assumptions
