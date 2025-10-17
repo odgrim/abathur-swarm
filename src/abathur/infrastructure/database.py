@@ -1431,6 +1431,7 @@ class Database:
             dependency_depth=row_dict.get("dependency_depth", 0),
             feature_branch=row_dict.get("feature_branch"),
             task_branch=row_dict.get("task_branch"),
+            summary=row_dict.get("summary"),
         )
 
     # Task dependency operations
