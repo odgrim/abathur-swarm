@@ -128,6 +128,7 @@ class TaskQueueService:
         input_data: dict[str, Any] | None = None,
         feature_branch: str | None = None,
         task_branch: str | None = None,
+        worktree_path: str | None = None,
     ) -> Task:
         """Enqueue a new task with dependency validation and priority calculation.
 
@@ -155,6 +156,7 @@ class TaskQueueService:
             input_data: Additional input data (optional)
             feature_branch: Feature branch that task changes get merged into (optional)
             task_branch: Individual task branch for isolated work, merges into feature_branch (optional)
+            worktree_path: Git worktree directory path for isolated execution (optional)
 
         Returns:
             Created task with calculated priority and initial status
@@ -234,6 +236,7 @@ class TaskQueueService:
                 dependency_depth=0,  # Will be calculated after dependencies inserted
                 feature_branch=feature_branch,
                 task_branch=task_branch,
+                worktree_path=worktree_path,
                 submitted_at=datetime.now(timezone.utc),
                 last_updated_at=datetime.now(timezone.utc),
             )
@@ -250,8 +253,8 @@ class TaskQueueService:
                         submitted_at, started_at, completed_at, last_updated_at,
                         created_by, parent_task_id, dependencies, session_id,
                         source, dependency_type, calculated_priority, deadline,
-                        estimated_duration_seconds, dependency_depth, feature_branch, task_branch, summary
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        estimated_duration_seconds, dependency_depth, feature_branch, task_branch, worktree_path, summary
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         str(task.id),
@@ -283,6 +286,7 @@ class TaskQueueService:
                         0,  # dependency_depth (will update after calculation)
                         feature_branch,
                         task_branch,
+                        worktree_path,
                         summary,
                     ),
                 )

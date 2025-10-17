@@ -376,6 +376,18 @@ class Database:
                 await conn.commit()
                 print("Added task_branch column to tasks")
 
+            # Migration: Add worktree_path column to tasks
+            if "worktree_path" not in column_names:
+                print("Migrating database schema: adding worktree_path to tasks")
+                await conn.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN worktree_path TEXT
+                    """
+                )
+                await conn.commit()
+                print("Added worktree_path column to tasks")
+
             # Migration: Add summary column to tasks
             if "summary" not in column_names:
                 print("Migrating database schema: adding summary to tasks")
@@ -731,6 +743,7 @@ class Database:
                 dependency_depth INTEGER DEFAULT 0,
                 feature_branch TEXT,
                 task_branch TEXT,
+                worktree_path TEXT,
                 summary TEXT NOT NULL DEFAULT 'Task',
                 FOREIGN KEY (parent_task_id) REFERENCES tasks(id),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
@@ -1059,8 +1072,8 @@ class Database:
                     submitted_at, started_at, completed_at, last_updated_at,
                     created_by, parent_task_id, dependencies, session_id,
                     source, dependency_type, calculated_priority, deadline,
-                    estimated_duration_seconds, dependency_depth, feature_branch, task_branch, summary
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    estimated_duration_seconds, dependency_depth, feature_branch, task_branch, worktree_path, summary
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(task.id),
@@ -1090,6 +1103,7 @@ class Database:
                     task.dependency_depth,
                     task.feature_branch,
                     task.task_branch,
+                    task.worktree_path,
                     task.summary,
                 ),
             )
@@ -1474,6 +1488,7 @@ class Database:
             dependency_depth=row_dict.get("dependency_depth", 0),
             feature_branch=row_dict.get("feature_branch"),
             task_branch=row_dict.get("task_branch"),
+            worktree_path=row_dict.get("worktree_path"),
             summary=row_dict.get("summary") or "Task",
         )
 
