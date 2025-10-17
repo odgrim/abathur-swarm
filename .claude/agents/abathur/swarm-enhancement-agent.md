@@ -167,56 +167,74 @@ When invoked to enhance or fix agents, follow these steps systematically:
 
 ### Step 4: Implement the Enhancement
 
-**CRITICAL WORKFLOW: Template-First Approach**
+**CRITICAL WORKFLOW: Template-First Autonomous Approach**
 - **ALWAYS work on template files FIRST** - Edit templates in `/Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/`
-- **Use `cp` to publish to active agents** - Copy from template to `.claude/agents/` directory
+- **AUTOMATICALLY copy to active agents** - Use Bash tool with `cp` command to copy from template to `.claude/agents/` directory
+- **Execute commands directly via Bash tool** - Do NOT generate shell scripts for users to run
 - **Make changes ONCE, not twice** - Avoid duplicate editing work
 - **Git provides version control** - Users can use `git diff` to see changes and `git restore` to undo if needed
 - **Do NOT create backup files** - No .bak or .fixed files
-- **Do NOT use scripts to edit or publish** - Simple `cp` command is sufficient
+- **Complete the entire workflow autonomously** - No human intervention required
 
 **For Single Agent Updates:**
 
 ```
-# 1. Read the agent file
-Read: /Users/odgrim/dev/home/agentics/abathur/.claude/agents/{agent-name}.md
+# 1. Read the template file first (use Grep to satisfy Read requirement)
+Grep:
+  pattern: ^
+  path: /Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/abathur/{agent-name}.md
+  output_mode: content
 
-# 2. Edit the file directly in place (NO backups, NO .fixed files)
+# 2. Edit the TEMPLATE file directly (NO backups, NO .fixed files)
 Edit:
-  file_path: /Users/odgrim/dev/home/agentics/abathur/.claude/agents/{agent-name}.md
+  file_path: /Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/abathur/{agent-name}.md
   old_string: [problematic section]
   new_string: [improved section]
 
-# 3. If this agent has a template version, update that too (directly)
-Read: /Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/{agent-name}.md
-Edit:
-  file_path: /Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/{agent-name}.md
-  old_string: [problematic section]
-  new_string: [improved section]
+# 3. Verify the template was updated correctly
+Grep:
+  pattern: [key part of new content]
+  path: /Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/abathur/{agent-name}.md
+  output_mode: content
+
+# 4. Copy template to active agent directory using Bash tool - EXECUTE DIRECTLY
+Bash:
+  command: cp /Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/abathur/{agent-name}.md /Users/odgrim/dev/home/agentics/abathur/.claude/agents/abathur/{agent-name}.md
+  description: Copy updated template to active agent directory
+
+# 5. Verify active agent was updated
+Grep:
+  pattern: [key part of new content]
+  path: /Users/odgrim/dev/home/agentics/abathur/.claude/agents/abathur/{agent-name}.md
+  output_mode: content
 ```
 
 **For Systematic Updates (Multiple Agents):**
 
 ```
-# 1. Use Glob to find all affected agents
-Glob: /Users/odgrim/dev/home/agentics/abathur/.claude/agents/*.md
+# 1. Use Glob to find all affected template agents
+Glob: /Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/abathur/*.md
 
-# 2. Use Grep to verify which agents have the issue
+# 2. Use Grep to verify which template agents have the issue
 Grep:
   pattern: [problematic pattern]
-  path: /Users/odgrim/dev/home/agentics/abathur/.claude/agents
+  path: /Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/abathur
 
-# 3. Use MultiEdit for bulk updates
-MultiEdit:
-  files: [list of agent files]
-  old_string: [common problematic section]
-  new_string: [improved section]
+# 3. Edit all affected TEMPLATE files
+For each affected template:
+  Grep: (read file first)
+  Edit:
+    file_path: /Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/abathur/{agent-name}.md
+    old_string: [problematic section]
+    new_string: [improved section]
 
-# 4. Update templates as well
-MultiEdit:
-  files: [list of template agent files]
-  old_string: [common problematic section]
-  new_string: [improved section]
+# 4. Copy ALL updated templates to active agents using Bash tool - EXECUTE DIRECTLY
+Bash:
+  command: cp /Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/abathur/{agent-1}.md /Users/odgrim/dev/home/agentics/abathur/.claude/agents/abathur/{agent-1}.md && cp /Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/abathur/{agent-2}.md /Users/odgrim/dev/home/agentics/abathur/.claude/agents/abathur/{agent-2}.md && cp /Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/abathur/{agent-3}.md /Users/odgrim/dev/home/agentics/abathur/.claude/agents/abathur/{agent-3}.md
+  description: Copy all updated templates to active agent directory
+
+# 5. Verify all active agents were updated
+Grep: Verify each updated agent file
 ```
 
 **CRITICAL:** Always update both active agents AND templates for systematic changes!
@@ -320,13 +338,16 @@ Provide a comprehensive summary of the enhancement work completed.
 - Follow existing conventions and structure
 
 **Implementation:**
-- **ALWAYS edit files directly in place** - Never create .bak or .fixed files
-- Git provides version control - No need for manual backups
+- **ALWAYS edit template files FIRST** - Work on templates in `/Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/` before touching active agents
+- **Use Bash tool to execute cp commands directly** - Copy templates to active agents automatically using the Bash tool
+- **NEVER generate shell scripts for users** - Execute all commands directly via Bash tool, don't create scripts for users to run
+- **Use Grep before Edit** - Edit tool requires reading file first; use Grep with pattern "^" to read entire file
+- Git provides version control - No need for manual backups or .bak files
 - Use Edit for single-file, targeted changes
-- Use MultiEdit for systematic updates across multiple files
-- ALWAYS update both active agents and templates
-- Verify changes with Read after implementation
-- Changes apply immediately - No manual mv commands needed
+- Use MultiEdit for systematic updates affecting multiple agents
+- ALWAYS update both template and active agents
+- Verify changes with Grep after implementation
+- Complete entire workflow autonomously without human intervention
 
 **Validation:**
 - Check YAML frontmatter validity

@@ -252,7 +252,6 @@ It must work within the project's architecture and follow established patterns.
 
    agent_creation_task = task_enqueue({
        "description": agent_creation_context,
-       "summary": f"Create {suggested_agent_type} agent for {domain}",
        "source": "task-planner",
        "priority": 8,  # High priority - blocks implementation
        "agent_type": "agent-creator",
@@ -285,7 +284,6 @@ It must work within the project's architecture and follow established patterns.
    # ❌ BAD: Insufficient context AND generic agent type
    task_enqueue({
        "description": "Implement TaskQueue class",
-       "summary": "Implement TaskQueue domain model",  # Even with summary, still needs good description!
        "agent_type": "python-backend-developer",  # ❌ Generic agent type!
        "source": "task-planner"
    })
@@ -378,7 +376,6 @@ Required methods:
 
    task_enqueue({
        "description": task_description,
-       "summary": "Implement TaskQueue domain model class",
        "source": "task-planner",
        "priority": critical_path_priority,
        "agent_type": domain_agent_type,  # ✅ Hyperspecialized agent!
@@ -489,7 +486,6 @@ When breaking down a feature into multiple tasks:
    # All tasks for this feature use the same branch name
    task_enqueue({
        "description": task_description,
-       "summary": "Brief summary of task (50-200 chars)",
        "feature_branch": feature_branch_name,  # ✅ Shared branch
        # ... other params
    })
@@ -554,7 +550,6 @@ that computes task priority based on deadline, dependencies, and base priority.
 2. Unit tests
 3. Committed to task branch: task/calculate-priority-function
 """,
-    "summary": "Implement calculate_priority() function with tests",
     "feature_branch": feature_branch_name,  # Parent feature
     "task_branch": task_branch_name,        # Individual task branch
     "agent_type": "python-implementation-specialist",
@@ -580,7 +575,6 @@ Merge the completed work from task branch into the main feature branch.
 - Task {implementation_task['task_id']} must be completed
 - All tests must pass
 """,
-    "summary": "Merge calculate-priority-function into feature branch",
     "feature_branch": feature_branch_name,  # Still part of same feature
     "task_branch": None,  # Merge tasks don't need their own branch
     "agent_type": "integration-specialist",
@@ -629,7 +623,6 @@ Merge the completed work from task branch into the main feature branch.
    # Create tasks with appropriate branches
    task1 = task_enqueue({
        "description": "...",
-       "summary": "Implement memory storage functionality",
        "feature_branch": feature_branch,
        "task_branch": task_branch_for_task_1,  # Isolated work
        # ...
@@ -637,7 +630,6 @@ Merge the completed work from task branch into the main feature branch.
 
    task2 = task_enqueue({
        "description": "...",
-       "summary": "Add memory search capability",
        "feature_branch": feature_branch,
        "task_branch": task_branch_for_task_2,  # Isolated work
        # ...
@@ -646,7 +638,6 @@ Merge the completed work from task branch into the main feature branch.
    # Create merge tasks
    merge1 = task_enqueue({
        "description": "Merge task/implement-memory-store into feature/memory-service",
-       "summary": "Merge memory-store into feature branch",
        "feature_branch": feature_branch,
        "task_branch": None,  # No isolated branch for merges
        "prerequisites": [task1['task_id']],
@@ -654,7 +645,6 @@ Merge the completed work from task branch into the main feature branch.
 
    merge2 = task_enqueue({
        "description": "Merge task/add-memory-search into feature/memory-service",
-       "summary": "Merge memory-search into feature branch",
        "feature_branch": feature_branch,
        "task_branch": None,
        "prerequisites": [task2['task_id']],
