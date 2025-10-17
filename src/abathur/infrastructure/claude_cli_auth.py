@@ -42,7 +42,7 @@ class ClaudeCLIAuthProvider(AuthProvider):
             )
 
         self.cli_path: str = cli_path
-        logger.info("claude_cli_initialized", cli_path=self.cli_path)
+        logger.debug("claude_cli_initialized", cli_path=self.cli_path)
 
     async def get_credentials(self) -> dict[str, str]:
         """Get Claude CLI credentials.

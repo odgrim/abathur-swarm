@@ -50,19 +50,22 @@ docker run -it abathur/abathur:latest abathur version
 # Initialize database and configuration
 abathur init
 
-# Set your Anthropic API key
-abathur config set-key YOUR_API_KEY
+# Set your Anthropic API key via environment variable
+export ANTHROPIC_API_KEY=YOUR_API_KEY
 ```
 
-### 2. Install a Template
+### 2. Configure Templates
 
-```bash
-# Clone a template from Git
-abathur template install https://github.com/org/agent-template.git
+Templates are configured in `.abathur/config.yaml`. The default template is already configured, but you can add more:
 
-# List installed templates
-abathur template list
+```yaml
+# .abathur/config.yaml
+template_repos:
+  - url: https://github.com/odgrim/abathur-claude-template.git
+    version: main
 ```
+
+Run `abathur init` to install templates.
 
 ### 3. Submit a Task
 
@@ -70,7 +73,7 @@ abathur template list
 # Submit a task with JSON input
 abathur task submit my-agent --input-file input.json --priority 8
 
-# Check task status
+# Check tasks
 abathur task list
 ```
 
@@ -80,8 +83,8 @@ abathur task list
 # Start swarm to process tasks
 abathur swarm start --max-agents 10
 
-# Monitor status
-abathur status
+# Monitor task queue status
+abathur task status
 ```
 
 ---
@@ -103,7 +106,6 @@ Tasks are units of work submitted to Abathur for execution by specialized Claude
 ```
 PENDING → RUNNING → COMPLETED
                   ↘ FAILED → (retry) → PENDING
-                                     ↘ DLQ
 ```
 
 ### Agents
@@ -122,7 +124,6 @@ Agents are instances of Claude spawned from templates to execute tasks.
 The swarm orchestrator manages concurrent agent execution with:
 - Semaphore-based concurrency control (10+ agents)
 - Priority-based task queue
-- Automatic failure recovery
 - Resource monitoring
 
 ---
@@ -157,11 +158,11 @@ abathur task list --status failed
 abathur task list --limit 50
 ```
 
-### Task Status
+### Task Details
 
 ```bash
-# Get detailed task status
-abathur task status <task-id>
+# Get detailed task information
+abathur task show <task-id>
 
 # Output shows:
 # - Template name
@@ -204,11 +205,8 @@ abathur swarm start --max-agents 20
 # Get current swarm status
 abathur swarm status
 
-# Monitor system status
-abathur status
-
-# Watch resource usage
-abathur resources
+# Monitor task queue status
+abathur task status
 ```
 
 ---
@@ -263,32 +261,42 @@ result = await loop_executor.execute_loop(
 
 ## Template Management
 
+Templates are configured in the `.abathur/config.yaml` file under the `template_repos` field. Multiple templates can be specified and will be installed in order when running `abathur init`.
+
+### Configure Templates
+
+Edit `.abathur/config.yaml` to configure template repositories:
+
+```yaml
+template_repos:
+  - url: https://github.com/org/template.git
+    version: main
+  - url: https://github.com/org/another-template.git
+    version: v1.0.0
+```
+
 ### Install Templates
 
-```bash
-# From Git repository
-abathur template install https://github.com/org/template.git
+Templates are automatically installed when you run `abathur init`:
 
-# Specific version/branch
-abathur template install https://github.com/org/template.git --version v1.0.0
+```bash
+# Initialize database and install configured templates
+abathur init
+
+# Skip template installation (only init database)
+abathur init --skip-template
 ```
 
-### List Templates
+### View Configured Templates
 
-```bash
-# List installed templates
-abathur template list
-```
+Check the `.abathur/config.yaml` file to see configured templates:
 
-### Validate Templates
-
-```bash
-# Validate template structure
-abathur template validate my-agent
-
-# Output shows:
-# - Valid/Invalid status
-# - Validation errors (if any)
+```yaml
+template_repos:
+  - url: https://github.com/org/template.git
+    version: main
+  - url: https://github.com/org/another-template.git
+    version: v1.0.0
 ```
 
 ### Template Structure
@@ -363,42 +371,6 @@ Create `.mcp.json` in project root:
 
 ## Monitoring & Recovery
 
-### Resource Monitoring
-
-```bash
-# Check resource usage
-abathur resources
-
-# Output shows:
-# - CPU usage (%)
-# - Memory usage (MB, %)
-# - Available memory
-# - Active agent count
-```
-
-### Failure Recovery
-
-```bash
-# Show recovery statistics
-abathur recovery
-
-# Output shows:
-# - Total failures
-# - Permanent vs transient failures
-# - Retried/recovered tasks
-# - DLQ count
-```
-
-### Dead Letter Queue
-
-```bash
-# List tasks in DLQ
-abathur dlq list
-
-# Reprocess failed task
-abathur dlq reprocess <task-id>
-```
-
 ---
 
 ## Configuration
@@ -423,11 +395,6 @@ swarm:
   agent_spawn_timeout: 5
   agent_idle_timeout: 300
 
-resources:
-  max_memory_per_agent: 512  # MB
-  max_total_memory: 4096     # MB
-  max_cpu_percent: 80.0
-
 retry:
   max_retries: 3
   initial_backoff: 10        # seconds
@@ -437,23 +404,22 @@ retry:
 
 ### Set API Key
 
-```bash
-# Store in system keychain (recommended)
-abathur config set-key YOUR_API_KEY
+Set your Anthropic API key via environment variable:
 
-# Store in .env file
-abathur config set-key YOUR_API_KEY --no-use-keychain
+```bash
+# Set as environment variable
+export ANTHROPIC_API_KEY=YOUR_API_KEY
+
+# Or add to your shell profile (.bashrc, .zshrc, etc.)
+echo 'export ANTHROPIC_API_KEY=YOUR_API_KEY' >> ~/.zshrc
 ```
 
 ### Validate Configuration
 
-```bash
-# Validate configuration files
-abathur config validate
-
-# Show current configuration
-abathur config show
-```
+Check your configuration files manually:
+- `.abathur/config.yaml` - Template defaults
+- `~/.abathur/config.yaml` - User overrides
+- `.abathur/local.yaml` - Project overrides
 
 ---
 
@@ -470,14 +436,13 @@ abathur config show
 
 1. **Start with 10 concurrent agents**: Adjust based on resource availability
 2. **Monitor resource usage**: Ensure CPU/memory stay under limits
-3. **Use failure recovery**: Enable automatic retry for transient errors
 
 ### Template Development
 
 1. **Clear system prompts**: Be specific about agent behavior
 2. **Include examples**: Help agents understand expected input/output
-3. **Validate before deployment**: Use `abathur template validate`
-4. **Version templates**: Use Git tags for versioning
+3. **Version templates**: Use Git tags for versioning
+4. **Add to config**: Configure templates in `.abathur/config.yaml`
 
 ### Loop Execution
 
@@ -519,14 +484,13 @@ poetry install
 **Issue: High memory usage**
 ```bash
 # Reduce max_concurrent_agents
-# Lower max_memory_per_agent
-# Monitor with: abathur resources
+# Check with: abathur swarm status
 ```
 
 **Issue: Tasks stuck in RUNNING**
 ```bash
-# Check failure recovery stats
-# Tasks will auto-recover after stall timeout (1 hour)
+# Check task details: abathur task show <task-id>
+# Check for stale tasks: abathur task check-stale
 # Or manually retry: abathur task retry <task-id>
 ```
 
