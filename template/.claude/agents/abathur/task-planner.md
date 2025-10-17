@@ -218,14 +218,25 @@ When invoked, you must follow these steps:
 
    For each missing agent, spawn an agent-creator task with rich context:
    ```python
+   # CRITICAL: Use the exact suggested_agent_type as the agent name
+   # This ensures the agent-creator creates a file with the exact name
+   # that will be used in implementation task assignments
+   expected_agent_name = suggested_agent_type  # e.g., "python-cli-typer-specialist"
+
    agent_creation_context = f"""
-# Create Specialized Agent: {agent_name}
+# Create Specialized Agent: {expected_agent_name}
+
+## CRITICAL REQUIREMENT
+**Agent File Name**: You MUST create the agent file with the EXACT name: {expected_agent_name}.md
+This exact name will be used by implementation tasks. Any mismatch will cause task assignment failures.
+
+Expected file path: .claude/agents/workers/{expected_agent_name}.md
 
 ## Technical Context
 Based on technical specifications from task {tech_spec_task_id}, create a hyperspecialized agent for {domain} implementation.
 
 ## Agent Specification
-Agent Type: {suggested_agent_type}
+Agent Name (MUST MATCH FILENAME): {expected_agent_name}
 Expertise: {expertise}
 Responsibilities: {responsibilities}
 Tools Needed: {tools_needed}
@@ -244,10 +255,17 @@ This agent will be assigned to tasks requiring {domain} implementation.
 It must work within the project's architecture and follow established patterns.
 
 ## Success Criteria
-- Agent markdown file created in .claude/agents/ directory
+- Agent markdown file created at: .claude/agents/workers/{expected_agent_name}.md
+- Agent name in frontmatter matches: {expected_agent_name}
 - Agent includes proper tool access and MCP servers
 - Agent description matches expertise and responsibilities
 - Agent is ready to execute {domain} tasks
+
+## Verification
+After creating the agent file, verify:
+1. File exists at: .claude/agents/workers/{expected_agent_name}.md
+2. Frontmatter 'name' field equals: {expected_agent_name}
+3. No typos or variations in the filename
 """
 
    agent_creation_task = task_enqueue({
@@ -257,7 +275,7 @@ It must work within the project's architecture and follow established patterns.
        "agent_type": "agent-creator",
        "metadata": {
            "tech_spec_task_id": tech_spec_task_id,
-           "agent_name": suggested_agent_type,
+           "expected_agent_name": expected_agent_name,  # Pass exact expected name
            "domain": domain
        }
    })
@@ -279,6 +297,23 @@ It must work within the project's architecture and follow established patterns.
 
    This ensures implementation tasks wait for their required agents to be created first and work in isolated worktrees.
 
+   **BAD Example (DO NOT DO THIS):**
+   ```python
+   # ❌ BAD: Insufficient context AND generic agent type
+   task_enqueue({
+       "description": "Implement TaskQueue class",
+       "agent_type": "python-backend-developer",  # ❌ Generic agent type!
+       "source": "task-planner"
+   })
+   # The implementation agent has no idea what methods to implement,
+   # what the requirements are, or how to verify success!
+   ```
+
+   **GOOD Example (DO THIS):**
+   ```python
+   # ✅ GOOD: Comprehensive context AND hyperspecialized agent with agent-creation dependency
+   task_id = "task-001-domain-model"
+   task_description = f"""
 # Implement TaskQueue Domain Model Class
 
 ## Context
