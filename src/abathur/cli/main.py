@@ -112,12 +112,12 @@ async def _get_services() -> dict[str, Any]:
         # Try API key first (environment variable precedence)
         api_key = config_manager.get_api_key()
         auth_provider = APIKeyAuthProvider(api_key)
-        logger.info("auth_initialized", method="api_key")
+        logger.debug("auth_initialized", method="api_key")
     except ValueError:
         # API key not found, try Claude CLI
         try:
             auth_provider = ClaudeCLIAuthProvider()
-            logger.info("auth_initialized", method="claude_cli")
+            logger.debug("auth_initialized", method="claude_cli")
         except Exception as e:
             raise ValueError(
                 "No authentication configured.\n"

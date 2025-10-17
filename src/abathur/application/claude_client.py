@@ -82,7 +82,7 @@ class ClaudeClient:
         self.timeout = timeout
         self.context_limit = self.auth_provider.get_context_limit()
 
-        logger.info(
+        logger.debug(
             "claude_client_initialized",
             auth_method=self.auth_provider.get_auth_method(),
             context_limit=self.context_limit,
