@@ -84,6 +84,7 @@ When invoked, you must follow these steps:
    # Create task to track agent creation
    agent_creation_task = task_enqueue({
        "description": f"Agent Creation: {agent_name}",
+       "summary": f"Create {agent_name} specialized agent",
        "source": "agent-creator",
        "agent_type": "agent-creator",
        "priority": 6

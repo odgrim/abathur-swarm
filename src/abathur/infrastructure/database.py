@@ -376,6 +376,61 @@ class Database:
                 await conn.commit()
                 print("Added task_branch column to tasks")
 
+            # Migration: Add summary column to tasks
+            if "summary" not in column_names:
+                print("Migrating database schema: adding summary to tasks")
+                await conn.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN summary TEXT NOT NULL DEFAULT 'Task'
+                    """
+                )
+                # Backfill existing rows with auto-generated summaries
+                # This logic MUST match the service layer auto-generation in task_queue_service.py:174-181
+                #
+                # Service layer logic (for reference):
+                #   if source == TaskSource.HUMAN:
+                #       summary = "User Prompt: " + description[:126].strip()
+                #   else:
+                #       summary = description[:140].strip()
+                #
+                # SQL equivalent:
+                #   TRIM(SUBSTR(prompt, 1, 126)) matches description[:126].strip()
+                #   TRIM(SUBSTR(prompt, 1, 140)) matches description[:140].strip()
+                #
+                # Both truncate first, then trim whitespace, ensuring identical behavior.
+                await conn.execute(
+                    """
+                    UPDATE tasks
+                    SET summary = CASE
+                        WHEN prompt IS NULL OR TRIM(prompt) = '' THEN 'Task'
+                        WHEN source = 'human' THEN 'User Prompt: ' || TRIM(SUBSTR(prompt, 1, 126))
+                        ELSE TRIM(SUBSTR(prompt, 1, 140))
+                    END
+                    WHERE summary IS NULL OR TRIM(summary) = ''
+                    """
+                )
+                await conn.commit()
+                print("Added summary column to tasks and backfilled existing rows")
+
+            # Migration: Fix idx_tasks_summary partial index with pointless WHERE clause
+            # Check if old index exists with WHERE clause
+            cursor = await conn.execute(
+                """
+                SELECT sql FROM sqlite_master
+                WHERE type='index' AND name='idx_tasks_summary'
+                """
+            )
+            index_row = await cursor.fetchone()
+            if index_row and index_row["sql"] and "WHERE summary IS NOT NULL" in index_row["sql"]:
+                print("Migrating index: fixing idx_tasks_summary partial index condition")
+                # Drop old index with pointless WHERE clause
+                await conn.execute("DROP INDEX IF EXISTS idx_tasks_summary")
+                # Recreate without WHERE clause
+                await conn.execute("""CREATE INDEX idx_tasks_summary ON tasks(summary)""")
+                await conn.commit()
+                print("Fixed idx_tasks_summary index")
+
         # Check if agents table exists and needs session_id column
         cursor = await conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='agents'"
@@ -676,6 +731,7 @@ class Database:
                 dependency_depth INTEGER DEFAULT 0,
                 feature_branch TEXT,
                 task_branch TEXT,
+                summary TEXT NOT NULL DEFAULT 'Task',
                 FOREIGN KEY (parent_task_id) REFERENCES tasks(id),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
             )
@@ -875,6 +931,12 @@ class Database:
                WHERE session_id IS NOT NULL"""
         )
 
+        # Summary field index for search and filtering
+        await conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_tasks_summary
+               ON tasks(summary)"""
+        )
+
         # Agents indexes (3 indexes)
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_agents_task ON agents(task_id)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_agents_state ON agents(state)")
@@ -997,8 +1059,8 @@ class Database:
                     submitted_at, started_at, completed_at, last_updated_at,
                     created_by, parent_task_id, dependencies, session_id,
                     source, dependency_type, calculated_priority, deadline,
-                    estimated_duration_seconds, dependency_depth, feature_branch, task_branch
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    estimated_duration_seconds, dependency_depth, feature_branch, task_branch, summary
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(task.id),
@@ -1028,6 +1090,7 @@ class Database:
                     task.dependency_depth,
                     task.feature_branch,
                     task.task_branch,
+                    task.summary,
                 ),
             )
             await conn.commit()
@@ -1261,8 +1324,12 @@ class Database:
                 },
                 "agent_breakdown": agent_breakdown,
                 "timestamps": {
-                    "earliest_task": timestamps["earliest"] if timestamps["earliest"] else None,
-                    "latest_activity": timestamps["latest"] if timestamps["latest"] else None,
+                    "earliest_task": timestamps["earliest"]
+                    if timestamps and timestamps["earliest"]
+                    else None,
+                    "latest_activity": timestamps["latest"]
+                    if timestamps and timestamps["latest"]
+                    else None,
                 },
             }
 
@@ -1392,7 +1459,9 @@ class Database:
             else datetime.now(timezone.utc),
             created_by=row_dict["created_by"],
             parent_task_id=UUID(row_dict["parent_task_id"]) if row_dict["parent_task_id"] else None,
-            dependencies=[UUID(dep) for dep in json.loads(row_dict["dependencies"])],
+            dependencies=[UUID(dep) for dep in json.loads(row_dict["dependencies"])]
+            if row_dict.get("dependencies")
+            else [],
             session_id=row_dict.get("session_id"),
             # NEW: Enhanced task queue fields
             source=TaskSource(row_dict.get("source", "human")),
@@ -1405,6 +1474,7 @@ class Database:
             dependency_depth=row_dict.get("dependency_depth", 0),
             feature_branch=row_dict.get("feature_branch"),
             task_branch=row_dict.get("task_branch"),
+            summary=row_dict.get("summary") or "Task",
         )
 
     # Task dependency operations

@@ -21,6 +21,8 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Import abathur modules
+from pydantic import ValidationError  # noqa: E402
+
 from abathur.domain.models import TaskSource, TaskStatus  # noqa: E402
 from abathur.infrastructure.database import Database  # noqa: E402
 from abathur.infrastructure.logger import get_logger  # noqa: E402
@@ -136,6 +138,11 @@ class AbathurTaskQueueServer:
                             "task_branch": {
                                 "type": "string",
                                 "description": "Individual task branch for isolated work, merges into feature_branch",
+                            },
+                            "summary": {
+                                "type": "string",
+                                "description": "Short, human-readable task summary (max 140 chars). If not provided, will be auto-generated from description.",
+                                "maxLength": 140,
                             },
                         },
                         "required": ["description", "source"],
@@ -360,7 +367,28 @@ class AbathurTaskQueueServer:
         description = arguments["description"]
         source = arguments["source"]
 
+        # Validate description type
+        if not isinstance(description, str):
+            return {"error": "ValidationError", "message": "description must be a string"}
+
+        # Validate description is not empty
+        if not description or not description.strip():
+            return {
+                "error": "ValidationError",
+                "message": "description cannot be empty or whitespace-only",
+            }
+
+        # Validate description length (reasonable limit: 10,000 chars)
+        # This prevents memory/storage abuse while allowing detailed task descriptions
+        MAX_DESCRIPTION_LENGTH = 10_000
+        if len(description) > MAX_DESCRIPTION_LENGTH:
+            return {
+                "error": "ValidationError",
+                "message": f"description must not exceed {MAX_DESCRIPTION_LENGTH} characters, got {len(description)}",
+            }
+
         # Optional parameters with defaults
+        summary = arguments.get("summary")
         agent_type = arguments.get("agent_type", "requirements-gatherer")
         base_priority = arguments.get("base_priority", 5)
         prerequisites = arguments.get("prerequisites", [])
@@ -371,6 +399,9 @@ class AbathurTaskQueueServer:
         parent_task_id = arguments.get("parent_task_id")
         feature_branch = arguments.get("feature_branch")
         task_branch = arguments.get("task_branch")
+
+        # Note: summary validation is handled by domain model (Pydantic)
+        # Pass summary as-is to service layer, which will validate via Task model
 
         # Validate agent_type - reject generic/invalid agent types
         invalid_agent_types = [
@@ -448,6 +479,7 @@ class AbathurTaskQueueServer:
                 input_data=input_data,
                 feature_branch=feature_branch,
                 task_branch=task_branch,
+                summary=summary,
             )
 
             return {
@@ -458,7 +490,11 @@ class AbathurTaskQueueServer:
                 "submitted_at": task.submitted_at.isoformat(),
             }
 
+        except ValidationError as e:
+            # Pydantic validation error from domain model
+            return {"error": "ValidationError", "message": str(e)}
         except ValueError as e:
+            # Service layer validation errors
             return {"error": "ValidationError", "message": str(e)}
         except CircularDependencyError as e:
             return {"error": "CircularDependencyError", "message": str(e)}
@@ -656,7 +692,9 @@ class AbathurTaskQueueServer:
             summary = await self._db.get_feature_branch_summary(feature_branch)
             return summary
         except Exception as e:
-            logger.error("feature_branch_summary_error", feature_branch=feature_branch, error=str(e))
+            logger.error(
+                "feature_branch_summary_error", feature_branch=feature_branch, error=str(e)
+            )
             return {"error": "InternalError", "message": str(e)}
 
     async def _handle_feature_branch_list(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -685,30 +723,47 @@ class AbathurTaskQueueServer:
                 "has_blockers": len(blockers) > 0,
             }
         except Exception as e:
-            logger.error("feature_branch_blockers_error", feature_branch=feature_branch, error=str(e))
+            logger.error(
+                "feature_branch_blockers_error", feature_branch=feature_branch, error=str(e)
+            )
             return {"error": "InternalError", "message": str(e)}
 
     def _serialize_task(self, task: Any) -> dict[str, Any]:
-        """Serialize Task object to JSON-compatible dict."""
+        """Serialize Task object to JSON-compatible dict with ALL 28 Task model fields."""
         return {
+            # Core identification
             "id": str(task.id),
             "prompt": task.prompt,
+            "summary": task.summary,
             "agent_type": task.agent_type,
             "priority": task.priority,
             "status": task.status.value,
-            "calculated_priority": task.calculated_priority,
-            "dependency_depth": task.dependency_depth,
-            "source": task.source.value,
-            "parent_task_id": str(task.parent_task_id) if task.parent_task_id else None,
-            "session_id": task.session_id,
-            "submitted_at": task.submitted_at.isoformat(),
-            "started_at": task.started_at.isoformat() if task.started_at else None,
-            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
-            "deadline": task.deadline.isoformat() if task.deadline else None,
-            "estimated_duration_seconds": task.estimated_duration_seconds,
+            # Data fields
             "input_data": task.input_data,
             "result_data": task.result_data,
             "error_message": task.error_message,
+            # Retry and timeout fields
+            "retry_count": task.retry_count,
+            "max_retries": task.max_retries,
+            "max_execution_timeout_seconds": task.max_execution_timeout_seconds,
+            # Timestamp fields
+            "submitted_at": task.submitted_at.isoformat(),
+            "started_at": task.started_at.isoformat() if task.started_at else None,
+            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+            "last_updated_at": task.last_updated_at.isoformat(),
+            # Relationship fields
+            "created_by": task.created_by,
+            "parent_task_id": str(task.parent_task_id) if task.parent_task_id else None,
+            "dependencies": [str(dep) for dep in task.dependencies],
+            "session_id": task.session_id,
+            # Enhanced task queue fields
+            "source": task.source.value,
+            "dependency_type": task.dependency_type.value,
+            "calculated_priority": task.calculated_priority,
+            "deadline": task.deadline.isoformat() if task.deadline else None,
+            "estimated_duration_seconds": task.estimated_duration_seconds,
+            "dependency_depth": task.dependency_depth,
+            # Branch tracking fields
             "feature_branch": task.feature_branch,
             "task_branch": task.task_branch,
         }

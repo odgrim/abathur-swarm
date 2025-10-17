@@ -20,6 +20,7 @@ Performance targets:
 - Execution plan: <30ms (100-task graph)
 """
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -116,6 +117,7 @@ class TaskQueueService:
         self,
         description: str,
         source: TaskSource,
+        summary: str | None = None,
         parent_task_id: UUID | None = None,
         prerequisites: list[UUID] | None = None,
         base_priority: int = 5,
@@ -142,6 +144,7 @@ class TaskQueueService:
         Args:
             description: Task description/instruction
             source: Task source (HUMAN or AGENT_*)
+            summary: Brief human-readable task summary, max 140 chars (auto-generated if not provided)
             parent_task_id: Parent task ID (for hierarchical tasks)
             prerequisites: List of prerequisite task IDs
             base_priority: User-specified priority (0-10, default 5)
@@ -163,6 +166,23 @@ class TaskQueueService:
         try:
             prerequisites = prerequisites or []
             input_data = input_data or {}
+
+            # Generate summary if not provided (None or empty string)
+            if summary is None or summary.strip() == "":
+                # Auto-generate summary from description
+                # Check if description is empty first (match migration logic in database.py:406)
+                if not description or not description.strip():
+                    # Empty description → use default for all sources
+                    summary = "Task"
+                elif source == TaskSource.HUMAN:
+                    # Non-empty human task → use prefix
+                    prefix = "User Prompt: "
+                    # Truncate to 126 to stay under limit with prefix (140 - 13 - 1 for safety)
+                    summary = prefix + description[:126].strip()
+                else:
+                    # Non-empty agent task → no prefix
+                    summary = description[:140].strip()
+            # If summary is provided, let Pydantic validate max_length (don't truncate here)
 
             # Validate base_priority range
             if not 0 <= base_priority <= 10:
@@ -200,6 +220,7 @@ class TaskQueueService:
             task = Task(
                 id=task_id,
                 prompt=description,
+                summary=summary,
                 agent_type=agent_type,
                 priority=base_priority,
                 status=initial_status,
@@ -229,15 +250,15 @@ class TaskQueueService:
                         submitted_at, started_at, completed_at, last_updated_at,
                         created_by, parent_task_id, dependencies, session_id,
                         source, dependency_type, calculated_priority, deadline,
-                        estimated_duration_seconds, dependency_depth, feature_branch, task_branch
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        estimated_duration_seconds, dependency_depth, feature_branch, task_branch, summary
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         str(task.id),
                         task.prompt,
                         task.agent_type,
                         task.priority,
-                        task.status.value,
+                        task.status,  # Already a string (TaskStatus inherits from str)
                         "{}",  # input_data as JSON
                         None,  # result_data
                         None,  # error_message
@@ -250,16 +271,19 @@ class TaskQueueService:
                         task.last_updated_at.isoformat(),
                         None,  # created_by
                         str(parent_task_id) if parent_task_id else None,
-                        "[]",  # dependencies as JSON array
+                        json.dumps(
+                            [str(pid) for pid in prerequisites]
+                        ),  # dependencies as JSON array
                         session_id,
-                        task.source.value,
-                        DependencyType.SEQUENTIAL.value,
+                        task.source,  # Already a string (TaskSource inherits from str)
+                        DependencyType.SEQUENTIAL,  # Already a string (DependencyType inherits from str)
                         0.0,  # calculated_priority (will update after depth)
                         task.deadline.isoformat() if task.deadline else None,
                         task.estimated_duration_seconds,
                         0,  # dependency_depth (will update after calculation)
                         feature_branch,
                         task_branch,
+                        summary,
                     ),
                 )
 
@@ -284,7 +308,7 @@ class TaskQueueService:
                             str(dependency.id),
                             str(dependency.dependent_task_id),
                             str(dependency.prerequisite_task_id),
-                            dependency.dependency_type.value,
+                            dependency.dependency_type,  # Already a string (DependencyType inherits from str)
                             dependency.created_at.isoformat(),
                             None,  # resolved_at
                         ),

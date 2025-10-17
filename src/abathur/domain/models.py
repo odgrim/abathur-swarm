@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TaskStatus(str, Enum):
@@ -37,10 +37,20 @@ class DependencyType(str, Enum):
 
 
 class Task(BaseModel):
-    """Represents a unit of work in the task queue."""
+    """Represents a unit of work in the task queue.
+
+    Attributes:
+        id: Unique task identifier
+        summary: Short, human-readable task summary for display (optional, max 140 chars, auto-generated if not provided)
+        prompt: The actual instruction/task to execute
+    """
 
     id: UUID = Field(default_factory=uuid4)
-    prompt: str  # The actual instruction/task to execute
+    summary: str | None = Field(
+        default=None,
+        description="Short, human-readable task summary (max 140 chars after stripping, auto-generated from description if not provided)",
+    )
+    prompt: str  # The actual instruction/task to execute (description in MCP API)
     agent_type: str = (
         "requirements-gatherer"  # Agent definition to use (defaults to requirements-gatherer)
     )
@@ -77,13 +87,36 @@ class Task(BaseModel):
     feature_branch: str | None = None  # Feature branch that task changes get merged into
 
     # NEW: Task branch tracking
-    task_branch: str | None = None  # Individual task branch for isolated work (merges into feature_branch)
+    task_branch: str | None = (
+        None  # Individual task branch for isolated work (merges into feature_branch)
+    )
+
+    @field_validator("summary")
+    @classmethod
+    def validate_summary(cls, v: str | None) -> str | None:
+        """Validate summary field: strip whitespace, truncate if too long.
+
+        Auto-corrects instead of raising errors for better UX:
+        - Strips whitespace
+        - Returns None if empty (triggers auto-generation)
+        - Truncates to 140 chars if too long
+        """
+        if v is None:
+            return None
+        # Strip whitespace first
+        v = v.strip()
+        # Reject empty string after stripping (will trigger auto-generation)
+        if not v:
+            return None
+        # Truncate to max length (auto-correction vs rejection)
+        if len(v) > 140:
+            return v[:140]
+        return v
 
     model_config = ConfigDict(
-        json_encoders={
-            UUID: str,
-            datetime: lambda v: v.isoformat(),
-        }
+        # Note: Use model_dump(mode='json') for proper JSON serialization
+        # This automatically converts UUID→str, datetime→ISO string
+        # Enums serialize to their values by default in mode='json'
     )
 
 
@@ -97,12 +130,7 @@ class TaskDependency(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     resolved_at: datetime | None = None  # When prerequisite completed
 
-    model_config = ConfigDict(
-        json_encoders={
-            UUID: str,
-            datetime: lambda v: v.isoformat(),
-        }
-    )
+    model_config = ConfigDict()
 
 
 class AgentState(str, Enum):
@@ -129,12 +157,7 @@ class Agent(BaseModel):
     resource_usage: dict[str, Any] = Field(default_factory=dict)
     session_id: str | None = None  # Link to session for memory context
 
-    model_config = ConfigDict(
-        json_encoders={
-            UUID: str,
-            datetime: lambda v: v.isoformat(),
-        }
-    )
+    model_config = ConfigDict()
 
 
 class ExecutionContext(BaseModel):
@@ -157,11 +180,7 @@ class Result(BaseModel):
     token_usage: dict[str, int] | None = None
     execution_time_seconds: float | None = None
 
-    model_config = ConfigDict(
-        json_encoders={
-            UUID: str,
-        }
-    )
+    model_config = ConfigDict()
 
 
 class LoopState(BaseModel):
@@ -174,8 +193,4 @@ class LoopState(BaseModel):
     history: list[dict[str, Any]] = Field(default_factory=list)
     checkpoint_data: dict[str, Any] = Field(default_factory=dict)
 
-    model_config = ConfigDict(
-        json_encoders={
-            UUID: str,
-        }
-    )
+    model_config = ConfigDict()
