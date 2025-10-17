@@ -154,7 +154,6 @@ When invoked, you must follow these steps:
    # Create task to track architectural work
    arch_task = task_enqueue({
        "description": "Technical Architecture Analysis",
-       "summary": "Analyze requirements and design system architecture",
        "source": "technical-architect",
        "agent_type": "technical-architect",
        "priority": 7
@@ -248,7 +247,6 @@ Spawn task-planner to decompose into executable tasks.
 
     tech_spec_task = task_enqueue({
         "description": tech_spec_context,
-        "summary": "Create technical specifications for implementation",
         "source": "technical-architect",
         "priority": 7,
         "agent_type": "technical-requirements-specialist",
@@ -336,7 +334,6 @@ Spawn task-planner to decompose into executable tasks for THIS subproject.
 
         tech_spec_task = task_enqueue({
             "description": subproject_context,
-            "summary": f"Create technical specs for {subproject['name']} subproject",
             "source": "technical-architect",
             "priority": 8 - subproject['priority'],  # Higher priority for foundational subprojects
             "agent_type": "technical-requirements-specialist",

@@ -222,7 +222,6 @@ When invoked, you must follow these steps:
    ```python
    task_enqueue({
        "description": context_description,  # From step 9a
-       "summary": f"Analyze requirements and design architecture for {problem_domain}",
        "source": "requirements-gatherer",
        "priority": 7,
        "agent_type": "technical-architect",
@@ -471,7 +470,6 @@ Based on your decomposition decision:
 # Enqueue with rich context - DO THIS EXACTLY ONCE
 tech_architect_task = task_enqueue({
     "description": context_description,
-    "summary": f"Analyze requirements and design architecture for {problem_domain}",
     "source": "requirements-gatherer",
     "priority": 7,
     "agent_type": "technical-architect",
