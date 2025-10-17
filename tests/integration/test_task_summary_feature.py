@@ -14,18 +14,15 @@ Tests simulate actual MCP tool calls through the TaskQueueServer handlers.
 import asyncio
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
-from pydantic import ValidationError
-
-from abathur.domain.models import Task, TaskSource, TaskStatus
+from abathur.domain.models import TaskSource
 from abathur.infrastructure.database import Database
 from abathur.mcp.task_queue_server import AbathurTaskQueueServer
 from abathur.services.dependency_resolver import DependencyResolver
 from abathur.services.priority_calculator import PriorityCalculator
 from abathur.services.task_queue_service import TaskQueueService
-
 
 # Fixtures
 
@@ -48,7 +45,9 @@ async def task_queue_service(memory_db: Database) -> TaskQueueService:
 
 
 @pytest.fixture
-async def mcp_server(memory_db: Database, task_queue_service: TaskQueueService) -> AbathurTaskQueueServer:
+async def mcp_server(
+    memory_db: Database, task_queue_service: TaskQueueService
+) -> AbathurTaskQueueServer:
     """Create MCP server with in-memory database (initialized).
 
     This fixture provides a fully initialized MCP server with:
@@ -360,7 +359,9 @@ async def test_database_migration_idempotent():
             columns_before = await cursor.fetchall()
             column_names_before = [col["name"] for col in columns_before]
 
-            assert "summary" in column_names_before, "Summary column should exist after first migration"
+            assert (
+                "summary" in column_names_before
+            ), "Summary column should exist after first migration"
 
         # Close first connection (file-based DB auto-closes)
 
@@ -374,7 +375,9 @@ async def test_database_migration_idempotent():
             columns_after = await cursor.fetchall()
             column_names_after = [col["name"] for col in columns_after]
 
-            assert "summary" in column_names_after, "Summary column should persist after second migration"
+            assert (
+                "summary" in column_names_after
+            ), "Summary column should persist after second migration"
 
             # Verify column count unchanged (no duplicate columns)
             assert len(columns_before) == len(columns_after), "Column count should be unchanged"
@@ -506,6 +509,7 @@ async def test_mcp_concurrent_enqueue_with_summary(
     - All summaries persisted correctly
     - Database handles concurrent writes
     """
+
     # Create 10 tasks concurrently
     async def enqueue_task(i: int):
         args = {

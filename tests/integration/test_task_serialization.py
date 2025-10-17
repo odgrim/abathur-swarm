@@ -16,10 +16,10 @@ Coverage Target: Complete serialization validation
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
-from abathur.domain.models import Task, TaskSource, TaskStatus
+from abathur.domain.models import TaskSource, TaskStatus
 from abathur.infrastructure.database import Database
 from abathur.mcp.task_queue_server import AbathurTaskQueueServer
 from abathur.services.dependency_resolver import DependencyResolver
@@ -129,7 +129,9 @@ async def test_serialize_task_includes_all_28_fields(
     }
 
     actual_fields = set(serialized.keys())
-    assert actual_fields == expected_fields, f"Missing fields: {expected_fields - actual_fields}, Extra fields: {actual_fields - expected_fields}"
+    assert (
+        actual_fields == expected_fields
+    ), f"Missing fields: {expected_fields - actual_fields}, Extra fields: {actual_fields - expected_fields}"
 
     # Verify key field values (sampling from each category)
     # Core identification
@@ -215,15 +217,9 @@ async def test_serialize_task_with_multiple_dependencies(
 ):
     """Test serialization of task with multiple dependencies."""
     # Create prerequisite tasks
-    prereq1 = await task_queue_service.enqueue_task(
-        description="Prereq 1", source=TaskSource.HUMAN
-    )
-    prereq2 = await task_queue_service.enqueue_task(
-        description="Prereq 2", source=TaskSource.HUMAN
-    )
-    prereq3 = await task_queue_service.enqueue_task(
-        description="Prereq 3", source=TaskSource.HUMAN
-    )
+    prereq1 = await task_queue_service.enqueue_task(description="Prereq 1", source=TaskSource.HUMAN)
+    prereq2 = await task_queue_service.enqueue_task(description="Prereq 2", source=TaskSource.HUMAN)
+    prereq3 = await task_queue_service.enqueue_task(description="Prereq 3", source=TaskSource.HUMAN)
 
     # Create task with multiple prerequisites
     task = await task_queue_service.enqueue_task(
@@ -302,7 +298,9 @@ async def test_serialize_task_enum_values(
 
 
 @pytest.mark.asyncio
-async def test_serialize_task_field_count_matches_model(memory_db: Database, mcp_server: AbathurTaskQueueServer):
+async def test_serialize_task_field_count_matches_model(
+    memory_db: Database, mcp_server: AbathurTaskQueueServer
+):
     """Test that serialized dict has exactly 28 fields matching Task model."""
     # Create a simple task directly in database
     task_id = uuid4()
@@ -338,6 +336,7 @@ async def test_serialize_task_field_count_matches_model(memory_db: Database, mcp
 
     # Count Task model fields
     from abathur.domain.models import Task as TaskModel
+
     model_field_count = len(TaskModel.model_fields)
 
     # Verify serialized dict has same number of fields

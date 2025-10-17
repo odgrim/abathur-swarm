@@ -4,8 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-
-from abathur.domain.models import Task, TaskSource, TaskStatus, DependencyType
+from abathur.domain.models import DependencyType, Task, TaskSource, TaskStatus
 from abathur.infrastructure.database import Database
 
 

@@ -29,7 +29,6 @@ Test Strategy:
    - Verify no default value
 """
 
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -84,6 +83,7 @@ async def test_migration_idempotent_on_second_run():
     """
     # Arrange - create file-based database for persistence between runs
     import tempfile
+
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = Path(f.name)
 
@@ -115,7 +115,9 @@ async def test_migration_idempotent_on_second_run():
             column_names_after = [col["name"] for col in columns_after]
 
             # Verify summary column still exists
-            assert "summary" in column_names_after, "Summary column should persist after second migration"
+            assert (
+                "summary" in column_names_after
+            ), "Summary column should persist after second migration"
 
             # Verify column properties unchanged
             summary_col_after = next(col for col in columns_after if col["name"] == "summary")
@@ -149,8 +151,8 @@ async def test_migration_preserves_existing_data():
     - Task count unchanged
     """
     # Arrange - create database with summary data
-    from datetime import datetime, timezone
     from uuid import uuid4
+
     from abathur.domain.models import Task, TaskSource, TaskStatus
 
     db = Database(Path(":memory:"))
@@ -313,6 +315,7 @@ async def test_migration_with_null_summary_values():
     """
     # Arrange
     from uuid import uuid4
+
     from abathur.domain.models import Task, TaskSource, TaskStatus
 
     db = Database(Path(":memory:"))
@@ -350,6 +353,7 @@ async def test_migration_with_empty_string_summary():
     """
     # Arrange
     from uuid import uuid4
+
     from abathur.domain.models import Task, TaskSource, TaskStatus
 
     db = Database(Path(":memory:"))
@@ -387,6 +391,7 @@ async def test_migration_with_max_length_summary():
     """
     # Arrange
     from uuid import uuid4
+
     from abathur.domain.models import Task, TaskSource, TaskStatus
 
     db = Database(Path(":memory:"))
@@ -425,6 +430,7 @@ async def test_migration_multiple_times_file_database():
     """
     # Arrange - create temporary file database
     import tempfile
+
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = Path(f.name)
 

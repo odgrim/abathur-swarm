@@ -46,7 +46,12 @@ class Task(BaseModel):
     """
 
     id: UUID = Field(default_factory=uuid4)
-    summary: str = Field(min_length=3, max_length=200, description="Short, human-readable task summary for display")
+    summary: str | None = Field(
+        None,
+        min_length=3,
+        max_length=200,
+        description="Short, human-readable task summary for display",
+    )
     prompt: str  # The actual instruction/task to execute
     agent_type: str = (
         "requirements-gatherer"  # Agent definition to use (defaults to requirements-gatherer)
@@ -84,9 +89,11 @@ class Task(BaseModel):
     feature_branch: str | None = None  # Feature branch that task changes get merged into
 
     # NEW: Task branch tracking
-    task_branch: str | None = None  # Individual task branch for isolated work (merges into feature_branch)
+    task_branch: str | None = (
+        None  # Individual task branch for isolated work (merges into feature_branch)
+    )
 
-    @field_validator('summary')
+    @field_validator("summary")
     @classmethod
     def validate_summary_length(cls, v: str | None) -> str | None:
         """Validate summary field max_length constraint."""

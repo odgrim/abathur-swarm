@@ -82,11 +82,6 @@ class AbathurTaskQueueServer:
                                 "type": "string",
                                 "description": "Task description/instruction",
                             },
-                            "summary": {
-                                "type": "string",
-                                "description": "Optional brief summary of task (max 200 chars)",
-                                "maxLength": 200,
-                            },
                             "source": {
                                 "type": "string",
                                 "enum": [
@@ -383,7 +378,6 @@ class AbathurTaskQueueServer:
         parent_task_id = arguments.get("parent_task_id")
         feature_branch = arguments.get("feature_branch")
         task_branch = arguments.get("task_branch")
-        summary = arguments.get("summary")
 
         # Validate summary length if provided
         if summary is not None:
@@ -678,7 +672,9 @@ class AbathurTaskQueueServer:
             summary = await self._db.get_feature_branch_summary(feature_branch)
             return summary
         except Exception as e:
-            logger.error("feature_branch_summary_error", feature_branch=feature_branch, error=str(e))
+            logger.error(
+                "feature_branch_summary_error", feature_branch=feature_branch, error=str(e)
+            )
             return {"error": "InternalError", "message": str(e)}
 
     async def _handle_feature_branch_list(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -707,7 +703,9 @@ class AbathurTaskQueueServer:
                 "has_blockers": len(blockers) > 0,
             }
         except Exception as e:
-            logger.error("feature_branch_blockers_error", feature_branch=feature_branch, error=str(e))
+            logger.error(
+                "feature_branch_blockers_error", feature_branch=feature_branch, error=str(e)
+            )
             return {"error": "InternalError", "message": str(e)}
 
     def _serialize_task(self, task: Any) -> dict[str, Any]:
@@ -720,32 +718,24 @@ class AbathurTaskQueueServer:
             "agent_type": task.agent_type,
             "priority": task.priority,
             "status": task.status.value,
-
             # Data fields
             "input_data": task.input_data,
             "result_data": task.result_data,
             "error_message": task.error_message,
-
             # Retry and timeout fields
             "retry_count": task.retry_count,
             "max_retries": task.max_retries,
             "max_execution_timeout_seconds": task.max_execution_timeout_seconds,
-
             # Timestamp fields
             "submitted_at": task.submitted_at.isoformat(),
             "started_at": task.started_at.isoformat() if task.started_at else None,
             "completed_at": task.completed_at.isoformat() if task.completed_at else None,
             "last_updated_at": task.last_updated_at.isoformat(),
-
             # Relationship fields
             "created_by": task.created_by,
             "parent_task_id": str(task.parent_task_id) if task.parent_task_id else None,
             "dependencies": [str(dep) for dep in task.dependencies],
             "session_id": task.session_id,
-
-            # Summary field (new)
-            "summary": task.summary,
-
             # Enhanced task queue fields
             "source": task.source.value,
             "dependency_type": task.dependency_type.value,
@@ -753,7 +743,6 @@ class AbathurTaskQueueServer:
             "deadline": task.deadline.isoformat() if task.deadline else None,
             "estimated_duration_seconds": task.estimated_duration_seconds,
             "dependency_depth": task.dependency_depth,
-
             # Branch tracking fields
             "feature_branch": task.feature_branch,
             "task_branch": task.task_branch,

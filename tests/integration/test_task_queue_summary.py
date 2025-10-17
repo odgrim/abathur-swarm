@@ -16,11 +16,10 @@ Coverage:
 """
 
 import asyncio
-import json
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from abathur.domain.models import TaskSource, TaskStatus
@@ -28,7 +27,6 @@ from abathur.infrastructure.database import Database
 from abathur.services.dependency_resolver import DependencyResolver
 from abathur.services.priority_calculator import PriorityCalculator
 from abathur.services.task_queue_service import TaskQueueService
-
 
 # Fixtures
 
@@ -54,9 +52,7 @@ async def task_queue_service(memory_db: Database) -> TaskQueueService:
 
 
 @pytest.mark.asyncio
-async def test_enqueue_task_with_summary(
-    memory_db: Database, task_queue_service: TaskQueueService
-):
+async def test_enqueue_task_with_summary(memory_db: Database, task_queue_service: TaskQueueService):
     """Test enqueue_task accepts summary parameter and persists to database.
 
     Verifies:

@@ -1286,8 +1286,12 @@ class Database:
                 },
                 "agent_breakdown": agent_breakdown,
                 "timestamps": {
-                    "earliest_task": timestamps["earliest"] if timestamps["earliest"] else None,
-                    "latest_activity": timestamps["latest"] if timestamps["latest"] else None,
+                    "earliest_task": timestamps["earliest"]
+                    if timestamps and timestamps["earliest"]
+                    else None,
+                    "latest_activity": timestamps["latest"]
+                    if timestamps and timestamps["latest"]
+                    else None,
                 },
             }
 
@@ -1417,9 +1421,10 @@ class Database:
             else datetime.now(timezone.utc),
             created_by=row_dict["created_by"],
             parent_task_id=UUID(row_dict["parent_task_id"]) if row_dict["parent_task_id"] else None,
-            dependencies=[UUID(dep) for dep in json.loads(row_dict["dependencies"])] if row_dict.get("dependencies") else [],
+            dependencies=[UUID(dep) for dep in json.loads(row_dict["dependencies"])]
+            if row_dict.get("dependencies")
+            else [],
             session_id=row_dict.get("session_id"),
-            summary=row_dict.get("summary"),
             # NEW: Enhanced task queue fields
             source=TaskSource(row_dict.get("source", "human")),
             dependency_type=DependencyType(row_dict.get("dependency_type", "sequential")),

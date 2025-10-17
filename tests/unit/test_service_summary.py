@@ -7,18 +7,14 @@ Tests verify that:
 4. Backward compatibility is maintained (summary=None works)
 """
 
-import pytest
-from datetime import datetime
 from pathlib import Path
-from uuid import uuid4
 
-from abathur.domain.models import Task, TaskSource
-from abathur.services.task_queue_service import TaskQueueService, TaskQueueError
+import pytest
+from abathur.domain.models import TaskSource
 from abathur.infrastructure.database import Database
 from abathur.services.dependency_resolver import DependencyResolver
 from abathur.services.priority_calculator import PriorityCalculator
-
-from pydantic import ValidationError
+from abathur.services.task_queue_service import TaskQueueError, TaskQueueService
 
 
 class TestTaskQueueServiceSummary:
@@ -36,9 +32,7 @@ class TestTaskQueueServiceSummary:
 
         # Act
         task = await service.enqueue_task(
-            description="Test task with summary",
-            source=TaskSource.HUMAN,
-            summary="Test summary"
+            description="Test task with summary", source=TaskSource.HUMAN, summary="Test summary"
         )
 
         # Assert
@@ -64,8 +58,7 @@ class TestTaskQueueServiceSummary:
 
         # Act
         task = await service.enqueue_task(
-            description="Test task without summary",
-            source=TaskSource.HUMAN
+            description="Test task without summary", source=TaskSource.HUMAN
         )
 
         # Assert
@@ -91,9 +84,7 @@ class TestTaskQueueServiceSummary:
         # Valid: 500 characters (max)
         summary_500 = "x" * 500
         task = await service.enqueue_task(
-            description="Test with 500 char summary",
-            source=TaskSource.HUMAN,
-            summary=summary_500
+            description="Test with 500 char summary", source=TaskSource.HUMAN, summary=summary_500
         )
         assert task.summary == summary_500
         assert len(task.summary) == 500
@@ -104,7 +95,7 @@ class TestTaskQueueServiceSummary:
             await service.enqueue_task(
                 description="Test with 501 char summary",
                 source=TaskSource.HUMAN,
-                summary=summary_501
+                summary=summary_501,
             )
 
         # Verify validation error message mentions max_length
@@ -123,9 +114,7 @@ class TestTaskQueueServiceSummary:
 
         # Create prerequisite task
         prereq = await service.enqueue_task(
-            description="Prerequisite task",
-            source=TaskSource.HUMAN,
-            summary="Prereq summary"
+            description="Prerequisite task", source=TaskSource.HUMAN, summary="Prereq summary"
         )
 
         # Create dependent task with summary
@@ -133,7 +122,7 @@ class TestTaskQueueServiceSummary:
             description="Dependent task",
             source=TaskSource.HUMAN,
             summary="Dependent summary",
-            prerequisites=[prereq.id]
+            prerequisites=[prereq.id],
         )
 
         # Assert both tasks have summaries
@@ -158,9 +147,7 @@ class TestTaskQueueServiceSummary:
 
         # Act
         task = await service.enqueue_task(
-            description="Test task with empty summary",
-            source=TaskSource.HUMAN,
-            summary=""
+            description="Test task with empty summary", source=TaskSource.HUMAN, summary=""
         )
 
         # Assert
