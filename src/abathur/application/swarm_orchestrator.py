@@ -44,13 +44,26 @@ class SwarmOrchestrator:
         self._running = False
 
     async def start_swarm(self, task_limit: int | None = None) -> list[Result]:
-        """Start the swarm in continuous mode with polling for new tasks.
+        """Start the swarm orchestrator and process tasks from the queue.
 
-        This mode keeps the swarm running indefinitely, continuously polling the
+        Args:
+            task_limit: Optional maximum number of tasks to complete. If None, continues indefinitely.
+
+        This mode keeps the swarm running, continuously polling the
         database for new READY tasks. It respects the max_concurrent_agents limit
         and spawns new agent instances as slots become available.
 
+        The swarm will:
+        1. Pick tasks from the queue
+        2. Spawn agents to execute tasks (up to task_limit if specified)
+        3. Wait for all active agents to complete
+        4. Exit gracefully when task_limit reached or queue empty
+
+        Tasks are counted when completed (successful or failed), not when spawned.
+        Active tasks spawned before reaching the limit are allowed to complete.
+
         The swarm will continue until:
+        - task_limit is reached (if specified)
         - A shutdown signal is received (SIGINT or SIGTERM)
         - The shutdown() method is called
 
