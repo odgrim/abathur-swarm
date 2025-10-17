@@ -97,14 +97,17 @@ class SwarmOrchestrator:
         # Track active task coroutines
         active_task_coroutines: set[asyncio.Task] = set()
 
+        # Track tasks spawned for task_limit enforcement
+        tasks_processed = 0
+
         try:
             while self._running and not self._shutdown_event.is_set():
-                # Check if task limit has been reached (count completed tasks)
-                if task_limit is not None and len(self.results) >= task_limit:
+                # Check if task limit has been reached (spawn-time counting)
+                if task_limit is not None and tasks_processed >= task_limit:
                     logger.info(
                         "task_limit_reached",
                         limit=task_limit,
-                        completed=len(self.results),
+                        processed=tasks_processed,
                     )
                     break
 
@@ -114,6 +117,10 @@ class SwarmOrchestrator:
                     next_task = await self.task_queue_service.get_next_task()
 
                     if next_task:
+                        # CRITICAL: Increment BEFORE create_task for spawn-time counting
+                        # This prevents race condition where tasks spawn faster than counter increments
+                        tasks_processed += 1
+
                         # Spawn agent for task
                         task_coroutine = asyncio.create_task(
                             self._execute_with_semaphore(next_task)
@@ -129,6 +136,15 @@ class SwarmOrchestrator:
                             active_count=len(self.active_agents),
                             available_slots=self.max_concurrent_agents - len(self.active_agents),
                         )
+
+                        # Exit immediately after spawning Nth task (spawn-time limit enforcement)
+                        if task_limit is not None and tasks_processed >= task_limit:
+                            logger.debug(
+                                "task_limit_reached_post_spawn",
+                                task_limit=task_limit,
+                                tasks_spawned=tasks_processed,
+                            )
+                            break
                     else:
                         # No tasks available, wait before polling again
                         logger.debug(
