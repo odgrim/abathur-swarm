@@ -31,12 +31,6 @@
 - Configurable max iterations and timeouts
 - Iteration history tracking
 
-✅ **Resource Management**
-- Real-time CPU and memory monitoring
-- Per-agent resource limits (512MB default)
-- Automatic warnings and spawn safety checks
-- Historical usage tracking
-
 ✅ **MCP Integration**
 - Full MCP server lifecycle management
 - Agent-to-server binding
@@ -236,7 +230,6 @@ abathur mcp restart <server>
 
 ```bash
 abathur status                  # System status
-abathur resources               # Resource usage
 ```
 
 ### Configuration
@@ -274,12 +267,6 @@ swarm:
   max_concurrent_agents: 10
   agent_spawn_timeout: 5
   agent_idle_timeout: 300
-
-resources:
-  max_memory_per_agent: 512  # MB
-  max_total_memory: 4096     # MB
-  max_cpu_percent: 80.0
-  warning_memory_percent: 80.0
 
 retry:
   max_retries: 3

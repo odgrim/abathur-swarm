@@ -867,31 +867,6 @@ def loop_start(
     asyncio.run(_start())
 
 
-# ===== Resource Commands =====
-@app.command()
-def resources() -> None:
-    """Show resource usage statistics."""
-
-    async def _resources() -> None:
-        services = await _get_services()
-        await services["resource_monitor"].start_monitoring()
-        await asyncio.sleep(1)  # Let it collect data
-        stats = services["resource_monitor"].get_stats()
-        await services["resource_monitor"].stop_monitoring()
-
-        console.print("[bold]Resource Usage[/bold]")
-        if stats.get("current"):
-            current = stats["current"]
-            console.print(f"CPU: {current.get('cpu_percent', 0):.1f}%")
-            console.print(
-                f"Memory: {current.get('memory_mb', 0):.1f} MB ({current.get('memory_percent', 0):.1f}%)"
-            )
-            console.print(f"Available: {current.get('available_memory_mb', 0):.1f} MB")
-            console.print(f"Active agents: {current.get('agent_count', 0)}")
-
-    asyncio.run(_resources())
-
-
 # ===== Config Commands =====
 config_app = typer.Typer(help="Configuration management", no_args_is_help=True)
 app.add_typer(config_app, name="config")

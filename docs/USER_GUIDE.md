@@ -207,9 +207,6 @@ abathur swarm status
 
 # Monitor system status
 abathur status
-
-# Watch resource usage
-abathur resources
 ```
 
 ---
@@ -374,19 +371,6 @@ Create `.mcp.json` in project root:
 
 ## Monitoring & Recovery
 
-### Resource Monitoring
-
-```bash
-# Check resource usage
-abathur resources
-
-# Output shows:
-# - CPU usage (%)
-# - Memory usage (MB, %)
-# - Available memory
-# - Active agent count
-```
-
 ---
 
 ## Configuration
@@ -410,11 +394,6 @@ swarm:
   max_concurrent_agents: 10
   agent_spawn_timeout: 5
   agent_idle_timeout: 300
-
-resources:
-  max_memory_per_agent: 512  # MB
-  max_total_memory: 4096     # MB
-  max_cpu_percent: 80.0
 
 retry:
   max_retries: 3
@@ -506,8 +485,7 @@ poetry install
 **Issue: High memory usage**
 ```bash
 # Reduce max_concurrent_agents
-# Lower max_memory_per_agent
-# Monitor with: abathur resources
+# Check with: abathur swarm status
 ```
 
 **Issue: Tasks stuck in RUNNING**
