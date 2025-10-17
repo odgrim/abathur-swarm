@@ -139,6 +139,10 @@ class AbathurTaskQueueServer:
                                 "type": "string",
                                 "description": "Individual task branch for isolated work, merges into feature_branch",
                             },
+                            "worktree_path": {
+                                "type": "string",
+                                "description": "Git worktree directory path for isolated task execution. Enables concurrent work without file conflicts.",
+                            },
                             "summary": {
                                 "type": "string",
                                 "description": "Short, human-readable task summary (max 140 chars). If not provided, will be auto-generated from description.",
@@ -399,6 +403,7 @@ class AbathurTaskQueueServer:
         parent_task_id = arguments.get("parent_task_id")
         feature_branch = arguments.get("feature_branch")
         task_branch = arguments.get("task_branch")
+        worktree_path = arguments.get("worktree_path")
 
         # Note: summary validation is handled by domain model (Pydantic)
         # Pass summary as-is to service layer, which will validate via Task model
@@ -479,6 +484,7 @@ class AbathurTaskQueueServer:
                 input_data=input_data,
                 feature_branch=feature_branch,
                 task_branch=task_branch,
+                worktree_path=worktree_path,
                 summary=summary,
             )
 
@@ -766,6 +772,7 @@ class AbathurTaskQueueServer:
             # Branch tracking fields
             "feature_branch": task.feature_branch,
             "task_branch": task.task_branch,
+            "worktree_path": task.worktree_path,
         }
 
     async def run(self) -> None:

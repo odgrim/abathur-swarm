@@ -53,9 +53,54 @@ class SwarmOrchestrator:
         The swarm will continue until:
         - A shutdown signal is received (SIGINT or SIGTERM)
         - The shutdown() method is called
+        - The task_limit is reached (if specified)
+
+        Args:
+            task_limit: Maximum number of tasks to process before stopping the swarm.
+                       - None (default): Runs indefinitely until shutdown() is called
+                       - 0: Exits immediately without processing any tasks
+                       - N: Processes exactly N tasks, then stops gracefully
+
+                       IMPORTANT: Tasks are counted when spawned, not when completed.
+                       This means active tasks continue to completion even after the
+                       limit is reached (graceful shutdown).
+
+                       Failed tasks (both Result.success=False and exception-based
+                       failures) count toward the limit.
 
         Returns:
             List of all execution results
+
+        Examples:
+            Process exactly 5 tasks (for testing or bounded execution):
+            >>> results = await orchestrator.start_swarm(task_limit=5)
+            >>> len(results)  # Will be exactly 5
+            5
+
+            Run indefinitely until manual shutdown (production mode):
+            >>> results = await orchestrator.start_swarm(task_limit=None)
+            # Swarm continues processing tasks until shutdown() is called
+
+            Process single task (useful for sequential execution):
+            >>> results = await orchestrator.start_swarm(task_limit=1)
+            >>> len(results)
+            1
+
+            Batch processing with automatic shutdown:
+            >>> results = await orchestrator.execute_batch([task1_id, task2_id, task3_id])
+            # Internally calls start_swarm(task_limit=3)
+
+        Behavior:
+            - Graceful shutdown: When task_limit is reached, swarm stops spawning
+              new tasks but waits for all active tasks to complete
+            - Counter semantics: tasks_processed counter increments immediately
+              when a task is spawned (line 140), before execution starts
+            - Failure handling: Both Result-based failures (success=False) and
+              exception-based failures count toward the limit
+            - Concurrent execution: Multiple tasks can execute simultaneously
+              (up to max_concurrent_agents), all count toward limit when spawned
+            - Logging: "task_limit_reached" log message indicates when limit
+              is reached (line 124-129)
         """
         self._running = True
         self._shutdown_event.clear()
@@ -64,27 +109,41 @@ class SwarmOrchestrator:
             "starting_continuous_swarm",
             max_concurrent=self.max_concurrent_agents,
             poll_interval=self.poll_interval,
+            task_limit=task_limit,
         )
 
         # Track active task coroutines
         active_task_coroutines: set[asyncio.Task] = set()
 
+        # Track number of tasks processed (spawned)
+        tasks_processed = 0
+
         try:
             while self._running and not self._shutdown_event.is_set():
+                # Check if task limit has been reached
+                if task_limit is not None and tasks_processed >= task_limit:
+                    logger.info(
+                        "task_limit_reached",
+                        limit=task_limit,
+                        processed=tasks_processed,
+                    )
+                    break
+
                 # Check if we have capacity for more tasks
                 if len(self.active_agents) < self.max_concurrent_agents:
                     # Try to get next READY task
                     next_task = await self.task_queue_service.get_next_task()
 
                     if next_task:
+                        # Increment tasks processed counter BEFORE spawning
+                        # This ensures the limit check sees the accurate count immediately
+                        tasks_processed += 1
+
                         # Spawn agent for task
                         task_coroutine = asyncio.create_task(
                             self._execute_with_semaphore(next_task)
                         )
                         active_task_coroutines.add(task_coroutine)
-
-                        # Remove completed tasks from tracking
-                        active_task_coroutines = {t for t in active_task_coroutines if not t.done()}
 
                         logger.info(
                             "task_spawned_continuous",
@@ -92,6 +151,15 @@ class SwarmOrchestrator:
                             active_count=len(self.active_agents),
                             available_slots=self.max_concurrent_agents - len(self.active_agents),
                         )
+
+                        # Check if we've reached the limit immediately after spawning
+                        if task_limit is not None and tasks_processed >= task_limit:
+                            logger.info(
+                                "task_limit_reached_after_spawn",
+                                limit=task_limit,
+                                processed=tasks_processed,
+                            )
+                            break
                     else:
                         # No tasks available, wait before polling again
                         logger.debug(

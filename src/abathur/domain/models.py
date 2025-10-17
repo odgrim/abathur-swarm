@@ -43,6 +43,9 @@ class Task(BaseModel):
         id: Unique task identifier
         summary: Short, human-readable task summary for display (optional, max 140 chars, auto-generated if not provided)
         prompt: The actual instruction/task to execute
+        feature_branch: Feature branch that task changes get merged into (optional)
+        task_branch: Individual task branch for isolated work (optional)
+        worktree_path: Git worktree directory path for isolated execution (optional)
     """
 
     id: UUID = Field(default_factory=uuid4)
@@ -90,6 +93,9 @@ class Task(BaseModel):
     task_branch: str | None = (
         None  # Individual task branch for isolated work (merges into feature_branch)
     )
+
+    # NEW: Worktree path tracking
+    worktree_path: str | None = None  # Git worktree directory path for isolated execution
 
     @field_validator("summary")
     @classmethod
