@@ -370,7 +370,7 @@ def cancel(
 
 @task_app.command("retry")
 def retry(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> None:
-    """Retry a failed task."""
+    """Retry a failed or cancelled task."""
 
     async def _retry() -> None:
         services = await _get_services()
@@ -978,51 +978,6 @@ def resources() -> None:
     asyncio.run(_resources())
 
 
-# ===== DLQ Commands =====
-dlq_app = typer.Typer(help="Dead letter queue management", no_args_is_help=True)
-app.add_typer(dlq_app, name="dlq")
-
-
-@dlq_app.command("list")
-def dlq_list() -> None:
-    """List tasks in dead letter queue."""
-
-    async def _list() -> None:
-        services = await _get_services()
-        dlq_tasks = services["failure_recovery"].get_dlq_tasks()
-
-        if not dlq_tasks:
-            console.print("Dead letter queue is empty")
-            return
-
-        table = Table(title="Dead Letter Queue")
-        table.add_column("Task ID", style="cyan", no_wrap=True)
-
-        for task_id in dlq_tasks:
-            table.add_row(str(task_id))
-
-        console.print(table)
-
-    asyncio.run(_list())
-
-
-@dlq_app.command("reprocess")
-def dlq_reprocess(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> None:
-    """Reprocess a task from DLQ."""
-
-    async def _reprocess() -> None:
-        services = await _get_services()
-        resolved_id = await _resolve_task_id(task_id, services)
-        success = await services["failure_recovery"].reprocess_dlq_task(resolved_id)
-
-        if success:
-            console.print(f"[green]✓[/green] Task {task_id} requeued from DLQ")
-        else:
-            console.print(f"[red]Error:[/red] Failed to reprocess task {task_id}")
-
-    asyncio.run(_reprocess())
-
-
 # ===== Config Commands =====
 config_app = typer.Typer(help="Configuration management", no_args_is_help=True)
 app.add_typer(config_app, name="config")
@@ -1268,7 +1223,6 @@ def recovery() -> None:
         console.print(f"Transient failures: {stats.get('transient_failures', 0)}")
         console.print(f"Retried tasks: {stats.get('retried_tasks', 0)}")
         console.print(f"Recovered tasks: {stats.get('recovered_tasks', 0)}")
-        console.print(f"DLQ count: {stats.get('dlq_count', 0)}")
 
     asyncio.run(_stats())
 

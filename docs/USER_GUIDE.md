@@ -103,7 +103,6 @@ Tasks are units of work submitted to Abathur for execution by specialized Claude
 ```
 PENDING → RUNNING → COMPLETED
                   ↘ FAILED → (retry) → PENDING
-                                     ↘ DLQ
 ```
 
 ### Agents
@@ -386,17 +385,6 @@ abathur recovery
 # - Total failures
 # - Permanent vs transient failures
 # - Retried/recovered tasks
-# - DLQ count
-```
-
-### Dead Letter Queue
-
-```bash
-# List tasks in DLQ
-abathur dlq list
-
-# Reprocess failed task
-abathur dlq reprocess <task-id>
 ```
 
 ---

@@ -163,7 +163,7 @@ class TaskCoordinator:
         return await self.database.list_tasks(status=status, limit=limit)
 
     async def retry_task(self, task_id: UUID) -> bool:
-        """Retry a failed task.
+        """Retry a failed or cancelled task.
 
         Args:
             task_id: Task ID to retry
@@ -175,7 +175,7 @@ class TaskCoordinator:
         if not task:
             return False
 
-        if task.status != TaskStatus.FAILED:
+        if task.status not in (TaskStatus.FAILED, TaskStatus.CANCELLED):
             logger.warning(
                 "task_cannot_retry",
                 task_id=str(task_id),
