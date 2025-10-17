@@ -47,12 +47,15 @@ async def test_insert_task_with_summary(db):
 
 
 @pytest.mark.asyncio
-async def test_insert_task_without_summary(db):
-    """Test inserting a task without a summary (None)."""
+async def test_insert_task_with_explicit_summary(db):
+    """Test inserting a task with explicit summary value.
+
+    Note: summary is now required at domain level, service layer must always provide it.
+    """
     task = Task(
         id=uuid.uuid4(),
         prompt="Detailed instructions without a summary",
-        summary=None,
+        summary="Task",  # Must be provided explicitly (service layer auto-generates this)
         agent_type="general-purpose",
         status=TaskStatus.PENDING,
         source=TaskSource.HUMAN,
@@ -71,7 +74,7 @@ async def test_insert_task_without_summary(db):
     assert retrieved is not None
     assert retrieved.id == task.id
     assert retrieved.prompt == task.prompt
-    assert retrieved.summary is None
+    assert retrieved.summary == "Task"
     assert retrieved.agent_type == task.agent_type
 
 
@@ -93,7 +96,7 @@ async def test_summary_roundtrip(db):
         Task(
             id=uuid.uuid4(),
             prompt="Long prompt 2",
-            summary=None,
+            summary="Auto-generated summary",  # Must be provided (service layer handles auto-generation)
             agent_type="test-agent",
             status=TaskStatus.PENDING,
             source=TaskSource.HUMAN,
@@ -112,7 +115,7 @@ async def test_summary_roundtrip(db):
     assert retrieved_1.summary == "Short summary 1"
 
     retrieved_2 = await db.get_task(tasks[1].id)
-    assert retrieved_2.summary is None
+    assert retrieved_2.summary == "Auto-generated summary"
 
 
 @pytest.mark.asyncio

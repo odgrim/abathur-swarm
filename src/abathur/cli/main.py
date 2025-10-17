@@ -218,7 +218,6 @@ def submit(
             agent_type=agent_type,
             input_data=input_data,
             priority=priority,
-            summary=None,
         )
         task_id: UUID = await services["task_coordinator"].submit_task(task)
 

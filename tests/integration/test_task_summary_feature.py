@@ -130,18 +130,19 @@ async def test_mcp_backward_compatibility_without_summary(
     mcp_server: AbathurTaskQueueServer,
     memory_db: Database,
 ):
-    """Test MCP task_enqueue works without summary parameter (backward compatibility).
+    """Test MCP task_enqueue auto-generates summary when not provided (backward compatibility).
 
     Simulates legacy MCP client not providing summary parameter:
     1. Client calls task_enqueue WITHOUT summary
-    2. Server creates task with summary=None
+    2. Server auto-generates summary from description
     3. Client retrieves task
-    4. Response has summary=None
+    4. Response has auto-generated summary
 
     Verifies:
     - Backward compatibility maintained
     - Existing code works without summary
     - No errors when summary omitted
+    - Summary is auto-generated from description
     """
     # Step 1: Enqueue task WITHOUT summary parameter
     enqueue_args = {
@@ -160,18 +161,21 @@ async def test_mcp_backward_compatibility_without_summary(
 
     task_id = enqueue_result["task_id"]
 
-    # Step 2: Verify database has summary=None
+    # Step 2: Verify database has auto-generated summary (Human source gets "User Prompt: " prefix)
     retrieved_from_db = await memory_db.get_task(UUID(task_id))
     assert retrieved_from_db is not None
-    assert retrieved_from_db.summary is None
+    assert retrieved_from_db.summary is not None
+    assert retrieved_from_db.summary.startswith("User Prompt: ")
+    assert "Refactor payment processing module" in retrieved_from_db.summary
 
     # Step 3: Retrieve via MCP task_get
     get_result = await mcp_server._handle_task_get({"task_id": task_id})
 
-    # Assert: summary field present but None
+    # Assert: summary field present and auto-generated
     assert "error" not in get_result
     assert "summary" in get_result
-    assert get_result["summary"] is None
+    assert get_result["summary"] is not None
+    assert get_result["summary"].startswith("User Prompt: ")
 
 
 # Test 3: Validation Error Handling
@@ -181,34 +185,31 @@ async def test_mcp_backward_compatibility_without_summary(
 async def test_mcp_summary_validation_max_length(
     task_queue_service: TaskQueueService,
 ):
-    """Test that summaries exceeding max_length raise TaskQueueError at service layer.
+    """Test that summaries exceeding max_length are automatically truncated.
 
-    Note: Pydantic validation happens at Task model instantiation in service layer,
-    then is caught and wrapped in TaskQueueError. MCP schema declares maxLength but
-    doesn't enforce.
+    The service layer auto-trims summaries to 140 characters instead of raising errors,
+    providing better UX (auto-correction vs rejection).
 
     Verifies:
-    - Pydantic validation enforces max_length=500
-    - TaskQueueError raised (wrapping ValidationError) for >500 char summaries
-    - Error message mentions max_length constraint
+    - Summaries >140 chars are automatically truncated to 140
+    - No error is raised (graceful handling)
+    - Truncated summary is persisted correctly
+    - Auto-truncation maintains data integrity
     """
-    from abathur.services.task_queue_service import TaskQueueError
+    # Enqueue task with >140 char summary
+    long_summary = "x" * 141  # 141 characters (exceeds max_length=140)
 
-    # Attempt to enqueue task with >500 char summary
-    long_summary = "x" * 501  # 501 characters (exceeds max_length=500)
+    # Should NOT raise error - should auto-truncate instead
+    task = await task_queue_service.enqueue_task(
+        description="Task with too-long summary",
+        source=TaskSource.HUMAN,
+        summary=long_summary,
+        base_priority=5,
+    )
 
-    with pytest.raises(TaskQueueError) as exc_info:
-        await task_queue_service.enqueue_task(
-            description="Task with too-long summary",
-            source=TaskSource.HUMAN,
-            summary=long_summary,
-            base_priority=5,
-        )
-
-    # Assert: Error message mentions validation and max_length/500
-    error_message = str(exc_info.value).lower()
-    assert "validation error" in error_message or "max" in error_message
-    assert "500" in error_message
+    # Assert: Summary was truncated to 140 characters
+    assert len(task.summary) == 140
+    assert task.summary == "x" * 140
 
 
 @pytest.mark.asyncio
@@ -216,15 +217,15 @@ async def test_mcp_summary_validation_exactly_max_length(
     mcp_server: AbathurTaskQueueServer,
     memory_db: Database,
 ):
-    """Test that summary exactly at max_length (500 chars) is accepted.
+    """Test that summary exactly at max_length (140 chars) is accepted.
 
     Verifies:
-    - Boundary condition: exactly 500 characters accepted
+    - Boundary condition: exactly 140 characters accepted
     - No truncation occurs
     - Full summary persisted and retrieved
     """
-    # Exactly 500 characters
-    max_length_summary = "x" * 500
+    # Exactly 140 characters
+    max_length_summary = "x" * 140
 
     enqueue_args = {
         "description": "Task with max length summary",
@@ -246,7 +247,7 @@ async def test_mcp_summary_validation_exactly_max_length(
 
     assert "error" not in get_result
     assert get_result["summary"] == max_length_summary
-    assert len(get_result["summary"]) == 500
+    assert len(get_result["summary"]) == 140
 
 
 # Test 4: task_list Returns Summaries
@@ -322,9 +323,13 @@ async def test_mcp_task_list_includes_summaries(
             if task["id"] == result1["task_id"]:
                 assert task["summary"] == "Summary for task 1"
             elif task["id"] == result2["task_id"]:
-                assert task["summary"] is None
+                # Auto-generated from description for human source
+                assert task["summary"].startswith("User Prompt: ")
+                assert "Task 2 without summary" in task["summary"]
             elif task["id"] == result3["task_id"]:
-                assert task["summary"] == ""
+                # Empty summary gets auto-generated
+                assert task["summary"].startswith("User Prompt: ")
+                assert "Task 3 with empty summary" in task["summary"]
 
 
 # Test 5: Database Migration Idempotency

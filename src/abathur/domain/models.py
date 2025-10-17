@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TaskStatus(str, Enum):
@@ -41,16 +41,15 @@ class Task(BaseModel):
 
     Attributes:
         id: Unique task identifier
-        summary: Short, human-readable task summary for display (3-200 chars)
+        summary: Short, human-readable task summary for display (always required, max 140 chars)
         prompt: The actual instruction/task to execute
     """
 
     id: UUID = Field(default_factory=uuid4)
-    summary: str | None = Field(
-        None,
-        min_length=3,
-        max_length=200,
-        description="Short, human-readable task summary for display",
+    summary: str = Field(
+        default="Task",
+        max_length=140,
+        description="Short, human-readable task summary for display (max 140 chars, auto-generated from prompt if not provided)",
     )
     prompt: str  # The actual instruction/task to execute
     agent_type: str = (
@@ -93,20 +92,7 @@ class Task(BaseModel):
         None  # Individual task branch for isolated work (merges into feature_branch)
     )
 
-    @field_validator("summary")
-    @classmethod
-    def validate_summary_length(cls, v: str | None) -> str | None:
-        """Validate summary field max_length constraint."""
-        if v is not None and len(v) > 200:
-            raise ValueError(f"summary must not exceed 200 characters (got {len(v)})")
-        return v
-
-    model_config = ConfigDict(
-        json_encoders={
-            UUID: str,
-            datetime: lambda v: v.isoformat(),
-        }
-    )
+    model_config = ConfigDict()
 
 
 class TaskDependency(BaseModel):
@@ -119,12 +105,7 @@ class TaskDependency(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     resolved_at: datetime | None = None  # When prerequisite completed
 
-    model_config = ConfigDict(
-        json_encoders={
-            UUID: str,
-            datetime: lambda v: v.isoformat(),
-        }
-    )
+    model_config = ConfigDict()
 
 
 class AgentState(str, Enum):
@@ -151,12 +132,7 @@ class Agent(BaseModel):
     resource_usage: dict[str, Any] = Field(default_factory=dict)
     session_id: str | None = None  # Link to session for memory context
 
-    model_config = ConfigDict(
-        json_encoders={
-            UUID: str,
-            datetime: lambda v: v.isoformat(),
-        }
-    )
+    model_config = ConfigDict()
 
 
 class ExecutionContext(BaseModel):
@@ -179,11 +155,7 @@ class Result(BaseModel):
     token_usage: dict[str, int] | None = None
     execution_time_seconds: float | None = None
 
-    model_config = ConfigDict(
-        json_encoders={
-            UUID: str,
-        }
-    )
+    model_config = ConfigDict()
 
 
 class LoopState(BaseModel):
@@ -196,8 +168,4 @@ class LoopState(BaseModel):
     history: list[dict[str, Any]] = Field(default_factory=list)
     checkpoint_data: dict[str, Any] = Field(default_factory=dict)
 
-    model_config = ConfigDict(
-        json_encoders={
-            UUID: str,
-        }
-    )
+    model_config = ConfigDict()
