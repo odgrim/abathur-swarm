@@ -41,17 +41,17 @@ class Task(BaseModel):
 
     Attributes:
         id: Unique task identifier
-        summary: Short, human-readable task summary for display (always required, max 140 chars)
+        summary: Short, human-readable task summary for display (optional, max 140 chars, auto-generated if not provided)
         prompt: The actual instruction/task to execute
     """
 
     id: UUID = Field(default_factory=uuid4)
-    summary: str = Field(
-        default="Task",
+    summary: str | None = Field(
+        default=None,
         max_length=140,
-        description="Short, human-readable task summary for display (max 140 chars, auto-generated from prompt if not provided)",
+        description="Short, human-readable task summary (max 140 chars, auto-generated from description if not provided)",
     )
-    prompt: str  # The actual instruction/task to execute
+    prompt: str  # The actual instruction/task to execute (description in MCP API)
     agent_type: str = (
         "requirements-gatherer"  # Agent definition to use (defaults to requirements-gatherer)
     )
@@ -92,7 +92,11 @@ class Task(BaseModel):
         None  # Individual task branch for isolated work (merges into feature_branch)
     )
 
-    model_config = ConfigDict()
+    model_config = ConfigDict(
+        # Note: Use model_dump(mode='json') for proper JSON serialization
+        # This automatically converts UUID→str, datetime→ISO string
+        # Enums serialize to their values by default in mode='json'
+    )
 
 
 class TaskDependency(BaseModel):

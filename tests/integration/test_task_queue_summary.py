@@ -89,13 +89,13 @@ async def test_enqueue_task_with_summary(memory_db: Database, task_queue_service
 async def test_enqueue_task_without_summary(
     memory_db: Database, task_queue_service: TaskQueueService
 ):
-    """Test enqueue_task works without summary parameter (backward compatibility).
+    """Test enqueue_task auto-generates summary when not provided.
 
     Verifies:
     - Service accepts omitted summary parameter
-    - Summary defaults to None
-    - Task persists correctly
-    - Backward compatibility maintained
+    - Summary auto-generated from description with "User Prompt: " prefix
+    - Task persists correctly with auto-generated summary
+    - Auto-generation maintains backward compatibility
     """
     # Arrange
     test_description = "Implement user registration endpoint"
@@ -107,14 +107,15 @@ async def test_enqueue_task_without_summary(
         base_priority=5,
     )
 
-    # Assert - service returns task with summary=None
-    assert enqueued_task.summary is None
+    # Assert - service auto-generates summary with "User Prompt: " prefix
+    expected_summary = "User Prompt: " + test_description
+    assert enqueued_task.summary == expected_summary
     assert enqueued_task.prompt == test_description
 
-    # Assert - database persistence (summary=None)
+    # Assert - database persistence (auto-generated summary)
     retrieved_task = await memory_db.get_task(enqueued_task.id)
     assert retrieved_task is not None
-    assert retrieved_task.summary is None
+    assert retrieved_task.summary == expected_summary
     assert retrieved_task.prompt == test_description
 
 
@@ -122,12 +123,12 @@ async def test_enqueue_task_without_summary(
 async def test_enqueue_task_with_empty_string_summary(
     memory_db: Database, task_queue_service: TaskQueueService
 ):
-    """Test enqueue_task accepts empty string summary.
+    """Test enqueue_task auto-generates summary when empty string provided.
 
     Verifies:
-    - Service accepts empty string ""
-    - Empty string persisted correctly
-    - Distinguished from None
+    - Service treats empty string "" same as None (auto-generates)
+    - Summary auto-generated from description with "User Prompt: " prefix
+    - Empty string treated as "not provided"
     """
     # Arrange
     test_description = "Fix bug in payment processing"
@@ -136,33 +137,33 @@ async def test_enqueue_task_with_empty_string_summary(
     enqueued_task = await task_queue_service.enqueue_task(
         description=test_description,
         source=TaskSource.HUMAN,
-        summary="",  # Empty string
+        summary="",  # Empty string - treated as not provided
         base_priority=5,
     )
 
-    # Assert - service returns task with empty string
-    assert enqueued_task.summary == ""
-    assert enqueued_task.summary is not None  # Different from None
+    # Assert - service auto-generates summary (treats empty string as None)
+    expected_summary = "User Prompt: " + test_description
+    assert enqueued_task.summary == expected_summary
 
-    # Assert - database persistence
+    # Assert - database persistence with auto-generated summary
     retrieved_task = await memory_db.get_task(enqueued_task.id)
     assert retrieved_task is not None
-    assert retrieved_task.summary == ""
+    assert retrieved_task.summary == expected_summary
 
 
 @pytest.mark.asyncio
 async def test_enqueue_task_with_max_length_summary(
     memory_db: Database, task_queue_service: TaskQueueService
 ):
-    """Test enqueue_task accepts exactly 200 character summary.
+    """Test enqueue_task accepts exactly 140 character summary.
 
     Verifies:
-    - Service accepts 200 char summary (boundary condition)
+    - Service accepts 140 char summary (boundary condition)
     - Pydantic validation passes
     - Summary persisted correctly
     """
-    # Arrange - exactly 200 characters
-    test_summary = "x" * 200
+    # Arrange - exactly 140 characters
+    test_summary = "x" * 140
     test_description = "Implement feature with maximum summary length"
 
     # Act
@@ -175,13 +176,47 @@ async def test_enqueue_task_with_max_length_summary(
 
     # Assert
     assert enqueued_task.summary == test_summary
-    assert len(enqueued_task.summary) == 200
+    assert len(enqueued_task.summary) == 140
 
     # Assert - database persistence
     retrieved_task = await memory_db.get_task(enqueued_task.id)
     assert retrieved_task is not None
     assert retrieved_task.summary == test_summary
-    assert len(retrieved_task.summary) == 200
+    assert len(retrieved_task.summary) == 140
+
+
+@pytest.mark.asyncio
+async def test_enqueue_task_exceeds_max_summary_length(
+    memory_db: Database, task_queue_service: TaskQueueService
+):
+    """Test enqueue_task truncates summary exceeding 140 characters.
+
+    Verifies:
+    - Service truncates summaries >140 chars to 140 chars
+    - No validation error raised (service handles truncation)
+    - Summary persisted as truncated value
+    """
+    # Arrange - 141 characters (one char too long)
+    test_summary = "x" * 141
+    test_description = "Test truncation of overly long summary"
+
+    # Act - service should truncate to 140 chars
+    enqueued_task = await task_queue_service.enqueue_task(
+        description=test_description,
+        source=TaskSource.HUMAN,
+        summary=test_summary,
+        base_priority=5,
+    )
+
+    # Assert - summary truncated to 140 chars
+    assert len(enqueued_task.summary) == 140
+    assert enqueued_task.summary == "x" * 140
+
+    # Assert - database persistence with truncated value
+    retrieved_task = await memory_db.get_task(enqueued_task.id)
+    assert retrieved_task is not None
+    assert len(retrieved_task.summary) == 140
+    assert retrieved_task.summary == "x" * 140
 
 
 @pytest.mark.asyncio
@@ -448,10 +483,12 @@ async def test_mcp_task_list_returns_summary(
     assert retrieved_task_1.summary == "This task has a summary"
 
     retrieved_task_2 = next(t for t in tasks if t.id == task_without_summary.id)
-    assert retrieved_task_2.summary is None
+    # Service auto-generates summary with "User Prompt: " prefix
+    assert retrieved_task_2.summary == "User Prompt: Task without summary"
 
     retrieved_task_3 = next(t for t in tasks if t.id == task_with_empty_summary.id)
-    assert retrieved_task_3.summary == ""
+    # Service auto-generates summary when empty string provided
+    assert retrieved_task_3.summary == "User Prompt: Task with empty summary"
 
 
 # Backward Compatibility Tests
@@ -459,28 +496,28 @@ async def test_mcp_task_list_returns_summary(
 
 @pytest.mark.asyncio
 async def test_database_migration_backward_compatibility(memory_db: Database):
-    """Test backward compatibility: existing tasks work with new summary column.
+    """Test backward compatibility: existing tasks work with summary column default.
 
     Simulates migration scenario:
-    1. Create task before migration (insert without summary column)
-    2. Verify task can be retrieved
-    3. Verify summary=None for old task
+    1. Migration adds summary column with NOT NULL DEFAULT 'Task'
+    2. Existing rows get backfilled with auto-generated summaries
+    3. Verify task can be retrieved with default or backfilled summary
     4. Verify no data loss
 
     Verifies:
-    - Old tasks (before migration) still queryable
-    - summary=None for tasks without summary
-    - No errors reading old data
+    - Old tasks (before migration) get default 'Task' summary after migration
+    - Migration backfill updates old tasks with auto-generated summaries
+    - No errors reading migrated data
     - Backward compatibility maintained (NFR002)
     """
-    # Arrange - simulate old task (before migration) by inserting without summary
+    # Arrange - simulate old task AFTER migration (has default 'Task' summary)
     old_task_id = uuid4()
     old_task_description = "Old task before migration"
 
     async with memory_db._get_connection() as conn:
-        # Insert task WITHOUT summary column (simulate pre-migration data)
-        # Note: In reality, migration adds summary column with default NULL
-        # This test verifies that NULL values are handled correctly
+        # Insert task with default 'Task' summary (simulates post-migration state)
+        # The migration adds: ALTER TABLE tasks ADD COLUMN summary TEXT NOT NULL DEFAULT 'Task'
+        # Then backfills with auto-generated summaries based on source
         await conn.execute(
             """
             INSERT INTO tasks (
@@ -522,7 +559,7 @@ async def test_database_migration_backward_compatibility(memory_db: Database):
                 0,
                 None,
                 None,
-                None,  # summary = NULL (simulates old task)
+                "User Prompt: Old task before migration",  # Simulates migration backfill
             ),
         )
         await conn.commit()
@@ -535,8 +572,8 @@ async def test_database_migration_backward_compatibility(memory_db: Database):
     assert retrieved_task.id == old_task_id
     assert retrieved_task.prompt == old_task_description
 
-    # Assert - summary is None for old task
-    assert retrieved_task.summary is None
+    # Assert - summary was backfilled by migration (matches auto-generation logic)
+    assert retrieved_task.summary == "User Prompt: Old task before migration"
 
     # Assert - no data loss (other fields intact)
     assert retrieved_task.agent_type == "requirements-gatherer"
@@ -548,23 +585,24 @@ async def test_database_migration_backward_compatibility(memory_db: Database):
 async def test_update_old_task_with_summary(
     memory_db: Database, task_queue_service: TaskQueueService
 ):
-    """Test adding summary to existing task without summary.
+    """Test adding summary to existing task with auto-generated summary.
 
     Verifies:
-    - Old tasks can be updated with summary
+    - Tasks with auto-generated summary can be updated
     - Summary update doesn't affect other fields
     - Forward compatibility
     """
-    # Arrange - create task without summary
+    # Arrange - create task without explicit summary (auto-generated)
     task = await task_queue_service.enqueue_task(
         description="Task to be updated",
         source=TaskSource.HUMAN,
         base_priority=5,
     )
 
-    assert task.summary is None
+    # Service auto-generates summary
+    assert task.summary == "User Prompt: Task to be updated"
 
-    # Act - update task with summary (manually via database)
+    # Act - update task with new summary (manually via database)
     new_summary = "Summary added later"
     async with memory_db._get_connection() as conn:
         await conn.execute(

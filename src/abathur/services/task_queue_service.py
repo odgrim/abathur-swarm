@@ -167,25 +167,24 @@ class TaskQueueService:
             prerequisites = prerequisites or []
             input_data = input_data or {}
 
-            # Generate summary if not provided or empty (always required, max 140 chars)
-            # Check for None, empty string, or whitespace-only string
-            if not summary or not summary.strip():
-                # For human-submitted tasks, use "User Prompt: " prefix
+            # Generate summary if not provided (None or empty string)
+            if summary is None or summary.strip() == "":
+                # Auto-generate summary from description
                 if source == TaskSource.HUMAN:
+                    # For human-submitted tasks, use "User Prompt: " prefix
                     prefix = "User Prompt: "
-                    max_desc_len = 140 - len(prefix)  # 140 - 13 = 127 chars for prompt
-                    # Truncate to 126 to stay under limit with prefix
+                    # Truncate to 126 to stay under limit with prefix (140 - 13 - 1 for safety)
                     summary = prefix + description[:126].strip()
                 else:
                     # For agent tasks, just use first 140 chars
                     summary = description[:140].strip()
 
-                # Fallback if empty after stripping
-                if not summary or not summary.strip():
+                # Fallback if description is empty after stripping
+                if not summary.strip():
                     summary = "Task"
             else:
-                # If summary provided, trim to max length
-                summary = summary[:140].strip() if summary else "Task"
+                # Summary provided - trim to max length
+                summary = summary[:140].strip()
 
             # Validate base_priority range
             if not 0 <= base_priority <= 10:
@@ -261,7 +260,7 @@ class TaskQueueService:
                         task.prompt,
                         task.agent_type,
                         task.priority,
-                        task.status.value,
+                        task.status,  # Already a string (TaskStatus inherits from str)
                         "{}",  # input_data as JSON
                         None,  # result_data
                         None,  # error_message
@@ -276,8 +275,8 @@ class TaskQueueService:
                         str(parent_task_id) if parent_task_id else None,
                         json.dumps([str(pid) for pid in prerequisites]),  # dependencies as JSON array
                         session_id,
-                        task.source.value,
-                        DependencyType.SEQUENTIAL.value,
+                        task.source,  # Already a string (TaskSource inherits from str)
+                        DependencyType.SEQUENTIAL,  # Already a string (DependencyType inherits from str)
                         0.0,  # calculated_priority (will update after depth)
                         task.deadline.isoformat() if task.deadline else None,
                         task.estimated_duration_seconds,
@@ -309,7 +308,7 @@ class TaskQueueService:
                             str(dependency.id),
                             str(dependency.dependent_task_id),
                             str(dependency.prerequisite_task_id),
-                            dependency.dependency_type.value,
+                            dependency.dependency_type,  # Already a string (DependencyType inherits from str)
                             dependency.created_at.isoformat(),
                             None,  # resolved_at
                         ),
