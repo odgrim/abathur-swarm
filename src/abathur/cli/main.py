@@ -122,7 +122,7 @@ async def _get_services() -> dict[str, Any]:
             raise ValueError(
                 "No authentication configured.\n"
                 "Please either:\n"
-                "  1. Set API key: abathur config set-key <key>\n"
+                "  1. Set API key: export ANTHROPIC_API_KEY=<key>\n"
                 "  2. Install Claude CLI and authenticate: https://docs.anthropic.com/claude/docs/quickstart"
             ) from e
 
@@ -865,71 +865,6 @@ def loop_start(
                 await mcp_manager.stop()
 
     asyncio.run(_start())
-
-
-# ===== Config Commands =====
-config_app = typer.Typer(help="Configuration management", no_args_is_help=True)
-app.add_typer(config_app, name="config")
-
-
-@config_app.command("show")
-def config_show() -> None:
-    """Show current configuration."""
-
-    async def _show() -> None:
-        from abathur.infrastructure import ConfigManager
-
-        config_manager = ConfigManager()
-        config = config_manager.load_config()
-
-        console.print("[bold]Configuration[/bold]")
-        console.print(f"Database path: {config_manager.get_database_path()}")
-        console.print(f"Log level: {config.log_level}")
-        console.print(f"Max concurrent agents: {config.swarm.max_concurrent_agents}")
-        console.print(f"Max queue size: {config.queue.max_size}")
-        console.print(f"Max loop iterations: {config.loop.max_iterations}")
-
-        if config.template_repos:
-            console.print(f"\n[bold]Templates ({len(config.template_repos)})[/bold]")
-            for idx, repo in enumerate(config.template_repos, start=1):
-                console.print(f"  {idx}. {repo.url} @ {repo.version}")
-
-    asyncio.run(_show())
-
-
-@config_app.command("validate")
-def config_validate() -> None:
-    """Validate configuration files."""
-    try:
-        from abathur.infrastructure.config import ConfigManager
-
-        config_manager = ConfigManager()
-        config = config_manager.load_config()
-        console.print("[green]✓[/green] Configuration is valid")
-        console.print(f"Version: {config.version}")
-        console.print(f"Log level: {config.log_level}")
-        console.print(f"Max concurrent agents: {config.swarm.max_concurrent_agents}")
-    except Exception as e:
-        console.print(f"[red]✗[/red] Configuration error: {e}")
-        raise typer.Exit(1) from e
-
-
-@config_app.command("set-key")
-def config_set_key(
-    api_key: str = typer.Argument(..., help="Anthropic API key"),
-    use_keychain: bool = typer.Option(True, help="Store in system keychain"),
-) -> None:
-    """Set Anthropic API key."""
-    try:
-        from abathur.infrastructure.config import ConfigManager
-
-        config_manager = ConfigManager()
-        config_manager.set_api_key(api_key, use_keychain=use_keychain)
-        storage = "keychain" if use_keychain else ".env file"
-        console.print(f"[green]✓[/green] API key stored in {storage}")
-    except Exception as e:
-        console.print(f"[red]✗[/red] Failed to store API key: {e}")
-        raise typer.Exit(1) from e
 
 
 # ===== Database Commands =====

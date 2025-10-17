@@ -11,8 +11,8 @@ Abathur now supports **dual-mode authentication**: API keys and OAuth tokens. Th
 ### Option 1: API Key (Recommended for Most Users)
 
 ```bash
-# Set your API key
-abathur config set-key sk-ant-api03-your-key-here
+# Set your API key via environment variable
+export ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
 
 # Verify configuration
 abathur config oauth-status
@@ -153,7 +153,7 @@ abathur config oauth-status
 
 No authentication configured.
 Configure authentication:
-  1. API key: abathur config set-key <key>
+  1. API key: export ANTHROPIC_API_KEY=<key>
   2. OAuth:   abathur config oauth-login --manual
 ```
 

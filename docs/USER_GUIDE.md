@@ -50,8 +50,8 @@ docker run -it abathur/abathur:latest abathur version
 # Initialize database and configuration
 abathur init
 
-# Set your Anthropic API key
-abathur config set-key YOUR_API_KEY
+# Set your Anthropic API key via environment variable
+export ANTHROPIC_API_KEY=YOUR_API_KEY
 ```
 
 ### 2. Configure Templates
@@ -289,14 +289,14 @@ abathur init --skip-template
 
 ### View Configured Templates
 
-```bash
-# Show current configuration including templates
-abathur config show
+Check the `.abathur/config.yaml` file to see configured templates:
 
-# Output includes:
-# Templates (2)
-#   1. https://github.com/org/template.git @ main
-#   2. https://github.com/org/another-template.git @ v1.0.0
+```yaml
+template_repos:
+  - url: https://github.com/org/template.git
+    version: main
+  - url: https://github.com/org/another-template.git
+    version: v1.0.0
 ```
 
 ### Template Structure
@@ -404,23 +404,22 @@ retry:
 
 ### Set API Key
 
-```bash
-# Store in system keychain (recommended)
-abathur config set-key YOUR_API_KEY
+Set your Anthropic API key via environment variable:
 
-# Store in .env file
-abathur config set-key YOUR_API_KEY --no-use-keychain
+```bash
+# Set as environment variable
+export ANTHROPIC_API_KEY=YOUR_API_KEY
+
+# Or add to your shell profile (.bashrc, .zshrc, etc.)
+echo 'export ANTHROPIC_API_KEY=YOUR_API_KEY' >> ~/.zshrc
 ```
 
 ### Validate Configuration
 
-```bash
-# Validate configuration files
-abathur config validate
-
-# Show current configuration
-abathur config show
-```
+Check your configuration files manually:
+- `.abathur/config.yaml` - Template defaults
+- `~/.abathur/config.yaml` - User overrides
+- `.abathur/local.yaml` - Project overrides
 
 ---
 
