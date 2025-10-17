@@ -59,20 +59,32 @@ class SwarmOrchestrator:
         """
         self._running = True
         self._shutdown_event.clear()
+        self.task_limit = task_limit
 
         logger.info(
             "starting_continuous_swarm",
             max_concurrent=self.max_concurrent_agents,
             poll_interval=self.poll_interval,
+            task_limit=task_limit,
         )
 
-        # Track active task coroutines
+        # Track active task coroutines and tasks processed
         active_task_coroutines: set[asyncio.Task] = set()
+        tasks_processed = 0
 
         try:
             while self._running and not self._shutdown_event.is_set():
                 # Check if we have capacity for more tasks
                 if len(self.active_agents) < self.max_concurrent_agents:
+                    # Check task limit BEFORE spawning
+                    if task_limit is not None and tasks_processed >= task_limit:
+                        logger.info(
+                            "task_limit_reached",
+                            task_limit=task_limit,
+                            tasks_processed=tasks_processed,
+                        )
+                        break
+
                     # Try to get next READY task
                     next_task = await self.task_queue_service.get_next_task()
 
@@ -82,6 +94,7 @@ class SwarmOrchestrator:
                             self._execute_with_semaphore(next_task)
                         )
                         active_task_coroutines.add(task_coroutine)
+                        tasks_processed += 1
 
                         # Remove completed tasks from tracking
                         active_task_coroutines = {t for t in active_task_coroutines if not t.done()}
@@ -91,6 +104,7 @@ class SwarmOrchestrator:
                             task_id=str(next_task.id),
                             active_count=len(self.active_agents),
                             available_slots=self.max_concurrent_agents - len(self.active_agents),
+                            tasks_processed=tasks_processed,
                         )
                     else:
                         # No tasks available, wait before polling again
