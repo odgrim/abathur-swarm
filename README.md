@@ -37,11 +37,6 @@
 - Automatic warnings and spawn safety checks
 - Historical usage tracking
 
-✅ **Failure Recovery**
-- Exponential backoff retry (10s → 5min)
-- Stalled task detection (1 hour timeout)
-- Transient vs permanent error classification
-
 ✅ **MCP Integration**
 - Full MCP server lifecycle management
 - Agent-to-server binding
@@ -101,18 +96,18 @@ abathur init
 abathur config set-key YOUR_API_KEY
 ```
 
-### 2. Install Agent Template
+### 2. Configure Templates
 
-```bash
-# Clone a template from Git
-abathur template install https://github.com/org/agent-template.git
+Templates are configured in `.abathur/config.yaml`. The default template is automatically configured:
 
-# List installed templates
-abathur template list
-
-# Validate template
-abathur template validate my-agent
+```yaml
+# .abathur/config.yaml
+template_repos:
+  - url: https://github.com/odgrim/abathur-claude-template.git
+    version: main
 ```
+
+Run `abathur init` to install templates.
 
 ### 3. Submit & Execute Tasks
 
@@ -167,7 +162,6 @@ Abathur follows **Clean Architecture** principles with clear layer separation:
 │  • AgentExecutor                         │
 │  • TemplateManager                       │
 │  • MCPManager                            │
-│  • FailureRecovery                       │
 │  • ResourceMonitor                       │
 │  • AgentPool                             │
 └────────────────┬─────────────────────────┘
@@ -225,9 +219,8 @@ abathur loop start <task-id> [--max-iterations N] [--convergence-threshold F]
 ### Template Management
 
 ```bash
-abathur template list
-abathur template install <repo-url> [--version TAG]
-abathur template validate <name>
+abathur config show   # View configured templates
+abathur init          # Install configured templates
 ```
 
 ### MCP Management
@@ -239,12 +232,11 @@ abathur mcp stop <server>
 abathur mcp restart <server>
 ```
 
-### Monitoring & Recovery
+### Monitoring
 
 ```bash
 abathur status                  # System status
 abathur resources               # Resource usage
-abathur recovery                # Failure stats
 ```
 
 ### Configuration
@@ -273,7 +265,10 @@ Abathur uses a 4-level configuration hierarchy:
 ```yaml
 version: "1.0"
 log_level: INFO
-default_model: claude-sonnet-4
+
+template_repos:
+  - url: https://github.com/odgrim/abathur-claude-template.git
+    version: main
 
 swarm:
   max_concurrent_agents: 10
@@ -414,7 +409,6 @@ abathur --help
 - Swarm Orchestrator (10+ concurrent agents)
 - Agent Pool (dynamic lifecycle, health monitoring)
 - Resource Monitor (CPU/memory tracking, limits)
-- Failure Recovery (exponential backoff, stalled detection)
 
 ### ✅ Phase 3: Production Features (COMPLETE)
 
@@ -437,7 +431,6 @@ abathur --help
 - **Concurrent Agents**: 10+ simultaneous agents
 - **Task Throughput**: 1,000+ tasks/hour (depends on task complexity)
 - **Database**: >99.9% ACID reliability with WAL mode
-- **Recovery**: Automatic retry with exponential backoff (10s → 5min)
 
 ---
 

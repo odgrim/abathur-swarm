@@ -3,7 +3,6 @@
 from abathur.application.agent_executor import AgentExecutor
 from abathur.application.agent_pool import AgentPool, PoolStats
 from abathur.application.claude_client import ClaudeClient
-from abathur.application.failure_recovery import FailureRecovery, FailureStats, RetryPolicy
 from abathur.application.loop_executor import (
     ConvergenceCriteria,
     ConvergenceEvaluation,
@@ -25,8 +24,6 @@ __all__ = [
     "ConvergenceCriteria",
     "ConvergenceEvaluation",
     "ConvergenceType",
-    "FailureRecovery",
-    "FailureStats",
     "LoopExecutor",
     "LoopResult",
     "LoopState",
@@ -37,7 +34,6 @@ __all__ = [
     "ResourceLimits",
     "ResourceMonitor",
     "ResourceSnapshot",
-    "RetryPolicy",
     "SwarmOrchestrator",
     "TaskCoordinator",
     "Template",

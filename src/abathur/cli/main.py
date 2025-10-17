@@ -14,10 +14,6 @@ from rich.table import Table
 
 from abathur import __version__
 
-# Default template repository
-DEFAULT_TEMPLATE_REPO = "https://github.com/odgrim/abathur-claude-template.git"
-DEFAULT_TEMPLATE_VERSION = "main"
-
 # Initialize Typer app
 app = typer.Typer(
     name="abathur",
@@ -82,7 +78,6 @@ async def _get_services() -> dict[str, Any]:
     from abathur.application import (
         AgentExecutor,
         ClaudeClient,
-        FailureRecovery,
         LoopExecutor,
         MCPManager,
         ResourceMonitor,
@@ -150,7 +145,6 @@ async def _get_services() -> dict[str, Any]:
     template_manager = TemplateManager()
     mcp_manager = MCPManager()
     await mcp_manager.initialize()
-    failure_recovery = FailureRecovery(task_coordinator, database)
     resource_monitor = ResourceMonitor()
     loop_executor = LoopExecutor(task_coordinator, agent_executor, database)
 
@@ -163,7 +157,6 @@ async def _get_services() -> dict[str, Any]:
         "swarm_orchestrator": swarm_orchestrator,
         "template_manager": template_manager,
         "mcp_manager": mcp_manager,
-        "failure_recovery": failure_recovery,
         "resource_monitor": resource_monitor,
         "loop_executor": loop_executor,
         "config_manager": config_manager,
@@ -466,7 +459,6 @@ def start_swarm(
 
         # Start monitoring
         await services["resource_monitor"].start_monitoring()
-        await services["failure_recovery"].start_recovery_monitor()
 
         try:
             # Start swarm in a task so we can monitor shutdown signal
@@ -498,7 +490,6 @@ def start_swarm(
         finally:
             # Stop monitoring
             await services["resource_monitor"].stop_monitoring()
-            await services["failure_recovery"].stop_recovery_monitor()
 
             # Stop MCP memory server
             if mcp_manager:
@@ -526,83 +517,6 @@ def swarm_status() -> None:
         console.print(f"Failed tasks: {status.get('failed_tasks', 0)}")
 
     asyncio.run(_status())
-
-
-# ===== Template Commands =====
-template_app = typer.Typer(help="Template management", no_args_is_help=True)
-app.add_typer(template_app, name="template")
-
-
-@template_app.command("list")
-def template_list() -> None:
-    """List installed templates."""
-
-    async def _list() -> None:
-        services = await _get_services()
-        templates = services["template_manager"].list_templates()
-
-        if not templates:
-            console.print("No templates installed")
-            return
-
-        table = Table(title="Templates")
-        table.add_column("Name", style="cyan")
-        table.add_column("Path", style="green")
-
-        for template in templates:
-            table.add_row(template.name, str(template.path))
-
-        console.print(table)
-
-    asyncio.run(_list())
-
-
-@template_app.command("install")
-def template_install(
-    repo_url: str = typer.Argument(..., help="Git repository URL"),
-    version: str = typer.Option("main", help="Git branch/tag"),
-) -> None:
-    """Install a template from Git repository."""
-
-    async def _install() -> None:
-        services = await _get_services()
-
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            progress.add_task(description=f"Cloning template from {repo_url}...", total=None)
-
-            template = await services["template_manager"].clone_template(repo_url, version)
-
-        console.print(f"[green]✓[/green] Template installed: [cyan]{template.name}[/cyan]")
-
-    asyncio.run(_install())
-
-
-@template_app.command("validate")
-def template_validate(name: str = typer.Argument(..., help="Template name")) -> None:
-    """Validate a template."""
-
-    async def _validate() -> None:
-        services = await _get_services()
-        template = services["template_manager"].get_template(name)
-
-        if not template:
-            console.print(f"[red]Error:[/red] Template {name} not found")
-            return
-
-        result = services["template_manager"].validate_template(template)
-
-        if result.is_valid:
-            console.print(f"[green]✓[/green] Template {name} is valid")
-        else:
-            console.print(f"[red]✗[/red] Template {name} validation failed:")
-            for error in result.errors:
-                console.print(f"  - {error}")
-
-    asyncio.run(_validate())
 
 
 # ===== MCP Commands =====
@@ -1000,6 +914,11 @@ def config_show() -> None:
         console.print(f"Max queue size: {config.queue.max_size}")
         console.print(f"Max loop iterations: {config.loop.max_iterations}")
 
+        if config.template_repos:
+            console.print(f"\n[bold]Templates ({len(config.template_repos)})[/bold]")
+            for idx, repo in enumerate(config.template_repos, start=1):
+                console.print(f"  {idx}. {repo.url} @ {repo.version}")
+
     asyncio.run(_show())
 
 
@@ -1041,9 +960,6 @@ def config_set_key(
 # ===== Database Commands =====
 @app.command()
 def init(
-    template: str | None = typer.Option(None, help="Template repository URL or name"),  # noqa: B008
-    version_tag: str
-    | None = typer.Option(None, help="Template version (tag or branch)"),  # noqa: B008
     validate: bool = typer.Option(
         False, help="Run comprehensive database validation"
     ),  # noqa: B008
@@ -1055,9 +971,9 @@ def init(
     | None = typer.Option(None, help="Save validation report as JSON"),  # noqa: B008
     skip_template: bool = typer.Option(False, help="Skip template installation"),  # noqa: B008
 ) -> None:
-    """Initialize or update an Abathur project with latest template.
+    """Initialize or update an Abathur project with latest templates.
 
-    By default, pulls the latest official template from GitHub and installs/updates it
+    By default, pulls templates from the config file and installs/updates them
     to your project directory (.claude/ and related files).
 
     Template Update Behavior:
@@ -1066,8 +982,10 @@ def init(
     - Custom agents (not in template) are preserved
     - Documentation files are updated
 
+    Templates are configured in .abathur/config.yaml under the 'template_repos' field.
+    Multiple templates can be specified, and they will be installed in order.
+
     Use --skip-template to only initialize the database without updating templates.
-    Use --template to install a custom template instead of the default.
     Use --validate to run a comprehensive validation suite after initialization.
     This checks PRAGMA settings, foreign keys, indexes, and performance.
 
@@ -1077,7 +995,6 @@ def init(
     Examples:
         abathur init                                    # Init DB + update templates
         abathur init --skip-template                    # Only init database
-        abathur init --template https://github.com/org/template.git
         abathur init --validate
         abathur init --validate --report-output validation.json
         abathur init --db-path /tmp/test.db --validate
@@ -1132,53 +1049,67 @@ def init(
         elif report_output:
             console.print("[yellow]Warning:[/yellow] --report-output requires --validate flag")
 
-        # Install template (unless skipped)
+        # Install templates (unless skipped)
         if not skip_template:
-            # Use custom template if provided, otherwise use default
-            template_url = template or DEFAULT_TEMPLATE_REPO
-            template_version = version_tag or DEFAULT_TEMPLATE_VERSION
+            # Load config to get template repos
+            config_manager = ConfigManager()
+            config = config_manager.load_config()
 
-            console.print("\n[blue]Installing template...[/blue]")
-            console.print(f"[dim]Repository: {template_url}[/dim]")
-            console.print(f"[dim]Version: {template_version}[/dim]")
+            if not config.template_repos:
+                console.print("[yellow]Warning:[/yellow] No templates configured in config file")
+                return
+
+            console.print(f"\n[blue]Installing {len(config.template_repos)} template(s)...[/blue]")
 
             services = await _get_services()
+            total_agents = 0
 
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-            ) as progress:
-                progress.add_task(description="Pulling template into cache...", total=None)
+            for idx, template_repo in enumerate(config.template_repos, start=1):
+                console.print(f"\n[dim]Template {idx}/{len(config.template_repos)}[/dim]")
+                console.print(f"[dim]Repository: {template_repo.url}[/dim]")
+                console.print(f"[dim]Version: {template_repo.version}[/dim]")
 
-                # Pull template into cache
-                tmpl = await services["template_manager"].clone_template(
-                    template_url, template_version
-                )
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=console,
+                ) as progress:
+                    progress.add_task(description="Pulling template into cache...", total=None)
 
-            console.print(f"[green]✓[/green] Template cached: [cyan]{tmpl.name}[/cyan]")
+                    # Pull template into cache
+                    tmpl = await services["template_manager"].clone_template(
+                        template_repo.url, template_repo.version
+                    )
 
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-            ) as progress:
-                progress.add_task(
-                    description="Installing/updating template in project directory...", total=None
-                )
+                console.print(f"[green]✓[/green] Template cached: [cyan]{tmpl.name}[/cyan]")
 
-                # Install template to project directory
-                await services["template_manager"].install_template(tmpl)
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=console,
+                ) as progress:
+                    progress.add_task(
+                        description="Installing/updating template in project directory...",
+                        total=None,
+                    )
 
-            console.print("[green]✓[/green] Template installed/updated in project directory")
-            console.print("[dim]  - Core agent templates updated from template[/dim]")
+                    # Install template to project directory
+                    await services["template_manager"].install_template(tmpl)
+
+                console.print("[green]✓[/green] Template installed/updated in project directory")
+
+                # Count agents
+                if tmpl.agents:
+                    total_agents += len(tmpl.agents)
+                    console.print(f"[dim]  - {len(tmpl.agents)} agent(s) from this template[/dim]")
+
+            console.print("\n[green]✓[/green] All templates installed successfully")
+            console.print("[dim]  - Core agent templates updated from templates[/dim]")
             console.print("[dim]  - MCP config updated[/dim]")
             console.print("[dim]  - Custom agents preserved (if any)[/dim]")
-
-            # Show what was installed
-            if tmpl.agents:
+            if total_agents > 0:
                 console.print(
-                    f"[dim]  - {len(tmpl.agents)} template agent(s) in .claude/agents/[/dim]"
+                    f"[dim]  - Total {total_agents} template agent(s) in .claude/agents/[/dim]"
                 )
 
     asyncio.run(_init())
@@ -1206,25 +1137,6 @@ def status(watch: bool = typer.Option(False, help="Watch mode (live updates)")) 
         console.print(f"Total tasks: {pending + running + completed + failed}")
 
     asyncio.run(_status())
-
-
-# ===== Recovery Stats =====
-@app.command()
-def recovery() -> None:
-    """Show failure recovery statistics."""
-
-    async def _stats() -> None:
-        services = await _get_services()
-        stats = services["failure_recovery"].get_stats()
-
-        console.print("[bold]Failure Recovery Statistics[/bold]")
-        console.print(f"Total failures: {stats.get('total_failures', 0)}")
-        console.print(f"Permanent failures: {stats.get('permanent_failures', 0)}")
-        console.print(f"Transient failures: {stats.get('transient_failures', 0)}")
-        console.print(f"Retried tasks: {stats.get('retried_tasks', 0)}")
-        console.print(f"Recovered tasks: {stats.get('recovered_tasks', 0)}")
-
-    asyncio.run(_stats())
 
 
 # ===== Main Entry Point =====

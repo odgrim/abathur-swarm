@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
-from abathur.infrastructure.config import Config, ConfigManager, QueueConfig
+from abathur.infrastructure.config import Config, ConfigManager, QueueConfig, TemplateRepo
 
 
 class TestConfig:
@@ -22,6 +22,10 @@ class TestConfig:
         assert config.swarm.max_concurrent_agents == 10
         assert config.loop.max_iterations == 10
         assert config.monitoring.metrics_enabled is True
+        # Check default template repo
+        assert len(config.template_repos) == 1
+        assert config.template_repos[0].url == "https://github.com/odgrim/abathur-claude-template.git"
+        assert config.template_repos[0].version == "main"
 
     def test_custom_config_values(self) -> None:
         """Test creating a config with custom values."""
@@ -33,6 +37,21 @@ class TestConfig:
         assert config.log_level == "DEBUG"
         assert config.queue.max_size == 500
         assert config.queue.default_priority == 3
+
+    def test_custom_template_repos(self) -> None:
+        """Test creating a config with custom template repos."""
+        config = Config(
+            template_repos=[
+                TemplateRepo(url="https://github.com/org/template1.git", version="v1.0"),
+                TemplateRepo(url="https://github.com/org/template2.git", version="main"),
+            ]
+        )
+
+        assert len(config.template_repos) == 2
+        assert config.template_repos[0].url == "https://github.com/org/template1.git"
+        assert config.template_repos[0].version == "v1.0"
+        assert config.template_repos[1].url == "https://github.com/org/template2.git"
+        assert config.template_repos[1].version == "main"
 
 
 class TestConfigManager:
