@@ -25,7 +25,7 @@ console = Console()
 
 
 # Helper to resolve UUID prefix to full UUID
-async def _resolve_task_id(task_id_prefix: str, services: dict[str, Any]) -> UUID | None:
+async def _resolve_task_id(task_id_prefix: str, services: dict[str, Any]) -> UUID:
     """Resolve a task ID prefix to a full UUID.
 
     Args:
@@ -33,7 +33,7 @@ async def _resolve_task_id(task_id_prefix: str, services: dict[str, Any]) -> UUI
         services: Services dictionary with task_coordinator
 
     Returns:
-        Full UUID if exactly one match found, None otherwise
+        Full UUID if exactly one match found
 
     Raises:
         typer.Exit: If no matches or multiple matches found
@@ -376,6 +376,157 @@ def retry(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> None:
             console.print(f"[red]Error:[/red] Failed to retry task {task_id}")
 
     asyncio.run(_retry())
+
+
+@task_app.command("prune")
+def prune(
+    task_ids: list[str] = typer.Argument(None, help="Task IDs or prefixes to delete"),
+    status: str | None = typer.Option(None, "--status", help="Delete all tasks with this status (pending|blocked|ready|running|completed|failed|cancelled)"),
+    force: bool = typer.Option(False, "--force", help="Skip confirmation prompt"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be deleted without deleting"),
+) -> None:
+    """Delete tasks by ID or status.
+
+    Examples:
+        abathur task prune ebec23ad
+        abathur task prune ebec23ad-1234-5678-90ab-cdef12345678 fbec23ad-5678-1234-90ab-cdef12345678
+        abathur task prune --status completed
+        abathur task prune --status failed --force
+        abathur task prune --status pending --dry-run
+    """
+    from abathur.domain.models import TaskStatus
+
+    # Parameter validation (before async)
+    if task_ids and status:
+        raise typer.BadParameter("Cannot specify both task IDs and --status. Choose one filter method.")
+
+    if not task_ids and not status:
+        raise typer.BadParameter("Must specify either task IDs or --status filter.")
+
+    # Validate status enum value
+    task_status = None
+    if status:
+        try:
+            task_status = TaskStatus(status)
+        except ValueError:
+            valid_values = ", ".join([s.value for s in TaskStatus])
+            raise typer.BadParameter(
+                f"Invalid status '{status}'. Valid values: {valid_values}"
+            ) from None
+
+    async def _prune() -> None:
+        services = await _get_services()
+
+        # Task selection logic
+        selected_task_ids: list[UUID] = []
+
+        if task_ids:
+            # Resolve task ID prefixes
+            for task_id_prefix in task_ids:
+                resolved_id = await _resolve_task_id(task_id_prefix, services)
+                selected_task_ids.append(resolved_id)
+        elif task_status:
+            # Filter by status
+            tasks = await services["database"].list_tasks(task_status, limit=10000)
+            selected_task_ids = [task.id for task in tasks]
+
+            if not selected_task_ids:
+                console.print(f"[green]✓[/green] No tasks found with status '{task_status.value}'")
+                return
+
+        # Fetch full task details for display
+        tasks_to_delete = []
+        for task_id in selected_task_ids:
+            task = await services["task_coordinator"].get_task(task_id)
+            if task:
+                tasks_to_delete.append(task)
+            else:
+                # Task ID was resolved but doesn't exist in database
+                console.print(f"[red]Error:[/red] Task {task_id} not found")
+                raise typer.Exit(1)
+
+        if not tasks_to_delete:
+            console.print("[green]✓[/green] No tasks to delete")
+            return
+
+        # Display preview table
+        table = Table(title=f"Tasks to Delete ({len(tasks_to_delete)})")
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Summary", style="magenta")
+        table.add_column("Status", style="yellow")
+        table.add_column("Agent Type", style="green")
+
+        for task in tasks_to_delete:
+            summary_preview = (
+                (task.summary[:40] + "...")
+                if task.summary and len(task.summary) > 40
+                else (task.summary or "-")
+            )
+            table.add_row(
+                str(task.id)[:8],
+                summary_preview,
+                task.status.value,
+                task.agent_type,
+            )
+
+        console.print(table)
+
+        # Dry-run mode
+        if dry_run:
+            console.print("\n[blue]Dry-run mode - no changes will be made[/blue]")
+            console.print(f"[dim]Would delete {len(tasks_to_delete)} task(s)[/dim]")
+            return
+
+        # Confirmation prompt (unless --force)
+        if not force:
+            console.print(f"\n[yellow]About to permanently delete {len(tasks_to_delete)} task(s)[/yellow]")
+            confirmed = typer.confirm("Are you sure you want to continue?")
+            if not confirmed:
+                console.print("[dim]Operation cancelled[/dim]")
+                raise typer.Exit(0)
+
+        # Check for child tasks before deletion
+        child_tasks = await services["database"].get_child_tasks(selected_task_ids)
+
+        if child_tasks:
+            console.print(
+                f"\n[yellow]![/yellow] Cannot delete {len(selected_task_ids)} task(s) - "
+                f"{len(child_tasks)} have child tasks:"
+            )
+
+            blocked_table = Table()
+            blocked_table.add_column("Parent ID", style="cyan", no_wrap=True)
+            blocked_table.add_column("Child ID", style="yellow", no_wrap=True)
+            blocked_table.add_column("Child Summary", style="magenta")
+
+            for child in child_tasks:
+                parent_id_str = str(child.parent_task_id)[:8] if child.parent_task_id else "unknown"
+                child_id_str = str(child.id)[:8]
+                summary_preview = (
+                    (child.summary[:40] + "...")
+                    if child.summary and len(child.summary) > 40
+                    else (child.summary or "-")
+                )
+                blocked_table.add_row(
+                    parent_id_str,
+                    child_id_str,
+                    summary_preview,
+                )
+
+            console.print(blocked_table)
+            console.print("\n[yellow]Delete child tasks first before deleting parent tasks.[/yellow]")
+            return
+
+        # Execute deletion
+        console.print("[blue]Deleting tasks...[/blue]")
+        deleted_count = await services["database"].delete_tasks(selected_task_ids)
+
+        # Display results
+        console.print(
+            f"[green]✓[/green] Deleted {deleted_count} task(s)"
+        )
+
+    asyncio.run(_prune())
 
 
 @task_app.command("check-stale")
