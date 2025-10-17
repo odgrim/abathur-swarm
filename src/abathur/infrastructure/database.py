@@ -385,8 +385,20 @@ class Database:
                     ADD COLUMN summary TEXT NOT NULL DEFAULT 'Task'
                     """
                 )
-                # Backfill existing rows with auto-generated summaries (matching service layer logic)
-                # Use TRIM() to match service layer's .strip() behavior
+                # Backfill existing rows with auto-generated summaries
+                # This logic MUST match the service layer auto-generation in task_queue_service.py:174-181
+                #
+                # Service layer logic (for reference):
+                #   if source == TaskSource.HUMAN:
+                #       summary = "User Prompt: " + description[:126].strip()
+                #   else:
+                #       summary = description[:140].strip()
+                #
+                # SQL equivalent:
+                #   TRIM(SUBSTR(prompt, 1, 126)) matches description[:126].strip()
+                #   TRIM(SUBSTR(prompt, 1, 140)) matches description[:140].strip()
+                #
+                # Both truncate first, then trim whitespace, ensuring identical behavior.
                 await conn.execute(
                     """
                     UPDATE tasks
@@ -899,6 +911,13 @@ class Database:
             """CREATE INDEX IF NOT EXISTS idx_tasks_session
                ON tasks(session_id, submitted_at DESC)
                WHERE session_id IS NOT NULL"""
+        )
+
+        # Summary field index for search and filtering
+        await conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_tasks_summary
+               ON tasks(summary)
+               WHERE summary IS NOT NULL"""
         )
 
         # Agents indexes (3 indexes)

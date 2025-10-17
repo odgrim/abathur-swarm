@@ -378,8 +378,19 @@ class AbathurTaskQueueServer:
         feature_branch = arguments.get("feature_branch")
         task_branch = arguments.get("task_branch")
 
-        # Validate summary length if provided
+        # Validate summary if provided
         if summary is not None:
+            # Trim whitespace
+            summary = summary.strip()
+
+            # Reject empty string after trimming
+            if not summary:
+                return {
+                    "error": "ValidationError",
+                    "message": "summary cannot be empty or whitespace-only",
+                }
+
+            # Check max length (140 chars)
             if len(summary) > 140:
                 return {
                     "error": "ValidationError",
