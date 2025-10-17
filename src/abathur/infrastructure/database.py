@@ -1751,22 +1751,60 @@ class Database:
             await conn.commit()
             return cursor.rowcount
 
-    async def delete_tasks(self, task_ids: list[UUID]) -> int:
-        """Delete tasks by ID list. Returns count of deleted tasks.
+    async def delete_tasks(self, task_ids: list[UUID]) -> dict[str, Any]:
+        """Delete tasks by ID list with child task validation.
 
         Args:
             task_ids: List of task UUIDs to delete
 
         Returns:
-            Number of tasks actually deleted (cursor.rowcount)
+            Dictionary with:
+                - deleted_count: Number of tasks actually deleted
+                - blocked_deletions: List of dicts with task_id and child_ids for blocked parents
+                - errors: List of error messages
+
+        Raises:
+            ValueError: If task_ids is empty
 
         Side Effects:
-            - Deletes from tasks table
+            - Deletes from tasks table (only if no children)
             - CASCADE deletes from task_dependencies (automatic via FK)
             - Orphans agents.task_id (acceptable - historical record)
             - Preserves audit.task_id (no FK constraint)
         """
+        # Validate input
+        if not task_ids:
+            raise ValueError("task_ids cannot be empty")
+
         async with self._get_connection() as conn:
+            # Enable foreign key constraints for CASCADE deletion
+            await conn.execute("PRAGMA foreign_keys = ON")
+
+            # Step 1: Check for child tasks - block deletion of parents
+            child_tasks = await self.get_child_tasks(task_ids)
+
+            if child_tasks:
+                # Build blocked deletions report
+                parent_to_children: dict[str, list[str]] = {}
+                for child in child_tasks:
+                    if child.parent_task_id:
+                        parent_id = str(child.parent_task_id)
+                        if parent_id not in parent_to_children:
+                            parent_to_children[parent_id] = []
+                        parent_to_children[parent_id].append(str(child.id))
+
+                blocked_deletions = [
+                    {"task_id": parent_id, "child_ids": child_ids}
+                    for parent_id, child_ids in parent_to_children.items()
+                ]
+
+                return {
+                    "deleted_count": 0,
+                    "blocked_deletions": blocked_deletions,
+                    "errors": ["Cannot delete tasks with child tasks. Delete children first."]
+                }
+
+            # Step 2: No child tasks - proceed with deletion
             # Build dynamic IN clause with placeholders
             placeholders = ",".join("?" * len(task_ids))
             query = f"DELETE FROM tasks WHERE id IN ({placeholders})"
@@ -1778,7 +1816,11 @@ class Database:
             )
             await conn.commit()
 
-            return cursor.rowcount
+            return {
+                "deleted_count": cursor.rowcount,
+                "blocked_deletions": [],
+                "errors": []
+            }
 
     async def prune_tasks(self, filters: PruneFilters) -> PruneResult:
         """Prune tasks based on age and status criteria.

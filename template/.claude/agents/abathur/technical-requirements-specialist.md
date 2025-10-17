@@ -68,6 +68,50 @@ When invoked, you must follow these steps:
    - Identify technical implications of each requirement
    - Map requirements to technical domains and components
 
+3.5. **Check for Duplicate Technical Specification Work**
+   **CRITICAL**: Before proceeding with technical specification, verify you are not duplicating existing work:
+
+   ```python
+   # Extract architecture_task_id and problem_domain from task metadata
+   architecture_task_id = task_metadata.get('architecture_task_id')
+   problem_domain = task_metadata.get('problem_domain', 'unknown')
+
+   # Search for existing technical specifications
+   existing_specs = memory_search({
+       "namespace_prefix": f"task:",
+       "memory_type": "semantic",
+       "query": f"{problem_domain} technical specifications architecture data_models",
+       "limit": 10
+   })
+
+   # Check for overlapping specification tasks in queue
+   queue_status = task_queue_status()
+   overlapping_specs = [
+       task for task in queue_status.get('tasks', [])
+       if task.get('agent_type') == 'technical-requirements-specialist'
+       and task.get('metadata', {}).get('architecture_task_id') == architecture_task_id
+       and task.get('task_id') != current_task_id
+       and task.get('status') in ['PENDING', 'IN_PROGRESS']
+   ]
+
+   # If duplicate work exists, STOP and reference existing work
+   if existing_specs:
+       # Reuse existing specifications instead of duplicating
+       memory_add({
+           "namespace": f"task:{current_task_id}:technical_specs",
+           "key": "reused_specifications",
+           "value": {
+               "source_task_id": existing_specs[0]['task_id'],
+               "reason": "Technical specifications for this domain already exist - preventing duplication",
+               "namespace": existing_specs[0]['namespace']
+           },
+           "memory_type": "episodic",
+           "created_by": "technical-requirements-specialist"
+       })
+       # Skip to step 10 (spawning task-planner) using existing specs
+       return
+   ```
+
 4. **Technical Research**
    - Research best practices for identified domains (use WebSearch/WebFetch)
    - Evaluate technology options and tradeoffs
@@ -232,6 +276,16 @@ When invoked, you must follow these steps:
 # Task Planning and Agent Orchestration
 
 ## Your Responsibility
+
+## ANTI-DUPLICATION REQUIREMENTS
+
+**You are responsible for preventing duplicate task plans:**
+1. Each atomic task you create must have a DISCRETE, NON-OVERLAPPING scope
+2. Use task DEPENDENCIES when one task's work requires another task to finish first
+3. Do NOT create duplicate tasks for the same work
+4. Verify no other task-planner has already decomposed this work
+
+## Your Responsibility
 You are responsible for orchestrating the entire implementation flow:
 1. Decompose implementation into atomic tasks
 2. Determine which specialized agents are needed for each task type
@@ -322,6 +376,11 @@ Original requirements: task:{requirements_task_id}:requirements
     ```
 
 **Best Practices:**
+- **PREVENT DUPLICATION**: Always check for existing technical specifications before starting work
+- **SINGLE TASK PLANNER DEFAULT**: Prefer ONE task-planner for implementation unless justified
+- **VERIFY PLANNER UNIQUENESS**: Check for existing task-planner tasks before spawning
+- **DEPENDENCY OVER DUPLICATION**: Task-planners should use dependencies instead of duplicating task plans
+- **DISCRETE SCOPES**: When spawning multiple task-planners, ensure non-overlapping component boundaries
 - Make evidence-based technical decisions (research first with WebSearch/WebFetch)
 - Document all architectural decisions with rationale
 - Consider scalability, maintainability, and testability

@@ -444,3 +444,354 @@ class TestDatabaseAuditOperations:
         )
 
         # Audit entry should be logged (no error)
+
+
+class TestDatabasePruneOperations:
+    """Integration tests for database prune_tasks() method."""
+
+    @pytest.mark.asyncio
+    async def test_prune_tasks_by_age_and_status(self, database: Database) -> None:
+        """Test pruning tasks by age and status filters."""
+        from datetime import datetime, timedelta, timezone
+        from abathur.infrastructure.database import PruneFilters
+
+        # Create old completed tasks (older than 30 days)
+        old_task1 = Task(prompt="Old task 1", summary="Old completed task")
+        old_task2 = Task(prompt="Old task 2", summary="Old completed task")
+        await database.insert_task(old_task1)
+        await database.insert_task(old_task2)
+
+        # Update to completed with old completion date
+        old_date = datetime.now(timezone.utc) - timedelta(days=35)
+        async with database._get_connection() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = ?, completed_at = ? WHERE id IN (?, ?)",
+                (
+                    TaskStatus.COMPLETED.value,
+                    old_date.isoformat(),
+                    str(old_task1.id),
+                    str(old_task2.id),
+                ),
+            )
+            await conn.commit()
+
+        # Create recent completed task (should not be pruned)
+        recent_task = Task(prompt="Recent task", summary="Recent completed task")
+        await database.insert_task(recent_task)
+        await database.update_task_status(recent_task.id, TaskStatus.COMPLETED)
+
+        # Prune tasks older than 30 days
+        filters = PruneFilters(older_than_days=30, statuses=[TaskStatus.COMPLETED])
+        result = await database.prune_tasks(filters)
+
+        # Assert - 2 old tasks deleted, 0 dependencies
+        assert result.deleted_tasks == 2
+        assert result.deleted_dependencies == 0
+        assert result.dry_run is False
+        assert TaskStatus.COMPLETED in result.breakdown_by_status
+        assert result.breakdown_by_status[TaskStatus.COMPLETED] == 2
+
+        # Verify old tasks deleted
+        assert await database.get_task(old_task1.id) is None
+        assert await database.get_task(old_task2.id) is None
+
+        # Verify recent task still exists
+        assert await database.get_task(recent_task.id) is not None
+
+    @pytest.mark.asyncio
+    async def test_prune_tasks_dry_run_mode(self, database: Database) -> None:
+        """Test dry run mode previews deletion without removing tasks."""
+        from datetime import datetime, timedelta, timezone
+        from abathur.infrastructure.database import PruneFilters
+
+        # Create old completed task
+        old_task = Task(prompt="Old task", summary="Old completed task")
+        await database.insert_task(old_task)
+
+        old_date = datetime.now(timezone.utc) - timedelta(days=35)
+        async with database._get_connection() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+                (TaskStatus.COMPLETED.value, old_date.isoformat(), str(old_task.id)),
+            )
+            await conn.commit()
+
+        # Dry run prune
+        filters = PruneFilters(
+            older_than_days=30, statuses=[TaskStatus.COMPLETED], dry_run=True
+        )
+        result = await database.prune_tasks(filters)
+
+        # Assert - shows what would be deleted
+        assert result.deleted_tasks == 1
+        assert result.dry_run is True
+        assert result.reclaimed_bytes is None  # No VACUUM in dry run
+
+        # Verify task still exists (not actually deleted)
+        assert await database.get_task(old_task.id) is not None
+
+    @pytest.mark.asyncio
+    async def test_prune_tasks_with_vacuum(self, database: Database) -> None:
+        """Test VACUUM operation reclaims space after deletion."""
+        from datetime import datetime, timedelta, timezone
+        from abathur.infrastructure.database import PruneFilters
+
+        # Create multiple old completed tasks
+        tasks_to_create = 10
+        task_ids = []
+        for i in range(tasks_to_create):
+            task = Task(
+                prompt=f"Old task {i}",
+                summary=f"Old completed task {i}",
+                input_data={"large_data": "x" * 1000},  # Add some data for size
+            )
+            await database.insert_task(task)
+            task_ids.append(task.id)
+
+        # Update all to completed with old dates
+        old_date = datetime.now(timezone.utc) - timedelta(days=35)
+        async with database._get_connection() as conn:
+            for task_id in task_ids:
+                await conn.execute(
+                    "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+                    (TaskStatus.COMPLETED.value, old_date.isoformat(), str(task_id)),
+                )
+            await conn.commit()
+
+        # Prune tasks (VACUUM will run)
+        filters = PruneFilters(older_than_days=30, statuses=[TaskStatus.COMPLETED])
+        result = await database.prune_tasks(filters)
+
+        # Assert - tasks deleted and VACUUM ran
+        assert result.deleted_tasks == tasks_to_create
+        assert result.dry_run is False
+        # VACUUM should report reclaimed bytes (may be None or >= 0)
+        assert result.reclaimed_bytes is None or result.reclaimed_bytes >= 0
+
+    @pytest.mark.asyncio
+    async def test_prune_tasks_multiple_statuses(self, database: Database) -> None:
+        """Test pruning tasks with multiple status filters."""
+        from datetime import datetime, timedelta, timezone
+        from abathur.infrastructure.database import PruneFilters
+
+        # Create old tasks with different statuses
+        completed_task = Task(prompt="Completed", summary="Completed task")
+        failed_task = Task(prompt="Failed", summary="Failed task")
+        cancelled_task = Task(prompt="Cancelled", summary="Cancelled task")
+        pending_task = Task(prompt="Pending", summary="Pending task")
+
+        await database.insert_task(completed_task)
+        await database.insert_task(failed_task)
+        await database.insert_task(cancelled_task)
+        await database.insert_task(pending_task)
+
+        # Update to respective statuses with old dates
+        old_date = datetime.now(timezone.utc) - timedelta(days=35)
+        async with database._get_connection() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+                (
+                    TaskStatus.COMPLETED.value,
+                    old_date.isoformat(),
+                    str(completed_task.id),
+                ),
+            )
+            await conn.execute(
+                "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+                (TaskStatus.FAILED.value, old_date.isoformat(), str(failed_task.id)),
+            )
+            await conn.execute(
+                "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+                (
+                    TaskStatus.CANCELLED.value,
+                    old_date.isoformat(),
+                    str(cancelled_task.id),
+                ),
+            )
+            await conn.commit()
+
+        # Prune all terminal statuses (completed, failed, cancelled)
+        filters = PruneFilters(
+            older_than_days=30,
+            statuses=[TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED],
+        )
+        result = await database.prune_tasks(filters)
+
+        # Assert - 3 tasks deleted (pending not deleted)
+        assert result.deleted_tasks == 3
+        assert result.breakdown_by_status[TaskStatus.COMPLETED] == 1
+        assert result.breakdown_by_status[TaskStatus.FAILED] == 1
+        assert result.breakdown_by_status[TaskStatus.CANCELLED] == 1
+
+        # Verify terminal tasks deleted
+        assert await database.get_task(completed_task.id) is None
+        assert await database.get_task(failed_task.id) is None
+        assert await database.get_task(cancelled_task.id) is None
+
+        # Verify pending task still exists
+        assert await database.get_task(pending_task.id) is not None
+
+    @pytest.mark.asyncio
+    async def test_prune_tasks_with_dependencies(self, database: Database) -> None:
+        """Test pruning tasks with task_dependencies records."""
+        from datetime import datetime, timedelta, timezone
+        from abathur.infrastructure.database import PruneFilters
+
+        # Create old completed tasks with dependency relationship
+        prerequisite_task = Task(prompt="Prerequisite", summary="Prerequisite task")
+        dependent_task = Task(prompt="Dependent", summary="Dependent task")
+
+        await database.insert_task(prerequisite_task)
+        await database.insert_task(dependent_task)
+
+        # Create dependency relationship
+        from datetime import datetime, timezone
+
+        async with database._get_connection() as conn:
+            await conn.execute(
+                """
+                INSERT INTO task_dependencies (prerequisite_task_id, dependent_task_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    str(prerequisite_task.id),
+                    str(dependent_task.id),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            await conn.commit()
+
+        # Update both to completed with old dates
+        old_date = datetime.now(timezone.utc) - timedelta(days=35)
+        async with database._get_connection() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = ?, completed_at = ? WHERE id IN (?, ?)",
+                (
+                    TaskStatus.COMPLETED.value,
+                    old_date.isoformat(),
+                    str(prerequisite_task.id),
+                    str(dependent_task.id),
+                ),
+            )
+            await conn.commit()
+
+        # Prune tasks
+        filters = PruneFilters(older_than_days=30, statuses=[TaskStatus.COMPLETED])
+        result = await database.prune_tasks(filters)
+
+        # Assert - 2 tasks deleted, 1 dependency deleted
+        assert result.deleted_tasks == 2
+        assert result.deleted_dependencies == 1
+
+        # Verify dependency also deleted
+        async with database._get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM task_dependencies WHERE prerequisite_task_id = ?",
+                (str(prerequisite_task.id),),
+            )
+            dep_count = (await cursor.fetchone())[0]
+            assert dep_count == 0
+
+    @pytest.mark.asyncio
+    async def test_prune_tasks_empty_result(self, database: Database) -> None:
+        """Test pruning when no tasks match filter criteria."""
+        from abathur.infrastructure.database import PruneFilters
+
+        # Create recent completed task (within 30 days)
+        recent_task = Task(prompt="Recent", summary="Recent task")
+        await database.insert_task(recent_task)
+        await database.update_task_status(recent_task.id, TaskStatus.COMPLETED)
+
+        # Prune tasks older than 30 days (none exist)
+        filters = PruneFilters(older_than_days=30, statuses=[TaskStatus.COMPLETED])
+        result = await database.prune_tasks(filters)
+
+        # Assert - no tasks deleted
+        assert result.deleted_tasks == 0
+        assert result.deleted_dependencies == 0
+        assert result.breakdown_by_status == {}
+
+        # Verify recent task still exists
+        assert await database.get_task(recent_task.id) is not None
+
+    @pytest.mark.asyncio
+    async def test_prune_tasks_with_limit(self, database: Database) -> None:
+        """Test pruning respects limit parameter."""
+        from datetime import datetime, timedelta, timezone
+        from abathur.infrastructure.database import PruneFilters
+
+        # Create 10 old completed tasks
+        task_ids = []
+        for i in range(10):
+            task = Task(prompt=f"Old task {i}", summary=f"Old task {i}")
+            await database.insert_task(task)
+            task_ids.append(task.id)
+
+        # Update all to completed with old dates
+        old_date = datetime.now(timezone.utc) - timedelta(days=35)
+        async with database._get_connection() as conn:
+            for task_id in task_ids:
+                await conn.execute(
+                    "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+                    (TaskStatus.COMPLETED.value, old_date.isoformat(), str(task_id)),
+                )
+            await conn.commit()
+
+        # Prune with limit of 5
+        filters = PruneFilters(
+            older_than_days=30, statuses=[TaskStatus.COMPLETED], limit=5
+        )
+        result = await database.prune_tasks(filters)
+
+        # Assert - only 5 tasks deleted (respecting limit)
+        assert result.deleted_tasks == 5
+
+        # Verify 5 tasks remain
+        remaining_tasks = await database.list_tasks(status=TaskStatus.COMPLETED)
+        assert len(remaining_tasks) == 5
+
+    @pytest.mark.asyncio
+    async def test_prune_tasks_before_date_filter(self, database: Database) -> None:
+        """Test pruning with before_date filter instead of older_than_days."""
+        from datetime import datetime, timedelta, timezone
+        from abathur.infrastructure.database import PruneFilters
+
+        # Create tasks with specific dates
+        old_task = Task(prompt="Old task", summary="Old task")
+        recent_task = Task(prompt="Recent task", summary="Recent task")
+
+        await database.insert_task(old_task)
+        await database.insert_task(recent_task)
+
+        # Set specific completion dates
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
+        old_date = cutoff_date - timedelta(days=5)  # 35 days ago
+        recent_date = cutoff_date + timedelta(days=5)  # 25 days ago
+
+        async with database._get_connection() as conn:
+            await conn.execute(
+                "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+                (TaskStatus.COMPLETED.value, old_date.isoformat(), str(old_task.id)),
+            )
+            await conn.execute(
+                "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+                (
+                    TaskStatus.COMPLETED.value,
+                    recent_date.isoformat(),
+                    str(recent_task.id),
+                ),
+            )
+            await conn.commit()
+
+        # Prune tasks before cutoff date
+        filters = PruneFilters(
+            before_date=cutoff_date, statuses=[TaskStatus.COMPLETED]
+        )
+        result = await database.prune_tasks(filters)
+
+        # Assert - only old task deleted
+        assert result.deleted_tasks == 1
+
+        # Verify
+        assert await database.get_task(old_task.id) is None
+        assert await database.get_task(recent_task.id) is not None

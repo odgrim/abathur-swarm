@@ -125,16 +125,17 @@ class TestDeleteTasks:
         # Try to delete parent - should be blocked
         result = await database.delete_tasks([parent.id])
         assert result["deleted_count"] == 0
-        assert len(result["blocked_deletions"]) == 2
+        assert len(result["blocked_deletions"]) == 1  # One parent blocked
         assert result["errors"] == ["Cannot delete tasks with child tasks. Delete children first."]
 
         # Verify parent still exists
         assert await database.get_task(parent.id) is not None
 
-        # Verify child tasks are in blocked_deletions
-        blocked_ids = {item["task_id"] for item in result["blocked_deletions"]}
-        assert str(child1.id) in blocked_ids
-        assert str(child2.id) in blocked_ids
+        # Verify child task IDs are in the blocked_deletions entry
+        blocked_entry = result["blocked_deletions"][0]
+        assert blocked_entry["task_id"] == str(parent.id)
+        assert str(child1.id) in blocked_entry["child_ids"]
+        assert str(child2.id) in blocked_entry["child_ids"]
 
     @pytest.mark.asyncio
     async def test_delete_cascades_to_dependencies(self, database: Database) -> None:
