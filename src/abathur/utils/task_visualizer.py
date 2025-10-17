@@ -6,7 +6,7 @@ This module provides tools to visualize task dependencies using GraphViz and Mer
 import asyncio
 from uuid import UUID
 
-import graphviz
+import graphviz  # type: ignore[import-not-found]
 from abathur.domain.models import TaskStatus
 from abathur.infrastructure.database import Database
 from abathur.services.dependency_resolver import DependencyResolver
