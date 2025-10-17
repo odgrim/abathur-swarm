@@ -137,9 +137,9 @@ class SwarmOrchestrator:
 
                         # Exit immediately after spawning Nth task (spawn-time limit enforcement)
                         if task_limit is not None and tasks_processed >= task_limit:
-                            logger.debug(
-                                "Task limit reached after spawning task",
-                                task_limit=task_limit,
+                            logger.info(
+                                "task_limit_reached_post_spawn",
+                                limit=task_limit,
                                 tasks_spawned=tasks_processed,
                             )
                             break
