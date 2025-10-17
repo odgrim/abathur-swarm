@@ -63,11 +63,27 @@ class AuthConfig(BaseModel):
     context_window_handling: Literal["warn", "block", "ignore"] = "warn"
 
 
+class TemplateRepo(BaseModel):
+    """Template repository configuration."""
+
+    url: str = Field(..., description="Git repository URL")
+    version: str = Field(default="main", description="Git branch or tag")
+
+
 class Config(BaseModel):
     """Main configuration model."""
 
     version: str = "0.1.0"
     log_level: str = "INFO"
+    template_repos: list[TemplateRepo] = Field(
+        default_factory=lambda: [
+            TemplateRepo(
+                url="https://github.com/odgrim/abathur-claude-template.git",
+                version="main",
+            )
+        ],
+        description="List of template repositories to use",
+    )
     queue: QueueConfig = Field(default_factory=QueueConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)
     loop: LoopConfig = Field(default_factory=LoopConfig)

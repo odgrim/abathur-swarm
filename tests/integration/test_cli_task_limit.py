@@ -166,9 +166,6 @@ def test_cli_swarm_start_with_task_limit(
             "config_manager": config_manager,
             "template_manager": AsyncMock(),
             "mcp_manager": AsyncMock(initialize=AsyncMock()),
-            "failure_recovery": AsyncMock(
-                start_recovery_monitor=AsyncMock(), stop_recovery_monitor=AsyncMock()
-            ),
             "resource_monitor": AsyncMock(
                 start_monitoring=AsyncMock(), stop_monitoring=AsyncMock()
             ),
@@ -287,9 +284,6 @@ def test_cli_swarm_start_without_task_limit_processes_all_tasks(
             "config_manager": config_manager,
             "template_manager": AsyncMock(),
             "mcp_manager": AsyncMock(initialize=AsyncMock()),
-            "failure_recovery": AsyncMock(
-                start_recovery_monitor=AsyncMock(), stop_recovery_monitor=AsyncMock()
-            ),
             "resource_monitor": AsyncMock(
                 start_monitoring=AsyncMock(), stop_monitoring=AsyncMock()
             ),
@@ -389,9 +383,6 @@ def test_cli_swarm_start_task_limit_zero_exits_immediately(
             "config_manager": config_manager,
             "template_manager": AsyncMock(),
             "mcp_manager": AsyncMock(initialize=AsyncMock()),
-            "failure_recovery": AsyncMock(
-                start_recovery_monitor=AsyncMock(), stop_recovery_monitor=AsyncMock()
-            ),
             "resource_monitor": AsyncMock(
                 start_monitoring=AsyncMock(), stop_monitoring=AsyncMock()
             ),
@@ -485,9 +476,6 @@ def test_cli_swarm_start_task_limit_exceeds_queue_size(
             "config_manager": config_manager,
             "template_manager": AsyncMock(),
             "mcp_manager": AsyncMock(initialize=AsyncMock()),
-            "failure_recovery": AsyncMock(
-                start_recovery_monitor=AsyncMock(), stop_recovery_monitor=AsyncMock()
-            ),
             "resource_monitor": AsyncMock(
                 start_monitoring=AsyncMock(), stop_monitoring=AsyncMock()
             ),
@@ -590,9 +578,6 @@ def test_cli_swarm_start_task_limit_with_failed_tasks(
             "config_manager": config_manager,
             "template_manager": AsyncMock(),
             "mcp_manager": AsyncMock(initialize=AsyncMock()),
-            "failure_recovery": AsyncMock(
-                start_recovery_monitor=AsyncMock(), stop_recovery_monitor=AsyncMock()
-            ),
             "resource_monitor": AsyncMock(
                 start_monitoring=AsyncMock(), stop_monitoring=AsyncMock()
             ),
