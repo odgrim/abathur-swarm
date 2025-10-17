@@ -55,7 +55,7 @@ class MCPConfigLoader:
 
         for mcp_path in mcp_paths:
             if mcp_path.exists():
-                logger.info("loading_mcp_config", path=str(mcp_path))
+                logger.debug("loading_mcp_config", path=str(mcp_path))
                 return self._parse_mcp_config(mcp_path)
 
         logger.warning("no_mcp_config_found")
@@ -97,7 +97,7 @@ class MCPConfigLoader:
                     env=env,
                 )
 
-                logger.info("mcp_server_loaded", name=name, command=server_config.get("command"))
+                logger.debug("mcp_server_loaded", name=name, command=server_config.get("command"))
 
             return servers
 

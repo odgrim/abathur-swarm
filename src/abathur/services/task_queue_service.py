@@ -111,7 +111,7 @@ class TaskQueueService:
         self._dependency_resolver = dependency_resolver
         self._priority_calculator = priority_calculator
 
-        logger.info("TaskQueueService initialized")
+        logger.debug("TaskQueueService initialized")
 
     async def enqueue_task(
         self,
