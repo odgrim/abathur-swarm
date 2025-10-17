@@ -36,7 +36,7 @@ from abathur.infrastructure.database import Database
 
 
 @pytest.mark.asyncio
-async def test_migration_adds_column_to_fresh_database():
+async def test_migration_adds_column_to_fresh_database() -> None:
     """Test migration adds summary column to fresh database.
 
     Verifies:
@@ -54,7 +54,7 @@ async def test_migration_adds_column_to_fresh_database():
     # Assert - verify summary column exists
     async with db._get_connection() as conn:
         cursor = await conn.execute("PRAGMA table_info(tasks)")
-        columns = await cursor.fetchall()
+        columns = list(await cursor.fetchall())
         column_names = [col["name"] for col in columns]
 
         # Verify summary column exists
@@ -72,7 +72,7 @@ async def test_migration_adds_column_to_fresh_database():
 
 
 @pytest.mark.asyncio
-async def test_migration_idempotent_on_second_run():
+async def test_migration_idempotent_on_second_run() -> None:
     """Test migration is idempotent (can run multiple times safely).
 
     Verifies:
@@ -95,7 +95,7 @@ async def test_migration_idempotent_on_second_run():
         # Verify column exists after first migration
         async with db1._get_connection() as conn:
             cursor = await conn.execute("PRAGMA table_info(tasks)")
-            columns_before = await cursor.fetchall()
+            columns_before = list(await cursor.fetchall())
             column_names_before = [col["name"] for col in columns_before]
             assert "summary" in column_names_before
 
@@ -111,7 +111,7 @@ async def test_migration_idempotent_on_second_run():
         # Assert - column still exists with same properties
         async with db2._get_connection() as conn:
             cursor = await conn.execute("PRAGMA table_info(tasks)")
-            columns_after = await cursor.fetchall()
+            columns_after = list(await cursor.fetchall())
             column_names_after = [col["name"] for col in columns_after]
 
             # Verify summary column still exists
@@ -141,7 +141,7 @@ async def test_migration_idempotent_on_second_run():
 
 
 @pytest.mark.asyncio
-async def test_migration_preserves_existing_data():
+async def test_migration_preserves_existing_data() -> None:
     """Test migration preserves existing tasks with summary values.
 
     Verifies:
@@ -207,7 +207,7 @@ async def test_migration_preserves_existing_data():
 
 
 @pytest.mark.asyncio
-async def test_migration_column_properties():
+async def test_migration_column_properties() -> None:
     """Test summary column has correct database properties.
 
     Verifies:
@@ -223,7 +223,7 @@ async def test_migration_column_properties():
     # Assert - inspect column properties
     async with db._get_connection() as conn:
         cursor = await conn.execute("PRAGMA table_info(tasks)")
-        columns = await cursor.fetchall()
+        columns = list(await cursor.fetchall())
 
         # Find summary column
         summary_column = next((col for col in columns if col["name"] == "summary"), None)
@@ -239,7 +239,7 @@ async def test_migration_column_properties():
 
 
 @pytest.mark.asyncio
-async def test_migration_check_condition():
+async def test_migration_check_condition() -> None:
     """Test migration correctly checks for column existence before ALTER TABLE.
 
     Verifies:
@@ -258,7 +258,7 @@ async def test_migration_check_condition():
     # Assert - column now exists
     async with db._get_connection() as conn:
         cursor = await conn.execute("PRAGMA table_info(tasks)")
-        columns = await cursor.fetchall()
+        columns = list(await cursor.fetchall())
         column_names = [col["name"] for col in columns]
 
         assert "summary" in column_names, "Column should exist after first migration"
@@ -275,7 +275,7 @@ async def test_migration_check_condition():
 
 
 @pytest.mark.asyncio
-async def test_migration_no_duplicate_columns():
+async def test_migration_no_duplicate_columns() -> None:
     """Test migration doesn't create duplicate summary columns.
 
     Verifies:
@@ -290,7 +290,7 @@ async def test_migration_no_duplicate_columns():
     # Assert - count summary columns
     async with db._get_connection() as conn:
         cursor = await conn.execute("PRAGMA table_info(tasks)")
-        columns = await cursor.fetchall()
+        columns = list(await cursor.fetchall())
 
         # Count summary columns (should be exactly 1)
         summary_columns = [col for col in columns if col["name"] == "summary"]
@@ -305,7 +305,7 @@ async def test_migration_no_duplicate_columns():
 
 
 @pytest.mark.asyncio
-async def test_migration_with_null_summary_values():
+async def test_migration_with_null_summary_values() -> None:
     """Test migration handles NULL summary values correctly.
 
     Verifies:
@@ -343,7 +343,7 @@ async def test_migration_with_null_summary_values():
 
 
 @pytest.mark.asyncio
-async def test_migration_with_empty_string_summary():
+async def test_migration_with_empty_string_summary() -> None:
     """Test migration handles empty string summary values.
 
     Verifies:
@@ -381,7 +381,7 @@ async def test_migration_with_empty_string_summary():
 
 
 @pytest.mark.asyncio
-async def test_migration_with_max_length_summary():
+async def test_migration_with_max_length_summary() -> None:
     """Test migration handles maximum length summary values (200 chars).
 
     Verifies:
@@ -420,7 +420,7 @@ async def test_migration_with_max_length_summary():
 
 
 @pytest.mark.asyncio
-async def test_migration_multiple_times_file_database():
+async def test_migration_multiple_times_file_database() -> None:
     """Test migration can run multiple times on file-based database.
 
     Verifies:
@@ -443,7 +443,7 @@ async def test_migration_multiple_times_file_database():
             # Verify column exists after each run
             async with db._get_connection() as conn:
                 cursor = await conn.execute("PRAGMA table_info(tasks)")
-                columns = await cursor.fetchall()
+                columns = list(await cursor.fetchall())
                 column_names = [col["name"] for col in columns]
 
                 assert "summary" in column_names, f"Column should exist after run {run_number + 1}"
@@ -456,7 +456,7 @@ async def test_migration_multiple_times_file_database():
 
         async with db_final._get_connection() as conn:
             cursor = await conn.execute("PRAGMA table_info(tasks)")
-            columns = await cursor.fetchall()
+            columns = list(await cursor.fetchall())
             summary_columns = [col for col in columns if col["name"] == "summary"]
 
             assert len(summary_columns) == 1, "Should still have exactly one summary column"
@@ -474,7 +474,7 @@ async def test_migration_multiple_times_file_database():
 
 
 @pytest.mark.asyncio
-async def test_migration_backfill_matches_service_layer():
+async def test_migration_backfill_matches_service_layer() -> None:
     """Test migration backfill logic matches service layer auto-generation.
 
     This is a critical test to ensure backward compatibility:
@@ -487,12 +487,11 @@ async def test_migration_backfill_matches_service_layer():
     (task_queue_service.py:174-181).
     """
     # Arrange - create database and manually insert tasks with NULL summary
+    import tempfile
     from datetime import datetime, timezone
     from uuid import uuid4
 
     from abathur.domain.models import TaskSource
-
-    import tempfile
 
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = Path(f.name)
@@ -645,6 +644,7 @@ async def test_migration_backfill_matches_service_layer():
         # Assert - verify backfilled summaries match service layer expectations
         # Test case 1: Human task
         human_task = await db.get_task(human_task_id)
+        assert human_task is not None
         expected_human_summary = f"User Prompt: {human_prompt[:126].strip()}"
         assert (
             human_task.summary == expected_human_summary
@@ -652,6 +652,7 @@ async def test_migration_backfill_matches_service_layer():
 
         # Test case 2: Agent task
         agent_task = await db.get_task(agent_task_id)
+        assert agent_task is not None
         expected_agent_summary = agent_prompt[:140].strip()
         assert (
             agent_task.summary == expected_agent_summary
@@ -659,22 +660,24 @@ async def test_migration_backfill_matches_service_layer():
 
         # Test case 3: Long human task
         long_human_task = await db.get_task(long_human_task_id)
+        assert long_human_task is not None
         expected_long_summary = f"User Prompt: {long_prompt[:126].strip()}"
         assert (
             long_human_task.summary == expected_long_summary
-        ), f"Long human task summary mismatch. Expected length {len(expected_long_summary)}, Got length {len(long_human_task.summary)}"
+        ), f"Long human task summary mismatch. Expected length {len(expected_long_summary)}, Got length {len(long_human_task.summary) if long_human_task.summary else 0}"
         # Verify it's exactly 126 chars from prompt + prefix
+        assert long_human_task.summary is not None
         assert len(long_human_task.summary) == len("User Prompt: ") + 126
 
         # Test case 4: Empty prompt
         empty_task = await db.get_task(empty_task_id)
+        assert empty_task is not None
         assert empty_task.summary == "Task", "Empty prompt should backfill to 'Task'"
 
         # Test case 5: Whitespace-only prompt
         whitespace_task = await db.get_task(whitespace_task_id)
-        assert (
-            whitespace_task.summary == "Task"
-        ), "Whitespace-only prompt should backfill to 'Task'"
+        assert whitespace_task is not None
+        assert whitespace_task.summary == "Task", "Whitespace-only prompt should backfill to 'Task'"
 
         # Additional verification: simulate service layer generation and compare
         # This ensures the migration EXACTLY matches what the service layer would generate

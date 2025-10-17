@@ -77,7 +77,7 @@ async def measure_latencies(func, iterations: int = 100):
 
 @pytest.mark.asyncio
 @pytest.mark.performance
-async def test_enqueue_performance_with_summary(task_queue_service: TaskQueueService):
+async def test_enqueue_performance_with_summary(task_queue_service: TaskQueueService) -> None:
     """Test enqueue performance with summary field.
 
     Performance Target: <10ms per task (baseline requirement)
@@ -145,7 +145,7 @@ async def test_enqueue_performance_with_summary(task_queue_service: TaskQueueSer
 @pytest.mark.performance
 async def test_list_performance_with_summary(
     memory_db: Database, task_queue_service: TaskQueueService
-):
+) -> None:
     """Test task_list performance with summary field.
 
     Performance Target: <20ms per page (baseline requirement)
@@ -186,7 +186,7 @@ async def test_list_performance_with_summary(
 @pytest.mark.performance
 async def test_serialize_performance_all_fields(
     memory_db: Database, task_queue_service: TaskQueueService
-):
+) -> None:
     """Test serialization performance with all Task fields populated.
 
     Performance Target: <1ms per serialization
@@ -246,7 +246,7 @@ async def test_serialize_performance_all_fields(
 
 @pytest.mark.asyncio
 @pytest.mark.performance
-async def test_database_query_performance_with_summary(memory_db: Database):
+async def test_database_query_performance_with_summary(memory_db: Database) -> None:
     """Test database query performance with summary column.
 
     Performance Target: No regression from baseline
@@ -323,7 +323,7 @@ async def test_database_query_performance_with_summary(memory_db: Database):
                 "SELECT * FROM tasks WHERE status = ? LIMIT 50",
                 (TaskStatus.READY.value,),
             )
-            rows = await cursor.fetchall()
+            rows = list(await cursor.fetchall())
         end = time.perf_counter()
         latencies_list.append((end - start) * 1000)
         assert len(rows) > 0
@@ -349,7 +349,7 @@ async def test_database_query_performance_with_summary(memory_db: Database):
             """,
             (str(task_ids[0]),),
         )
-        plan = await cursor.fetchall()
+        plan = list(await cursor.fetchall())
 
     print("  Query plan for SELECT by ID:")
     for row in plan:
@@ -366,7 +366,7 @@ async def test_database_query_performance_with_summary(memory_db: Database):
 
 @pytest.mark.asyncio
 @pytest.mark.performance
-async def test_concurrent_enqueue_with_summary(task_queue_service: TaskQueueService):
+async def test_concurrent_enqueue_with_summary(task_queue_service: TaskQueueService) -> None:
     """Test concurrent task enqueue performance with summary field.
 
     Performance Target: >40 tasks/second with 50 concurrent agents

@@ -55,7 +55,7 @@ def mcp_server(memory_db: Database) -> AbathurTaskQueueServer:
 @pytest.mark.asyncio
 async def test_serialize_task_includes_all_28_fields(
     memory_db: Database, task_queue_service: TaskQueueService, mcp_server: AbathurTaskQueueServer
-):
+) -> None:
     """Test that _serialize_task includes all 28 Task model fields."""
     # Create prerequisite task first (no dependencies)
     prereq_task = await task_queue_service.enqueue_task(
@@ -179,7 +179,7 @@ async def test_serialize_task_includes_all_28_fields(
 @pytest.mark.asyncio
 async def test_serialize_task_with_null_optional_fields(
     memory_db: Database, task_queue_service: TaskQueueService, mcp_server: AbathurTaskQueueServer
-):
+) -> None:
     """Test serialization with NULL/None optional fields."""
     # Create minimal task
     task = await task_queue_service.enqueue_task(
@@ -214,7 +214,7 @@ async def test_serialize_task_with_null_optional_fields(
 @pytest.mark.asyncio
 async def test_serialize_task_with_multiple_dependencies(
     memory_db: Database, task_queue_service: TaskQueueService, mcp_server: AbathurTaskQueueServer
-):
+) -> None:
     """Test serialization of task with multiple dependencies."""
     # Create prerequisite tasks
     prereq1 = await task_queue_service.enqueue_task(description="Prereq 1", source=TaskSource.HUMAN)
@@ -245,7 +245,7 @@ async def test_serialize_task_with_multiple_dependencies(
 @pytest.mark.asyncio
 async def test_serialize_task_datetime_formatting(
     memory_db: Database, task_queue_service: TaskQueueService, mcp_server: AbathurTaskQueueServer
-):
+) -> None:
     """Test that datetime fields are properly formatted as ISO 8601 strings."""
     task = await task_queue_service.enqueue_task(
         description="Task for datetime test",
@@ -281,7 +281,7 @@ async def test_serialize_task_datetime_formatting(
 @pytest.mark.asyncio
 async def test_serialize_task_enum_values(
     memory_db: Database, task_queue_service: TaskQueueService, mcp_server: AbathurTaskQueueServer
-):
+) -> None:
     """Test that enum fields are serialized as string values."""
     task = await task_queue_service.enqueue_task(
         description="Task for enum test",
@@ -300,7 +300,7 @@ async def test_serialize_task_enum_values(
 @pytest.mark.asyncio
 async def test_serialize_task_field_count_matches_model(
     memory_db: Database, mcp_server: AbathurTaskQueueServer
-):
+) -> None:
     """Test that serialized dict has exactly 28 fields matching Task model."""
     # Create a simple task directly in database
     task_id = uuid4()

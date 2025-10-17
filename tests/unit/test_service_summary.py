@@ -21,7 +21,7 @@ class TestTaskQueueServiceSummary:
     """Test TaskQueueService summary parameter handling."""
 
     @pytest.mark.asyncio
-    async def test_enqueue_task_with_summary(self):
+    async def test_enqueue_task_with_summary(self) -> None:
         """Test enqueue_task accepts summary parameter and creates task correctly."""
         # Setup
         db = Database(Path(":memory:"))
@@ -47,7 +47,7 @@ class TestTaskQueueServiceSummary:
         assert retrieved.summary == "Test summary"
 
     @pytest.mark.asyncio
-    async def test_enqueue_task_without_summary(self):
+    async def test_enqueue_task_without_summary(self) -> None:
         """Test enqueue_task works without summary (backward compatibility)."""
         # Setup
         db = Database(Path(":memory:"))
@@ -72,7 +72,7 @@ class TestTaskQueueServiceSummary:
         assert retrieved.summary is None
 
     @pytest.mark.asyncio
-    async def test_enqueue_task_summary_max_length(self):
+    async def test_enqueue_task_summary_max_length(self) -> None:
         """Test Pydantic validates summary max_length constraint."""
         # Setup
         db = Database(Path(":memory:"))
@@ -103,7 +103,7 @@ class TestTaskQueueServiceSummary:
         assert "String should have at most 500 characters" in error_msg
 
     @pytest.mark.asyncio
-    async def test_enqueue_task_summary_with_prerequisites(self):
+    async def test_enqueue_task_summary_with_prerequisites(self) -> None:
         """Test summary works correctly with task dependencies."""
         # Setup
         db = Database(Path(":memory:"))
@@ -132,11 +132,13 @@ class TestTaskQueueServiceSummary:
         # Verify both persisted correctly
         retrieved_prereq = await db.get_task(prereq.id)
         retrieved_dependent = await db.get_task(dependent.id)
+        assert retrieved_prereq is not None
+        assert retrieved_dependent is not None
         assert retrieved_prereq.summary == "Prereq summary"
         assert retrieved_dependent.summary == "Dependent summary"
 
     @pytest.mark.asyncio
-    async def test_enqueue_task_empty_summary(self):
+    async def test_enqueue_task_empty_summary(self) -> None:
         """Test empty string summary is allowed."""
         # Setup
         db = Database(Path(":memory:"))

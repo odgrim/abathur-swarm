@@ -33,32 +33,26 @@ def _serialize_task(task: Task) -> dict:
         "agent_type": task.agent_type,
         "priority": task.priority,
         "status": task.status.value,
-
         # Data fields
         "input_data": task.input_data,
         "result_data": task.result_data,
         "error_message": task.error_message,
-
         # Retry and timeout fields
         "retry_count": task.retry_count,
         "max_retries": task.max_retries,
         "max_execution_timeout_seconds": task.max_execution_timeout_seconds,
-
         # Timestamp fields
         "submitted_at": task.submitted_at.isoformat(),
         "started_at": task.started_at.isoformat() if task.started_at else None,
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
         "last_updated_at": task.last_updated_at.isoformat(),
-
         # Relationship fields
         "created_by": task.created_by,
         "parent_task_id": str(task.parent_task_id) if task.parent_task_id else None,
         "dependencies": [str(dep) for dep in task.dependencies],
         "session_id": task.session_id,
-
         # Summary field (new)
         "summary": task.summary,
-
         # Enhanced task queue fields
         "source": task.source.value,
         "dependency_type": task.dependency_type.value,
@@ -66,14 +60,13 @@ def _serialize_task(task: Task) -> dict:
         "deadline": task.deadline.isoformat() if task.deadline else None,
         "estimated_duration_seconds": task.estimated_duration_seconds,
         "dependency_depth": task.dependency_depth,
-
         # Branch tracking fields
         "feature_branch": task.feature_branch,
         "task_branch": task.task_branch,
     }
 
 
-def test_serialize_task_all_28_fields_present():
+def test_serialize_task_all_28_fields_present() -> None:
     """Test that _serialize_task returns all 28 Task model fields.
 
     This test validates the fix for FR004 where _serialize_task was missing:
@@ -160,10 +153,12 @@ def test_serialize_task_all_28_fields_present():
 
     actual_fields = set(serialized.keys())
     assert len(actual_fields) == 28, f"Expected 28 fields, got {len(actual_fields)}"
-    assert actual_fields == expected_fields, f"Missing: {expected_fields - actual_fields}, Extra: {actual_fields - expected_fields}"
+    assert (
+        actual_fields == expected_fields
+    ), f"Missing: {expected_fields - actual_fields}, Extra: {actual_fields - expected_fields}"
 
 
-def test_serialize_task_field_values_correct():
+def test_serialize_task_field_values_correct() -> None:
     """Test that serialized field values are correct and properly converted."""
     # Arrange
     task_id = uuid4()
@@ -203,7 +198,7 @@ def test_serialize_task_field_values_correct():
     assert serialized["summary"] == "Test summary"
 
 
-def test_serialize_task_null_values_handled():
+def test_serialize_task_null_values_handled() -> None:
     """Test that null/None values are properly handled in serialization."""
     # Arrange - minimal task with many None fields
     task = Task(
@@ -234,7 +229,7 @@ def test_serialize_task_null_values_handled():
     assert serialized["dependencies"] == []
 
 
-def test_serialize_task_missing_fields_from_original_bug():
+def test_serialize_task_missing_fields_from_original_bug() -> None:
     """Test that previously missing fields are now present.
 
     This test specifically validates that the 8 fields that were missing
@@ -291,7 +286,7 @@ def test_serialize_task_missing_fields_from_original_bug():
     assert serialized["summary"] == "Test summary"
 
 
-def test_serialize_task_dependencies_list_conversion():
+def test_serialize_task_dependencies_list_conversion() -> None:
     """Test that dependencies list is correctly converted from UUIDs to strings."""
     # Arrange
     dep1 = uuid4()
@@ -316,7 +311,7 @@ def test_serialize_task_dependencies_list_conversion():
     assert all(isinstance(d, str) for d in serialized["dependencies"])
 
 
-def test_serialize_task_backward_compatibility():
+def test_serialize_task_backward_compatibility() -> None:
     """Test that tasks without summary field serialize correctly (backward compatibility)."""
     # Arrange - task without summary (simulates old task)
     task = Task(

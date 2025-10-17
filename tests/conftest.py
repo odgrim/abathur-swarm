@@ -30,7 +30,7 @@ def helpers() -> type[Helpers]:
 
 
 # Add helpers to pytest namespace
-pytest.helpers = Helpers
+pytest.helpers = Helpers  # type: ignore[attr-defined]
 
 
 # Configure asyncio event loop for tests

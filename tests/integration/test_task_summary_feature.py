@@ -74,7 +74,7 @@ async def mcp_server(
 async def test_mcp_end_to_end_flow_with_summary(
     mcp_server: AbathurTaskQueueServer,
     memory_db: Database,
-):
+) -> None:
     """Test complete MCP flow: task_enqueue with summary → Database → task_get returns summary.
 
     Simulates actual MCP tool calls:
@@ -129,7 +129,7 @@ async def test_mcp_end_to_end_flow_with_summary(
 async def test_mcp_backward_compatibility_without_summary(
     mcp_server: AbathurTaskQueueServer,
     memory_db: Database,
-):
+) -> None:
     """Test MCP task_enqueue auto-generates summary when not provided (backward compatibility).
 
     Simulates legacy MCP client not providing summary parameter:
@@ -184,7 +184,7 @@ async def test_mcp_backward_compatibility_without_summary(
 @pytest.mark.asyncio
 async def test_mcp_summary_validation_max_length(
     task_queue_service: TaskQueueService,
-):
+) -> None:
     """Test that summaries exceeding max_length are automatically truncated.
 
     The service layer auto-trims summaries to 140 characters instead of raising errors,
@@ -208,6 +208,7 @@ async def test_mcp_summary_validation_max_length(
     )
 
     # Assert: Summary was truncated to 140 characters
+    assert task.summary is not None
     assert len(task.summary) == 140
     assert task.summary == "x" * 140
 
@@ -216,7 +217,7 @@ async def test_mcp_summary_validation_max_length(
 async def test_mcp_summary_validation_exactly_max_length(
     mcp_server: AbathurTaskQueueServer,
     memory_db: Database,
-):
+) -> None:
     """Test that summary exactly at max_length (140 chars) is accepted.
 
     Verifies:
@@ -257,7 +258,7 @@ async def test_mcp_summary_validation_exactly_max_length(
 async def test_mcp_task_list_includes_summaries(
     mcp_server: AbathurTaskQueueServer,
     memory_db: Database,
-):
+) -> None:
     """Test MCP task_list returns summary field for all tasks.
 
     Simulates:
@@ -336,7 +337,7 @@ async def test_mcp_task_list_includes_summaries(
 
 
 @pytest.mark.asyncio
-async def test_database_migration_idempotent():
+async def test_database_migration_idempotent() -> None:
     """Test that database migration can run multiple times safely.
 
     Verifies:
@@ -361,7 +362,7 @@ async def test_database_migration_idempotent():
         # Verify column exists after first migration
         async with db1._get_connection() as conn:
             cursor = await conn.execute("PRAGMA table_info(tasks)")
-            columns_before = await cursor.fetchall()
+            columns_before = list(await cursor.fetchall())
             column_names_before = [col["name"] for col in columns_before]
 
             assert (
@@ -377,7 +378,7 @@ async def test_database_migration_idempotent():
         # Verify column still exists with same properties
         async with db2._get_connection() as conn:
             cursor = await conn.execute("PRAGMA table_info(tasks)")
-            columns_after = await cursor.fetchall()
+            columns_after = list(await cursor.fetchall())
             column_names_after = [col["name"] for col in columns_after]
 
             assert (
@@ -397,7 +398,7 @@ async def test_database_migration_idempotent():
 
         async with db3._get_connection() as conn:
             cursor = await conn.execute("PRAGMA table_info(tasks)")
-            columns_final = await cursor.fetchall()
+            columns_final = list(await cursor.fetchall())
             summary_columns_final = [col for col in columns_final if col["name"] == "summary"]
 
             assert len(summary_columns_final) == 1, "Should still have exactly one summary column"
@@ -421,7 +422,7 @@ async def test_database_migration_idempotent():
 @pytest.mark.asyncio
 async def test_existing_task_fields_unaffected(
     mcp_server: AbathurTaskQueueServer,
-):
+) -> None:
     """Test that adding summary field doesn't affect other Task fields.
 
     Verifies:
@@ -505,7 +506,7 @@ async def test_existing_task_fields_unaffected(
 async def test_mcp_concurrent_enqueue_with_summary(
     mcp_server: AbathurTaskQueueServer,
     memory_db: Database,
-):
+) -> None:
     """Test concurrent task enqueue via MCP with summary parameter.
 
     Verifies:
@@ -548,7 +549,7 @@ async def test_mcp_concurrent_enqueue_with_summary(
 @pytest.mark.asyncio
 async def test_mcp_summary_with_unicode_characters(
     mcp_server: AbathurTaskQueueServer,
-):
+) -> None:
     """Test summary field handles unicode characters correctly.
 
     Verifies:
@@ -584,7 +585,7 @@ async def test_mcp_summary_with_unicode_characters(
 async def test_mcp_task_with_dependencies_preserves_summary(
     mcp_server: AbathurTaskQueueServer,
     memory_db: Database,
-):
+) -> None:
     """Test summary preserved in tasks with dependencies.
 
     Verifies:
@@ -623,6 +624,8 @@ async def test_mcp_task_with_dependencies_preserves_summary(
     prereq_task = await memory_db.get_task(UUID(prereq_id))
     dependent_task = await memory_db.get_task(UUID(dependent_id))
 
+    assert prereq_task is not None
+    assert dependent_task is not None
     assert prereq_task.summary == "Prereq summary"
     assert dependent_task.summary == "Dependent summary"
 

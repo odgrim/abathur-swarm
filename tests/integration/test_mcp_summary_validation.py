@@ -10,7 +10,6 @@ Tests comprehensive validation including:
 from uuid import UUID
 
 import pytest
-
 from abathur.infrastructure.database import Database
 from abathur.mcp.task_queue_server import AbathurTaskQueueServer
 from abathur.services.dependency_resolver import DependencyResolver
@@ -38,7 +37,7 @@ async def mcp_server(temp_db_path):
 
 
 @pytest.mark.asyncio
-async def test_mcp_rejects_whitespace_only_summary(mcp_server):
+async def test_mcp_rejects_whitespace_only_summary(mcp_server) -> None:
     """Test that whitespace-only summary is rejected."""
     # Test whitespace-only summary
     result = await mcp_server._handle_task_enqueue(
@@ -54,7 +53,7 @@ async def test_mcp_rejects_whitespace_only_summary(mcp_server):
 
 
 @pytest.mark.asyncio
-async def test_mcp_rejects_empty_summary_after_trim(mcp_server):
+async def test_mcp_rejects_empty_summary_after_trim(mcp_server) -> None:
     """Test that empty string summary is rejected after trimming."""
     # Test empty summary after strip
     result = await mcp_server._handle_task_enqueue(
@@ -70,7 +69,7 @@ async def test_mcp_rejects_empty_summary_after_trim(mcp_server):
 
 
 @pytest.mark.asyncio
-async def test_mcp_trims_whitespace(mcp_server):
+async def test_mcp_trims_whitespace(mcp_server) -> None:
     """Test that leading/trailing whitespace is trimmed from summary."""
     # Test whitespace trimming
     result = await mcp_server._handle_task_enqueue(
@@ -91,7 +90,7 @@ async def test_mcp_trims_whitespace(mcp_server):
 
 
 @pytest.mark.asyncio
-async def test_mcp_rejects_141_char_summary(mcp_server):
+async def test_mcp_rejects_141_char_summary(mcp_server) -> None:
     """Test that summary exceeding 140 characters is rejected."""
     # Test 141 characters (exceeds max)
     long_summary = "a" * 141
@@ -108,7 +107,7 @@ async def test_mcp_rejects_141_char_summary(mcp_server):
 
 
 @pytest.mark.asyncio
-async def test_mcp_accepts_140_char_summary(mcp_server):
+async def test_mcp_accepts_140_char_summary(mcp_server) -> None:
     """Test that summary with exactly 140 characters is accepted."""
     # Test exactly 140 characters
     exact_summary = "a" * 140
@@ -125,7 +124,7 @@ async def test_mcp_accepts_140_char_summary(mcp_server):
 
 
 @pytest.mark.asyncio
-async def test_mcp_handles_unicode_characters(mcp_server):
+async def test_mcp_handles_unicode_characters(mcp_server) -> None:
     """Test that Unicode characters are handled correctly in summary."""
     # Test Unicode characters (emoji, accents, etc.)
     unicode_summary = "Test task with emoji 🎉 and accents éàü"
@@ -146,7 +145,7 @@ async def test_mcp_handles_unicode_characters(mcp_server):
 
 
 @pytest.mark.asyncio
-async def test_mcp_unicode_length_validation(mcp_server):
+async def test_mcp_unicode_length_validation(mcp_server) -> None:
     """Test that Unicode multi-byte characters count correctly for length validation."""
     # Test that emoji counts as 1 character (not bytes)
     # 140 regular chars + 1 emoji = 141 characters (should fail)
@@ -165,7 +164,7 @@ async def test_mcp_unicode_length_validation(mcp_server):
 
 
 @pytest.mark.asyncio
-async def test_mcp_none_summary_accepted(mcp_server):
+async def test_mcp_none_summary_accepted(mcp_server) -> None:
     """Test that None summary is accepted (optional parameter)."""
     # Test None summary (should succeed and auto-generate)
     result = await mcp_server._handle_task_enqueue(
