@@ -83,8 +83,8 @@ abathur task list
 # Start swarm to process tasks
 abathur swarm start --max-agents 10
 
-# Monitor status
-abathur status
+# Monitor task queue status
+abathur task status
 ```
 
 ---
@@ -205,8 +205,8 @@ abathur swarm start --max-agents 20
 # Get current swarm status
 abathur swarm status
 
-# Monitor system status
-abathur status
+# Monitor task queue status
+abathur task status
 ```
 
 ---

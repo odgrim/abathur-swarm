@@ -122,8 +122,8 @@ abathur task list --status pending
 # Start swarm to process tasks
 abathur swarm start --max-agents 10
 
-# Monitor system status
-abathur status
+# Monitor task queue status
+abathur task status
 ```
 
 ### 4. Use Loop Execution
@@ -193,6 +193,7 @@ Abathur follows **Clean Architecture** principles with clear layer separation:
 abathur task submit <template> [--input-file FILE] [--priority 0-10]
 abathur task list [--status STATUS] [--limit N]
 abathur task show <task-id>
+abathur task status              # Show task queue statistics
 abathur task cancel <task-id>
 abathur task retry <task-id>
 ```
@@ -223,12 +224,6 @@ abathur mcp list
 abathur mcp start <server>
 abathur mcp stop <server>
 abathur mcp restart <server>
-```
-
-### Monitoring
-
-```bash
-abathur status                  # System status
 ```
 
 ---

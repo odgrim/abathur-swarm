@@ -398,6 +398,30 @@ def check_stale() -> None:
     asyncio.run(_check_stale())
 
 
+@task_app.command("status")
+def task_status(watch: bool = typer.Option(False, help="Watch mode (live updates)")) -> None:
+    """Show task queue status and statistics."""
+
+    async def _status() -> None:
+        services = await _get_services()
+        from abathur.domain.models import TaskStatus
+
+        # Count tasks by status
+        pending = len(await services["database"].list_tasks(TaskStatus.PENDING, 1000))
+        running = len(await services["database"].list_tasks(TaskStatus.RUNNING, 1000))
+        completed = len(await services["database"].list_tasks(TaskStatus.COMPLETED, 1000))
+        failed = len(await services["database"].list_tasks(TaskStatus.FAILED, 1000))
+
+        console.print("[bold]Task Queue Status[/bold]")
+        console.print(f"Pending tasks: {pending}")
+        console.print(f"Running tasks: {running}")
+        console.print(f"Completed tasks: {completed}")
+        console.print(f"Failed tasks: {failed}")
+        console.print(f"Total tasks: {pending + running + completed + failed}")
+
+    asyncio.run(_status())
+
+
 # ===== Swarm Commands =====
 swarm_app = typer.Typer(help="Agent swarm management", no_args_is_help=True)
 app.add_typer(swarm_app, name="swarm")
@@ -1023,30 +1047,6 @@ def init(
                 )
 
     asyncio.run(_init())
-
-
-@app.command()
-def status(watch: bool = typer.Option(False, help="Watch mode (live updates)")) -> None:
-    """Show system status."""
-
-    async def _status() -> None:
-        services = await _get_services()
-        from abathur.domain.models import TaskStatus
-
-        # Count tasks by status
-        pending = len(await services["database"].list_tasks(TaskStatus.PENDING, 1000))
-        running = len(await services["database"].list_tasks(TaskStatus.RUNNING, 1000))
-        completed = len(await services["database"].list_tasks(TaskStatus.COMPLETED, 1000))
-        failed = len(await services["database"].list_tasks(TaskStatus.FAILED, 1000))
-
-        console.print("[bold]Abathur System Status[/bold]")
-        console.print(f"Pending tasks: {pending}")
-        console.print(f"Running tasks: {running}")
-        console.print(f"Completed tasks: {completed}")
-        console.print(f"Failed tasks: {failed}")
-        console.print(f"Total tasks: {pending + running + completed + failed}")
-
-    asyncio.run(_status())
 
 
 # ===== Main Entry Point =====
