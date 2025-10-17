@@ -102,6 +102,7 @@ When invoked, you must follow these steps:
    # Create a task to track this technical specification work
    tech_spec_task = task_enqueue({
        "description": "Technical Specification Analysis",
+       "summary": "Create detailed technical specifications for implementation",
        "source": "technical-requirements-specialist",
        "agent_type": "technical-requirements-specialist",
        "priority": 7
@@ -293,6 +294,7 @@ Original requirements: task:{requirements_task_id}:requirements
     # Enqueue task planning (task-planner will orchestrate agent creation)
     task_planning_task = task_enqueue({
         "description": planning_context,
+        "summary": "Decompose implementation into atomic tasks with agent orchestration",
         "source": "technical-requirements-specialist",
         "priority": 7,
         "agent_type": "task-planner",

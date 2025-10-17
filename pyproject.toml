@@ -74,10 +74,19 @@ warn_unused_ignores = true
 warn_no_return = true
 strict_equality = true
 
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+disallow_incomplete_defs = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra -q --strict-markers --cov=abathur --cov-report=term-missing --cov-report=html"
+markers = [
+    "performance: marks tests as performance tests (deselect with '-m \"not performance\"')",
+]
 
 [tool.coverage.run]
 source = ["src"]

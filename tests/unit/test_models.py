@@ -75,6 +75,242 @@ class TestTask:
         assert dep1 in task.dependencies
         assert dep2 in task.dependencies
 
+    # ===== Summary Field Tests =====
+
+    def test_task_with_summary(self) -> None:
+        """Test Task model accepts summary field with valid data."""
+        # Arrange
+        valid_summary = "This is a test task summary"
+
+        # Act
+        task = Task(
+            prompt="Test task with summary",
+            summary=valid_summary,
+        )
+
+        # Assert
+        assert task.summary == valid_summary
+        assert task.prompt == "Test task with summary"
+
+        # Verify serialization includes summary
+        serialized = task.model_dump()
+        assert "summary" in serialized
+        assert serialized["summary"] == valid_summary
+
+    def test_task_without_summary(self) -> None:
+        """Test Task model works with summary=None (backward compatibility)."""
+        # Arrange & Act - create task without providing summary
+        task = Task(
+            prompt="Test task without summary",
+        )
+
+        # Assert - summary defaults to None
+        assert task.summary is None
+        assert task.prompt == "Test task without summary"
+
+        # Verify serialization includes summary field as None
+        serialized = task.model_dump()
+        assert "summary" in serialized
+        assert serialized["summary"] is None
+
+    def test_task_summary_none_explicit(self) -> None:
+        """Test Task model accepts explicit summary=None."""
+        # Arrange & Act - explicitly set summary to None
+        task = Task(
+            prompt="Test task with explicit None",
+            summary=None,
+        )
+
+        # Assert
+        assert task.summary is None
+
+        # Verify no validation error
+        serialized = task.model_dump()
+        assert serialized["summary"] is None
+
+    def test_task_summary_max_length_at_boundary(self) -> None:
+        """Test summary field validation at exact boundary (max_length=140)."""
+        # Arrange - create summary with exactly 140 characters
+        summary_140_chars = "x" * 140
+
+        # Act
+        task = Task(
+            prompt="Test task with 140 char summary",
+            summary=summary_140_chars,
+        )
+
+        # Assert - should accept exactly 140 characters
+        assert task.summary == summary_140_chars
+        assert len(task.summary) == 140
+
+    def test_task_summary_exceeds_max_length(self) -> None:
+        """Test summary field automatically truncates to 140 characters."""
+        # Arrange - create summary with 141 characters (exceeds limit)
+        summary_141_chars = "x" * 141
+
+        # Act - field validator should auto-truncate instead of raising error
+        task = Task(
+            prompt="Test task with too long summary",
+            summary=summary_141_chars,
+        )
+
+        # Assert - summary should be truncated to exactly 140 characters
+        assert task.summary == "x" * 140
+        assert len(task.summary) == 140
+
+    def test_task_summary_empty_string(self) -> None:
+        """Test summary field converts empty string to None after stripping."""
+        # Arrange & Act
+        task = Task(
+            prompt="Test task with empty summary",
+            summary="",
+        )
+
+        # Assert - empty string becomes None after stripping (will trigger auto-generation)
+        assert task.summary is None
+
+    def test_task_summary_serialization_includes_all_fields(self) -> None:
+        """Test Task model serializes to dict with summary field present."""
+        # Arrange
+        task_with_summary = Task(
+            prompt="Task with summary",
+            summary="Test summary",
+            agent_type="test-agent",
+            priority=7,
+        )
+
+        # Act
+        serialized = task_with_summary.model_dump()
+
+        # Assert - verify summary is in serialized output
+        assert "summary" in serialized
+        assert serialized["summary"] == "Test summary"
+        assert serialized["prompt"] == "Task with summary"
+        assert serialized["agent_type"] == "test-agent"
+        assert serialized["priority"] == 7
+
+    def test_task_summary_with_special_characters(self) -> None:
+        """Test summary field accepts special characters and unicode."""
+        # Arrange - test with unicode, emojis, and special chars
+        special_summary = "Task: Fix bug 🐛 - Update API → v2.0 (高优先级)"
+
+        # Act
+        task = Task(
+            prompt="Test task with special chars",
+            summary=special_summary,
+        )
+
+        # Assert - special characters should be preserved
+        assert task.summary == special_summary
+        assert "🐛" in task.summary
+        assert "→" in task.summary
+        assert "高优先级" in task.summary
+
+    def test_task_summary_whitespace_handling(self) -> None:
+        """Test summary field strips leading/trailing whitespace."""
+        # Arrange - test with leading/trailing/internal whitespace
+        summary_with_whitespace = "  Task summary with  spaces  "
+
+        # Act
+        task = Task(
+            prompt="Test task with whitespace",
+            summary=summary_with_whitespace,
+        )
+
+        # Assert - leading/trailing whitespace should be stripped, internal preserved
+        assert task.summary == "Task summary with  spaces"
+        assert task.summary != summary_with_whitespace
+
+    def test_task_summary_whitespace_stripped(self) -> None:
+        """Test summary field strips whitespace from simple input."""
+        # Arrange
+        summary_with_padding = "  test  "
+
+        # Act
+        task = Task(
+            prompt="Test task with padded summary",
+            summary=summary_with_padding,
+        )
+
+        # Assert - should be stripped to "test"
+        assert task.summary == "test"
+
+    def test_task_summary_whitespace_edge_case(self) -> None:
+        """Test summary with 139 chars + whitespace stays valid after stripping."""
+        # Arrange - 139 'x' characters with leading/trailing whitespace
+        # After stripping, this should be exactly 139 chars (valid)
+        summary_139_chars_padded = "  " + ("x" * 139) + "  "
+
+        # Act
+        task = Task(
+            prompt="Test task with whitespace edge case",
+            summary=summary_139_chars_padded,
+        )
+
+        # Assert - should accept and strip to exactly 139 characters
+        assert task.summary == "x" * 139
+        assert len(task.summary) == 139
+
+    def test_task_summary_whitespace_only_becomes_none(self) -> None:
+        """Test summary with only whitespace becomes None after stripping."""
+        # Arrange - only whitespace
+        whitespace_only = "    \t\n  "
+
+        # Act
+        task = Task(
+            prompt="Test task with whitespace only",
+            summary=whitespace_only,
+        )
+
+        # Assert - should become None (will trigger auto-generation)
+        assert task.summary is None
+
+    def test_task_summary_exceeds_max_after_stripping(self) -> None:
+        """Test summary that exceeds max length even after stripping is truncated."""
+        # Arrange - 141 'x' characters with whitespace (still 141 after strip)
+        summary_141_chars_padded = "  " + ("x" * 141) + "  "
+
+        # Act - field validator should strip then truncate
+        task = Task(
+            prompt="Test task with too long summary after strip",
+            summary=summary_141_chars_padded,
+        )
+
+        # Assert - should be truncated to exactly 140 characters (after stripping)
+        assert task.summary == "x" * 140
+        assert len(task.summary) == 140
+
+    def test_task_summary_json_encoding(self) -> None:
+        """Test Task with summary can be JSON-encoded correctly."""
+        # Arrange
+        task = Task(
+            prompt="Test JSON encoding",
+            summary="Summary for JSON test",
+        )
+
+        # Act - use model_dump_json for JSON serialization
+        json_str = task.model_dump_json()
+
+        # Assert - should contain summary field
+        assert "summary" in json_str
+        assert "Summary for JSON test" in json_str
+
+    def test_task_summary_multiple_tasks_independence(self) -> None:
+        """Test summary field is independent across multiple Task instances."""
+        # Arrange & Act - create multiple tasks with different summaries
+        task1 = Task(prompt="Task 1", summary="Summary 1")
+        task2 = Task(prompt="Task 2", summary="Summary 2")
+        task3 = Task(prompt="Task 3")  # No summary
+
+        # Assert - each task has correct summary
+        assert task1.summary == "Summary 1"
+        assert task2.summary == "Summary 2"
+        assert task3.summary is None
+
+        # Verify no cross-contamination
+        assert task1.summary != task2.summary
+        assert task1.summary != task3.summary
+
 
 class TestAgent:
     """Tests for Agent model."""

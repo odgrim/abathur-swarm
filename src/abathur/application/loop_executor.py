@@ -561,6 +561,7 @@ class LoopExecutor:
             input_data=refined_input,
             priority=task.priority,
             max_retries=task.max_retries,
+            summary=task.summary,
         )
 
         return refined_task

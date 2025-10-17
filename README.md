@@ -17,6 +17,7 @@
 - ACID-compliant SQLite persistence with WAL mode
 - Task dependencies and cancellation
 - Automatic retry with exponential backoff
+- Optional task summaries for quick identification (max 500 chars)
 
 ✅ **Concurrent Agent Swarms**
 - 10+ Claude agents running simultaneously
@@ -117,8 +118,15 @@ abathur template validate my-agent
 ### 3. Submit & Execute Tasks
 
 ```bash
-# Submit a task
-abathur task submit analyzer --input-file data.json --priority 8
+# Submit a task (via MCP task_enqueue)
+# With optional summary for quick identification
+mcp_client.call_tool("task_enqueue", {
+    "description": "Implement user authentication with JWT tokens and OAuth2 support",
+    "source": "human",
+    "agent_type": "python-backend-specialist",
+    "summary": "Add user authentication to API",  # Optional: brief summary (max 500 chars)
+    "base_priority": 8
+})
 
 # List tasks
 abathur task list --status pending

@@ -213,7 +213,12 @@ def submit(
         elif input_json:
             input_data = json.loads(input_json)
 
-        task = Task(prompt=prompt, agent_type=agent_type, input_data=input_data, priority=priority)
+        task = Task(
+            prompt=prompt,
+            agent_type=agent_type,
+            input_data=input_data,
+            priority=priority,
+        )
         task_id: UUID = await services["task_coordinator"].submit_task(task)
 
         console.print(f"[green]✓[/green] Task submitted: [cyan]{task_id}[/cyan]")
@@ -239,19 +244,23 @@ def list_tasks(
 
         table = Table(title="Tasks")
         table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("Summary", style="magenta")
         table.add_column("Agent Type", style="green")
-        table.add_column("Prompt", style="white")
         table.add_column("Priority", justify="center")
         table.add_column("Status", style="yellow")
         table.add_column("Submitted", style="blue")
 
         for task in tasks:
-            # Truncate prompt and ID for display
-            prompt_preview = task.prompt[:50] + "..." if len(task.prompt) > 50 else task.prompt
+            # Truncate summary and ID for display
+            summary_preview = (
+                (task.summary[:40] + "...")
+                if task.summary and len(task.summary) > 40
+                else (task.summary or "-")
+            )
             table.add_row(
                 str(task.id)[:8],
+                summary_preview,
                 task.agent_type,
-                prompt_preview,
                 str(task.priority),
                 task.status.value,
                 task.submitted_at.strftime("%Y-%m-%d %H:%M"),
@@ -278,6 +287,8 @@ def task_status(task_id: str = typer.Argument(..., help="Task ID or prefix")) ->
             return
 
         console.print(f"[bold]Task {task.id}[/bold]")
+        if task.summary:
+            console.print(f"Summary: [magenta]{task.summary}[/magenta]")
         console.print(f"Prompt: {task.prompt}")
         console.print(f"Agent Type: {task.agent_type}")
         console.print(f"Priority: {task.priority}")
