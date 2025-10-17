@@ -96,6 +96,7 @@ class SwarmOrchestrator:
 
         # Track active task coroutines
         active_task_coroutines: set[asyncio.Task] = set()
+        tasks_processed = 0  # Track tasks spawned for task_limit enforcement
 
         try:
             while self._running and not self._shutdown_event.is_set():
@@ -104,7 +105,7 @@ class SwarmOrchestrator:
                     logger.info(
                         "task_limit_reached",
                         limit=task_limit,
-                        completed=len(self.results),
+                        tasks_spawned=tasks_processed,
                     )
                     break
 
@@ -157,7 +158,7 @@ class SwarmOrchestrator:
 
             logger.info(
                 "continuous_swarm_stopped",
-                tasks_completed=len(self.results),
+                tasks_spawned=tasks_processed,
             )
 
             return self.results
