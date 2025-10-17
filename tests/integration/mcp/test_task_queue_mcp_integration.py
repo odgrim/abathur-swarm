@@ -129,8 +129,8 @@ async def test_complete_task_workflow_enqueue_get_complete(
 
     # Step 5: Verify task is completed
     completed_task = await memory_db.get_task(enqueued_task.id)
-    assert completed_task.status == TaskStatus.COMPLETED
-    assert completed_task.completed_at is not None
+    assert completed_task.status == TaskStatus.COMPLETED  # type: ignore
+    assert completed_task.completed_at is not None  # type: ignore
 
 
 @pytest.mark.asyncio
@@ -160,7 +160,7 @@ async def test_task_with_dependency_blocks_until_prerequisite_completes(
 
     # Get next task should return prerequisite, not dependent
     next_task = await task_queue_service.get_next_task()
-    assert next_task.id == prereq_task.id
+    assert next_task.id == prereq_task.id  # type: ignore
 
     # Complete prerequisite
     unblocked_ids = await task_queue_service.complete_task(prereq_task.id)
@@ -170,7 +170,7 @@ async def test_task_with_dependency_blocks_until_prerequisite_completes(
 
     # Verify dependent is now READY
     updated_dependent = await memory_db.get_task(dependent_task.id)
-    assert updated_dependent.status == TaskStatus.READY
+    assert updated_dependent.status == TaskStatus.READY  # type: ignore
 
 
 @pytest.mark.asyncio
@@ -207,25 +207,25 @@ async def test_dependency_chain_execution_order(
     # Execute in order
     # 1. Dequeue and complete A
     next_task = await task_queue_service.get_next_task()
-    assert next_task.id == task_a.id
+    assert next_task.id == task_a.id  # type: ignore
     await task_queue_service.complete_task(task_a.id)
 
     # 2. B should now be ready
     task_b_updated = await memory_db.get_task(task_b.id)
-    assert task_b_updated.status == TaskStatus.READY
+    assert task_b_updated.status == TaskStatus.READY  # type: ignore
 
     # 3. Dequeue and complete B
     next_task = await task_queue_service.get_next_task()
-    assert next_task.id == task_b.id
+    assert next_task.id == task_b.id  # type: ignore
     await task_queue_service.complete_task(task_b.id)
 
     # 4. C should now be ready
     task_c_updated = await memory_db.get_task(task_c.id)
-    assert task_c_updated.status == TaskStatus.READY
+    assert task_c_updated.status == TaskStatus.READY  # type: ignore
 
     # 5. Dequeue and complete C
     next_task = await task_queue_service.get_next_task()
-    assert next_task.id == task_c.id
+    assert next_task.id == task_c.id  # type: ignore
     await task_queue_service.complete_task(task_c.id)
 
     # Verify all completed
@@ -233,9 +233,9 @@ async def test_dependency_chain_execution_order(
     final_b = await memory_db.get_task(task_b.id)
     final_c = await memory_db.get_task(task_c.id)
 
-    assert final_a.status == TaskStatus.COMPLETED
-    assert final_b.status == TaskStatus.COMPLETED
-    assert final_c.status == TaskStatus.COMPLETED
+    assert final_a.status == TaskStatus.COMPLETED  # type: ignore
+    assert final_b.status == TaskStatus.COMPLETED  # type: ignore
+    assert final_c.status == TaskStatus.COMPLETED  # type: ignore
 
 
 @pytest.mark.asyncio
@@ -339,10 +339,10 @@ async def test_cancel_task_cascades_to_dependents(
     final_c = await memory_db.get_task(task_c.id)
     final_d = await memory_db.get_task(task_d.id)
 
-    assert final_a.status == TaskStatus.CANCELLED
-    assert final_b.status == TaskStatus.CANCELLED
-    assert final_c.status == TaskStatus.CANCELLED
-    assert final_d.status == TaskStatus.CANCELLED
+    assert final_a.status == TaskStatus.CANCELLED  # type: ignore
+    assert final_b.status == TaskStatus.CANCELLED  # type: ignore
+    assert final_c.status == TaskStatus.CANCELLED  # type: ignore
+    assert final_d.status == TaskStatus.CANCELLED  # type: ignore
 
 
 @pytest.mark.asyncio
@@ -387,10 +387,10 @@ async def test_fail_task_cascades_to_dependents(
     final_b = await memory_db.get_task(task_b.id)
     final_c = await memory_db.get_task(task_c.id)
 
-    assert final_a.status == TaskStatus.FAILED
-    assert final_a.error_message == "Task failed due to error"
-    assert final_b.status == TaskStatus.CANCELLED
-    assert final_c.status == TaskStatus.CANCELLED
+    assert final_a.status == TaskStatus.FAILED  # type: ignore
+    assert final_a.error_message == "Task failed due to error"  # type: ignore
+    assert final_b.status == TaskStatus.CANCELLED  # type: ignore
+    assert final_c.status == TaskStatus.CANCELLED  # type: ignore
 
 
 # Queue Status Tests
@@ -666,7 +666,7 @@ async def test_higher_priority_task_dequeued_first(
     next_task = await task_queue_service.get_next_task()
 
     # Should get high priority task first
-    assert next_task.id == high_priority_task.id
+    assert next_task.id == high_priority_task.id  # type: ignore
 
 
 @pytest.mark.asyncio
@@ -705,8 +705,8 @@ async def test_fifo_tiebreaker_for_equal_priority(
 
     # Should dequeue in FIFO order (assuming equal calculated priority)
     # Note: Calculated priority may differ slightly, so we check submitted_at
-    assert next_1.submitted_at <= next_2.submitted_at
-    assert next_2.submitted_at <= next_3.submitted_at
+    assert next_1.submitted_at <= next_2.submitted_at  # type: ignore
+    assert next_2.submitted_at <= next_3.submitted_at  # type: ignore
 
 
 # Session Integration Tests
@@ -727,7 +727,7 @@ async def test_task_with_session_id(memory_db: Database, task_queue_service: Tas
 
     # Retrieve and verify
     retrieved_task = await memory_db.get_task(task.id)
-    assert retrieved_task.session_id == "integration-test-session"
+    assert retrieved_task.session_id == "integration-test-session"  # type: ignore
 
 
 @pytest.mark.asyncio
@@ -752,7 +752,7 @@ async def test_parent_task_hierarchy(memory_db: Database, task_queue_service: Ta
 
     # Retrieve and verify
     retrieved_child = await memory_db.get_task(child_task.id)
-    assert retrieved_child.parent_task_id == parent_task.id
+    assert retrieved_child.parent_task_id == parent_task.id  # type: ignore
 
 
 # Concurrent Access Tests
@@ -827,7 +827,7 @@ async def test_concurrent_task_completion(
 
     # Verify all completed
     for task_id in task_ids:
-        task = await memory_db.get_task(task_id)
+        task = await memory_db.get_task(task_id)  # type: ignore
         assert task.status == TaskStatus.COMPLETED
 
 
