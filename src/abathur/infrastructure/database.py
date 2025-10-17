@@ -382,18 +382,20 @@ class Database:
                 await conn.execute(
                     """
                     ALTER TABLE tasks
-                    ADD COLUMN summary TEXT
+                    ADD COLUMN summary TEXT NOT NULL DEFAULT 'Task'
                     """
                 )
-                # Backfill existing rows with auto-generated summaries
+                # Backfill existing rows with auto-generated summaries (matching service layer logic)
+                # Use TRIM() to match service layer's .strip() behavior
                 await conn.execute(
                     """
                     UPDATE tasks
                     SET summary = CASE
-                        WHEN prompt = '' OR prompt IS NULL THEN 'Task'
-                        ELSE SUBSTR(prompt, 1, 100)
+                        WHEN prompt IS NULL OR TRIM(prompt) = '' THEN 'Task'
+                        WHEN source = 'human' THEN 'User Prompt: ' || TRIM(SUBSTR(prompt, 1, 126))
+                        ELSE TRIM(SUBSTR(prompt, 1, 140))
                     END
-                    WHERE summary IS NULL OR summary = ''
+                    WHERE summary IS NULL OR TRIM(summary) = ''
                     """
                 )
                 await conn.commit()
@@ -699,7 +701,7 @@ class Database:
                 dependency_depth INTEGER DEFAULT 0,
                 feature_branch TEXT,
                 task_branch TEXT,
-                summary TEXT,
+                summary TEXT NOT NULL DEFAULT 'Task',
                 FOREIGN KEY (parent_task_id) REFERENCES tasks(id),
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
             )
@@ -1436,7 +1438,7 @@ class Database:
             dependency_depth=row_dict.get("dependency_depth", 0),
             feature_branch=row_dict.get("feature_branch"),
             task_branch=row_dict.get("task_branch"),
-            summary=row_dict.get("summary"),
+            summary=row_dict.get("summary") or "Task",
         )
 
     # Task dependency operations

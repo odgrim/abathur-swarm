@@ -144,7 +144,7 @@ class TaskQueueService:
         Args:
             description: Task description/instruction
             source: Task source (HUMAN or AGENT_*)
-            summary: Brief human-readable task summary, max 200 chars (optional)
+            summary: Brief human-readable task summary, max 140 chars (auto-generated if not provided)
             parent_task_id: Parent task ID (for hierarchical tasks)
             prerequisites: List of prerequisite task IDs
             base_priority: User-specified priority (0-10, default 5)
@@ -167,11 +167,25 @@ class TaskQueueService:
             prerequisites = prerequisites or []
             input_data = input_data or {}
 
-            # Generate summary if not provided
-            if summary is None:
-                summary = description[:100].strip()
-                if not summary:
+            # Generate summary if not provided or empty (always required, max 140 chars)
+            # Check for None, empty string, or whitespace-only string
+            if not summary or not summary.strip():
+                # For human-submitted tasks, use "User Prompt: " prefix
+                if source == TaskSource.HUMAN:
+                    prefix = "User Prompt: "
+                    max_desc_len = 140 - len(prefix)  # 140 - 13 = 127 chars for prompt
+                    # Truncate to 126 to stay under limit with prefix
+                    summary = prefix + description[:126].strip()
+                else:
+                    # For agent tasks, just use first 140 chars
+                    summary = description[:140].strip()
+
+                # Fallback if empty after stripping
+                if not summary or not summary.strip():
                     summary = "Task"
+            else:
+                # If summary provided, trim to max length
+                summary = summary[:140].strip() if summary else "Task"
 
             # Validate base_priority range
             if not 0 <= base_priority <= 10:
