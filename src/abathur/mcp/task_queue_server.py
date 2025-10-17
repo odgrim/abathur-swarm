@@ -70,7 +70,7 @@ class AbathurTaskQueueServer:
     def _register_tools(self) -> None:
         """Register all MCP tools."""
 
-        @self.server.list_tools()
+        @self.server.list_tools()  # type: ignore[no-untyped-call]
         async def list_tools() -> list[Tool]:
             """List available tools."""
             return [

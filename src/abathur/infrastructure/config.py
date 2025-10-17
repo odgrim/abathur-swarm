@@ -63,11 +63,27 @@ class AuthConfig(BaseModel):
     context_window_handling: Literal["warn", "block", "ignore"] = "warn"
 
 
+class TemplateRepo(BaseModel):
+    """Template repository configuration."""
+
+    url: str = Field(..., description="Git repository URL")
+    version: str = Field(default="main", description="Git branch or tag")
+
+
 class Config(BaseModel):
     """Main configuration model."""
 
     version: str = "0.1.0"
     log_level: str = "INFO"
+    template_repos: list[TemplateRepo] = Field(
+        default_factory=lambda: [
+            TemplateRepo(
+                url="https://github.com/odgrim/abathur-claude-template.git",
+                version="main",
+            )
+        ],
+        description="List of template repositories to use",
+    )
     queue: QueueConfig = Field(default_factory=QueueConfig)
     swarm: SwarmConfig = Field(default_factory=SwarmConfig)
     loop: LoopConfig = Field(default_factory=LoopConfig)
@@ -209,8 +225,7 @@ class ConfigManager:
         raise ValueError(
             "ANTHROPIC_API_KEY not found. Set it via:\n"
             "  1. Environment variable: export ANTHROPIC_API_KEY=your-key\n"
-            "  2. Keychain: abathur config set-key\n"
-            "  3. .env file: echo 'ANTHROPIC_API_KEY=your-key' > .env"
+            "  2. .env file: echo 'ANTHROPIC_API_KEY=your-key' > .env"
         )
 
     def set_api_key(self, api_key: str, use_keychain: bool = True) -> None:

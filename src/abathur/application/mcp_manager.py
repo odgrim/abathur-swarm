@@ -52,7 +52,7 @@ class MCPManager:
 
     async def initialize(self) -> None:
         """Initialize MCP manager and load server configurations."""
-        logger.info("mcp_manager_initializing")
+        logger.debug("mcp_manager_initializing")
 
         # Load MCP configurations
         self.servers = self.config_loader.load_mcp_config()
@@ -67,7 +67,7 @@ class MCPManager:
                     errors=server_errors,
                 )
 
-        logger.info(
+        logger.debug(
             "mcp_manager_initialized",
             server_count=len(self.servers),
         )
