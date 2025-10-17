@@ -209,12 +209,14 @@ async def test_enqueue_task_exceeds_max_summary_length(
     )
 
     # Assert - summary truncated to 140 chars
+    assert enqueued_task.summary is not None
     assert len(enqueued_task.summary) == 140
     assert enqueued_task.summary == "x" * 140
 
     # Assert - database persistence with truncated value
     retrieved_task = await memory_db.get_task(enqueued_task.id)
     assert retrieved_task is not None
+    assert retrieved_task.summary is not None
     assert len(retrieved_task.summary) == 140
     assert retrieved_task.summary == "x" * 140
 
@@ -282,11 +284,11 @@ async def test_mcp_task_enqueue_with_summary(
 
     # Act - call service method (as MCP handler would)
     task = await task_queue_service.enqueue_task(
-        description=mcp_request_params["description"],
+        description=mcp_request_params["description"],  # type: ignore[arg-type]
         source=TaskSource.HUMAN,
-        summary=mcp_request_params["summary"],
-        base_priority=mcp_request_params["base_priority"],
-        agent_type=mcp_request_params["agent_type"],
+        summary=mcp_request_params["summary"],  # type: ignore[arg-type]
+        base_priority=mcp_request_params["base_priority"],  # type: ignore[arg-type]
+        agent_type=mcp_request_params["agent_type"],  # type: ignore[arg-type]
     )
 
     # Assert - task created with summary
@@ -377,7 +379,7 @@ async def test_mcp_task_get_returns_all_28_fields(
 
     # Act - retrieve and serialize task
     retrieved_task = await memory_db.get_task(task.id)
-    serialized = retrieved_task.model_dump()
+    serialized = retrieved_task.model_dump()  # type: ignore[union-attr]
 
     # Assert - all 28 fields present
     expected_fields = {
@@ -652,10 +654,10 @@ async def test_concurrent_enqueue_with_summary(
     enqueued_tasks = await asyncio.gather(
         *[
             task_queue_service.enqueue_task(
-                description=task["description"],
+                description=task["description"],  # type: ignore[arg-type]
                 source=TaskSource.HUMAN,
-                summary=task["summary"],
-                base_priority=task["priority"],
+                summary=task["summary"],  # type: ignore[arg-type]
+                base_priority=task["priority"],  # type: ignore[arg-type]
             )
             for task in tasks_to_enqueue
         ]
