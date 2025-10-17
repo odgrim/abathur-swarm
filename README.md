@@ -39,7 +39,6 @@
 
 ✅ **Failure Recovery**
 - Exponential backoff retry (10s → 5min)
-- Dead letter queue for permanent failures
 - Stalled task detection (1 hour timeout)
 - Transient vs permanent error classification
 
@@ -246,8 +245,6 @@ abathur mcp restart <server>
 abathur status                  # System status
 abathur resources               # Resource usage
 abathur recovery                # Failure stats
-abathur dlq list                # Dead letter queue
-abathur dlq reprocess <task-id> # Reprocess from DLQ
 ```
 
 ### Configuration
@@ -417,7 +414,7 @@ abathur --help
 - Swarm Orchestrator (10+ concurrent agents)
 - Agent Pool (dynamic lifecycle, health monitoring)
 - Resource Monitor (CPU/memory tracking, limits)
-- Failure Recovery (exponential backoff, DLQ, stalled detection)
+- Failure Recovery (exponential backoff, stalled detection)
 
 ### ✅ Phase 3: Production Features (COMPLETE)
 

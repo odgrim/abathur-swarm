@@ -33,7 +33,6 @@ class FailureStats:
     transient_failures: int = 0
     retried_tasks: int = 0
     recovered_tasks: int = 0
-    dlq_count: int = 0
 
 
 class FailureRecovery:
@@ -56,7 +55,6 @@ class FailureRecovery:
         self.database = database
         self.retry_policy = retry_policy or RetryPolicy()
         self.stats = FailureStats()
-        self.dead_letter_queue: list[UUID] = []
         self._recovery_task: asyncio.Task | None = None
 
     async def start_recovery_monitor(self, check_interval: float = 60.0) -> None:
@@ -93,10 +91,13 @@ class FailureRecovery:
             logger.error("recovery_loop_error", error=str(e))
 
     async def _check_failed_tasks(self) -> None:
-        """Check for failed tasks that can be retried."""
+        """Check for failed or cancelled tasks that can be retried."""
         failed_tasks = await self.task_coordinator.list_tasks(status=TaskStatus.FAILED, limit=100)
+        cancelled_tasks = await self.task_coordinator.list_tasks(
+            status=TaskStatus.CANCELLED, limit=100
+        )
 
-        for task in failed_tasks:
+        for task in failed_tasks + cancelled_tasks:
             if await self._should_retry(task):
                 await self.retry_task(task.id)
 
@@ -125,7 +126,7 @@ class FailureRecovery:
                     self.stats.transient_failures += 1
 
     async def _should_retry(self, task: Task) -> bool:
-        """Determine if a failed task should be retried.
+        """Determine if a failed or cancelled task should be retried.
 
         Args:
             task: Task to check
@@ -139,7 +140,7 @@ class FailureRecovery:
                 task_id=str(task.id),
                 retry_count=task.retry_count,
             )
-            await self._move_to_dlq(task.id)
+            self.stats.permanent_failures += 1
             return False
 
         # Calculate backoff time
@@ -194,26 +195,6 @@ class FailureRecovery:
 
         return success
 
-    async def _move_to_dlq(self, task_id: UUID) -> None:
-        """Move a task to the dead letter queue.
-
-        Args:
-            task_id: Task ID to move
-        """
-        if task_id not in self.dead_letter_queue:
-            self.dead_letter_queue.append(task_id)
-            self.stats.dlq_count += 1
-            self.stats.permanent_failures += 1
-
-            await self.database.log_audit(
-                task_id=task_id,
-                action_type="moved_to_dlq",
-                action_data={"reason": "max_retries_exceeded"},
-                result="moved_to_dlq",
-            )
-
-            logger.warning("task_moved_to_dlq", task_id=str(task_id))
-
     async def handle_agent_failure(self, agent_id: UUID, task_id: UUID, error: str) -> None:
         """Handle an agent failure.
 
@@ -241,11 +222,10 @@ class FailureRecovery:
             self.stats.transient_failures += 1
             # Will be retried by recovery loop
         else:
-            self.stats.permanent_failures += 1
-            # Move to DLQ immediately
+            # Check if max retries exceeded
             task = await self.task_coordinator.get_task(task_id)
             if task and task.retry_count >= task.max_retries:
-                await self._move_to_dlq(task_id)
+                self.stats.permanent_failures += 1
 
     def _is_transient_error(self, error: str) -> bool:
         """Determine if an error is transient (retriable).
@@ -282,37 +262,4 @@ class FailureRecovery:
             "transient_failures": self.stats.transient_failures,
             "retried_tasks": self.stats.retried_tasks,
             "recovered_tasks": self.stats.recovered_tasks,
-            "dlq_count": self.stats.dlq_count,
-            "dlq_tasks": [str(tid) for tid in self.dead_letter_queue],
         }
-
-    def get_dlq_tasks(self) -> list[UUID]:
-        """Get list of task IDs in dead letter queue.
-
-        Returns:
-            List of task IDs
-        """
-        return self.dead_letter_queue.copy()
-
-    async def reprocess_dlq_task(self, task_id: UUID) -> bool:
-        """Manually reprocess a task from the dead letter queue.
-
-        Args:
-            task_id: Task ID to reprocess
-
-        Returns:
-            True if task was queued for reprocessing
-        """
-        if task_id not in self.dead_letter_queue:
-            logger.warning("task_not_in_dlq", task_id=str(task_id))
-            return False
-
-        # Remove from DLQ
-        self.dead_letter_queue.remove(task_id)
-        self.stats.dlq_count -= 1
-
-        # Reset task to pending
-        await self.task_coordinator.update_task_status(task_id, TaskStatus.PENDING)
-
-        logger.info("task_reprocessed_from_dlq", task_id=str(task_id))
-        return True

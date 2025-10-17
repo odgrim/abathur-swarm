@@ -143,12 +143,6 @@ await failure_recovery.start_recovery_monitor(check_interval=60.0)
 # Get statistics
 stats = failure_recovery.get_stats()
 
-# Get DLQ tasks
-dlq_tasks = failure_recovery.get_dlq_tasks()
-
-# Reprocess from DLQ
-success = await failure_recovery.reprocess_dlq_task(task_id)
-
 # Stop monitoring
 await failure_recovery.stop_recovery_monitor()
 ```
