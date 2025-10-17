@@ -203,7 +203,7 @@ def submit(
 
     async def _submit() -> UUID:
         services = await _get_services()
-        from abathur.domain.models import Task
+        from abathur.domain.models import Task, TaskSource
 
         # Load additional context data
         input_data = {}
@@ -213,11 +213,18 @@ def submit(
         elif input_json:
             input_data = json.loads(input_json)
 
+        # Auto-generate summary from prompt for human tasks
+        # Format: "User Prompt: " + first 126 chars of prompt
+        prefix = "User Prompt: "
+        auto_summary = prefix + prompt[:126].strip()
+
         task = Task(
             prompt=prompt,
+            summary=auto_summary,
             agent_type=agent_type,
             input_data=input_data,
             priority=priority,
+            source=TaskSource.HUMAN,
         )
         task_id: UUID = await services["task_coordinator"].submit_task(task)
 
