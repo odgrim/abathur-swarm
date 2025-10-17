@@ -250,9 +250,9 @@ class TestSwarmTaskLimit:
         assert '"limit": 0' in captured.out or 'limit=0' in captured.out, (
             "Log should show limit=0"
         )
-        # Verify processed=0 in logs
-        assert '"processed": 0' in captured.out or 'processed=0' in captured.out, (
-            "Log should show processed=0"
+        # Verify tasks_spawned=0 in logs
+        assert '"tasks_spawned": 0' in captured.out or 'tasks_spawned=0' in captured.out, (
+            "Log should show tasks_spawned=0"
         )
 
         # Assertion 3: get_next_task never called
@@ -355,8 +355,8 @@ class TestSwarmTaskLimit:
         assert '"limit": 1' in captured.out or 'limit=1' in captured.out, (
             "Log should show limit=1"
         )
-        assert '"completed":' in captured.out or 'completed=' in captured.out, (
-            "Log should show completed count"
+        assert '"tasks_spawned":' in captured.out or 'tasks_spawned=' in captured.out, (
+            "Log should show tasks_spawned count"
         )
 
         # Assertion 3: Swarm exited immediately after first task (no second fetch)
