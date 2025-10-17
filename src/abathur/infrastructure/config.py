@@ -225,8 +225,7 @@ class ConfigManager:
         raise ValueError(
             "ANTHROPIC_API_KEY not found. Set it via:\n"
             "  1. Environment variable: export ANTHROPIC_API_KEY=your-key\n"
-            "  2. Keychain: abathur config set-key\n"
-            "  3. .env file: echo 'ANTHROPIC_API_KEY=your-key' > .env"
+            "  2. .env file: echo 'ANTHROPIC_API_KEY=your-key' > .env"
         )
 
     def set_api_key(self, api_key: str, use_keychain: bool = True) -> None:

@@ -97,8 +97,8 @@ APIKeyInvalidError: Invalid API key format (must start with sk-ant-api): test-ke
 # Verify API key format (should start with sk-ant-api)
 echo $ANTHROPIC_API_KEY
 
-# Set correct API key
-abathur config set-key sk-ant-api03-your-actual-key
+# Set correct API key via environment variable
+export ANTHROPIC_API_KEY=sk-ant-api03-your-actual-key
 ```
 
 ---
@@ -172,7 +172,7 @@ WARNING: Task input (210,000 tokens) exceeds oauth context limit (200,000 tokens
 
 1. **Switch to API key (1M token limit):**
    ```bash
-   abathur config set-key sk-ant-api03-your-key
+   export ANTHROPIC_API_KEY=sk-ant-api03-your-key
    ```
 
 2. **Reduce input size:**
@@ -398,7 +398,7 @@ abathur: command not found
 
 3. **Switch to API key for performance-critical tasks:**
    ```bash
-   abathur config set-key sk-ant-api03-your-key
+   export ANTHROPIC_API_KEY=sk-ant-api03-your-key
    ```
 
 ---
@@ -462,9 +462,6 @@ echo $ANTHROPIC_OAUTH_EXPIRES_AT
 ```bash
 # Verify current configuration
 abathur config oauth-status
-
-# Show full config
-abathur config show
 ```
 
 ### Collect Diagnostic Info
@@ -504,7 +501,7 @@ Include this information when reporting issues:
 **Error:**
 ```
 No authentication configured. Options:
-  1. Set API key: abathur config set-key <key>
+  1. Set API key: export ANTHROPIC_API_KEY=<key>
   2. Login with OAuth: abathur config oauth-login
 ```
 
@@ -513,7 +510,7 @@ No authentication configured. Options:
 # Choose one:
 
 # Option 1: API Key
-abathur config set-key sk-ant-api03-your-key
+export ANTHROPIC_API_KEY=sk-ant-api03-your-key
 
 # Option 2: OAuth
 abathur config oauth-login --manual

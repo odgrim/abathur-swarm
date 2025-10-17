@@ -86,8 +86,8 @@ docker run -it abathur/abathur:latest abathur version
 # Initialize database and configuration
 abathur init
 
-# Set your Anthropic API key
-abathur config set-key YOUR_API_KEY
+# Set your Anthropic API key via environment variable
+export ANTHROPIC_API_KEY=YOUR_API_KEY
 ```
 
 ### 2. Configure Templates
@@ -213,7 +213,6 @@ abathur loop start <task-id> [--max-iterations N] [--convergence-threshold F]
 ### Template Management
 
 ```bash
-abathur config show   # View configured templates
 abathur init          # Install configured templates
 ```
 
@@ -230,14 +229,6 @@ abathur mcp restart <server>
 
 ```bash
 abathur status                  # System status
-```
-
-### Configuration
-
-```bash
-abathur config show             # Show configuration
-abathur config validate         # Validate configuration
-abathur config set-key <key>    # Set API key
 ```
 
 ---
