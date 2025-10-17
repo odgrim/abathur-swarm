@@ -66,6 +66,20 @@ class SwarmOrchestrator:
         - task_limit is reached (if specified)
         - A shutdown signal is received (SIGINT or SIGTERM)
         - The shutdown() method is called
+        - The task_limit is reached (if specified)
+
+        Args:
+            task_limit: Maximum number of tasks to complete before stopping the swarm.
+                       - None (default): Runs indefinitely until shutdown() is called
+                       - 0: Exits immediately without processing any tasks
+                       - N: Processes exactly N tasks, then stops gracefully
+
+                       IMPORTANT: Tasks are counted when COMPLETED, not when spawned.
+                       This means the swarm stops spawning new tasks once N tasks
+                       have finished, ensuring exactly N tasks complete.
+
+                       Failed tasks (both Result.success=False and exception-based
+                       failures) count toward the limit.
 
         Returns:
             List of all execution results
@@ -77,6 +91,7 @@ class SwarmOrchestrator:
             "starting_continuous_swarm",
             max_concurrent=self.max_concurrent_agents,
             poll_interval=self.poll_interval,
+            task_limit=task_limit,
         )
 
         # Track active task coroutines
@@ -84,6 +99,15 @@ class SwarmOrchestrator:
 
         try:
             while self._running and not self._shutdown_event.is_set():
+                # Check if task limit has been reached (count completed tasks)
+                if task_limit is not None and len(self.results) >= task_limit:
+                    logger.info(
+                        "task_limit_reached",
+                        limit=task_limit,
+                        completed=len(self.results),
+                    )
+                    break
+
                 # Check if we have capacity for more tasks
                 if len(self.active_agents) < self.max_concurrent_agents:
                     # Try to get next READY task
@@ -133,7 +157,7 @@ class SwarmOrchestrator:
 
             logger.info(
                 "continuous_swarm_stopped",
-                tasks_processed=len(self.results),
+                tasks_completed=len(self.results),
             )
 
             return self.results
