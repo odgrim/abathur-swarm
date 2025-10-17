@@ -73,7 +73,7 @@ Run `abathur init` to install templates.
 # Submit a task with JSON input
 abathur task submit my-agent --input-file input.json --priority 8
 
-# Check task status
+# Check tasks
 abathur task list
 ```
 
@@ -158,11 +158,11 @@ abathur task list --status failed
 abathur task list --limit 50
 ```
 
-### Task Status
+### Task Details
 
 ```bash
-# Get detailed task status
-abathur task status <task-id>
+# Get detailed task information
+abathur task show <task-id>
 
 # Output shows:
 # - Template name
@@ -489,7 +489,7 @@ poetry install
 
 **Issue: Tasks stuck in RUNNING**
 ```bash
-# Check task status: abathur task status <task-id>
+# Check task details: abathur task show <task-id>
 # Check for stale tasks: abathur task check-stale
 # Or manually retry: abathur task retry <task-id>
 ```

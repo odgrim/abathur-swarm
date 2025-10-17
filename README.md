@@ -192,7 +192,7 @@ Abathur follows **Clean Architecture** principles with clear layer separation:
 ```bash
 abathur task submit <template> [--input-file FILE] [--priority 0-10]
 abathur task list [--status STATUS] [--limit N]
-abathur task status <task-id>
+abathur task show <task-id>
 abathur task cancel <task-id>
 abathur task retry <task-id>
 ```

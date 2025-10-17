@@ -278,9 +278,9 @@ def list_tasks(
     asyncio.run(_list())
 
 
-@task_app.command("status")
-def task_status(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> None:
-    """Get detailed task status."""
+@task_app.command("show")
+def task_show(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> None:
+    """Get detailed task information."""
 
     async def _status() -> None:
         from datetime import datetime, timezone
