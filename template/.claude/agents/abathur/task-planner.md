@@ -279,23 +279,6 @@ It must work within the project's architecture and follow established patterns.
 
    This ensures implementation tasks wait for their required agents to be created first and work in isolated worktrees.
 
-   **BAD Example (DO NOT DO THIS):**
-   ```python
-   # ❌ BAD: Insufficient context AND generic agent type
-   task_enqueue({
-       "description": "Implement TaskQueue class",
-       "agent_type": "python-backend-developer",  # ❌ Generic agent type!
-       "source": "task-planner"
-   })
-   # The implementation agent has no idea what methods to implement,
-   # what the requirements are, or how to verify success!
-   ```
-
-   **GOOD Example (DO THIS):**
-   ```python
-   # ✅ GOOD: Comprehensive context AND hyperspecialized agent with agent-creation dependency
-   task_id = "task-001-domain-model"
-   task_description = f"""
 # Implement TaskQueue Domain Model Class
 
 ## Context
