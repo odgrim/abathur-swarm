@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TaskStatus(str, Enum):
@@ -48,8 +48,7 @@ class Task(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     summary: str | None = Field(
         default=None,
-        max_length=140,
-        description="Short, human-readable task summary (max 140 chars, auto-generated from description if not provided)",
+        description="Short, human-readable task summary (max 140 chars after stripping, auto-generated from description if not provided)",
     )
     prompt: str  # The actual instruction/task to execute (description in MCP API)
     agent_type: str = (
@@ -91,6 +90,28 @@ class Task(BaseModel):
     task_branch: str | None = (
         None  # Individual task branch for isolated work (merges into feature_branch)
     )
+
+    @field_validator("summary")
+    @classmethod
+    def validate_summary(cls, v: str | None) -> str | None:
+        """Validate summary field: strip whitespace, truncate if too long.
+
+        Auto-corrects instead of raising errors for better UX:
+        - Strips whitespace
+        - Returns None if empty (triggers auto-generation)
+        - Truncates to 140 chars if too long
+        """
+        if v is None:
+            return None
+        # Strip whitespace first
+        v = v.strip()
+        # Reject empty string after stripping (will trigger auto-generation)
+        if not v:
+            return None
+        # Truncate to max length (auto-correction vs rejection)
+        if len(v) > 140:
+            return v[:140]
+        return v
 
     model_config = ConfigDict(
         # Note: Use model_dump(mode='json') for proper JSON serialization

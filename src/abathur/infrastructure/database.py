@@ -413,6 +413,24 @@ class Database:
                 await conn.commit()
                 print("Added summary column to tasks and backfilled existing rows")
 
+            # Migration: Fix idx_tasks_summary partial index with pointless WHERE clause
+            # Check if old index exists with WHERE clause
+            cursor = await conn.execute(
+                """
+                SELECT sql FROM sqlite_master
+                WHERE type='index' AND name='idx_tasks_summary'
+                """
+            )
+            index_row = await cursor.fetchone()
+            if index_row and index_row["sql"] and "WHERE summary IS NOT NULL" in index_row["sql"]:
+                print("Migrating index: fixing idx_tasks_summary partial index condition")
+                # Drop old index with pointless WHERE clause
+                await conn.execute("DROP INDEX IF EXISTS idx_tasks_summary")
+                # Recreate without WHERE clause
+                await conn.execute("""CREATE INDEX idx_tasks_summary ON tasks(summary)""")
+                await conn.commit()
+                print("Fixed idx_tasks_summary index")
+
         # Check if agents table exists and needs session_id column
         cursor = await conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='agents'"
@@ -916,8 +934,7 @@ class Database:
         # Summary field index for search and filtering
         await conn.execute(
             """CREATE INDEX IF NOT EXISTS idx_tasks_summary
-               ON tasks(summary)
-               WHERE summary IS NOT NULL"""
+               ON tasks(summary)"""
         )
 
         # Agents indexes (3 indexes)

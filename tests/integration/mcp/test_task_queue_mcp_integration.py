@@ -831,5 +831,106 @@ async def test_concurrent_task_completion(
         assert task.status == TaskStatus.COMPLETED
 
 
+# MCP Layer Validation Tests
+
+
+@pytest.mark.asyncio
+async def test_mcp_description_max_length_exceeded(
+    memory_db: Database, task_queue_service: TaskQueueService
+):
+    """Test that description exceeding max length is rejected at MCP layer."""
+    from abathur.mcp.task_queue_server import AbathurTaskQueueServer
+
+    # Create MCP server
+    server = AbathurTaskQueueServer(Path(":memory:"))
+    server._db = memory_db
+    server._task_queue_service = task_queue_service
+
+    # Create description with 10,001 characters (exceeds 10,000 limit)
+    long_description = "x" * 10_001
+
+    result = await server._handle_task_enqueue({"description": long_description, "source": "human"})
+
+    assert result["error"] == "ValidationError"
+    assert "must not exceed 10000 characters" in result["message"]
+    assert "got 10001" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_description_max_length_boundary(
+    memory_db: Database, task_queue_service: TaskQueueService
+):
+    """Test that description at max length (10,000 chars) is accepted."""
+    from abathur.mcp.task_queue_server import AbathurTaskQueueServer
+
+    # Create MCP server
+    server = AbathurTaskQueueServer(Path(":memory:"))
+    server._db = memory_db
+    server._task_queue_service = task_queue_service
+
+    # Create description with exactly 10,000 characters (boundary)
+    boundary_description = "x" * 10_000
+
+    result = await server._handle_task_enqueue(
+        {"description": boundary_description, "source": "human"}
+    )
+
+    # Should succeed (no error key)
+    assert "error" not in result
+    assert "task_id" in result
+
+
+@pytest.mark.asyncio
+async def test_mcp_description_empty(memory_db: Database, task_queue_service: TaskQueueService):
+    """Test that empty description is rejected at MCP layer."""
+    from abathur.mcp.task_queue_server import AbathurTaskQueueServer
+
+    # Create MCP server
+    server = AbathurTaskQueueServer(Path(":memory:"))
+    server._db = memory_db
+    server._task_queue_service = task_queue_service
+
+    result = await server._handle_task_enqueue({"description": "", "source": "human"})
+
+    assert result["error"] == "ValidationError"
+    assert "cannot be empty or whitespace-only" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_description_whitespace_only(
+    memory_db: Database, task_queue_service: TaskQueueService
+):
+    """Test that whitespace-only description is rejected at MCP layer."""
+    from abathur.mcp.task_queue_server import AbathurTaskQueueServer
+
+    # Create MCP server
+    server = AbathurTaskQueueServer(Path(":memory:"))
+    server._db = memory_db
+    server._task_queue_service = task_queue_service
+
+    result = await server._handle_task_enqueue({"description": "   ", "source": "human"})
+
+    assert result["error"] == "ValidationError"
+    assert "cannot be empty or whitespace-only" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_description_invalid_type(
+    memory_db: Database, task_queue_service: TaskQueueService
+):
+    """Test that non-string description is rejected at MCP layer."""
+    from abathur.mcp.task_queue_server import AbathurTaskQueueServer
+
+    # Create MCP server
+    server = AbathurTaskQueueServer(Path(":memory:"))
+    server._db = memory_db
+    server._task_queue_service = task_queue_service
+
+    result = await server._handle_task_enqueue({"description": 123, "source": "human"})
+
+    assert result["error"] == "ValidationError"
+    assert "must be a string" in result["message"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -170,21 +170,19 @@ class TaskQueueService:
             # Generate summary if not provided (None or empty string)
             if summary is None or summary.strip() == "":
                 # Auto-generate summary from description
-                if source == TaskSource.HUMAN:
-                    # For human-submitted tasks, use "User Prompt: " prefix
+                # Check if description is empty first (match migration logic in database.py:406)
+                if not description or not description.strip():
+                    # Empty description → use default for all sources
+                    summary = "Task"
+                elif source == TaskSource.HUMAN:
+                    # Non-empty human task → use prefix
                     prefix = "User Prompt: "
                     # Truncate to 126 to stay under limit with prefix (140 - 13 - 1 for safety)
                     summary = prefix + description[:126].strip()
                 else:
-                    # For agent tasks, just use first 140 chars
+                    # Non-empty agent task → no prefix
                     summary = description[:140].strip()
-
-                # Fallback if description is empty after stripping
-                if not summary.strip():
-                    summary = "Task"
-            else:
-                # Summary provided - trim to max length
-                summary = summary[:140].strip()
+            # If summary is provided, let Pydantic validate max_length (don't truncate here)
 
             # Validate base_priority range
             if not 0 <= base_priority <= 10:
