@@ -501,13 +501,13 @@ Configuration is valid!
 
 ### 1.7 Status & Monitoring
 
-#### `abathur status`
+#### `abathur task status`
 
-Show overall system status.
+Show task queue status and statistics.
 
 **Syntax:**
 ```bash
-abathur status [OPTIONS]
+abathur task status [OPTIONS]
 ```
 
 **Options:**
@@ -516,40 +516,25 @@ abathur status [OPTIONS]
 **Examples:**
 ```bash
 # Show current status
-abathur status
+abathur task status
 
 # Watch status continuously
-abathur status --watch
+abathur task status --watch
 ```
 
 **Output:**
 ```
-Abathur Status
-==============
-
-System:
-  Version: 1.0.0
-  Template: v1.2.0
-  Uptime: 2h 15m
+Task Queue Status
+=================
 
 Queue:
   Pending: 3
   Waiting: 1 (dependencies)
   Running: 5
   Completed: 42
-  Failed: 2 (in DLQ)
+  Failed: 2
 
-Swarm:
-  Active Agents: 5/10
-  Memory: 1.6 GB / 4.0 GB (40%)
-  CPU: 45%
-
-Recent Activity:
-  [14:32] Task task_abc123 completed successfully
-  [14:31] Agent backend-001 spawned
-  [14:30] Task task_def456 submitted (priority: 9)
-
-Health: ✓ All systems operational
+Total Tasks: 53
 ```
 
 ---
