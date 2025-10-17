@@ -43,7 +43,7 @@ class TestSwarmErrorHandling:
         task_coordinator.update_task_status = AsyncMock()
 
         # Create orchestrator
-        orchestrator = SwarmOrchestrator(
+        orchestrator = SwarmOrchestrator(  # type: ignore
             task_coordinator=task_coordinator,
             agent_executor=agent_executor,
             max_concurrent_agents=1,
@@ -95,7 +95,7 @@ class TestSwarmErrorHandling:
         task_coordinator.retry_task = AsyncMock()
 
         # Create orchestrator
-        orchestrator = SwarmOrchestrator(
+        orchestrator = SwarmOrchestrator(  # type: ignore
             task_coordinator=task_coordinator,
             agent_executor=agent_executor,
             max_concurrent_agents=1,
@@ -146,7 +146,7 @@ class TestSwarmErrorHandling:
         task_coordinator.update_task_status = AsyncMock()
 
         # Create orchestrator
-        orchestrator = SwarmOrchestrator(
+        orchestrator = SwarmOrchestrator(  # type: ignore
             task_coordinator=task_coordinator,
             agent_executor=agent_executor,
             max_concurrent_agents=1,

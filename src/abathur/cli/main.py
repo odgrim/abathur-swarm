@@ -186,7 +186,10 @@ app.add_typer(task_app, name="task")
 def submit(
     prompt: str = typer.Argument(..., help="Task prompt/instruction"),
     agent_type: str = typer.Option("requirements-gatherer", help="Agent type to use"),  # noqa: B008
-    summary: str | None = typer.Option(None, help="Custom summary (max 140 chars, auto-generated if not provided)"),  # noqa: B008
+    summary: str
+    | None = typer.Option(
+        None, help="Custom summary (max 140 chars, auto-generated if not provided)"
+    ),  # noqa: B008
     input_file: Path
     | None = typer.Option(None, help="JSON file with additional context data"),  # noqa: B008
     input_json: str

@@ -310,9 +310,9 @@ async def test_execution_plan_latency(
     Target: <30ms for 100-task graph
     """
     # Create 100 tasks with some dependencies
-    task_ids = []
+    task_ids: list[UUID] = []
     for i in range(100):
-        prerequisites = []
+        prerequisites: list[UUID] = []
         if i > 0 and i % 10 == 0:
             # Every 10th task depends on previous task
             prerequisites = [task_ids[i - 1]]
@@ -451,9 +451,9 @@ async def test_dependency_depth_scales_linearly(
 
     for depth in [10, 20, 50]:
         # Create chain
-        prev_id = None
+        prev_id: UUID | None = None
         for i in range(depth):
-            prerequisites = [prev_id] if prev_id else []
+            prerequisites: list[UUID] = [prev_id] if prev_id else []
             task = await task_queue_service.enqueue_task(
                 description=f"Chain task {i}",
                 source=TaskSource.HUMAN,
@@ -465,6 +465,7 @@ async def test_dependency_depth_scales_linearly(
         # Measure depth calculation time (already done during enqueue, but test explicitly)
         dependency_resolver = DependencyResolver(memory_db)
         start = time.perf_counter()
+        assert prev_id is not None  # Should always have a prev_id after creating chain
         calculated_depth = await dependency_resolver.calculate_dependency_depth(prev_id)
         end = time.perf_counter()
 
@@ -578,7 +579,10 @@ async def test_concurrent_mixed_operations(
         )
 
     # Mix of operations
-    operations = []
+    from collections.abc import Coroutine
+    from typing import Any
+
+    operations: list[Coroutine[Any, Any, Any]] = []
 
     # 50 enqueues
     for i in range(50):

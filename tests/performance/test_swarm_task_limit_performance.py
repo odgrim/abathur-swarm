@@ -51,7 +51,6 @@ from abathur.services.dependency_resolver import DependencyResolver
 from abathur.services.priority_calculator import PriorityCalculator
 from abathur.services.task_queue_service import TaskQueueService
 
-
 # Fixtures
 
 
@@ -81,7 +80,7 @@ def mock_agent_executor():
 
         async def execute_task(self, task: Task):
             """Mock task execution."""
-            return Result(
+            return Result(  # type: ignore
                 task_id=task.id,
                 agent_id=uuid4(),
                 success=True,
@@ -108,9 +107,7 @@ def swarm_orchestrator(
 # Helper Functions
 
 
-def measure_synchronous_operation_latencies(
-    func, iterations: int = 10000
-) -> dict[str, float]:
+def measure_synchronous_operation_latencies(func, iterations: int = 10000) -> dict[str, float]:
     """Measure latency of a synchronous operation over many iterations.
 
     Args:
@@ -138,9 +135,7 @@ def measure_synchronous_operation_latencies(
     }
 
 
-async def measure_async_operation_latencies(
-    func, iterations: int = 1000
-) -> dict[str, float]:
+async def measure_async_operation_latencies(func, iterations: int = 1000) -> dict[str, float]:
     """Measure latency of an async operation over many iterations.
 
     Args:
@@ -216,7 +211,7 @@ async def test_limit_check_overhead_benchmark(
     # Populate results list with 500 items
     for i in range(500):
         swarm_orchestrator.results.append(
-            Result(task_id=uuid4(), agent_id=uuid4(), success=True, output=f"result_{i}")
+            Result(task_id=uuid4(), agent_id=uuid4(), success=True, output=f"result_{i}")  # type: ignore
         )
 
     # Benchmark limit check operation
@@ -230,9 +225,7 @@ async def test_limit_check_overhead_benchmark(
     )
 
     # Assert performance target: P99 < 250ns (adjusted for observed performance)
-    assert (
-        stats["p99_ns"] < 250
-    ), f"Limit check P99 {stats['p99_ns']:.2f}ns exceeds 250ns target"
+    assert stats["p99_ns"] < 250, f"Limit check P99 {stats['p99_ns']:.2f}ns exceeds 250ns target"
 
     # Verify the check returned expected value
     assert limit_check() is False
@@ -258,7 +251,7 @@ async def test_limit_check_o1_validation(swarm_orchestrator: SwarmOrchestrator) 
         swarm_orchestrator.results.clear()
         for i in range(size):
             swarm_orchestrator.results.append(
-                Result(task_id=uuid4(), agent_id=uuid4(), success=True, output=f"result_{i}")
+                Result(task_id=uuid4(), agent_id=uuid4(), success=True, output=f"result_{i}")  # type: ignore
             )
 
         def limit_check():
@@ -281,7 +274,7 @@ async def test_limit_check_o1_validation(swarm_orchestrator: SwarmOrchestrator) 
     variance_100 = abs(mean_100 - mean_10) / mean_10 * 100
     variance_1000 = abs(mean_1000 - mean_10) / mean_10 * 100
 
-    print(f"\n  Variance Analysis:")
+    print("\n  Variance Analysis:")
     print(f"    10 vs 100:   {variance_100:+.1f}% change")
     print(f"    10 vs 1000:  {variance_1000:+.1f}% change")
 
@@ -293,7 +286,9 @@ async def test_limit_check_o1_validation(swarm_orchestrator: SwarmOrchestrator) 
         variance_1000 < 50
     ), f"Performance variance {variance_1000:.1f}% indicates non-O(1) behavior"
 
-    print(f"\n  ✓ O(1) validated: len() performance constant across list sizes (CPython caching works)")
+    print(
+        "\n  ✓ O(1) validated: len() performance constant across list sizes (CPython caching works)"
+    )
 
 
 # Benchmark 2: List Append Overhead
@@ -315,7 +310,7 @@ async def test_list_append_overhead_benchmark(
     though occasional O(n) resizes may occur (amortized O(1)).
     """
     # Benchmark list append operation
-    test_result = Result(
+    test_result = Result(  # type: ignore
         task_id=uuid4(),
         agent_id=uuid4(),
         success=True,
@@ -327,14 +322,10 @@ async def test_list_append_overhead_benchmark(
 
     stats = measure_synchronous_operation_latencies(list_append, iterations=10000)
 
-    print_benchmark_results(
-        "List Append Overhead (10,000 iterations)", stats, target_ns=250
-    )
+    print_benchmark_results("List Append Overhead (10,000 iterations)", stats, target_ns=250)
 
     # Assert performance target: P99 < 250ns (adjusted for observed performance)
-    assert (
-        stats["p99_ns"] < 250
-    ), f"List append P99 {stats['p99_ns']:.2f}ns exceeds 250ns target"
+    assert stats["p99_ns"] < 250, f"List append P99 {stats['p99_ns']:.2f}ns exceeds 250ns target"
 
     # Verify list size
     assert len(swarm_orchestrator.results) == 10000
@@ -363,9 +354,7 @@ async def test_semaphore_acquisition_overhead_benchmark() -> None:
         await semaphore.acquire()
         semaphore.release()
 
-    stats = await measure_async_operation_latencies(
-        semaphore_acquire_release, iterations=1000
-    )
+    stats = await measure_async_operation_latencies(semaphore_acquire_release, iterations=1000)
 
     print_benchmark_results(
         "Semaphore Acquire/Release Overhead (1,000 iterations)", stats, target_ns=None
@@ -374,15 +363,11 @@ async def test_semaphore_acquisition_overhead_benchmark() -> None:
     print(
         f"\n  Note: Semaphore overhead is significantly higher than len() check (~{stats['mean_ns']:.0f}ns vs ~50-150ns)"
     )
-    print(
-        f"        This validates using len(self.results) for task limit instead of Semaphore."
-    )
+    print("        This validates using len(self.results) for task limit instead of Semaphore.")
 
     # No strict assertion - this is for comparison/validation only
     # But we can verify it's slower than len() check (should be >200ns)
-    assert (
-        stats["mean_ns"] > 200
-    ), "Semaphore should be slower than len() check"
+    assert stats["mean_ns"] > 200, "Semaphore should be slower than len() check"
 
 
 # Benchmark 4: Combined Operation Overhead
@@ -404,7 +389,7 @@ async def test_combined_limit_check_and_append_overhead(
     This represents the total overhead per task for limit enforcement.
     """
     task_limit = 10000
-    test_result = Result(
+    test_result = Result(  # type: ignore
         task_id=uuid4(),
         agent_id=uuid4(),
         success=True,
@@ -479,7 +464,7 @@ async def test_realistic_task_limit_enforcement_overhead(
     tasks_completed = len(results)
     time_per_task_ms = duration_ms / tasks_completed
 
-    print(f"\nRealistic Task Limit Enforcement Performance:")
+    print("\nRealistic Task Limit Enforcement Performance:")
     print(f"  Tasks completed:     {tasks_completed}")
     print(f"  Total duration:      {duration_ms:.2f}ms")
     print(f"  Time per task:       {time_per_task_ms:.2f}ms")
@@ -500,7 +485,9 @@ async def test_realistic_task_limit_enforcement_overhead(
     print(f"  Overhead as % of total time:    {overhead_percentage:.4f}%")
 
     # Relax assertion to <5% for test stability (system variability can affect timing)
-    assert overhead_percentage < 5.0, f"Limit check overhead {overhead_percentage:.2f}% should be <5%"
+    assert (
+        overhead_percentage < 5.0
+    ), f"Limit check overhead {overhead_percentage:.2f}% should be <5%"
 
     print(f"\n  ✓ Limit enforcement overhead is negligible ({overhead_percentage:.4f}%)")
 
@@ -527,15 +514,13 @@ async def test_performance_baseline_establishment(
     task_limit = 1000
     for i in range(500):
         swarm_orchestrator.results.append(
-            Result(task_id=uuid4(), agent_id=uuid4(), success=True, output=f"result_{i}")
+            Result(task_id=uuid4(), agent_id=uuid4(), success=True, output=f"result_{i}")  # type: ignore
         )
 
     def limit_check():
         return len(swarm_orchestrator.results) >= task_limit
 
-    limit_check_stats = measure_synchronous_operation_latencies(
-        limit_check, iterations=10000
-    )
+    limit_check_stats = measure_synchronous_operation_latencies(limit_check, iterations=10000)
 
     print("\n1. LIMIT CHECK PERFORMANCE (len + comparison):")
     print(f"   Mean:   {limit_check_stats['mean_ns']:.2f}ns")
@@ -545,14 +530,12 @@ async def test_performance_baseline_establishment(
 
     # Benchmark 2: List append
     swarm_orchestrator.results.clear()
-    test_result = Result(task_id=uuid4(), agent_id=uuid4(), success=True, output="test")
+    test_result = Result(task_id=uuid4(), agent_id=uuid4(), success=True, output="test")  # type: ignore
 
     def list_append():
         swarm_orchestrator.results.append(test_result)
 
-    append_stats = measure_synchronous_operation_latencies(
-        list_append, iterations=10000
-    )
+    append_stats = measure_synchronous_operation_latencies(list_append, iterations=10000)
 
     print("\n2. LIST APPEND PERFORMANCE:")
     print(f"   Mean:   {append_stats['mean_ns']:.2f}ns")
@@ -570,9 +553,7 @@ async def test_performance_baseline_establishment(
         swarm_orchestrator.results.append(test_result)
         return True
 
-    combined_stats = measure_synchronous_operation_latencies(
-        combined_operation, iterations=10000
-    )
+    combined_stats = measure_synchronous_operation_latencies(combined_operation, iterations=10000)
 
     print("\n3. COMBINED OPERATION PERFORMANCE (check + append):")
     print(f"   Mean:   {combined_stats['mean_ns']:.2f}ns")
@@ -594,9 +575,7 @@ async def test_performance_baseline_establishment(
     print(f"\nAll performance targets met: {'✓ YES' if all_targets_met else '✗ NO'}")
     print("\nO(1) Time Complexity: ✓ VALIDATED (CPython len() caching)")
     print("Performance overhead: NEGLIGIBLE (<1% of total execution time)")
-    print(
-        "\nConclusion: Task limit implementation using len(self.results) has"
-    )
+    print("\nConclusion: Task limit implementation using len(self.results) has")
     print("           acceptable performance characteristics for production use.")
     print("\nNote: Original spec recommended dedicated counter for guaranteed O(1).")
     print("      Current implementation trades slight overhead for code simplicity.")

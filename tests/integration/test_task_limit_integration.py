@@ -85,6 +85,7 @@ class MockAgentExecutor(AgentExecutor):
 @pytest.fixture
 def create_test_task():
     """Factory fixture for creating test tasks."""
+
     def _create(task_id: str, prompt: str = "Test task") -> Task:
         return Task(
             id=UUID(task_id) if len(task_id) == 36 else UUID(int=int(task_id)),
@@ -92,12 +93,14 @@ def create_test_task():
             agent_type="test-agent",
             status=TaskStatus.READY,
         )
+
     return _create
 
 
 # ==============================================================================
 # Scenario 1: Realistic Workload Test (Slow Concurrent Tasks)
 # ==============================================================================
+
 
 @pytest.mark.asyncio
 async def test_realistic_workload_no_over_spawning(
@@ -137,7 +140,7 @@ async def test_realistic_workload_no_over_spawning(
         await task_queue_service.enqueue_task(
             description=task.prompt,
             agent_type=task.agent_type,
-            source="human",
+            source="human",  # type: ignore
         )
 
     # Create mock executor with 0.5-second execution time (simulates slow tasks)
@@ -159,9 +162,9 @@ async def test_realistic_workload_no_over_spawning(
 
     # Assert: Exactly 10 tasks executed (critical validation)
     assert len(results) == 10, f"Expected exactly 10 tasks, but got {len(results)}"
-    assert len(mock_executor.executed_tasks) == 10, (
-        f"Expected executor to run exactly 10 tasks, but it ran {len(mock_executor.executed_tasks)}"
-    )
+    assert (
+        len(mock_executor.executed_tasks) == 10
+    ), f"Expected executor to run exactly 10 tasks, but it ran {len(mock_executor.executed_tasks)}"
 
     # Assert: All tasks succeeded
     assert all(r.success for r in results), "All tasks should succeed"
@@ -178,6 +181,7 @@ async def test_realistic_workload_no_over_spawning(
 # ==============================================================================
 # Scenario 2: Performance Regression Test (Fast Tasks)
 # ==============================================================================
+
 
 @pytest.mark.asyncio
 async def test_performance_no_regression(
@@ -209,7 +213,7 @@ async def test_performance_no_regression(
         await task_queue_service.enqueue_task(
             description=task.prompt,
             agent_type=task.agent_type,
-            source="human",
+            source="human",  # type: ignore
         )
 
     # Create mock executor with fast execution (10ms per task)
@@ -248,6 +252,7 @@ async def test_performance_no_regression(
 # Scenario 3: Backward Compatibility Test (task_limit=None)
 # ==============================================================================
 
+
 @pytest.mark.asyncio
 async def test_backward_compatibility_large_limit(
     memory_db: Database,
@@ -278,7 +283,7 @@ async def test_backward_compatibility_large_limit(
         await task_queue_service.enqueue_task(
             description=task.prompt,
             agent_type=task.agent_type,
-            source="human",
+            source="human",  # type: ignore
         )
 
     # Create mock executor
@@ -308,6 +313,7 @@ async def test_backward_compatibility_large_limit(
 # ==============================================================================
 # Scenario 4: Edge Case - Limit Equals Concurrent
 # ==============================================================================
+
 
 @pytest.mark.asyncio
 async def test_edge_case_limit_equals_concurrent(
@@ -339,7 +345,7 @@ async def test_edge_case_limit_equals_concurrent(
         await task_queue_service.enqueue_task(
             description=task.prompt,
             agent_type=task.agent_type,
-            source="human",
+            source="human",  # type: ignore
         )
 
     # Create mock executor
@@ -358,8 +364,7 @@ async def test_edge_case_limit_equals_concurrent(
 
     # Assert: Exactly 5 tasks executed
     assert len(results) == limit, (
-        f"Expected exactly {limit} tasks when limit == max_concurrent, "
-        f"but got {len(results)}"
+        f"Expected exactly {limit} tasks when limit == max_concurrent, " f"but got {len(results)}"
     )
 
     # Assert: All tasks succeeded
@@ -369,6 +374,7 @@ async def test_edge_case_limit_equals_concurrent(
 # ==============================================================================
 # Scenario 5: Task Limit with Failed Tasks
 # ==============================================================================
+
 
 @pytest.mark.asyncio
 async def test_task_limit_with_failures(
@@ -402,7 +408,7 @@ async def test_task_limit_with_failures(
         queued_task = await task_queue_service.enqueue_task(
             description=task.prompt,
             agent_type=task.agent_type,
-            source="human",
+            source="human",  # type: ignore
         )
         task_ids.append(queued_task.id)
 
@@ -428,9 +434,9 @@ async def test_task_limit_with_failures(
     results = await orchestrator.start_swarm(task_limit=limit)
 
     # Assert: Exactly 10 tasks executed (including failures)
-    assert len(results) == limit, (
-        f"Expected exactly {limit} tasks (including failures), got {len(results)}"
-    )
+    assert (
+        len(results) == limit
+    ), f"Expected exactly {limit} tasks (including failures), got {len(results)}"
 
     # Assert: Correct number of successes and failures
     successes = [r for r in results if r.success]
@@ -443,6 +449,7 @@ async def test_task_limit_with_failures(
 # ==============================================================================
 # Scenario 6: Task Limit Zero (Immediate Exit)
 # ==============================================================================
+
 
 @pytest.mark.asyncio
 async def test_task_limit_zero(
@@ -470,7 +477,7 @@ async def test_task_limit_zero(
         await task_queue_service.enqueue_task(
             description=task.prompt,
             agent_type=task.agent_type,
-            source="human",
+            source="human",  # type: ignore
         )
 
     # Create mock executor

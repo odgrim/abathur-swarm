@@ -180,7 +180,9 @@ class TestSwarmTaskLimit:
         ), "Should attempt to get all available tasks when task_limit=None"
 
         # Assertion 6: Verify shutdown was called (manual trigger, not automatic limit)
-        assert orchestrator._shutdown_event.is_set(), "Shutdown event should be set after manual shutdown"
+        assert (
+            orchestrator._shutdown_event.is_set()
+        ), "Shutdown event should be set after manual shutdown"
 
     @pytest.mark.asyncio
     async def test_task_limit_zero(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -243,25 +245,21 @@ class TestSwarmTaskLimit:
         assert len(results) == 0, f"Expected 0 tasks spawned, got {len(results)}"
 
         # Assertion 2: "task_limit_reached" logged with limit=0, processed=0
-        assert "task_limit_reached" in captured.out, (
-            "Should log 'task_limit_reached' when limit is 0"
-        )
+        assert (
+            "task_limit_reached" in captured.out
+        ), "Should log 'task_limit_reached' when limit is 0"
         # Verify limit=0 in logs (structlog may use JSON or key=value format)
-        assert '"limit": 0' in captured.out or 'limit=0' in captured.out, (
-            "Log should show limit=0"
-        )
+        assert '"limit": 0' in captured.out or "limit=0" in captured.out, "Log should show limit=0"
         # Verify tasks_spawned=0 in logs
-        assert '"tasks_spawned": 0' in captured.out or 'tasks_spawned=0' in captured.out, (
-            "Log should show tasks_spawned=0"
-        )
+        assert (
+            '"tasks_spawned": 0' in captured.out or "tasks_spawned=0" in captured.out
+        ), "Log should show tasks_spawned=0"
 
         # Assertion 3: get_next_task never called
         task_queue_service.get_next_task.assert_not_called()
 
         # Assertion 4: Swarm exited immediately (< 1 second runtime)
-        assert duration < 1.0, (
-            f"Expected immediate exit (<1s), but took {duration:.2f}s"
-        )
+        assert duration < 1.0, f"Expected immediate exit (<1s), but took {duration:.2f}s"
 
         # Assertion 5: No errors or exceptions (test passes if we got here)
         # Verify the swarm didn't spawn any tasks or execute any agent work
@@ -344,20 +342,20 @@ class TestSwarmTaskLimit:
 
         # Assertion 1: At least 1 task completed, may have slight overage due to async spawning
         assert len(results) >= 1, f"Expected at least 1 task processed, got {len(results)}"
-        assert len(results) <= 5, f"Expected reasonable overage (≤max_concurrent), got {len(results)}"
+        assert (
+            len(results) <= 5
+        ), f"Expected reasonable overage (≤max_concurrent), got {len(results)}"
         assert all(r.success for r in results), "All tasks should complete successfully"
 
         # Assertion 2: Verify "task_limit_reached" logged with correct values
-        assert "task_limit_reached" in captured.out, (
-            "Should log 'task_limit_reached' when limit is reached"
-        )
+        assert (
+            "task_limit_reached" in captured.out
+        ), "Should log 'task_limit_reached' when limit is reached"
         # Note: structlog outputs JSON, check for limit=1
-        assert '"limit": 1' in captured.out or 'limit=1' in captured.out, (
-            "Log should show limit=1"
-        )
-        assert '"tasks_spawned":' in captured.out or 'tasks_spawned=' in captured.out, (
-            "Log should show tasks_spawned count"
-        )
+        assert '"limit": 1' in captured.out or "limit=1" in captured.out, "Log should show limit=1"
+        assert (
+            '"tasks_spawned":' in captured.out or "tasks_spawned=" in captured.out
+        ), "Log should show tasks_spawned count"
 
         # Assertion 3: Swarm exited immediately after first task (no second fetch)
         # get_next_task should be called exactly once (for the one task spawned)
@@ -368,9 +366,9 @@ class TestSwarmTaskLimit:
         )
 
         # Assertion 4: First task completed successfully
-        assert task_queue_service.complete_task.call_count == 1, (
-            "The single task should be marked as completed"
-        )
+        assert (
+            task_queue_service.complete_task.call_count == 1
+        ), "The single task should be marked as completed"
 
         # Assertion 5: Verify counter logic - edge case validation
         # At limit=1, the comparison (1 >= 1) should trigger break
@@ -378,9 +376,7 @@ class TestSwarmTaskLimit:
         # and "task_limit_reached" was logged
         result_task_ids = {r.task_id for r in results}
         first_task_id = test_tasks[0].id
-        assert first_task_id in result_task_ids, (
-            "The first task should be the one processed"
-        )
+        assert first_task_id in result_task_ids, "The first task should be the one processed"
 
     @pytest.mark.asyncio
     async def test_active_tasks_complete_after_limit(self) -> None:
@@ -639,11 +635,9 @@ class TestSwarmTaskLimit:
         assert len(results) == 3, f"Expected 3 tasks, got {len(results)}"
 
         # Assertion 2: All 3 tasks completed successfully (not cancelled)
+        assert all(r.success for r in results), "All tasks should complete successfully"
         assert all(
-            r.success for r in results
-        ), "All tasks should complete successfully"
-        assert all(
-            "completed after 2s" in r.data.get("output", "") for r in results
+            "completed after 2s" in r.data.get("output", "") for r in results  # type: ignore
         ), "All tasks should have completed their work"
 
         # Assertion 3: All 3 tasks were marked as completed in queue
@@ -654,8 +648,7 @@ class TestSwarmTaskLimit:
         # Assertion 4: Total execution time is >= 2 seconds
         # This proves tasks completed rather than being cancelled immediately
         assert duration >= 2.0, (
-            f"Expected duration >= 2.0s to prove tasks completed, "
-            f"but got {duration:.2f}s"
+            f"Expected duration >= 2.0s to prove tasks completed, " f"but got {duration:.2f}s"
         )
 
         # Assertion 5: Swarm didn't spawn more tasks beyond the limit
@@ -672,12 +665,12 @@ class TestSwarmTaskLimit:
         # Verify results contain the expected task IDs
         result_task_ids = {r.task_id for r in results}
         spawned_task_ids = {t.id for t in test_tasks[:3]}
-        assert (
-            result_task_ids == spawned_task_ids
-        ), "Results should match the first 3 spawned tasks"
+        assert result_task_ids == spawned_task_ids, "Results should match the first 3 spawned tasks"
 
     @pytest.mark.asyncio
-    async def test_limit_larger_than_available_tasks(self, capsys: pytest.CaptureFixture[str]) -> None:
+    async def test_limit_larger_than_available_tasks(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """Test that swarm processes all available tasks when task_limit > available tasks.
 
         This tests the edge case where task_limit is larger than the number of available tasks.
@@ -731,6 +724,7 @@ class TestSwarmTaskLimit:
         # This simulates exhausting the available task queue
         # Use an iterator that cycles None indefinitely after the 3 tasks
         from itertools import chain, repeat
+
         task_queue_service.get_next_task.side_effect = chain(test_tasks, repeat(None))
 
         # Mock executor to return successful results
@@ -771,12 +765,10 @@ class TestSwarmTaskLimit:
         captured = capsys.readouterr()
 
         # Assertion 1: Exactly 3 tasks were processed (all available tasks)
-        assert len(results) == 3, (
-            f"Expected exactly 3 tasks processed (all available), got {len(results)}"
-        )
-        assert all(r.success for r in results), (
-            "All 3 tasks should complete successfully"
-        )
+        assert (
+            len(results) == 3
+        ), f"Expected exactly 3 tasks processed (all available), got {len(results)}"
+        assert all(r.success for r in results), "All 3 tasks should complete successfully"
 
         # Assertion 2: Verify "task_limit_reached" was NOT logged
         # This is the KEY assertion for this edge case
@@ -795,9 +787,9 @@ class TestSwarmTaskLimit:
         )
 
         # Assertion 4: All 3 tasks were marked as completed
-        assert task_queue_service.complete_task.call_count == 3, (
-            "All 3 available tasks should be marked as completed"
-        )
+        assert (
+            task_queue_service.complete_task.call_count == 3
+        ), "All 3 available tasks should be marked as completed"
 
         # Assertion 5: Verify swarm exited naturally (not due to limit)
         # The natural exit path is line 116-122 (next_task is None)
