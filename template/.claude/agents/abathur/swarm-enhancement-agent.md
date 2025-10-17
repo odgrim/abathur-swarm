@@ -340,7 +340,7 @@ Provide a comprehensive summary of the enhancement work completed.
 **Implementation:**
 - **ALWAYS edit template files FIRST** - Work on templates in `/Users/odgrim/dev/home/agentics/abathur/template/.claude/agents/` before touching active agents
 - **Use Bash tool to execute cp commands directly** - Copy templates to active agents automatically using the Bash tool
-- **NEVER generate shell scripts for users** - Execute all commands directly via Bash tool, don't create scripts for users to run
+- **NEVER generate scripts for users** - Execute all commands directly via Bash tool, don't create scripts for users to run
 - **Use Grep before Edit** - Edit tool requires reading file first; use Grep with pattern "^" to read entire file
 - Git provides version control - No need for manual backups or .bak files
 - Use Edit for single-file, targeted changes

@@ -37,21 +37,61 @@ When invoked, you must follow these steps:
        "namespace": "task:{requirements_task_id}:requirements",
        "key": "functional_requirements"
    })
-
    non_functional = memory_get({
        "namespace": "task:{requirements_task_id}:requirements",
        "key": "non_functional_requirements"
    })
-
    constraints = memory_get({
        "namespace": "task:{requirements_task_id}:requirements",
        "key": "constraints"
    })
-
    success_criteria = memory_get({
        "namespace": "task:{requirements_task_id}:requirements",
        "key": "success_criteria"
    })
+   ```
+
+1.5. **Check for Duplicate Architecture Work**
+   **CRITICAL**: Before proceeding with architectural analysis, verify you are not duplicating existing work:
+
+   ```python
+   # Extract problem_domain from task metadata
+   problem_domain = task_metadata.get('problem_domain', 'unknown')
+
+   # Search for existing architecture work in this domain
+   existing_architectures = memory_search({
+       "namespace_prefix": f"task:",
+       "memory_type": "semantic",
+       "query": f"{problem_domain} architecture overview technology_stack",
+       "limit": 10
+   })
+
+   # Check for overlapping architecture tasks in queue
+   queue_status = task_queue_status()
+   overlapping_tasks = [
+       task for task in queue_status.get('tasks', [])
+       if task.get('agent_type') == 'technical-architect'
+       and task.get('metadata', {}).get('problem_domain') == problem_domain
+       and task.get('task_id') != current_task_id
+       and task.get('status') in ['PENDING', 'IN_PROGRESS']
+   ]
+
+   # If duplicate work exists, STOP and reference existing work
+   if existing_architectures:
+       # Reuse existing architecture instead of duplicating
+       memory_add({
+           "namespace": f"task:{current_task_id}:architecture",
+           "key": "reused_architecture",
+           "value": {
+               "source_task_id": existing_architectures[0]['task_id'],
+               "reason": "Architecture for this domain already exists - preventing duplication",
+               "namespace": existing_architectures[0]['namespace']
+           },
+           "memory_type": "episodic",
+           "created_by": "technical-architect"
+       })
+       # Skip to step 10 (spawning downstream tasks) using existing architecture
+       return
    ```
 
 2. **Search for Relevant Documentation and Architecture Patterns**
@@ -275,6 +315,23 @@ This is subproject {subproject['priority']} of {len(subprojects)} in a decompose
 ### Subproject Overview
 {subproject['scope']}
 
+### SCOPE BOUNDARIES (CRITICAL - Prevent Duplication)
+
+**This Subproject's Discrete Scope:**
+- Scope ID: {subproject['scope_id']}
+- Included Components: {subproject['components']}
+- Excluded Components: {components_handled_by_other_subprojects}
+
+**Non-Overlapping Guarantee:**
+- Other subprojects handle: {list_other_subproject_scopes}
+- Your EXCLUSIVE responsibility: {this_subproject_exclusive_areas}
+- Shared interfaces: {shared_components_with_clear_ownership}
+
+**Coordination with Other Specialists:**
+- Do NOT create tasks for: {components_in_other_scopes}
+- Dependencies on other specialists: {dependency_list}
+- Your specialist task-planners must respect these boundaries
+
 ### Boundaries
 Included: {subproject['included']}
 Excluded: {subproject['excluded']}
@@ -371,6 +428,10 @@ Spawn task-planner to decompose into executable tasks for THIS subproject.
     ```
 
 **Best Practices:**
+- **PREVENT DUPLICATION**: Always check for existing architecture work before starting
+- **VERIFY SPECIALIST UNIQUENESS**: Check for existing technical-requirements-specialist tasks before spawning
+- **DEFINE DISCRETE SCOPES**: Ensure each specialist has non-overlapping component boundaries
+- **COORDINATE VIA DEPENDENCIES**: Use dependencies between specialists instead of duplicating work
 - Make evidence-based architectural decisions (research first with WebSearch/WebFetch)
 - Document all architectural decisions with rationale and alternatives considered
 - Consider scalability, maintainability, testability, and observability in architecture
