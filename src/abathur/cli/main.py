@@ -186,6 +186,7 @@ app.add_typer(task_app, name="task")
 def submit(
     prompt: str = typer.Argument(..., help="Task prompt/instruction"),
     agent_type: str = typer.Option("requirements-gatherer", help="Agent type to use"),  # noqa: B008
+    summary: str | None = typer.Option(None, help="Custom summary (max 140 chars, auto-generated if not provided)"),  # noqa: B008
     input_file: Path
     | None = typer.Option(None, help="JSON file with additional context data"),  # noqa: B008
     input_json: str
@@ -199,6 +200,7 @@ def submit(
         abathur task submit "Fix the authentication bug" --agent-type code-reviewer
         abathur task submit "Analyze performance" --input-file context.json
         abathur task submit "Generate report" --input-json '{"format": "pdf"}'
+        abathur task submit "Complex task" --summary "Custom summary for this task"
     """
 
     async def _submit() -> UUID:
@@ -213,14 +215,16 @@ def submit(
         elif input_json:
             input_data = json.loads(input_json)
 
-        # Auto-generate summary from prompt for human tasks
+        # Auto-generate summary if not provided
         # Format: "User Prompt: " + first 126 chars of prompt
-        prefix = "User Prompt: "
-        auto_summary = prefix + prompt[:126].strip()
+        task_summary = summary
+        if task_summary is None:
+            prefix = "User Prompt: "
+            task_summary = prefix + prompt[:126].strip()
 
         task = Task(
             prompt=prompt,
-            summary=auto_summary,
+            summary=task_summary,
             agent_type=agent_type,
             input_data=input_data,
             priority=priority,
