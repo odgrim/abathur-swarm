@@ -67,6 +67,26 @@ class SwarmOrchestrator:
         - task_limit is reached (if specified)
         - A shutdown signal is received (SIGINT or SIGTERM)
         - The shutdown() method is called
+        - The task_limit is reached (if specified)
+
+        Args:
+            task_limit: Maximum number of tasks to COMPLETE (not spawn) before stopping.
+                       - None (default): Runs indefinitely until shutdown() is called
+                       - 0: Exits immediately without processing any tasks
+                       - N: Processes tasks until N tasks have completed, then stops
+
+                       IMPORTANT: Tasks are counted when COMPLETED, not when spawned.
+                       The swarm continues spawning new tasks until task_limit tasks
+                       have finished execution (either successfully or with errors).
+                       This ensures better resource utilization compared to spawn-time
+                       counting, as the swarm keeps all available agent slots active
+                       until the completion limit is reached.
+
+                       Graceful shutdown: Active tasks continue to completion even
+                       after the limit is reached.
+
+                       Failed tasks (both Result.success=False and exception-based
+                       failures) count toward the limit.
 
         Args:
             task_limit: Maximum number of tasks to spawn before stopping the swarm.
@@ -84,6 +104,33 @@ class SwarmOrchestrator:
 
         Returns:
             List of all execution results
+
+        Examples:
+            Process exactly 5 tasks (for testing or bounded execution):
+            >>> results = await orchestrator.start_swarm(task_limit=5)
+            >>> len(results)  # Will be exactly 5
+            5
+
+            Run indefinitely until manual shutdown (production mode):
+            >>> results = await orchestrator.start_swarm(task_limit=None)
+            # Swarm continues processing tasks until shutdown() is called
+
+            Process single task (useful for sequential execution):
+            >>> results = await orchestrator.start_swarm(task_limit=1)
+            >>> len(results)
+            1
+
+        Behavior:
+            - Completion-time counting: tasks_completed counter increments AFTER
+              task execution completes (line ~208, after result is appended)
+            - Resource utilization: Swarm continues spawning tasks to fill available
+              slots until completion limit is reached, maximizing throughput
+            - Graceful shutdown: When task_limit is reached, swarm stops spawning
+              new tasks but waits for all active tasks to complete
+            - Failure handling: Both Result-based failures (success=False) and
+              exception-based failures count toward the completion limit
+            - Concurrent execution: Multiple tasks can execute simultaneously
+              (up to max_concurrent_agents), all count toward limit when completed
         """
         self._running = True
         self._shutdown_event.clear()
