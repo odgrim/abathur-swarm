@@ -21,6 +21,8 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Import abathur modules
+from pydantic import ValidationError  # noqa: E402
+
 from abathur.domain.models import TaskSource, TaskStatus  # noqa: E402
 from abathur.infrastructure.database import Database  # noqa: E402
 from abathur.infrastructure.logger import get_logger  # noqa: E402
@@ -365,6 +367,26 @@ class AbathurTaskQueueServer:
         description = arguments["description"]
         source = arguments["source"]
 
+        # Validate description type
+        if not isinstance(description, str):
+            return {"error": "ValidationError", "message": "description must be a string"}
+
+        # Validate description is not empty
+        if not description or not description.strip():
+            return {
+                "error": "ValidationError",
+                "message": "description cannot be empty or whitespace-only",
+            }
+
+        # Validate description length (reasonable limit: 10,000 chars)
+        # This prevents memory/storage abuse while allowing detailed task descriptions
+        MAX_DESCRIPTION_LENGTH = 10_000
+        if len(description) > MAX_DESCRIPTION_LENGTH:
+            return {
+                "error": "ValidationError",
+                "message": f"description must not exceed {MAX_DESCRIPTION_LENGTH} characters, got {len(description)}",
+            }
+
         # Optional parameters with defaults
         summary = arguments.get("summary")
         agent_type = arguments.get("agent_type", "requirements-gatherer")
@@ -378,24 +400,8 @@ class AbathurTaskQueueServer:
         feature_branch = arguments.get("feature_branch")
         task_branch = arguments.get("task_branch")
 
-        # Validate summary if provided
-        if summary is not None:
-            # Trim whitespace
-            summary = summary.strip()
-
-            # Reject empty string after trimming
-            if not summary:
-                return {
-                    "error": "ValidationError",
-                    "message": "summary cannot be empty or whitespace-only",
-                }
-
-            # Check max length (140 chars)
-            if len(summary) > 140:
-                return {
-                    "error": "ValidationError",
-                    "message": "summary must not exceed 140 characters",
-                }
+        # Note: summary validation is handled by domain model (Pydantic)
+        # Pass summary as-is to service layer, which will validate via Task model
 
         # Validate agent_type - reject generic/invalid agent types
         invalid_agent_types = [
@@ -484,7 +490,11 @@ class AbathurTaskQueueServer:
                 "submitted_at": task.submitted_at.isoformat(),
             }
 
+        except ValidationError as e:
+            # Pydantic validation error from domain model
+            return {"error": "ValidationError", "message": str(e)}
         except ValueError as e:
+            # Service layer validation errors
             return {"error": "ValidationError", "message": str(e)}
         except CircularDependencyError as e:
             return {"error": "CircularDependencyError", "message": str(e)}

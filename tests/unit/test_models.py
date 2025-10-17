@@ -5,7 +5,6 @@ from uuid import uuid4
 
 import pytest
 from abathur.domain.models import Agent, AgentState, Task, TaskStatus
-from pydantic import ValidationError
 
 
 class TestTask:
@@ -145,32 +144,30 @@ class TestTask:
         assert len(task.summary) == 140
 
     def test_task_summary_exceeds_max_length(self) -> None:
-        """Test Pydantic enforces max_length=140 constraint on summary field."""
+        """Test summary field automatically truncates to 140 characters."""
         # Arrange - create summary with 141 characters (exceeds limit)
         summary_141_chars = "x" * 141
 
-        # Act & Assert - should raise ValidationError
-        with pytest.raises(ValidationError) as exc_info:
-            Task(
-                prompt="Test task with too long summary",
-                summary=summary_141_chars,
-            )
+        # Act - field validator should auto-truncate instead of raising error
+        task = Task(
+            prompt="Test task with too long summary",
+            summary=summary_141_chars,
+        )
 
-        # Verify error message mentions max_length constraint
-        error_str = str(exc_info.value).lower()
-        assert "max_length" in error_str or "maximum" in error_str or "140" in error_str
+        # Assert - summary should be truncated to exactly 140 characters
+        assert task.summary == "x" * 140
+        assert len(task.summary) == 140
 
     def test_task_summary_empty_string(self) -> None:
-        """Test summary field accepts empty string."""
+        """Test summary field converts empty string to None after stripping."""
         # Arrange & Act
         task = Task(
             prompt="Test task with empty summary",
             summary="",
         )
 
-        # Assert - empty string is valid
-        assert task.summary == ""
-        assert task.summary is not None  # Not None, but empty string
+        # Assert - empty string becomes None after stripping (will trigger auto-generation)
+        assert task.summary is None
 
     def test_task_summary_serialization_includes_all_fields(self) -> None:
         """Test Task model serializes to dict with summary field present."""
@@ -210,7 +207,7 @@ class TestTask:
         assert "高优先级" in task.summary
 
     def test_task_summary_whitespace_handling(self) -> None:
-        """Test summary field preserves whitespace."""
+        """Test summary field strips leading/trailing whitespace."""
         # Arrange - test with leading/trailing/internal whitespace
         summary_with_whitespace = "  Task summary with  spaces  "
 
@@ -220,8 +217,68 @@ class TestTask:
             summary=summary_with_whitespace,
         )
 
-        # Assert - whitespace should be preserved
-        assert task.summary == summary_with_whitespace
+        # Assert - leading/trailing whitespace should be stripped, internal preserved
+        assert task.summary == "Task summary with  spaces"
+        assert task.summary != summary_with_whitespace
+
+    def test_task_summary_whitespace_stripped(self) -> None:
+        """Test summary field strips whitespace from simple input."""
+        # Arrange
+        summary_with_padding = "  test  "
+
+        # Act
+        task = Task(
+            prompt="Test task with padded summary",
+            summary=summary_with_padding,
+        )
+
+        # Assert - should be stripped to "test"
+        assert task.summary == "test"
+
+    def test_task_summary_whitespace_edge_case(self) -> None:
+        """Test summary with 139 chars + whitespace stays valid after stripping."""
+        # Arrange - 139 'x' characters with leading/trailing whitespace
+        # After stripping, this should be exactly 139 chars (valid)
+        summary_139_chars_padded = "  " + ("x" * 139) + "  "
+
+        # Act
+        task = Task(
+            prompt="Test task with whitespace edge case",
+            summary=summary_139_chars_padded,
+        )
+
+        # Assert - should accept and strip to exactly 139 characters
+        assert task.summary == "x" * 139
+        assert len(task.summary) == 139
+
+    def test_task_summary_whitespace_only_becomes_none(self) -> None:
+        """Test summary with only whitespace becomes None after stripping."""
+        # Arrange - only whitespace
+        whitespace_only = "    \t\n  "
+
+        # Act
+        task = Task(
+            prompt="Test task with whitespace only",
+            summary=whitespace_only,
+        )
+
+        # Assert - should become None (will trigger auto-generation)
+        assert task.summary is None
+
+    def test_task_summary_exceeds_max_after_stripping(self) -> None:
+        """Test summary that exceeds max length even after stripping is truncated."""
+        # Arrange - 141 'x' characters with whitespace (still 141 after strip)
+        summary_141_chars_padded = "  " + ("x" * 141) + "  "
+
+        # Act - field validator should strip then truncate
+        task = Task(
+            prompt="Test task with too long summary after strip",
+            summary=summary_141_chars_padded,
+        )
+
+        # Assert - should be truncated to exactly 140 characters (after stripping)
+        assert task.summary == "x" * 140
+        assert len(task.summary) == 140
 
     def test_task_summary_json_encoding(self) -> None:
         """Test Task with summary can be JSON-encoded correctly."""

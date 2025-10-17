@@ -187,7 +187,7 @@ async def test_mcp_summary_validation_max_length(
 ) -> None:
     """Test that summaries exceeding max_length are automatically truncated.
 
-    The service layer auto-trims summaries to 140 characters instead of raising errors,
+    The Pydantic field validator auto-truncates summaries to 140 characters instead of raising errors,
     providing better UX (auto-correction vs rejection).
 
     Verifies:
@@ -199,7 +199,7 @@ async def test_mcp_summary_validation_max_length(
     # Enqueue task with >140 char summary
     long_summary = "x" * 141  # 141 characters (exceeds max_length=140)
 
-    # Should NOT raise error - should auto-truncate instead
+    # Should NOT raise error - Pydantic field validator auto-truncates
     task = await task_queue_service.enqueue_task(
         description="Task with too-long summary",
         source=TaskSource.HUMAN,
@@ -207,7 +207,7 @@ async def test_mcp_summary_validation_max_length(
         base_priority=5,
     )
 
-    # Assert: Summary was truncated to 140 characters
+    # Assert: Summary was truncated to 140 characters by Pydantic validator
     assert task.summary is not None
     assert len(task.summary) == 140
     assert task.summary == "x" * 140
@@ -251,6 +251,47 @@ async def test_mcp_summary_validation_exactly_max_length(
     assert len(get_result["summary"]) == 140
 
 
+@pytest.mark.asyncio
+async def test_mcp_summary_with_leading_trailing_whitespace(
+    mcp_server: AbathurTaskQueueServer,
+    memory_db: Database,
+) -> None:
+    """Test that summary with leading/trailing whitespace is stripped.
+
+    Verifies:
+    - Leading whitespace stripped
+    - Trailing whitespace stripped
+    - Internal whitespace preserved
+    - Pydantic field validator handles whitespace correctly
+    """
+    # Summary with leading and trailing whitespace
+    whitespace_summary = "  test summary with spaces  "
+
+    enqueue_args = {
+        "description": "Task with whitespace in summary",
+        "summary": whitespace_summary,
+        "source": "human",
+        "agent_type": "requirements-gatherer",
+        "base_priority": 5,
+    }
+
+    enqueue_result = await mcp_server._handle_task_enqueue(enqueue_args)
+
+    # Assert: No error
+    assert "error" not in enqueue_result
+
+    task_id = enqueue_result["task_id"]
+
+    # Retrieve and verify stripped summary
+    get_result = await mcp_server._handle_task_get({"task_id": task_id})
+
+    assert "error" not in get_result
+    assert (
+        get_result["summary"] == "test summary with spaces"
+    )  # Leading/trailing whitespace removed
+    assert get_result["summary"] != whitespace_summary  # Different from original
+
+
 # Test 4: task_list Returns Summaries
 
 
@@ -291,7 +332,7 @@ async def test_mcp_task_list_includes_summaries(
 
     task3_args = {
         "description": "Task 3 with empty summary",
-        "summary": "",
+        "summary": "",  # Empty string gets treated as None (auto-generates)
         "source": "human",
         "agent_type": "technical-architect",
         "base_priority": 5,
@@ -301,6 +342,7 @@ async def test_mcp_task_list_includes_summaries(
     result2 = await mcp_server._handle_task_enqueue(task2_args)
     result3 = await mcp_server._handle_task_enqueue(task3_args)
 
+    # All should succeed - empty summary auto-generates (no MCP validation error)
     assert "error" not in result1
     assert "error" not in result2
     assert "error" not in result3

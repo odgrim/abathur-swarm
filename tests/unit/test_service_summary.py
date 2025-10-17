@@ -14,7 +14,7 @@ from abathur.domain.models import TaskSource
 from abathur.infrastructure.database import Database
 from abathur.services.dependency_resolver import DependencyResolver
 from abathur.services.priority_calculator import PriorityCalculator
-from abathur.services.task_queue_service import TaskQueueError, TaskQueueService
+from abathur.services.task_queue_service import TaskQueueService
 
 
 class TestTaskQueueServiceSummary:
@@ -48,7 +48,7 @@ class TestTaskQueueServiceSummary:
 
     @pytest.mark.asyncio
     async def test_enqueue_task_without_summary(self) -> None:
-        """Test enqueue_task works without summary (backward compatibility)."""
+        """Test enqueue_task auto-generates summary when not provided."""
         # Setup
         db = Database(Path(":memory:"))
         await db.initialize()
@@ -63,17 +63,17 @@ class TestTaskQueueServiceSummary:
 
         # Assert
         assert task is not None
-        assert task.summary is None
+        assert task.summary == "User Prompt: Test task without summary"
         assert task.prompt == "Test task without summary"
 
-        # Verify task persisted with null summary
+        # Verify task persisted with auto-generated summary
         retrieved = await db.get_task(task.id)
         assert retrieved is not None
-        assert retrieved.summary is None
+        assert retrieved.summary == "User Prompt: Test task without summary"
 
     @pytest.mark.asyncio
     async def test_enqueue_task_summary_max_length(self) -> None:
-        """Test Pydantic validates summary max_length constraint."""
+        """Test Pydantic auto-truncates summary to max_length (140 chars)."""
         # Setup
         db = Database(Path(":memory:"))
         await db.initialize()
@@ -81,26 +81,26 @@ class TestTaskQueueServiceSummary:
         priority_calculator = PriorityCalculator(dependency_resolver)
         service = TaskQueueService(db, dependency_resolver, priority_calculator)
 
-        # Valid: 500 characters (max)
-        summary_500 = "x" * 500
+        # Valid: 140 characters (max after stripping)
+        summary_140 = "x" * 140
         task = await service.enqueue_task(
-            description="Test with 500 char summary", source=TaskSource.HUMAN, summary=summary_500
+            description="Test with 140 char summary", source=TaskSource.HUMAN, summary=summary_140
         )
-        assert task.summary == summary_500
-        assert len(task.summary) == 500
+        assert task.summary == summary_140
+        assert len(task.summary) == 140
 
-        # Invalid: 501 characters (exceeds max)
-        summary_501 = "x" * 501
-        with pytest.raises(TaskQueueError) as exc_info:
-            await service.enqueue_task(
-                description="Test with 501 char summary",
-                source=TaskSource.HUMAN,
-                summary=summary_501,
-            )
+        # 141 characters - should be auto-truncated to 140 by Pydantic field validator
+        summary_141 = "x" * 141
+        task_truncated = await service.enqueue_task(
+            description="Test with 141 char summary",
+            source=TaskSource.HUMAN,
+            summary=summary_141,
+        )
 
-        # Verify validation error message mentions max_length
-        error_msg = str(exc_info.value)
-        assert "String should have at most 500 characters" in error_msg
+        # Verify summary was truncated to exactly 140 characters
+        assert task_truncated.summary is not None
+        assert len(task_truncated.summary) == 140
+        assert task_truncated.summary == "x" * 140
 
     @pytest.mark.asyncio
     async def test_enqueue_task_summary_with_prerequisites(self) -> None:
@@ -139,7 +139,119 @@ class TestTaskQueueServiceSummary:
 
     @pytest.mark.asyncio
     async def test_enqueue_task_empty_summary(self) -> None:
-        """Test empty string summary is allowed."""
+        """Test empty string summary triggers auto-generation."""
+        # Setup
+        db = Database(Path(":memory:"))
+        await db.initialize()
+        dependency_resolver = DependencyResolver(db)
+        priority_calculator = PriorityCalculator(dependency_resolver)
+        service = TaskQueueService(db, dependency_resolver, priority_calculator)
+
+        # Act - empty summary should trigger auto-generation
+        task = await service.enqueue_task(
+            description="Test task with empty summary", source=TaskSource.HUMAN, summary=""
+        )
+
+        # Assert - should auto-generate from description
+        assert task is not None
+        assert task.summary == "User Prompt: Test task with empty summary"
+
+        # Verify persisted
+        retrieved = await db.get_task(task.id)
+        assert retrieved is not None
+        assert retrieved.summary == "User Prompt: Test task with empty summary"
+
+    @pytest.mark.asyncio
+    async def test_enqueue_task_summary_empty_description_human(self) -> None:
+        """Test empty description for human tasks generates 'Task'."""
+        # Setup
+        db = Database(Path(":memory:"))
+        await db.initialize()
+        dependency_resolver = DependencyResolver(db)
+        priority_calculator = PriorityCalculator(dependency_resolver)
+        service = TaskQueueService(db, dependency_resolver, priority_calculator)
+
+        # Act - empty description should generate "Task"
+        task = await service.enqueue_task(description="", source=TaskSource.HUMAN)
+
+        # Assert
+        assert task is not None
+        assert task.summary == "Task"  # Not "User Prompt: "
+
+        # Verify persisted
+        retrieved = await db.get_task(task.id)
+        assert retrieved is not None
+        assert retrieved.summary == "Task"
+
+    @pytest.mark.asyncio
+    async def test_enqueue_task_summary_empty_description_agent(self) -> None:
+        """Test empty description for agent tasks generates 'Task'."""
+        # Setup
+        db = Database(Path(":memory:"))
+        await db.initialize()
+        dependency_resolver = DependencyResolver(db)
+        priority_calculator = PriorityCalculator(dependency_resolver)
+        service = TaskQueueService(db, dependency_resolver, priority_calculator)
+
+        # Act - empty description should generate "Task"
+        task = await service.enqueue_task(description="", source=TaskSource.AGENT_REQUIREMENTS)
+
+        # Assert
+        assert task is not None
+        assert task.summary == "Task"
+
+        # Verify persisted
+        retrieved = await db.get_task(task.id)
+        assert retrieved is not None
+        assert retrieved.summary == "Task"
+
+    @pytest.mark.asyncio
+    async def test_enqueue_task_summary_whitespace_description(self) -> None:
+        """Test whitespace-only description generates 'Task'."""
+        # Setup
+        db = Database(Path(":memory:"))
+        await db.initialize()
+        dependency_resolver = DependencyResolver(db)
+        priority_calculator = PriorityCalculator(dependency_resolver)
+        service = TaskQueueService(db, dependency_resolver, priority_calculator)
+
+        # Act - whitespace-only description should generate "Task"
+        task = await service.enqueue_task(description="   ", source=TaskSource.HUMAN)
+
+        # Assert
+        assert task is not None
+        assert task.summary == "Task"
+
+        # Verify persisted
+        retrieved = await db.get_task(task.id)
+        assert retrieved is not None
+        assert retrieved.summary == "Task"
+
+    @pytest.mark.asyncio
+    async def test_enqueue_task_summary_auto_gen_human(self) -> None:
+        """Test auto-generated summary for human tasks includes prefix."""
+        # Setup
+        db = Database(Path(":memory:"))
+        await db.initialize()
+        dependency_resolver = DependencyResolver(db)
+        priority_calculator = PriorityCalculator(dependency_resolver)
+        service = TaskQueueService(db, dependency_resolver, priority_calculator)
+
+        # Act
+        task = await service.enqueue_task(description="Do something", source=TaskSource.HUMAN)
+
+        # Assert
+        assert task is not None
+        assert task.summary == "User Prompt: Do something"
+
+        # Verify persisted
+        retrieved = await db.get_task(task.id)
+        assert retrieved is not None
+        assert retrieved.summary == "User Prompt: Do something"
+
+    @pytest.mark.asyncio
+    async def test_enqueue_task_summary_auto_gen_agent(self) -> None:
+        """Test auto-generated summary for agent tasks has no prefix."""
         # Setup
         db = Database(Path(":memory:"))
         await db.initialize()
@@ -149,14 +261,14 @@ class TestTaskQueueServiceSummary:
 
         # Act
         task = await service.enqueue_task(
-            description="Test task with empty summary", source=TaskSource.HUMAN, summary=""
+            description="Do something", source=TaskSource.AGENT_REQUIREMENTS
         )
 
         # Assert
         assert task is not None
-        assert task.summary == ""
+        assert task.summary == "Do something"  # No prefix for agent tasks
 
         # Verify persisted
         retrieved = await db.get_task(task.id)
         assert retrieved is not None
-        assert retrieved.summary == ""
+        assert retrieved.summary == "Do something"
