@@ -132,7 +132,7 @@ class MockAbathurTaskQueueServer:
 
         # Call service
         try:
-            task = await self.task_queue_service.enqueue_task(
+            task = await self.task_queue_service.enqueue_task(  # type: ignore[attr-defined]
                 description=description,
                 source=TaskSource(source),
                 parent_task_id=parent_uuid,
@@ -177,7 +177,7 @@ class MockAbathurTaskQueueServer:
 
         # Get task from database
         try:
-            task = await self.db.get_task(task_id)
+            task = await self.db.get_task(task_id)  # type: ignore[attr-defined]
 
             if not task:
                 return {
@@ -237,7 +237,7 @@ class MockAbathurTaskQueueServer:
         # Query database
         try:
             # Build query filters
-            filters = {}
+            filters: dict[str, TaskStatus | TaskSource | str] = {}
             if status_filter:
                 filters["status"] = TaskStatus(status_filter)
             if source_filter:
@@ -245,7 +245,7 @@ class MockAbathurTaskQueueServer:
             if agent_type_filter:
                 filters["agent_type"] = agent_type_filter
 
-            tasks = await self.db.list_tasks(limit=limit, **filters)
+            tasks = await self.db.list_tasks(limit=limit, **filters)  # type: ignore[attr-defined]
 
             return {"tasks": [self._serialize_task(task) for task in tasks]}
 
@@ -255,7 +255,7 @@ class MockAbathurTaskQueueServer:
     async def _handle_task_queue_status(self, arguments: dict) -> dict:
         """Handle task_queue_status tool invocation."""
         try:
-            status = await self.task_queue_service.get_queue_status()
+            status = await self.task_queue_service.get_queue_status()  # type: ignore[attr-defined]
 
             # Serialize datetime fields
             result = {**status}
@@ -284,7 +284,7 @@ class MockAbathurTaskQueueServer:
 
         # Cancel task
         try:
-            cancelled_ids = await self.task_queue_service.cancel_task(task_id)
+            cancelled_ids = await self.task_queue_service.cancel_task(task_id)  # type: ignore[attr-defined]
 
             # First ID is the requested task, rest are cascaded
             return {
@@ -316,7 +316,7 @@ class MockAbathurTaskQueueServer:
 
         # Get execution plan
         try:
-            batches = await self.task_queue_service.get_task_execution_plan(task_ids)
+            batches = await self.task_queue_service.get_task_execution_plan(task_ids)  # type: ignore[attr-defined]
 
             # Calculate max parallelism
             max_parallelism = max(len(batch) for batch in batches) if batches else 0
@@ -768,7 +768,7 @@ async def test_task_get_not_found(mock_server, mock_db) -> None:
     mock_db.get_task.return_value = None
 
     task_id = uuid4()
-    arguments = {"task_id": str(task_id)}
+    arguments: dict[str, str] = {"task_id": str(task_id)}
 
     result = await mock_server._handle_task_get(arguments)
 
@@ -781,7 +781,7 @@ async def test_task_get_missing_task_id(mock_server, mock_db) -> None:
     """Test task_get fails with missing task_id."""
     mock_server.db = mock_db
 
-    arguments = {}
+    arguments: dict[str, str] = {}
 
     result = await mock_server._handle_task_get(arguments)
 
@@ -830,7 +830,7 @@ async def test_task_list_success_no_filters(mock_server, mock_db) -> None:
     mock_server.db = mock_db
     mock_db.list_tasks.return_value = [task1, task2]
 
-    arguments = {}
+    arguments: dict[str, str | int] = {}
 
     result = await mock_server._handle_task_list(arguments)
 
@@ -949,7 +949,7 @@ async def test_queue_status_success(mock_server, mock_task_queue_service) -> Non
     }
     mock_task_queue_service.get_queue_status.return_value = status_data
 
-    arguments = {}
+    arguments = {}  # type: ignore[var-annotated]
 
     result = await mock_server._handle_task_queue_status(arguments)
 
@@ -983,7 +983,7 @@ async def test_queue_status_empty_queue(mock_server, mock_task_queue_service) ->
     }
     mock_task_queue_service.get_queue_status.return_value = status_data
 
-    arguments = {}
+    arguments: dict[str, str] = {}
 
     result = await mock_server._handle_task_queue_status(arguments)
 
@@ -1058,7 +1058,7 @@ async def test_task_cancel_missing_task_id(mock_server, mock_task_queue_service)
     """Test task cancel fails with missing task_id."""
     mock_server.task_queue_service = mock_task_queue_service
 
-    arguments = {}
+    arguments: dict[str, str] = {}
 
     result = await mock_server._handle_task_cancel(arguments)
 
@@ -1115,7 +1115,7 @@ async def test_execution_plan_empty_task_ids(mock_server, mock_task_queue_servic
     mock_server.task_queue_service = mock_task_queue_service
     mock_task_queue_service.get_task_execution_plan.return_value = []
 
-    arguments = {"task_ids": []}
+    arguments: dict[str, list[str]] = {"task_ids": []}
 
     result = await mock_server._handle_task_execution_plan(arguments)
 
@@ -1150,7 +1150,7 @@ async def test_execution_plan_missing_task_ids(mock_server, mock_task_queue_serv
     """Test execution plan fails with missing task_ids."""
     mock_server.task_queue_service = mock_task_queue_service
 
-    arguments = {}
+    arguments: dict[str, str] = {}
 
     result = await mock_server._handle_task_execution_plan(arguments)
 
