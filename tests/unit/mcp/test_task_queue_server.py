@@ -402,7 +402,7 @@ def sample_task():
 
 
 @pytest.mark.asyncio
-async def test_server_initialization(mock_server):
+async def test_server_initialization(mock_server) -> None:
     """Test that server initializes with correct name."""
     assert mock_server.server.name == "abathur-task-queue"
     assert mock_server.db_path == Path(":memory:")
@@ -412,7 +412,9 @@ async def test_server_initialization(mock_server):
 
 
 @pytest.mark.asyncio
-async def test_task_enqueue_success_minimal(mock_server, mock_task_queue_service, sample_task):
+async def test_task_enqueue_success_minimal(
+    mock_server, mock_task_queue_service, sample_task
+) -> None:
     """Test successful task enqueue with minimal parameters."""
     mock_server.task_queue_service = mock_task_queue_service
     mock_task_queue_service.enqueue_task.return_value = sample_task
@@ -440,7 +442,7 @@ async def test_task_enqueue_success_minimal(mock_server, mock_task_queue_service
 
 
 @pytest.mark.asyncio
-async def test_task_enqueue_success_full_parameters(mock_server, mock_task_queue_service):
+async def test_task_enqueue_success_full_parameters(mock_server, mock_task_queue_service) -> None:
     """Test successful task enqueue with all parameters."""
     prereq_id = uuid4()
     parent_id = uuid4()
@@ -496,7 +498,7 @@ async def test_task_enqueue_success_full_parameters(mock_server, mock_task_queue
 
 
 @pytest.mark.asyncio
-async def test_task_enqueue_missing_description(mock_server, mock_task_queue_service):
+async def test_task_enqueue_missing_description(mock_server, mock_task_queue_service) -> None:
     """Test task enqueue fails with missing description."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -511,7 +513,7 @@ async def test_task_enqueue_missing_description(mock_server, mock_task_queue_ser
 
 
 @pytest.mark.asyncio
-async def test_task_enqueue_missing_source(mock_server, mock_task_queue_service):
+async def test_task_enqueue_missing_source(mock_server, mock_task_queue_service) -> None:
     """Test task enqueue fails with missing source."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -526,7 +528,7 @@ async def test_task_enqueue_missing_source(mock_server, mock_task_queue_service)
 
 
 @pytest.mark.asyncio
-async def test_task_enqueue_invalid_priority_range(mock_server, mock_task_queue_service):
+async def test_task_enqueue_invalid_priority_range(mock_server, mock_task_queue_service) -> None:
     """Test task enqueue fails with priority out of range."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -549,7 +551,9 @@ async def test_task_enqueue_invalid_priority_range(mock_server, mock_task_queue_
 
 
 @pytest.mark.asyncio
-async def test_task_enqueue_invalid_agent_type_general_purpose(mock_server, mock_task_queue_service):
+async def test_task_enqueue_invalid_agent_type_general_purpose(
+    mock_server, mock_task_queue_service
+) -> None:
     """Test task enqueue fails with 'general-purpose' agent type."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -568,7 +572,9 @@ async def test_task_enqueue_invalid_agent_type_general_purpose(mock_server, mock
 
 
 @pytest.mark.asyncio
-async def test_task_enqueue_invalid_agent_type_generic(mock_server, mock_task_queue_service):
+async def test_task_enqueue_invalid_agent_type_generic(
+    mock_server, mock_task_queue_service
+) -> None:
     """Test task enqueue fails with generic agent types."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -592,11 +598,15 @@ async def test_task_enqueue_invalid_agent_type_generic(mock_server, mock_task_qu
 
         assert result["error"] == "ValidationError", f"Failed for {agent_type}"
         assert "Invalid agent_type" in result["message"], f"Failed for {agent_type}"
-        assert "Generic agent types are not allowed" in result["message"], f"Failed for {agent_type}"
+        assert (
+            "Generic agent types are not allowed" in result["message"]
+        ), f"Failed for {agent_type}"
 
 
 @pytest.mark.asyncio
-async def test_task_enqueue_valid_specialized_agent_types(mock_server, mock_task_queue_service, sample_task):
+async def test_task_enqueue_valid_specialized_agent_types(
+    mock_server, mock_task_queue_service, sample_task
+) -> None:
     """Test task enqueue succeeds with valid specialized agent types."""
     mock_server.task_queue_service = mock_task_queue_service
     mock_task_queue_service.enqueue_task.return_value = sample_task
@@ -624,7 +634,7 @@ async def test_task_enqueue_valid_specialized_agent_types(mock_server, mock_task
 
 
 @pytest.mark.asyncio
-async def test_task_enqueue_invalid_source(mock_server, mock_task_queue_service):
+async def test_task_enqueue_invalid_source(mock_server, mock_task_queue_service) -> None:
     """Test task enqueue fails with invalid source."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -640,7 +650,7 @@ async def test_task_enqueue_invalid_source(mock_server, mock_task_queue_service)
 
 
 @pytest.mark.asyncio
-async def test_task_enqueue_invalid_prerequisite_uuid(mock_server, mock_task_queue_service):
+async def test_task_enqueue_invalid_prerequisite_uuid(mock_server, mock_task_queue_service) -> None:
     """Test task enqueue fails with invalid prerequisite UUID."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -657,7 +667,7 @@ async def test_task_enqueue_invalid_prerequisite_uuid(mock_server, mock_task_que
 
 
 @pytest.mark.asyncio
-async def test_task_enqueue_invalid_parent_uuid(mock_server, mock_task_queue_service):
+async def test_task_enqueue_invalid_parent_uuid(mock_server, mock_task_queue_service) -> None:
     """Test task enqueue fails with invalid parent_task_id UUID."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -674,7 +684,7 @@ async def test_task_enqueue_invalid_parent_uuid(mock_server, mock_task_queue_ser
 
 
 @pytest.mark.asyncio
-async def test_task_enqueue_invalid_deadline_format(mock_server, mock_task_queue_service):
+async def test_task_enqueue_invalid_deadline_format(mock_server, mock_task_queue_service) -> None:
     """Test task enqueue fails with invalid deadline format."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -691,7 +701,7 @@ async def test_task_enqueue_invalid_deadline_format(mock_server, mock_task_queue
 
 
 @pytest.mark.asyncio
-async def test_task_enqueue_circular_dependency(mock_server, mock_task_queue_service):
+async def test_task_enqueue_circular_dependency(mock_server, mock_task_queue_service) -> None:
     """Test task enqueue fails when circular dependency detected."""
     mock_server.task_queue_service = mock_task_queue_service
     mock_task_queue_service.enqueue_task.side_effect = CircularDependencyError(
@@ -711,7 +721,7 @@ async def test_task_enqueue_circular_dependency(mock_server, mock_task_queue_ser
 
 
 @pytest.mark.asyncio
-async def test_task_enqueue_prerequisite_not_found(mock_server, mock_task_queue_service):
+async def test_task_enqueue_prerequisite_not_found(mock_server, mock_task_queue_service) -> None:
     """Test task enqueue fails when prerequisite doesn't exist."""
     mock_server.task_queue_service = mock_task_queue_service
     prereq_id = uuid4()
@@ -735,7 +745,7 @@ async def test_task_enqueue_prerequisite_not_found(mock_server, mock_task_queue_
 
 
 @pytest.mark.asyncio
-async def test_task_get_success(mock_server, mock_db, sample_task):
+async def test_task_get_success(mock_server, mock_db, sample_task) -> None:
     """Test successful task retrieval by ID."""
     mock_server.db = mock_db
     mock_db.get_task.return_value = sample_task
@@ -752,7 +762,7 @@ async def test_task_get_success(mock_server, mock_db, sample_task):
 
 
 @pytest.mark.asyncio
-async def test_task_get_not_found(mock_server, mock_db):
+async def test_task_get_not_found(mock_server, mock_db) -> None:
     """Test task_get returns error when task not found."""
     mock_server.db = mock_db
     mock_db.get_task.return_value = None
@@ -767,7 +777,7 @@ async def test_task_get_not_found(mock_server, mock_db):
 
 
 @pytest.mark.asyncio
-async def test_task_get_missing_task_id(mock_server, mock_db):
+async def test_task_get_missing_task_id(mock_server, mock_db) -> None:
     """Test task_get fails with missing task_id."""
     mock_server.db = mock_db
 
@@ -780,7 +790,7 @@ async def test_task_get_missing_task_id(mock_server, mock_db):
 
 
 @pytest.mark.asyncio
-async def test_task_get_invalid_uuid(mock_server, mock_db):
+async def test_task_get_invalid_uuid(mock_server, mock_db) -> None:
     """Test task_get fails with invalid UUID format."""
     mock_server.db = mock_db
 
@@ -796,7 +806,7 @@ async def test_task_get_invalid_uuid(mock_server, mock_db):
 
 
 @pytest.mark.asyncio
-async def test_task_list_success_no_filters(mock_server, mock_db):
+async def test_task_list_success_no_filters(mock_server, mock_db) -> None:
     """Test successful task list with no filters."""
     task1 = Task(
         id=uuid4(),
@@ -831,7 +841,7 @@ async def test_task_list_success_no_filters(mock_server, mock_db):
 
 
 @pytest.mark.asyncio
-async def test_task_list_with_status_filter(mock_server, mock_db):
+async def test_task_list_with_status_filter(mock_server, mock_db) -> None:
     """Test task list with status filter."""
     ready_task = Task(
         id=uuid4(),
@@ -856,7 +866,7 @@ async def test_task_list_with_status_filter(mock_server, mock_db):
 
 
 @pytest.mark.asyncio
-async def test_task_list_with_limit(mock_server, mock_db):
+async def test_task_list_with_limit(mock_server, mock_db) -> None:
     """Test task list with custom limit."""
     mock_server.db = mock_db
     mock_db.list_tasks.return_value = []
@@ -871,7 +881,7 @@ async def test_task_list_with_limit(mock_server, mock_db):
 
 
 @pytest.mark.asyncio
-async def test_task_list_invalid_status(mock_server, mock_db):
+async def test_task_list_invalid_status(mock_server, mock_db) -> None:
     """Test task list fails with invalid status."""
     mock_server.db = mock_db
 
@@ -884,7 +894,7 @@ async def test_task_list_invalid_status(mock_server, mock_db):
 
 
 @pytest.mark.asyncio
-async def test_task_list_invalid_limit(mock_server, mock_db):
+async def test_task_list_invalid_limit(mock_server, mock_db) -> None:
     """Test task list fails with invalid limit."""
     mock_server.db = mock_db
 
@@ -902,7 +912,7 @@ async def test_task_list_invalid_limit(mock_server, mock_db):
 
 
 @pytest.mark.asyncio
-async def test_task_list_empty_result(mock_server, mock_db):
+async def test_task_list_empty_result(mock_server, mock_db) -> None:
     """Test task list returns empty array when no matches."""
     mock_server.db = mock_db
     mock_db.list_tasks.return_value = []
@@ -919,7 +929,7 @@ async def test_task_list_empty_result(mock_server, mock_db):
 
 
 @pytest.mark.asyncio
-async def test_queue_status_success(mock_server, mock_task_queue_service):
+async def test_queue_status_success(mock_server, mock_task_queue_service) -> None:
     """Test successful queue status retrieval."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -953,7 +963,7 @@ async def test_queue_status_success(mock_server, mock_task_queue_service):
 
 
 @pytest.mark.asyncio
-async def test_queue_status_empty_queue(mock_server, mock_task_queue_service):
+async def test_queue_status_empty_queue(mock_server, mock_task_queue_service) -> None:
     """Test queue status with empty queue."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -987,7 +997,7 @@ async def test_queue_status_empty_queue(mock_server, mock_task_queue_service):
 
 
 @pytest.mark.asyncio
-async def test_task_cancel_success_no_cascade(mock_server, mock_task_queue_service):
+async def test_task_cancel_success_no_cascade(mock_server, mock_task_queue_service) -> None:
     """Test successful task cancellation with no dependents."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -1005,7 +1015,7 @@ async def test_task_cancel_success_no_cascade(mock_server, mock_task_queue_servi
 
 
 @pytest.mark.asyncio
-async def test_task_cancel_success_with_cascade(mock_server, mock_task_queue_service):
+async def test_task_cancel_success_with_cascade(mock_server, mock_task_queue_service) -> None:
     """Test successful task cancellation with dependent tasks."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -1028,7 +1038,7 @@ async def test_task_cancel_success_with_cascade(mock_server, mock_task_queue_ser
 
 
 @pytest.mark.asyncio
-async def test_task_cancel_not_found(mock_server, mock_task_queue_service):
+async def test_task_cancel_not_found(mock_server, mock_task_queue_service) -> None:
     """Test task cancel fails when task not found."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -1044,7 +1054,7 @@ async def test_task_cancel_not_found(mock_server, mock_task_queue_service):
 
 
 @pytest.mark.asyncio
-async def test_task_cancel_missing_task_id(mock_server, mock_task_queue_service):
+async def test_task_cancel_missing_task_id(mock_server, mock_task_queue_service) -> None:
     """Test task cancel fails with missing task_id."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -1057,7 +1067,7 @@ async def test_task_cancel_missing_task_id(mock_server, mock_task_queue_service)
 
 
 @pytest.mark.asyncio
-async def test_task_cancel_invalid_uuid(mock_server, mock_task_queue_service):
+async def test_task_cancel_invalid_uuid(mock_server, mock_task_queue_service) -> None:
     """Test task cancel fails with invalid UUID."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -1073,7 +1083,7 @@ async def test_task_cancel_invalid_uuid(mock_server, mock_task_queue_service):
 
 
 @pytest.mark.asyncio
-async def test_execution_plan_success(mock_server, mock_task_queue_service):
+async def test_execution_plan_success(mock_server, mock_task_queue_service) -> None:
     """Test successful execution plan calculation."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -1100,7 +1110,7 @@ async def test_execution_plan_success(mock_server, mock_task_queue_service):
 
 
 @pytest.mark.asyncio
-async def test_execution_plan_empty_task_ids(mock_server, mock_task_queue_service):
+async def test_execution_plan_empty_task_ids(mock_server, mock_task_queue_service) -> None:
     """Test execution plan with empty task_ids."""
     mock_server.task_queue_service = mock_task_queue_service
     mock_task_queue_service.get_task_execution_plan.return_value = []
@@ -1116,7 +1126,7 @@ async def test_execution_plan_empty_task_ids(mock_server, mock_task_queue_servic
 
 
 @pytest.mark.asyncio
-async def test_execution_plan_circular_dependency(mock_server, mock_task_queue_service):
+async def test_execution_plan_circular_dependency(mock_server, mock_task_queue_service) -> None:
     """Test execution plan fails with circular dependency."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -1136,7 +1146,7 @@ async def test_execution_plan_circular_dependency(mock_server, mock_task_queue_s
 
 
 @pytest.mark.asyncio
-async def test_execution_plan_missing_task_ids(mock_server, mock_task_queue_service):
+async def test_execution_plan_missing_task_ids(mock_server, mock_task_queue_service) -> None:
     """Test execution plan fails with missing task_ids."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -1149,7 +1159,7 @@ async def test_execution_plan_missing_task_ids(mock_server, mock_task_queue_serv
 
 
 @pytest.mark.asyncio
-async def test_execution_plan_invalid_task_ids_type(mock_server, mock_task_queue_service):
+async def test_execution_plan_invalid_task_ids_type(mock_server, mock_task_queue_service) -> None:
     """Test execution plan fails when task_ids is not an array."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -1162,7 +1172,7 @@ async def test_execution_plan_invalid_task_ids_type(mock_server, mock_task_queue
 
 
 @pytest.mark.asyncio
-async def test_execution_plan_invalid_uuid_in_array(mock_server, mock_task_queue_service):
+async def test_execution_plan_invalid_uuid_in_array(mock_server, mock_task_queue_service) -> None:
     """Test execution plan fails with invalid UUID in task_ids."""
     mock_server.task_queue_service = mock_task_queue_service
 
@@ -1178,7 +1188,7 @@ async def test_execution_plan_invalid_uuid_in_array(mock_server, mock_task_queue
 
 
 @pytest.mark.asyncio
-async def test_task_serialize_with_all_fields(mock_server):
+async def test_task_serialize_with_all_fields(mock_server) -> None:
     """Test task serialization includes all fields."""
     parent_id = uuid4()
     task = Task(
@@ -1226,7 +1236,7 @@ async def test_task_serialize_with_all_fields(mock_server):
 
 
 @pytest.mark.asyncio
-async def test_task_serialize_with_minimal_fields(mock_server):
+async def test_task_serialize_with_minimal_fields(mock_server) -> None:
     """Test task serialization with only required fields."""
     task = Task(
         id=uuid4(),
@@ -1249,7 +1259,7 @@ async def test_task_serialize_with_minimal_fields(mock_server):
 
 
 @pytest.mark.asyncio
-async def test_handler_exception_handling(mock_server, mock_task_queue_service):
+async def test_handler_exception_handling(mock_server, mock_task_queue_service) -> None:
     """Test that unexpected exceptions are caught and formatted."""
     mock_server.task_queue_service = mock_task_queue_service
     mock_task_queue_service.enqueue_task.side_effect = Exception("Unexpected database error")

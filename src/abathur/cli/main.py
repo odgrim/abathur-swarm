@@ -252,7 +252,11 @@ def list_tasks(
 
         for task in tasks:
             # Truncate summary and ID for display
-            summary_preview = (task.summary[:40] + "...") if task.summary and len(task.summary) > 40 else (task.summary or "-")
+            summary_preview = (
+                (task.summary[:40] + "...")
+                if task.summary and len(task.summary) > 40
+                else (task.summary or "-")
+            )
             table.add_row(
                 str(task.id)[:8],
                 summary_preview,

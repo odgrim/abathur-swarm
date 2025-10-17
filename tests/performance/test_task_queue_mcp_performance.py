@@ -114,7 +114,7 @@ async def measure_latencies(func, iterations: int = 100):
 @pytest.mark.performance
 async def test_enqueue_simple_task_latency(
     memory_db: Database, task_queue_service: TaskQueueService
-):
+) -> None:
     """Test that simple task enqueue completes in <10ms (target).
 
     Target: <10ms for 95th percentile
@@ -143,7 +143,7 @@ async def test_enqueue_simple_task_latency(
 @pytest.mark.performance
 async def test_enqueue_task_with_dependencies_latency(
     memory_db: Database, task_queue_service: TaskQueueService
-):
+) -> None:
     """Test task enqueue with dependencies completes in reasonable time.
 
     Target: <20ms for task with 5 prerequisites (includes validation)
@@ -177,7 +177,9 @@ async def test_enqueue_task_with_dependencies_latency(
 
 @pytest.mark.asyncio
 @pytest.mark.performance
-async def test_get_task_by_id_latency(memory_db: Database, task_queue_service: TaskQueueService):
+async def test_get_task_by_id_latency(
+    memory_db: Database, task_queue_service: TaskQueueService
+) -> None:
     """Test that get task by ID completes in <5ms.
 
     Target: <5ms for 99th percentile (indexed query)
@@ -203,7 +205,9 @@ async def test_get_task_by_id_latency(memory_db: Database, task_queue_service: T
 
 @pytest.mark.asyncio
 @pytest.mark.performance
-async def test_get_next_task_latency(memory_db: Database, task_queue_service: TaskQueueService):
+async def test_get_next_task_latency(
+    memory_db: Database, task_queue_service: TaskQueueService
+) -> None:
     """Test that get_next_task completes in <5ms.
 
     Target: <5ms for 99th percentile (single indexed query)
@@ -230,7 +234,9 @@ async def test_get_next_task_latency(memory_db: Database, task_queue_service: Ta
 
 @pytest.mark.asyncio
 @pytest.mark.performance
-async def test_queue_status_latency(memory_db: Database, task_queue_service: TaskQueueService):
+async def test_queue_status_latency(
+    memory_db: Database, task_queue_service: TaskQueueService
+) -> None:
     """Test that queue status query completes in <20ms.
 
     Target: <20ms even with 1000 tasks
@@ -259,7 +265,7 @@ async def test_queue_status_latency(memory_db: Database, task_queue_service: Tas
 @pytest.mark.performance
 async def test_cancel_task_with_dependents_latency(
     memory_db: Database, task_queue_service: TaskQueueService
-):
+) -> None:
     """Test that cancel task with 10 dependents completes in <50ms.
 
     Target: <50ms for cascade cancellation
@@ -296,7 +302,9 @@ async def test_cancel_task_with_dependents_latency(
 
 @pytest.mark.asyncio
 @pytest.mark.performance
-async def test_execution_plan_latency(memory_db: Database, task_queue_service: TaskQueueService):
+async def test_execution_plan_latency(
+    memory_db: Database, task_queue_service: TaskQueueService
+) -> None:
     """Test that execution plan calculation completes in <30ms for 100 tasks.
 
     Target: <30ms for 100-task graph
@@ -334,7 +342,9 @@ async def test_execution_plan_latency(memory_db: Database, task_queue_service: T
 
 @pytest.mark.asyncio
 @pytest.mark.performance
-async def test_enqueue_throughput(memory_db: Database, task_queue_service: TaskQueueService):
+async def test_enqueue_throughput(
+    memory_db: Database, task_queue_service: TaskQueueService
+) -> None:
     """Test task enqueue throughput (tasks per second).
 
     Target: >50 tasks/second for simple tasks
@@ -364,7 +374,7 @@ async def test_enqueue_throughput(memory_db: Database, task_queue_service: TaskQ
 @pytest.mark.performance
 async def test_query_throughput(
     memory_db: Database, task_queue_service: TaskQueueService, large_queue: list[UUID]
-):
+) -> None:
     """Test query throughput (queries per second).
 
     Target: >100 queries/second for get_task by ID
@@ -396,7 +406,7 @@ async def test_query_throughput(
 @pytest.mark.performance
 async def test_queue_status_scales_with_task_count(
     memory_db: Database, task_queue_service: TaskQueueService
-):
+) -> None:
     """Test that queue status performance scales linearly with task count.
 
     Measure latency at 100, 500, 1000, 5000 tasks
@@ -432,7 +442,7 @@ async def test_queue_status_scales_with_task_count(
 @pytest.mark.performance
 async def test_dependency_depth_scales_linearly(
     memory_db: Database, task_queue_service: TaskQueueService
-):
+) -> None:
     """Test that dependency depth calculation scales linearly.
 
     Create chain of depth 10, 20, 50 and measure calculation time
@@ -473,7 +483,7 @@ async def test_dependency_depth_scales_linearly(
 @pytest.mark.performance
 async def test_concurrent_enqueue_50_agents(
     memory_db: Database, task_queue_service: TaskQueueService
-):
+) -> None:
     """Test concurrent task enqueue from 50 agents.
 
     Target: No significant degradation compared to sequential
@@ -515,7 +525,7 @@ async def test_concurrent_enqueue_50_agents(
 @pytest.mark.performance
 async def test_concurrent_dequeue_100_agents(
     memory_db: Database, task_queue_service: TaskQueueService
-):
+) -> None:
     """Test concurrent task dequeue from 100 agents.
 
     Target: Support 100 concurrent get_next_task calls
@@ -552,7 +562,7 @@ async def test_concurrent_dequeue_100_agents(
 @pytest.mark.performance
 async def test_concurrent_mixed_operations(
     memory_db: Database, task_queue_service: TaskQueueService
-):
+) -> None:
     """Test mixed concurrent operations (enqueue + dequeue + status).
 
     Simulates realistic workload with multiple operation types
@@ -611,7 +621,7 @@ async def test_concurrent_mixed_operations(
 
 @pytest.mark.asyncio
 @pytest.mark.performance
-async def test_explain_get_next_task_query(memory_db: Database):
+async def test_explain_get_next_task_query(memory_db: Database) -> None:
     """Verify that get_next_task query uses index.
 
     Query should use idx_tasks_status_priority composite index
@@ -653,7 +663,7 @@ async def test_explain_get_next_task_query(memory_db: Database):
             """,
             (TaskStatus.READY.value,),
         )
-        plan = await cursor.fetchall()
+        plan = list(await cursor.fetchall())
 
     print("\nQuery Plan for get_next_task:")
     for row in plan:
@@ -670,7 +680,7 @@ async def test_explain_get_next_task_query(memory_db: Database):
 
 @pytest.mark.asyncio
 @pytest.mark.performance
-async def test_explain_queue_status_query(memory_db: Database):
+async def test_explain_queue_status_query(memory_db: Database) -> None:
     """Verify that queue status query is optimized.
 
     Should use indexes for status counting
@@ -710,7 +720,7 @@ async def test_explain_queue_status_query(memory_db: Database):
             GROUP BY status
             """
         )
-        plan = await cursor.fetchall()
+        plan = list(await cursor.fetchall())
 
     print("\nQuery Plan for queue status aggregation:")
     for row in plan:
@@ -724,7 +734,7 @@ async def test_explain_queue_status_query(memory_db: Database):
 @pytest.mark.performance
 async def test_memory_usage_with_large_queue(
     memory_db: Database, task_queue_service: TaskQueueService
-):
+) -> None:
     """Test memory usage with large queue.
 
     Create 10,000 tasks and verify memory doesn't leak
