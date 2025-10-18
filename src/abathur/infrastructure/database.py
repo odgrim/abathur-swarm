@@ -150,22 +150,20 @@ class DeleteResult(BaseModel):
     blocked deletions due to child task dependencies, and any errors
     encountered during the operation.
 
-    Used by delete_tasks() and delete_tasks_by_status() methods to provide
-    structured, type-safe results.
+    Used by delete_tasks() method to provide structured, type-safe results.
     """
 
-    deleted_tasks: int = Field(
+    deleted_count: int = Field(
         ge=0, description="Number of tasks successfully deleted"
     )
 
     blocked_deletions: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="Tasks that could not be deleted due to child task dependencies"
+        description="Tasks blocked from deletion due to child dependencies (task_id, child_ids)",
     )
 
     errors: list[str] = Field(
-        default_factory=list,
-        description="Error messages encountered during deletion"
+        default_factory=list, description="Error messages from deletion process"
     )
 
 
@@ -203,30 +201,6 @@ class PruneResult(BaseModel):
                     f"Breakdown count for status {status} must be non-negative, got {count}"
                 )
         return v
-
-
-class DeleteResult(BaseModel):
-    """Result from delete_tasks operation.
-
-    Contains metrics about task deletion including successful deletions,
-    blocked deletions due to child task dependencies, and any errors
-    encountered during the operation.
-
-    Used by delete_tasks() method to provide structured, type-safe results.
-    """
-
-    deleted_count: int = Field(
-        ge=0, description="Number of tasks successfully deleted"
-    )
-
-    blocked_deletions: list[dict[str, Any]] = Field(
-        default_factory=list,
-        description="Tasks blocked from deletion due to child dependencies (task_id, child_ids)",
-    )
-
-    errors: list[str] = Field(
-        default_factory=list, description="Error messages from deletion process"
-    )
 
 
 class Database:
@@ -1842,7 +1816,7 @@ class Database:
             status: Status filter for deletion (TaskStatus enum)
 
         Returns:
-            DeleteResult with deleted_tasks count
+            DeleteResult with deleted_count
 
         Raises:
             DatabaseError: If deletion fails
@@ -1854,7 +1828,7 @@ class Database:
                 (status.value,),
             )
             await conn.commit()
-            return DeleteResult(deleted_tasks=cursor.rowcount)
+            return DeleteResult(deleted_count=cursor.rowcount)
 
     async def delete_tasks(self, task_ids: list[UUID]) -> DeleteResult:
         """Delete tasks by ID list with child task validation.
@@ -1864,7 +1838,7 @@ class Database:
 
         Returns:
             DeleteResult with:
-                - deleted_tasks: Number of tasks actually deleted (0 if task_ids is empty)
+                - deleted_count: Number of tasks actually deleted (0 if task_ids is empty)
                 - blocked_deletions: List of dicts with task_id and child_ids for blocked parents
                 - errors: List of error messages
 
@@ -1876,7 +1850,7 @@ class Database:
         """
         # Handle empty list - return early with 0 deletions
         if not task_ids:
-            return DeleteResult(deleted_tasks=0, blocked_deletions=[], errors=[])
+            return DeleteResult(deleted_count=0, blocked_deletions=[], errors=[])
 
         async with self._get_connection() as conn:
             # Enable foreign key constraints for CASCADE deletion
@@ -1901,7 +1875,7 @@ class Database:
                 ]
 
                 return DeleteResult(
-                    deleted_tasks=0,
+                    deleted_count=0,
                     blocked_deletions=blocked_deletions,
                     errors=["Cannot delete tasks with child tasks. Delete children first."]
                 )
@@ -1919,7 +1893,7 @@ class Database:
             await conn.commit()
 
             return DeleteResult(
-                deleted_tasks=cursor.rowcount,
+                deleted_count=cursor.rowcount,
                 blocked_deletions=[],
                 errors=[]
             )
