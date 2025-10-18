@@ -3,12 +3,14 @@
 import asyncio
 import json
 import logging
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+import aiosqlite
 import typer
 from pydantic import ValidationError
 from rich.console import Console
@@ -642,18 +644,50 @@ def prune(
             console.print("[blue]Deleting tasks...[/blue]")
             try:
                 result = await services["database"].prune_tasks(filters)
-            except Exception as e:
+            except sqlite3.OperationalError as e:
+                # Database locked, busy, or permission issues
                 console.print(
-                    f"[red]Error:[/red] Database operation failed: {type(e).__name__}: {e}"
+                    "[red]Error:[/red] Database is locked or busy.\n"
+                    "This can happen if another process is using the database.\n"
+                    "Try again in a few moments."
                 )
-                logger.exception(
-                    "Database error during task pruning",
-                    extra={
-                        "operation": "task_prune",
-                        "task_count": len(preview_task_ids),
-                        "error_type": type(e).__name__
-                    }
+                logger.error(f"Database operational error: {e}")
+                raise typer.Exit(1)
+            except sqlite3.IntegrityError as e:
+                # Foreign key violations, constraint failures
+                console.print(
+                    "[red]Error:[/red] Database integrity constraint violated.\n"
+                    "This may indicate data corruption or concurrent modifications.\n"
+                    f"Details: {e}"
                 )
+                logger.error(f"Database integrity error: {e}")
+                raise typer.Exit(1)
+            except aiosqlite.Error as e:
+                # General aiosqlite errors (connection, protocol, etc.)
+                console.print(
+                    "[red]Error:[/red] Database connection or protocol error.\n"
+                    f"Details: {e}\n"
+                    "Check database file permissions and disk space."
+                )
+                logger.error(f"Aiosqlite error: {e}")
+                raise typer.Exit(1)
+            except ValueError as e:
+                # Validation errors from our code
+                console.print(
+                    f"[red]Error:[/red] Invalid parameters: {e}\n"
+                    "Check your command arguments and try again."
+                )
+                logger.error(f"Validation error: {e}")
+                raise typer.Exit(1)
+            except Exception as e:
+                # Unexpected errors - still catch for safety
+                console.print(
+                    f"[red]Error:[/red] Unexpected error during task deletion.\n"
+                    f"Type: {type(e).__name__}\n"
+                    f"Details: {e}\n"
+                    "Please report this issue if it persists."
+                )
+                logger.exception("Unexpected error in prune command")
                 raise typer.Exit(1)
 
             # Component 6: PruneResult Display (~25 lines)
