@@ -563,6 +563,10 @@ class Database:
                 print("Added session_id column to agents")
 
             # Migration: Add CASCADE DELETE to agents.task_id foreign key
+            # Cleanup Strategy: Skip migration with warning if orphans detected
+            # Rationale: Prevents data loss by requiring manual investigation of orphaned records
+            # before applying CASCADE DELETE constraint that would hide future orphans
+
             # Check if CASCADE already exists
             cursor = await conn.execute("PRAGMA foreign_key_list(agents)")
             fk_list = await cursor.fetchall()
@@ -718,6 +722,10 @@ class Database:
                 print("Added session_id column to checkpoints")
 
             # Migration: Add CASCADE DELETE to checkpoints.task_id foreign key
+            # Cleanup Strategy: Skip migration with warning if orphans detected
+            # Rationale: Prevents data loss by requiring manual investigation of orphaned records
+            # before applying CASCADE DELETE constraint that would hide future orphans
+
             # Check if CASCADE already exists
             cursor = await conn.execute("PRAGMA foreign_key_list(checkpoints)")
             fk_list = await cursor.fetchall()
@@ -726,9 +734,7 @@ class Database:
             )
 
             if task_fk and task_fk["on_delete"] != "CASCADE":
-                print("Migrating database schema: adding CASCADE DELETE to checkpoints.task_id foreign key")
-
-                # Check for orphaned checkpoints BEFORE migration
+                # Pre-migration data integrity check: detect orphaned checkpoints
                 cursor = await conn.execute("""
                     SELECT COUNT(*) as orphan_count
                     FROM checkpoints c
@@ -755,51 +761,55 @@ class Database:
                     for sample in orphan_samples:
                         print(f"  - task_id: {sample['task_id']}, iteration: {sample['iteration']}, created_at: {sample['created_at']}")
 
-                    print("Migration will proceed: orphaned records will be preserved, but future orphans prevented by CASCADE DELETE")
+                    print("SKIPPING CASCADE DELETE migration to prevent data loss.")
+                    print("Please manually clean up orphaned checkpoints or restore missing tasks before retrying.")
+                else:
+                    # No orphans detected - proceed with migration
+                    print("Migrating database schema: adding CASCADE DELETE to checkpoints.task_id foreign key")
 
-                # Temporarily disable foreign keys
-                await conn.execute("PRAGMA foreign_keys=OFF")
+                    # Temporarily disable foreign keys
+                    await conn.execute("PRAGMA foreign_keys=OFF")
 
-                # Create new table with CASCADE DELETE
-                await conn.execute(
-                    """
-                    CREATE TABLE checkpoints_new (
-                        task_id TEXT NOT NULL,
-                        iteration INTEGER NOT NULL,
-                        state TEXT NOT NULL,
-                        created_at TIMESTAMP NOT NULL,
-                        session_id TEXT,
-                        PRIMARY KEY (task_id, iteration),
-                        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
-                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                    # Create new table with CASCADE DELETE
+                    await conn.execute(
+                        """
+                        CREATE TABLE checkpoints_new (
+                            task_id TEXT NOT NULL,
+                            iteration INTEGER NOT NULL,
+                            state TEXT NOT NULL,
+                            created_at TIMESTAMP NOT NULL,
+                            session_id TEXT,
+                            PRIMARY KEY (task_id, iteration),
+                            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                        )
+                        """
                     )
-                    """
-                )
 
-                # Copy data from old table to new table
-                await conn.execute(
-                    """
-                    INSERT INTO checkpoints_new
-                    SELECT * FROM checkpoints
-                    """
-                )
+                    # Copy data from old table to new table
+                    await conn.execute(
+                        """
+                        INSERT INTO checkpoints_new
+                        SELECT * FROM checkpoints
+                        """
+                    )
 
-                # Drop old table
-                await conn.execute("DROP TABLE checkpoints")
+                    # Drop old table
+                    await conn.execute("DROP TABLE checkpoints")
 
-                # Rename new table to checkpoints
-                await conn.execute("ALTER TABLE checkpoints_new RENAME TO checkpoints")
+                    # Rename new table to checkpoints
+                    await conn.execute("ALTER TABLE checkpoints_new RENAME TO checkpoints")
 
-                # Recreate indexes
-                await conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints(task_id, iteration DESC)"
-                )
+                    # Recreate indexes
+                    await conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints(task_id, iteration DESC)"
+                    )
 
-                # Re-enable foreign keys
-                await conn.execute("PRAGMA foreign_keys=ON")
+                    # Re-enable foreign keys
+                    await conn.execute("PRAGMA foreign_keys=ON")
 
-                await conn.commit()
-                print("Added CASCADE DELETE to checkpoints.task_id foreign key")
+                    await conn.commit()
+                    print("Added CASCADE DELETE to checkpoints.task_id foreign key")
 
         # Check if audit table needs task_id to be nullable
         cursor = await conn.execute(
