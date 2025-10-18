@@ -189,19 +189,31 @@ When invoked, you must follow these steps:
    - Mitigation strategies for each identified risk
 
 9. **Store Architecture in Memory**
-   Save architectural decisions and analysis:
+   Save architectural decisions and analysis using the CURRENT task ID (do NOT spawn a new task):
    ```python
-   # Create task to track architectural work
-   arch_task = task_enqueue({
-       "description": "Technical Architecture Analysis",
-       "source": "technical-architect",
-       "agent_type": "technical-architect",
-       "priority": 7
-   })
+   # Extract current task ID - the technical-architect IS already executing as a task
+   # Query for current IN_PROGRESS technical-architect task
+   current_tasks = task_list(filter={"agent_type": "technical-architect", "status": "IN_PROGRESS"})
+   current_task_id = None
 
-   # Store architectural overview
+   # Find the current task (spawned by requirements-gatherer or task-planner)
+   for task in current_tasks:
+       if task.get('source') in ['requirements-gatherer', 'task-planner', 'project-orchestrator']:
+           current_task_id = task['task_id']
+           break
+
+   # Fallback: If task_id is available in globals/context
+   if not current_task_id and 'task_id' in globals():
+       current_task_id = task_id
+
+   # Last resort: Create descriptive namespace (should rarely happen)
+   if not current_task_id:
+       import time
+       current_task_id = f"arch_{problem_domain}_{int(time.time())}"
+
+   # Store architectural overview using CURRENT task ID (NO self-spawning)
    memory_add({
-       "namespace": f"task:{arch_task['task_id']}:architecture",
+       "namespace": f"task:{current_task_id}:architecture",
        "key": "overview",
        "value": {
            "architectural_style": architectural_style,
@@ -216,7 +228,7 @@ When invoked, you must follow these steps:
 
    # Store technology stack decisions
    memory_add({
-       "namespace": f"task:{arch_task['task_id']}:architecture",
+       "namespace": f"task:{current_task_id}:architecture",
        "key": "technology_stack",
        "value": {
            "languages": language_choices,
@@ -231,7 +243,7 @@ When invoked, you must follow these steps:
 
    # Store risk assessment
    memory_add({
-       "namespace": f"task:{arch_task['task_id']}:architecture",
+       "namespace": f"task:{current_task_id}:architecture",
        "key": "risks",
        "value": {
            "identified_risks": risk_list,
@@ -255,7 +267,7 @@ When invoked, you must follow these steps:
 # Technical Requirements Analysis Task
 
 ## Architecture Context
-Based on architectural analysis from task {arch_task['task_id']}, create comprehensive technical specifications.
+Based on architectural analysis from task {current_task_id}, create comprehensive technical specifications.
 
 ## Architectural Overview
 {architecture_summary}
@@ -270,7 +282,7 @@ Based on architectural analysis from task {arch_task['task_id']}, create compreh
 {requirements_summary}
 
 ## Memory References
-Architecture: task:{arch_task['task_id']}:architecture
+Architecture: task:{current_task_id}:architecture
 Requirements: task:{requirements_task_id}:requirements
 
 ## Expected Deliverables
@@ -290,9 +302,9 @@ Spawn task-planner to decompose into executable tasks.
         "source": "technical-architect",
         "priority": 7,
         "agent_type": "technical-requirements-specialist",
-        "prerequisite_task_ids": [arch_task['task_id']],
+        "prerequisite_task_ids": [current_task_id],
         "metadata": {
-            "architecture_task_id": arch_task['task_id'],
+            "architecture_task_id": current_task_id,
             "requirements_task_id": requirements_task_id,
             "decomposed": False
         }
@@ -340,7 +352,7 @@ Excluded: {subproject['excluded']}
 {subproject['interfaces']}
 
 ## Architecture Context
-Based on architectural analysis from task {arch_task['task_id']}.
+Based on architectural analysis from task {current_task_id}.
 
 ### Overall System Architecture
 {high_level_architecture}
@@ -358,9 +370,9 @@ Based on architectural analysis from task {arch_task['task_id']}.
 {subproject['dependencies']}
 
 ## Memory References
-Architecture: task:{arch_task['task_id']}:architecture
+Architecture: task:{current_task_id}:architecture
 Requirements: task:{requirements_task_id}:requirements
-Subproject Specification: task:{arch_task['task_id']}:architecture/subproject_{subproject['name']}
+Subproject Specification: task:{current_task_id}:architecture/subproject_{subproject['name']}
 
 ## Expected Deliverables
 - Technical specifications for {subproject['name']} components
@@ -381,7 +393,7 @@ Spawn task-planner to decompose into executable tasks for THIS subproject.
 """
 
         # Determine prerequisite tasks (foundational subprojects must complete first)
-        prerequisites = [arch_task['task_id']]
+        prerequisites = [current_task_id]
         if subproject.get('depends_on_subprojects'):
             # Add task IDs of prerequisite subprojects
             for dep_name in subproject['depends_on_subprojects']:
@@ -396,7 +408,7 @@ Spawn task-planner to decompose into executable tasks for THIS subproject.
             "agent_type": "technical-requirements-specialist",
             "prerequisite_task_ids": prerequisites,
             "metadata": {
-                "architecture_task_id": arch_task['task_id'],
+                "architecture_task_id": current_task_id,
                 "requirements_task_id": requirements_task_id,
                 "decomposed": True,
                 "subproject_name": subproject['name'],
@@ -415,7 +427,7 @@ Spawn task-planner to decompose into executable tasks for THIS subproject.
 
     # Store workflow state
     memory_add({
-        "namespace": f"task:{arch_task['task_id']}:workflow",
+        "namespace": f"task:{current_task_id}:workflow",
         "key": "downstream_tasks",
         "value": {
             "decomposed": True,
