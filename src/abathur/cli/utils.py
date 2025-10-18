@@ -1,4 +1,27 @@
-"""CLI utility functions for Abathur."""
+"""Utility functions for CLI argument parsing and validation.
+
+Duration Approximations
+-----------------------
+The parse_duration_to_days function uses simplified approximations for
+time unit conversions to provide a convenient CLI interface:
+
+- Months: 30 days (actual months vary from 28-31 days)
+- Years: 365 days (does not account for leap years with 366 days)
+
+These approximations are intentional design decisions prioritizing:
+1. Simplicity: Easy mental math for users (e.g., "6m" = 180 days)
+2. Consistency: Predictable behavior regardless of current date
+3. CLI Convenience: Quick estimates without calendar complexity
+
+Trade-offs:
+- A "1m" duration means exactly 30 days, not "1 calendar month"
+- A "1y" duration means exactly 365 days, not "1 calendar year"
+- Users should be aware these are approximations for long durations
+
+Examples:
+    "6m" → 180 days (not 181-184 days depending on months)
+    "1y" → 365 days (not 365-366 days depending on leap year)
+"""
 
 import re
 from typing import Optional
