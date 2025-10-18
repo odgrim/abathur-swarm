@@ -179,6 +179,30 @@ class PruneResult(BaseModel):
         return v
 
 
+class DeleteResult(BaseModel):
+    """Result from delete_tasks operation.
+
+    Contains metrics about task deletion including successful deletions,
+    blocked deletions due to child task dependencies, and any errors
+    encountered during the operation.
+
+    Used by delete_tasks() method to provide structured, type-safe results.
+    """
+
+    deleted_count: int = Field(
+        ge=0, description="Number of tasks successfully deleted"
+    )
+
+    blocked_deletions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Tasks blocked from deletion due to child dependencies (task_id, child_ids)",
+    )
+
+    errors: list[str] = Field(
+        default_factory=list, description="Error messages from deletion process"
+    )
+
+
 class Database:
     """SQLite database with WAL mode for concurrent access."""
 
