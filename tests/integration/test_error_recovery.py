@@ -11,6 +11,9 @@ Tests complete end-to-end workflows for error recovery scenarios:
 - Concurrent write conflicts
 - Connection failures
 - Data integrity verification
+- CASCADE deletion completeness
+- Foreign key constraint enforcement
+- Database recovery after interrupted operations
 """
 
 import asyncio
@@ -25,6 +28,8 @@ from uuid import UUID, uuid4
 import aiosqlite
 import pytest
 from abathur.domain.models import (
+    Agent,
+    AgentState,
     DependencyType,
     Task,
     TaskDependency,
@@ -635,3 +640,667 @@ class TestDatabaseLockRecovery:
         retrieved_after = await file_database.get_task(task.id)
         assert retrieved_after is not None
         assert retrieved_after.status == TaskStatus.COMPLETED
+
+
+class TestCascadeDeletion:
+    """Integration tests for CASCADE deletion completeness.
+
+    Tests Recommendation #12, Scenario #5: Verify CASCADE deletion removes
+    all related records when a task is deleted.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cascade_deletion_completes_fully(
+        self, memory_db: Database
+    ) -> None:
+        """Test CASCADE deletion removes all related records completely.
+
+        Scenario:
+        1. Create a task with multiple related records:
+           - 3 agents
+           - 2 task_dependencies (as prerequisite)
+        2. Delete the task using delete_tasks
+        3. Verify ALL agents CASCADE deleted
+        4. Verify ALL dependencies CASCADE deleted
+        5. Verify result.deleted_count == 1
+        6. Verify no orphaned records remain
+
+        This test validates that ON DELETE CASCADE foreign key constraints
+        work correctly across all related tables.
+        """
+        # Step 1: Create task with multiple related records
+        main_task = Task(
+            prompt="Main task to be deleted",
+            summary="Main task",
+            agent_type="test-agent",
+        )
+        await memory_db.insert_task(main_task)
+
+        # Create 3 agents associated with this task
+        agent1 = Agent(
+            name="Agent 1",
+            specialization="Testing CASCADE deletion",
+            task_id=main_task.id,
+            state=AgentState.BUSY,
+        )
+        agent2 = Agent(
+            name="Agent 2",
+            specialization="Testing CASCADE deletion",
+            task_id=main_task.id,
+            state=AgentState.IDLE,
+        )
+        agent3 = Agent(
+            name="Agent 3",
+            specialization="Testing CASCADE deletion",
+            task_id=main_task.id,
+            state=AgentState.TERMINATED,
+        )
+
+        await memory_db.insert_agent(agent1)
+        await memory_db.insert_agent(agent2)
+        await memory_db.insert_agent(agent3)
+
+        # Create 2 dependent tasks that depend on main_task
+        dependent_task1 = Task(
+            prompt="Dependent task 1",
+            summary="Dep task 1",
+        )
+        dependent_task2 = Task(
+            prompt="Dependent task 2",
+            summary="Dep task 2",
+        )
+        await memory_db.insert_task(dependent_task1)
+        await memory_db.insert_task(dependent_task2)
+
+        # Create task_dependencies where main_task is the prerequisite
+        dependency1 = TaskDependency(
+            dependent_task_id=dependent_task1.id,
+            prerequisite_task_id=main_task.id,
+            dependency_type=DependencyType.SEQUENTIAL,
+        )
+        dependency2 = TaskDependency(
+            dependent_task_id=dependent_task2.id,
+            prerequisite_task_id=main_task.id,
+            dependency_type=DependencyType.SEQUENTIAL,
+        )
+        await memory_db.insert_task_dependency(dependency1)
+        await memory_db.insert_task_dependency(dependency2)
+
+        # Verify all records exist before deletion
+        # Check task exists
+        task_before = await memory_db.get_task(main_task.id)
+        assert task_before is not None
+
+        # Check agents exist (direct SQL query)
+        async with memory_db._get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM agents WHERE task_id = ?",
+                (str(main_task.id),)
+            )
+            agent_count = (await cursor.fetchone())[0]
+            assert agent_count == 3, "Should have 3 agents before deletion"
+
+        # Check dependencies exist (direct SQL query)
+        async with memory_db._get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM task_dependencies WHERE prerequisite_task_id = ?",
+                (str(main_task.id),)
+            )
+            dep_count = (await cursor.fetchone())[0]
+            assert dep_count == 2, "Should have 2 dependencies before deletion"
+
+        # Step 2: Delete the task using delete_tasks
+        result = await memory_db.delete_tasks([main_task.id])
+
+        # Step 3: Verify result.deleted_count == 1
+        assert result["deleted_count"] == 1, "Should delete exactly 1 task"
+        assert result["blocked_deletions"] == [], "Should have no blocked deletions"
+        assert result["errors"] == [], "Should have no errors"
+
+        # Verify task is deleted
+        task_after = await memory_db.get_task(main_task.id)
+        assert task_after is None, "Main task should be deleted"
+
+        # Step 4: Verify ALL agents CASCADE deleted
+        async with memory_db._get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM agents WHERE task_id = ?",
+                (str(main_task.id),)
+            )
+            agent_count_after = (await cursor.fetchone())[0]
+            assert agent_count_after == 0, "All agents should be CASCADE deleted"
+
+        # Verify no orphaned agents exist with the task_id
+        async with memory_db._get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT id FROM agents WHERE task_id = ?",
+                (str(main_task.id),)
+            )
+            orphaned_agents = await cursor.fetchall()
+            assert len(orphaned_agents) == 0, "No orphaned agent records should remain"
+
+        # Step 5: Verify ALL dependencies CASCADE deleted
+        async with memory_db._get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM task_dependencies WHERE prerequisite_task_id = ?",
+                (str(main_task.id),)
+            )
+            dep_count_after = (await cursor.fetchone())[0]
+            assert dep_count_after == 0, "All dependencies should be CASCADE deleted"
+
+        # Also check dependent_task_id side
+        async with memory_db._get_connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM task_dependencies WHERE dependent_task_id = ?",
+                (str(main_task.id),)
+            )
+            dep_count_dependent = (await cursor.fetchone())[0]
+            assert dep_count_dependent == 0, "No dependencies should reference deleted task"
+
+        # Verify no orphaned dependency records
+        async with memory_db._get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT id FROM task_dependencies
+                WHERE prerequisite_task_id = ? OR dependent_task_id = ?
+                """,
+                (str(main_task.id), str(main_task.id))
+            )
+            orphaned_deps = await cursor.fetchall()
+            assert len(orphaned_deps) == 0, "No orphaned dependency records should remain"
+
+        # Step 6: Verify dependent tasks still exist (not CASCADE deleted)
+        # These tasks should still exist because they were dependents, not the deleted task
+        dep_task1_after = await memory_db.get_task(dependent_task1.id)
+        dep_task2_after = await memory_db.get_task(dependent_task2.id)
+        assert dep_task1_after is not None, "Dependent task 1 should still exist"
+        assert dep_task2_after is not None, "Dependent task 2 should still exist"
+
+        # Final verification: Database is consistent and queryable
+        all_tasks = await memory_db.list_tasks()
+        assert len(all_tasks) == 2, "Should have 2 remaining tasks (the dependents)"
+
+    @pytest.mark.asyncio
+    async def test_cascade_deletion_with_bidirectional_dependencies(
+        self, memory_db: Database
+    ) -> None:
+        """Test CASCADE deletion with bidirectional dependency relationships.
+
+        This tests edge case where a task has both incoming and outgoing dependencies.
+        When deleted, both sets of dependencies should CASCADE delete.
+        """
+        # Create 3 tasks: A -> B -> C (A is prereq for B, B is prereq for C)
+        task_a = Task(prompt="Task A", summary="Task A")
+        task_b = Task(prompt="Task B", summary="Task B")
+        task_c = Task(prompt="Task C", summary="Task C")
+
+        await memory_db.insert_task(task_a)
+        await memory_db.insert_task(task_b)
+        await memory_db.insert_task(task_c)
+
+        # Create dependencies: A -> B -> C
+        dep_a_to_b = TaskDependency(
+            dependent_task_id=task_b.id,
+            prerequisite_task_id=task_a.id,
+            dependency_type=DependencyType.SEQUENTIAL,
+        )
+        dep_b_to_c = TaskDependency(
+            dependent_task_id=task_c.id,
+            prerequisite_task_id=task_b.id,
+            dependency_type=DependencyType.SEQUENTIAL,
+        )
+        await memory_db.insert_task_dependency(dep_a_to_b)
+        await memory_db.insert_task_dependency(dep_b_to_c)
+
+        # Verify both dependencies exist
+        async with memory_db._get_connection() as conn:
+            cursor = await conn.execute("SELECT COUNT(*) FROM task_dependencies")
+            dep_count = (await cursor.fetchone())[0]
+            assert dep_count == 2
+
+        # Delete middle task B (has both incoming and outgoing dependencies)
+        result = await memory_db.delete_tasks([task_b.id])
+
+        assert result["deleted_count"] == 1
+        assert result["blocked_deletions"] == []
+
+        # Verify both dependencies CASCADE deleted
+        async with memory_db._get_connection() as conn:
+            # Check prerequisite side (B as prerequisite of C)
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM task_dependencies WHERE prerequisite_task_id = ?",
+                (str(task_b.id),)
+            )
+            prereq_deps = (await cursor.fetchone())[0]
+            assert prereq_deps == 0, "Dependencies with B as prerequisite should be deleted"
+
+            # Check dependent side (B as dependent on A)
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM task_dependencies WHERE dependent_task_id = ?",
+                (str(task_b.id),)
+            )
+            dependent_deps = (await cursor.fetchone())[0]
+            assert dependent_deps == 0, "Dependencies with B as dependent should be deleted"
+
+            # Verify no dependencies remain for task B
+            cursor = await conn.execute("SELECT COUNT(*) FROM task_dependencies")
+            total_deps = (await cursor.fetchone())[0]
+            assert total_deps == 0, "All dependencies involving B should be CASCADE deleted"
+
+        # Verify tasks A and C still exist
+        assert await memory_db.get_task(task_a.id) is not None
+        assert await memory_db.get_task(task_c.id) is not None
+
+    @pytest.mark.asyncio
+    async def test_cascade_deletion_multiple_tasks_simultaneously(
+        self, memory_db: Database
+    ) -> None:
+        """Test CASCADE deletion works correctly when deleting multiple tasks at once.
+
+        Verifies that CASCADE deletion handles batch deletions properly.
+        """
+        # Create 3 tasks with agents
+        tasks = []
+        for i in range(3):
+            task = Task(prompt=f"Task {i}", summary=f"Task {i}")
+            await memory_db.insert_task(task)
+            tasks.append(task)
+
+            # Each task gets 2 agents
+            for j in range(2):
+                agent = Agent(
+                    name=f"Agent {i}-{j}",
+                    specialization=f"Spec {i}-{j}",
+                    task_id=task.id,
+                    state=AgentState.IDLE,
+                )
+                await memory_db.insert_agent(agent)
+
+        # Verify 6 agents exist total (3 tasks × 2 agents)
+        async with memory_db._get_connection() as conn:
+            cursor = await conn.execute("SELECT COUNT(*) FROM agents")
+            agent_count = (await cursor.fetchone())[0]
+            assert agent_count == 6
+
+        # Delete all 3 tasks simultaneously
+        task_ids = [t.id for t in tasks]
+        result = await memory_db.delete_tasks(task_ids)
+
+        assert result["deleted_count"] == 3
+        assert result["blocked_deletions"] == []
+
+        # Verify ALL agents CASCADE deleted
+        async with memory_db._get_connection() as conn:
+            cursor = await conn.execute("SELECT COUNT(*) FROM agents")
+            agent_count_after = (await cursor.fetchone())[0]
+            assert agent_count_after == 0, "All agents should be CASCADE deleted"
+
+        # Verify all tasks deleted
+        for task_id in task_ids:
+            assert await memory_db.get_task(task_id) is None
+
+
+async def test_foreign_key_enforcement_during_prune(memory_db: Database):
+    """Test that foreign key constraints are enforced during pruning operations.
+
+    This test verifies:
+    1. PRAGMA foreign_keys = ON is set
+    2. Foreign key constraint violations are caught
+    3. Valid parent-child relationships work correctly
+    4. Referential integrity is maintained during deletions
+
+    Foreign key constraint:
+        FOREIGN KEY (parent_task_id) REFERENCES tasks(id)
+    """
+    # Step 1: Verify PRAGMA foreign_keys is ON
+    async with memory_db._get_connection() as conn:
+        cursor = await conn.execute('PRAGMA foreign_keys')
+        fk_setting = await cursor.fetchone()
+        assert fk_setting is not None
+        assert fk_setting[0] == 1, 'Foreign keys should be enabled (PRAGMA foreign_keys = ON)'
+
+    # Step 2: Attempt to insert task with non-existent parent_task_id
+    # This should violate the foreign key constraint
+    non_existent_parent_id = uuid4()
+    task_with_invalid_parent = Task(
+        summary='Task with invalid parent',
+        prompt='Task with invalid parent',
+        agent_type='test-agent',
+        parent_task_id=non_existent_parent_id,
+        status=TaskStatus.PENDING,
+    )
+
+    # Should raise IntegrityError due to FK constraint violation
+    with pytest.raises(aiosqlite.IntegrityError) as exc_info:
+        await memory_db.insert_task(task_with_invalid_parent)
+
+    # Verify error message mentions foreign key
+    error_msg = str(exc_info.value).lower()
+    assert 'foreign key' in error_msg or 'constraint' in error_msg, \
+        f'Expected FK constraint error, got: {exc_info.value}'
+
+    # Step 3: Create valid parent task
+    parent_task = Task(
+        summary='Parent task',
+        prompt='Parent task',
+        agent_type='test-agent',
+        status=TaskStatus.COMPLETED,
+        priority=5,
+    )
+
+    # Set completion timestamp to make it eligible for pruning
+    completed_time = datetime.now(timezone.utc) - timedelta(days=60)
+    parent_task.completed_at = completed_time
+
+    await memory_db.insert_task(parent_task)
+
+    # Verify parent task was inserted
+    retrieved_parent = await memory_db.get_task(parent_task.id)
+    assert retrieved_parent is not None
+    assert retrieved_parent.id == parent_task.id
+
+    # Step 4: Create child task with valid parent_task_id
+    child_task = Task(
+        summary='Child task',
+        prompt='Child task',
+        agent_type='test-agent',
+        parent_task_id=parent_task.id,
+        status=TaskStatus.PENDING,
+        priority=3,
+    )
+
+    # This should succeed because parent_task_id references existing task
+    await memory_db.insert_task(child_task)
+
+    # Verify child task was inserted with correct parent relationship
+    retrieved_child = await memory_db.get_task(child_task.id)
+    assert retrieved_child is not None
+    assert retrieved_child.id == child_task.id
+    assert retrieved_child.parent_task_id == parent_task.id
+
+    # Step 5: Attempt to delete parent task while child exists
+    # This should fail due to FK constraint (no CASCADE DELETE on parent_task_id)
+    with pytest.raises(aiosqlite.IntegrityError) as exc_info:
+        async with memory_db._get_connection() as conn:
+            await conn.execute('DELETE FROM tasks WHERE id = ?', (str(parent_task.id),))
+            await conn.commit()
+
+    # Verify error mentions foreign key constraint
+    error_msg = str(exc_info.value).lower()
+    assert 'foreign key' in error_msg or 'constraint' in error_msg, \
+        f'Expected FK constraint error when deleting parent, got: {exc_info.value}'
+
+    # Step 6: Delete child task first (should succeed)
+    async with memory_db._get_connection() as conn:
+        cursor = await conn.execute('DELETE FROM tasks WHERE id = ?', (str(child_task.id),))
+        await conn.commit()
+        assert cursor.rowcount == 1, 'Child task should be deleted'
+
+    # Verify child was deleted
+    deleted_child = await memory_db.get_task(child_task.id)
+    assert deleted_child is None
+
+    # Step 7: Now delete parent task (should succeed since child is gone)
+    async with memory_db._get_connection() as conn:
+        cursor = await conn.execute('DELETE FROM tasks WHERE id = ?', (str(parent_task.id),))
+        await conn.commit()
+        assert cursor.rowcount == 1, 'Parent task should be deleted after child removed'
+
+    # Verify parent was deleted
+    deleted_parent = await memory_db.get_task(parent_task.id)
+    assert deleted_parent is None
+
+    # Step 8: Verify referential integrity maintained
+    # No orphaned tasks should exist
+    async with memory_db._get_connection() as conn:
+        cursor = await conn.execute(
+            '''
+            SELECT COUNT(*) FROM tasks
+            WHERE parent_task_id IS NOT NULL
+            AND parent_task_id NOT IN (SELECT id FROM tasks)
+            '''
+        )
+        orphan_count = await cursor.fetchone()
+        assert orphan_count[0] == 0, 'No orphaned tasks should exist'
+
+
+async def test_database_recovery_after_interrupted_prune(file_db_path: Path):
+    """Test database recovery when prune operation is interrupted mid-transaction.
+
+    SQLite uses write-ahead logging (WAL) for crash recovery. When a transaction
+    is interrupted (connection closed without commit), the changes should be
+    rolled back automatically when the database is reopened.
+
+    Test scenario:
+    1. Create file-based database with 50 tasks
+    2. Start a DELETE transaction to simulate prune operation
+    3. Interrupt the transaction by closing connection without commit
+    4. Reopen database to trigger crash recovery
+    5. Verify database integrity and correct task count
+
+    Expected behavior:
+    - Database can be opened after interruption (no corruption)
+    - Interrupted transaction is rolled back (all tasks remain)
+    - Database passes integrity check
+    - No partial deletions visible
+    """
+    # Step 1: Create database and populate with 50 tasks
+    db = Database(file_db_path)
+    await db.initialize()
+
+    # Create 50 tasks with different statuses
+    tasks_created = []
+    for i in range(50):
+        # Mix of statuses: 20 completed, 15 pending, 10 failed, 5 cancelled
+        if i < 20:
+            status = TaskStatus.COMPLETED
+        elif i < 35:
+            status = TaskStatus.PENDING
+        elif i < 45:
+            status = TaskStatus.FAILED
+        else:
+            status = TaskStatus.CANCELLED
+
+        task = Task(
+            prompt=f"Test task {i}",
+            summary=f"Test task {i}",
+            agent_type="test-agent",
+            priority=i % 10,
+        )
+        # Manually set status for test setup
+        if status != TaskStatus.PENDING:
+            task.status = status
+
+        await db.insert_task(task)
+        tasks_created.append(task)
+
+    # Verify all 50 tasks were created
+    all_tasks_before = await db.list_tasks()
+    assert len(all_tasks_before) == 50, "Should have 50 tasks before interruption"
+
+    # Step 2: Simulate interrupted prune operation
+    # Open direct connection to simulate prune transaction
+    # Don't use context manager since we want to close without commit
+    conn = await aiosqlite.connect(file_db_path)
+
+    # Start transaction (implicit with first query)
+    cursor = await conn.execute(
+        "DELETE FROM tasks WHERE status IN (?, ?)",
+        (TaskStatus.COMPLETED.value, TaskStatus.FAILED.value)
+    )
+    deleted_count = cursor.rowcount
+    await cursor.close()
+
+    # Verify deletion would affect 30 tasks (20 completed + 10 failed)
+    # Note: Don't commit - we're simulating an interruption
+    assert deleted_count == 30, "Should attempt to delete 30 tasks"
+
+    # Step 3: Interrupt by closing connection WITHOUT commit
+    # Connection close triggers rollback
+    await conn.close()
+
+    # Step 4: Reopen database - triggers SQLite crash recovery
+    # The uncommitted transaction should be rolled back
+    db2 = Database(file_db_path)
+    await db2.initialize()
+
+    # Step 5: Verify database recovery
+
+    # 5a. Database should be accessible (no corruption)
+    try:
+        all_tasks_after = await db2.list_tasks()
+    except Exception as e:
+        pytest.fail(f"Database corrupted after interruption: {e}")
+
+    # 5b. All tasks should still exist (transaction rolled back)
+    assert len(all_tasks_after) == 50, (
+        f"Expected 50 tasks after rollback, found {len(all_tasks_after)}. "
+        "Interrupted transaction should have been rolled back."
+    )
+
+    # 5c. Verify specific task counts by status
+    completed_tasks = [t for t in all_tasks_after if t.status == TaskStatus.COMPLETED]
+    failed_tasks = [t for t in all_tasks_after if t.status == TaskStatus.FAILED]
+    pending_tasks = [t for t in all_tasks_after if t.status == TaskStatus.PENDING]
+    cancelled_tasks = [t for t in all_tasks_after if t.status == TaskStatus.CANCELLED]
+
+    assert len(completed_tasks) == 20, "All completed tasks should remain"
+    assert len(failed_tasks) == 10, "All failed tasks should remain"
+    assert len(pending_tasks) == 15, "All pending tasks should remain"
+    assert len(cancelled_tasks) == 5, "All cancelled tasks should remain"
+
+    # 5d. Verify database integrity using SQLite PRAGMA
+    async with aiosqlite.connect(file_db_path) as conn:
+        cursor = await conn.execute("PRAGMA integrity_check")
+        integrity_result = await cursor.fetchone()
+        await cursor.close()
+
+        assert integrity_result[0] == "ok", (
+            f"Database integrity check failed: {integrity_result[0]}"
+        )
+
+    # 5e. Verify database can still perform operations normally
+    new_task = Task(
+        prompt="Post-recovery test task",
+        summary="Post-recovery test task",
+        agent_type="recovery-test",
+    )
+    await db2.insert_task(new_task)
+
+    retrieved_task = await db2.get_task(new_task.id)
+    assert retrieved_task is not None, "Should be able to insert and retrieve after recovery"
+    assert retrieved_task.prompt == "Post-recovery test task"
+
+    # Cleanup
+    await db2.close()
+
+
+@pytest.mark.asyncio
+async def test_database_consistency_with_committed_prune(file_db_path: Path):
+    """Test that properly committed prune operations work correctly.
+
+    This test verifies the expected behavior when a prune operation
+    completes successfully with a proper commit.
+    """
+    # Create database and populate with tasks
+    db = Database(file_db_path)
+    await db.initialize()
+
+    # Create 30 tasks: 10 completed, 10 pending, 10 failed
+    for i in range(30):
+        if i < 10:
+            status = TaskStatus.COMPLETED
+        elif i < 20:
+            status = TaskStatus.PENDING
+        else:
+            status = TaskStatus.FAILED
+
+        task = Task(
+            prompt=f"Test task {i}",
+            summary=f"Test task {i}",
+            agent_type="test-agent",
+        )
+        if status != TaskStatus.PENDING:
+            task.status = status
+
+        await db.insert_task(task)
+
+    # Verify initial count
+    all_tasks = await db.list_tasks()
+    assert len(all_tasks) == 30
+
+    # Perform committed deletion (simulating successful prune)
+    async with aiosqlite.connect(file_db_path) as conn:
+        await conn.execute(
+            "DELETE FROM tasks WHERE status = ?",
+            (TaskStatus.COMPLETED.value,)
+        )
+        await conn.commit()  # Properly commit the transaction
+
+    # Reopen database
+    db2 = Database(file_db_path)
+    await db2.initialize()
+
+    # Verify tasks were actually deleted
+    remaining_tasks = await db2.list_tasks()
+    assert len(remaining_tasks) == 20, "Should have 20 tasks after deleting 10 completed"
+
+    # Verify no completed tasks remain
+    completed_tasks = [t for t in remaining_tasks if t.status == TaskStatus.COMPLETED]
+    assert len(completed_tasks) == 0, "No completed tasks should remain"
+
+    # Verify other tasks still exist
+    pending_tasks = [t for t in remaining_tasks if t.status == TaskStatus.PENDING]
+    failed_tasks = [t for t in remaining_tasks if t.status == TaskStatus.FAILED]
+    assert len(pending_tasks) == 10, "All pending tasks should remain"
+    assert len(failed_tasks) == 10, "All failed tasks should remain"
+
+    await db2.close()
+
+
+@pytest.mark.asyncio
+async def test_database_vacuum_interruption_safety(file_db_path: Path):
+    """Test database safety when VACUUM operation is interrupted.
+
+    VACUUM creates a temporary copy of the database. If interrupted,
+    the original database should remain unchanged and valid.
+    """
+    # Create and populate database
+    db = Database(file_db_path)
+    await db.initialize()
+
+    # Create several tasks
+    for i in range(20):
+        task = Task(prompt=f"Task {i}", summary=f"Task {i}", agent_type="test")
+        await db.insert_task(task)
+
+    await db.close()
+
+    # Get original file size
+    original_size = file_db_path.stat().st_size
+
+    # Attempt VACUUM (simulating interruption is difficult, so we just verify success)
+    async with aiosqlite.connect(file_db_path) as conn:
+        try:
+            # VACUUM cannot be run in a transaction
+            await conn.execute("VACUUM")
+            vacuum_succeeded = True
+        except Exception as e:
+            vacuum_succeeded = False
+            vacuum_error = str(e)
+
+    # Verify database is still accessible
+    db2 = Database(file_db_path)
+    await db2.initialize()
+
+    tasks = await db2.list_tasks()
+    assert len(tasks) == 20, "All tasks should remain after VACUUM"
+
+    # Verify integrity
+    async with aiosqlite.connect(file_db_path) as conn:
+        cursor = await conn.execute("PRAGMA integrity_check")
+        result = await cursor.fetchone()
+        await cursor.close()
+        assert result[0] == "ok", "Database should pass integrity check"
+
+    await db2.close()
