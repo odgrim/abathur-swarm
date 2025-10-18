@@ -660,3 +660,249 @@ def test_prune_time_based_displays_result(database):
         assert len(remaining_tasks) == 0
 
     asyncio.run(verify())
+
+
+@pytest.mark.asyncio
+async def test_prune_vacuum_always() -> None:
+    """Test vacuum_mode='always' runs VACUUM every time."""
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+    from tempfile import NamedTemporaryFile
+
+    from abathur.domain.models import Task, TaskSource, TaskStatus
+    from abathur.infrastructure.database import Database, PruneFilters
+
+    # Create temporary database file
+    with NamedTemporaryFile(suffix=".db", delete=False) as tmp_file:
+        db_path = Path(tmp_file.name)
+
+    try:
+        # Initialize database and create tasks
+        db = Database(db_path)
+        await db.initialize()
+
+        # Create 10 completed tasks with completed_at set to 60 days ago
+        old_timestamp = datetime.now(timezone.utc) - timedelta(days=60)
+
+        for i in range(10):
+            task = Task(
+                prompt=f"Old task {i}",
+                summary=f"Task to prune {i}",
+                agent_type="test-agent",
+                source=TaskSource.HUMAN,
+                status=TaskStatus.COMPLETED,
+                submitted_at=old_timestamp,
+                completed_at=old_timestamp,
+            )
+            await db.insert_task(task)
+
+        # Execute: Prune with vacuum_mode="always"
+        filters = PruneFilters(older_than_days=30, vacuum_mode="always")
+        result = await db.prune_tasks(filters)
+
+        # Assert: Verify deletion and VACUUM ran
+        assert result.deleted_tasks == 10
+        assert result.reclaimed_bytes is not None  # VACUUM should have run
+        assert result.reclaimed_bytes >= 0  # May be 0 if DB is small
+
+        await db.close()
+    finally:
+        # Cleanup
+        if db_path.exists():
+            db_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_prune_vacuum_never() -> None:
+    """Test vacuum_mode='never' never runs VACUUM."""
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+    from tempfile import NamedTemporaryFile
+
+    from abathur.domain.models import Task, TaskSource, TaskStatus
+    from abathur.infrastructure.database import Database, PruneFilters
+
+    # Create temporary database file
+    with NamedTemporaryFile(suffix=".db", delete=False) as tmp_file:
+        db_path = Path(tmp_file.name)
+
+    try:
+        # Initialize database and create tasks
+        db = Database(db_path)
+        await db.initialize()
+
+        # Create 200 completed tasks (well above threshold)
+        old_timestamp = datetime.now(timezone.utc) - timedelta(days=60)
+
+        for i in range(200):
+            task = Task(
+                prompt=f"Old task {i}",
+                summary=f"Task to prune {i}",
+                agent_type="test-agent",
+                source=TaskSource.HUMAN,
+                status=TaskStatus.COMPLETED,
+                submitted_at=old_timestamp,
+                completed_at=old_timestamp,
+            )
+            await db.insert_task(task)
+
+        # Execute: Prune with vacuum_mode="never"
+        filters = PruneFilters(older_than_days=30, vacuum_mode="never")
+        result = await db.prune_tasks(filters)
+
+        # Assert: Verify deletion but no VACUUM
+        assert result.deleted_tasks == 200
+        assert result.reclaimed_bytes is None  # VACUUM should NOT have run
+
+        await db.close()
+    finally:
+        # Cleanup
+        if db_path.exists():
+            db_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_prune_vacuum_conditional_below_threshold() -> None:
+    """Test vacuum_mode='conditional' does not run VACUUM below 100 tasks."""
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+    from tempfile import NamedTemporaryFile
+
+    from abathur.domain.models import Task, TaskSource, TaskStatus
+    from abathur.infrastructure.database import Database, PruneFilters
+
+    # Create temporary database file
+    with NamedTemporaryFile(suffix=".db", delete=False) as tmp_file:
+        db_path = Path(tmp_file.name)
+
+    try:
+        # Initialize database and create tasks
+        db = Database(db_path)
+        await db.initialize()
+
+        # Create 50 completed tasks (below threshold of 100)
+        old_timestamp = datetime.now(timezone.utc) - timedelta(days=60)
+
+        for i in range(50):
+            task = Task(
+                prompt=f"Old task {i}",
+                summary=f"Task to prune {i}",
+                agent_type="test-agent",
+                source=TaskSource.HUMAN,
+                status=TaskStatus.COMPLETED,
+                submitted_at=old_timestamp,
+                completed_at=old_timestamp,
+            )
+            await db.insert_task(task)
+
+        # Execute: Prune with vacuum_mode="conditional" (default)
+        filters = PruneFilters(older_than_days=30, vacuum_mode="conditional")
+        result = await db.prune_tasks(filters)
+
+        # Assert: Verify deletion but no VACUUM (below threshold)
+        assert result.deleted_tasks == 50
+        assert result.reclaimed_bytes is None  # Should NOT run (< 100 tasks)
+
+        await db.close()
+    finally:
+        # Cleanup
+        if db_path.exists():
+            db_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_prune_vacuum_conditional_above_threshold() -> None:
+    """Test vacuum_mode='conditional' runs VACUUM at or above 100 tasks."""
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+    from tempfile import NamedTemporaryFile
+
+    from abathur.domain.models import Task, TaskSource, TaskStatus
+    from abathur.infrastructure.database import Database, PruneFilters
+
+    # Create temporary database file
+    with NamedTemporaryFile(suffix=".db", delete=False) as tmp_file:
+        db_path = Path(tmp_file.name)
+
+    try:
+        # Initialize database and create tasks
+        db = Database(db_path)
+        await db.initialize()
+
+        # Create 150 completed tasks (above threshold of 100)
+        old_timestamp = datetime.now(timezone.utc) - timedelta(days=60)
+
+        for i in range(150):
+            task = Task(
+                prompt=f"Old task {i}",
+                summary=f"Task to prune {i}",
+                agent_type="test-agent",
+                source=TaskSource.HUMAN,
+                status=TaskStatus.COMPLETED,
+                submitted_at=old_timestamp,
+                completed_at=old_timestamp,
+            )
+            await db.insert_task(task)
+
+        # Execute: Prune with vacuum_mode="conditional" (default)
+        filters = PruneFilters(older_than_days=30, vacuum_mode="conditional")
+        result = await db.prune_tasks(filters)
+
+        # Assert: Verify deletion and VACUUM ran (above threshold)
+        assert result.deleted_tasks == 150
+        assert result.reclaimed_bytes is not None  # Should run (>= 100 tasks)
+        assert result.reclaimed_bytes >= 0  # May be 0 if DB is small
+
+        await db.close()
+    finally:
+        # Cleanup
+        if db_path.exists():
+            db_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_prune_vacuum_default_is_conditional() -> None:
+    """Test default vacuum_mode is 'conditional' when not specified."""
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+    from tempfile import NamedTemporaryFile
+
+    from abathur.domain.models import Task, TaskSource, TaskStatus
+    from abathur.infrastructure.database import Database, PruneFilters
+
+    # Create temporary database file
+    with NamedTemporaryFile(suffix=".db", delete=False) as tmp_file:
+        db_path = Path(tmp_file.name)
+
+    try:
+        # Initialize database and create tasks
+        db = Database(db_path)
+        await db.initialize()
+
+        # Create 1 completed task (well below threshold)
+        old_timestamp = datetime.now(timezone.utc) - timedelta(days=60)
+
+        task = Task(
+            prompt="Old task",
+            summary="Task to prune",
+            agent_type="test-agent",
+            source=TaskSource.HUMAN,
+            status=TaskStatus.COMPLETED,
+            submitted_at=old_timestamp,
+            completed_at=old_timestamp,
+        )
+        await db.insert_task(task)
+
+        # Execute: Prune without specifying vacuum_mode (should default to "conditional")
+        filters = PruneFilters(older_than_days=30)  # No vacuum_mode specified
+        result = await db.prune_tasks(filters)
+
+        # Assert: Verify default behavior (conditional, below threshold, no VACUUM)
+        assert result.deleted_tasks == 1
+        assert result.reclaimed_bytes is None  # Should NOT run (< 100 tasks, conditional mode)
+
+        await db.close()
+    finally:
+        # Cleanup
+        if db_path.exists():
+            db_path.unlink()
