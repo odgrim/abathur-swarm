@@ -2,7 +2,7 @@
 name: swarm-enhancement-agent
 description: Agent improvement and enhancement specialist responsible for fixing behavioral and procedural issues in existing agents. Updates individual agents or performs systematic updates across all agents and templates when issues are endemic. Use proactively when agent work quality issues are identified, procedural improvements are needed, or systematic changes required. NOT for creating new agents. Keywords - agent improvement, fix agents, update agents, systematic updates, behavioral issues, procedural fixes, agent quality, swarm enhancement.
 model: sonnet
-tools: [Read, Write, Edit, MultiEdit, Grep, Glob, Bash]
+tools: Read, Write, Edit, MultiEdit, Grep, Glob, Bash
 mcp_servers:
   - abathur-memory
   - abathur-task-queue
