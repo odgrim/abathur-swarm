@@ -1734,14 +1734,29 @@ class Database:
         """Delete all tasks matching a status filter with CASCADE to dependent tables.
 
         Args:
-            status: Status filter for deletion (TaskStatus enum)
+            status: Status filter for deletion (TaskStatus enum).
+                    Only COMPLETED, FAILED, or CANCELLED statuses are allowed.
 
         Returns:
             Number of tasks deleted
 
         Raises:
+            ValueError: If status is PENDING, BLOCKED, READY, or RUNNING
             DatabaseError: If deletion fails
         """
+        # Validate that only pruneable statuses can be deleted
+        forbidden = {
+            TaskStatus.PENDING,
+            TaskStatus.BLOCKED,
+            TaskStatus.READY,
+            TaskStatus.RUNNING,
+        }
+        if status in forbidden:
+            raise ValueError(
+                f"Cannot delete tasks with status {status.value}. "
+                f"Only COMPLETED, FAILED, or CANCELLED tasks can be deleted."
+            )
+
         async with self._get_connection() as conn:
             await conn.execute("PRAGMA foreign_keys = ON")
             cursor = await conn.execute(
