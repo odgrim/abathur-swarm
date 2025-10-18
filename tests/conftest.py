@@ -5,6 +5,7 @@ import tempfile
 from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -141,3 +142,72 @@ async def populated_db(memory_db: Database) -> Database:
     )
 
     return memory_db
+
+
+# CLI Testing Fixtures
+# Test database path - isolated from working database at .abathur/abathur.db
+CLI_TEST_DB_PATH = Path(".abathur/test.db")
+
+
+@pytest.fixture(scope="function")
+def cli_test_db_path() -> Generator[Path, None, None]:
+    """Provide path to CLI test database at .abathur/test.db.
+
+    This fixture ensures CLI tests use an isolated database separate from
+    the working database at .abathur/abathur.db.
+
+    Usage:
+        Use this fixture in CLI integration tests that need a database path.
+        Combine with mock_cli_database_path fixture to ensure CLI commands
+        use this test database instead of the working database.
+    """
+    # Ensure .abathur directory exists
+    CLI_TEST_DB_PATH.parent.mkdir(exist_ok=True)
+
+    # Remove existing test database
+    if CLI_TEST_DB_PATH.exists():
+        CLI_TEST_DB_PATH.unlink()
+
+    # Also cleanup WAL files
+    wal_path = CLI_TEST_DB_PATH.with_suffix(".db-wal")
+    shm_path = CLI_TEST_DB_PATH.with_suffix(".db-shm")
+    if wal_path.exists():
+        wal_path.unlink()
+    if shm_path.exists():
+        shm_path.unlink()
+
+    yield CLI_TEST_DB_PATH
+
+    # Cleanup after test
+    if CLI_TEST_DB_PATH.exists():
+        CLI_TEST_DB_PATH.unlink()
+    if wal_path.exists():
+        wal_path.unlink()
+    if shm_path.exists():
+        shm_path.unlink()
+
+
+@pytest.fixture(scope="function")
+def mock_cli_database_path(cli_test_db_path: Path) -> Generator[None, None, None]:
+    """Mock ConfigManager.get_database_path to return CLI test database.
+
+    This fixture patches ConfigManager.get_database_path() to return
+    .abathur/test.db instead of .abathur/abathur.db, ensuring CLI commands
+    in tests use the isolated test database.
+
+    Usage:
+        Include this fixture in CLI integration tests to automatically mock
+        the database path. This fixture depends on cli_test_db_path and will
+        ensure the test database is properly set up and cleaned up.
+
+    Example:
+        def test_cli_command(mock_cli_database_path):
+            # CLI commands will now use .abathur/test.db
+            result = runner.invoke(app, ["task", "list"])
+            assert result.exit_code == 0
+    """
+    with patch(
+        "abathur.infrastructure.config.ConfigManager.get_database_path",
+        return_value=cli_test_db_path,
+    ):
+        yield
