@@ -92,6 +92,44 @@ class PruneFilters(BaseModel):
             )
         return v
 
+    def build_where_clause(self) -> tuple[str, list[str]]:
+        """
+        Build SQL WHERE clause and parameters for task filtering.
+
+        Returns:
+            Tuple of (where_clause_sql, parameters) where:
+            - where_clause_sql: SQL WHERE condition without 'WHERE' keyword
+            - parameters: List of parameter values for SQL placeholders
+
+        Used by both CLI preview queries and database prune_tasks() execution
+        to ensure consistent filtering logic.
+        """
+        where_clauses = []
+        params = []
+
+        # Time filter (required - validated by PruneFilters model)
+        if self.older_than_days is not None:
+            where_clauses.append(
+                "(completed_at < date('now', ?) OR "
+                "(completed_at IS NULL AND submitted_at < date('now', ?)))"
+            )
+            days_param = f"-{self.older_than_days} days"
+            params.extend([days_param, days_param])
+        elif self.before_date is not None:
+            where_clauses.append(
+                "(completed_at < ? OR (completed_at IS NULL AND submitted_at < ?))"
+            )
+            before_iso = self.before_date.isoformat()
+            params.extend([before_iso, before_iso])
+
+        # Status filter (always present - has default)
+        status_placeholders = ",".join("?" * len(self.statuses))
+        where_clauses.append(f"status IN ({status_placeholders})")
+        params.extend([status.value for status in self.statuses])
+
+        where_sql = " AND ".join(where_clauses)
+        return (where_sql, params)
+
 
 class PruneResult(BaseModel):
     """Statistics from prune operation.
@@ -1876,31 +1914,8 @@ class Database:
             DatabaseError: If deletion fails
         """
         async with self._get_connection() as conn:
-            # Build WHERE clause based on filters
-            where_clauses = []
-            params = []
-
-            # Time filter (required - validated by PruneFilters model)
-            if filters.older_than_days is not None:
-                where_clauses.append(
-                    "(completed_at < date('now', ?) OR "
-                    "(completed_at IS NULL AND submitted_at < date('now', ?)))"
-                )
-                days_param = f"-{filters.older_than_days} days"
-                params.extend([days_param, days_param])
-            elif filters.before_date is not None:
-                where_clauses.append(
-                    "(completed_at < ? OR (completed_at IS NULL AND submitted_at < ?))"
-                )
-                before_iso = filters.before_date.isoformat()
-                params.extend([before_iso, before_iso])
-
-            # Status filter (always present - has default)
-            status_placeholders = ",".join("?" * len(filters.statuses))
-            where_clauses.append(f"status IN ({status_placeholders})")
-            params.extend([status.value for status in filters.statuses])
-
-            where_sql = " AND ".join(where_clauses)
+            # Build WHERE clause based on filters (use shared method)
+            where_sql, params = filters.build_where_clause()
 
             # Start transaction
             await conn.execute("BEGIN TRANSACTION")
