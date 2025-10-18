@@ -394,6 +394,11 @@ def prune(
     limit: int | None = typer.Option(None, "--limit", help="Maximum tasks to delete", min=1),
     force: bool = typer.Option(False, "--force", help="Skip confirmation prompt"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be deleted without deleting"),
+    vacuum: str = typer.Option(
+        "conditional",
+        "--vacuum",
+        help="VACUUM strategy: 'always' (may be slow), 'conditional' (auto, default), or 'never' (fastest)"
+    ),
 ) -> None:
     """Delete tasks by ID or status.
 
@@ -403,6 +408,9 @@ def prune(
         abathur task prune --status completed
         abathur task prune --status failed --force
         abathur task prune --status pending --dry-run
+        abathur task prune --older-than 30d
+        abathur task prune --older-than 30d --vacuum=always
+        abathur task prune --older-than 30d --vacuum=never
     """
     from abathur.domain.models import TaskStatus
 
@@ -497,7 +505,8 @@ def prune(
                         before_date=before_date,
                         statuses=[task_status],
                         limit=limit,
-                        dry_run=dry_run
+                        dry_run=dry_run,
+                        vacuum_mode=vacuum
                     )
                 else:
                     # No status specified - use default (COMPLETED, FAILED, CANCELLED)
@@ -505,7 +514,8 @@ def prune(
                         older_than_days=older_than_days,
                         before_date=before_date,
                         limit=limit,
-                        dry_run=dry_run
+                        dry_run=dry_run,
+                        vacuum_mode=vacuum
                     )
             except ValidationError as e:
                 raise typer.BadParameter(f"Invalid filter parameters: {e}") from None
@@ -671,10 +681,14 @@ def prune(
 
                 console.print(breakdown_table)
 
-            # Display space reclaimed
-            if result.reclaimed_bytes:
-                mb_reclaimed = result.reclaimed_bytes / (1024 * 1024)
-                console.print(f"[green]Space reclaimed: {mb_reclaimed:.2f} MB[/green]")
+            # Display VACUUM information
+            if result.reclaimed_bytes is not None:
+                reclaimed_mb = result.reclaimed_bytes / (1024 * 1024)
+                console.print(f"\n[green]VACUUM completed: {reclaimed_mb:.2f} MB reclaimed[/green]")
+            elif filters.vacuum_mode == "never":
+                console.print("\n[dim]VACUUM skipped (--vacuum=never)[/dim]")
+            elif filters.vacuum_mode == "conditional" and result.deleted_tasks < 100:
+                console.print(f"\n[dim]VACUUM skipped (conditional mode, only {result.deleted_tasks} tasks deleted, threshold is 100)[/dim]")
 
             # Display dependency count
             if result.deleted_dependencies:
