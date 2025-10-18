@@ -778,7 +778,7 @@ def prune(
         console.print("[blue]Deleting tasks...[/blue]")
         try:
             result = await services["database"].delete_tasks(selected_task_ids)
-            deleted_count = result['deleted_count']
+            deleted_count = result['deleted_tasks']
         except Exception as e:
             console.print(
                 f"[red]Error:[/red] Database operation failed: {type(e).__name__}: {e}"
