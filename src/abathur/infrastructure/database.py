@@ -60,6 +60,11 @@ class PruneFilters(BaseModel):
 
     dry_run: bool = Field(default=False, description="Preview mode without deletion")
 
+    vacuum_mode: str = Field(
+        default="conditional",
+        description="VACUUM strategy: 'always', 'conditional', or 'never'"
+    )
+
     @model_validator(mode="after")
     def validate_filters(self) -> "PruneFilters":
         """Ensure at least one time filter is specified."""
