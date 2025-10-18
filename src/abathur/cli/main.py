@@ -561,11 +561,126 @@ def prune(
                 return
 
             # Phase 3: prune_tasks() execution and result display
-            # TODO: Implement child validation and prune execution in subsequent tasks (CLI-008 through CLI-013)
-            console.print(f"[yellow]![/yellow] Preview found {len(preview_task_ids)} task(s) matching filters")
-            console.print(f"[dim]Preview task IDs: {[tid[:8] for tid in preview_task_ids[:5]]}{'...' if len(preview_task_ids) > 5 else ''}[/dim]")
-            console.print("[dim]Coming soon: child validation and prune execution[/dim]")
-            raise typer.Exit(1)
+
+            # Component 1: Child Task Validation (~30 lines)
+            child_tasks = await services["database"].get_child_tasks(preview_task_ids)
+
+            if child_tasks:
+                console.print(
+                    f"\n[yellow]![/yellow] Cannot delete {len(preview_task_ids)} task(s) - "
+                    f"{len(child_tasks)} have child tasks:"
+                )
+
+                blocked_table = Table()
+                blocked_table.add_column("Parent ID", style="cyan", no_wrap=True)
+                blocked_table.add_column("Child ID", style="yellow", no_wrap=True)
+                blocked_table.add_column("Child Summary", style="magenta")
+
+                for child in child_tasks:
+                    parent_id_str = str(child.parent_task_id)[:8] if child.parent_task_id else "unknown"
+                    child_id_str = str(child.id)[:8]
+                    summary_preview = (
+                        (child.summary[:40] + "...")
+                        if child.summary and len(child.summary) > 40
+                        else (child.summary or "-")
+                    )
+                    blocked_table.add_row(
+                        parent_id_str,
+                        child_id_str,
+                        summary_preview,
+                    )
+
+                console.print(blocked_table)
+                console.print("\n[yellow]Delete child tasks first before deleting parent tasks.[/yellow]")
+                return
+
+            # Component 2: Preview Display (~25 lines)
+            # Fetch full Task objects for preview
+            tasks_to_delete = []
+            for task_id in preview_task_ids:
+                task = await services['task_coordinator'].get_task(task_id)
+                if task:
+                    tasks_to_delete.append(task)
+
+            # Display preview table
+            preview_table = Table(title=f"Tasks to Delete ({len(tasks_to_delete)})")
+            preview_table.add_column("ID", style="cyan", no_wrap=True)
+            preview_table.add_column("Summary", style="magenta")
+            preview_table.add_column("Status", style="yellow")
+            preview_table.add_column("Agent Type", style="green")
+
+            for task in tasks_to_delete:
+                summary_preview = (
+                    (task.summary[:40] + "...")
+                    if task.summary and len(task.summary) > 40
+                    else (task.summary or "-")
+                )
+                preview_table.add_row(
+                    str(task.id)[:8],
+                    summary_preview,
+                    task.status.value,
+                    task.agent_type,
+                )
+
+            console.print(preview_table)
+
+            # Component 3: Dry-Run Check (~5 lines)
+            if dry_run:
+                console.print("\n[blue]Dry-run mode - no changes will be made[/blue]")
+                console.print(f"[dim]Would delete {len(tasks_to_delete)} task(s)[/dim]")
+                return
+
+            # Component 4: Confirmation Prompt (~10 lines)
+            if not force:
+                console.print(f"\n[yellow]About to permanently delete {len(tasks_to_delete)} task(s)[/yellow]")
+                confirmed = typer.confirm("Are you sure you want to continue?")
+                if not confirmed:
+                    console.print("[dim]Operation cancelled[/dim]")
+                    raise typer.Exit(0)
+
+            # Component 5: Prune Execution (~10 lines)
+            console.print("[blue]Deleting tasks...[/blue]")
+            try:
+                result = await services["database"].prune_tasks(filters)
+            except Exception as e:
+                console.print(
+                    f"[red]Error:[/red] Database operation failed: {type(e).__name__}: {e}"
+                )
+                logger.exception(
+                    "Database error during task pruning",
+                    extra={
+                        "operation": "task_prune",
+                        "task_count": len(preview_task_ids),
+                        "error_type": type(e).__name__
+                    }
+                )
+                raise typer.Exit(1)
+
+            # Component 6: PruneResult Display (~25 lines)
+            # Display result summary
+            console.print(f"\n[green]✓[/green] Successfully deleted {result.deleted_tasks} task(s)")
+
+            # Display breakdown by status
+            if result.breakdown_by_status:
+                breakdown_table = Table(title="Breakdown by Status")
+                breakdown_table.add_column("Status", style="cyan")
+                breakdown_table.add_column("Count", style="yellow", justify="right")
+
+                for status, count in result.breakdown_by_status.items():
+                    breakdown_table.add_row(status.value, str(count))
+
+                console.print(breakdown_table)
+
+            # Display space reclaimed
+            if result.reclaimed_bytes:
+                mb_reclaimed = result.reclaimed_bytes / (1024 * 1024)
+                console.print(f"[green]Space reclaimed: {mb_reclaimed:.2f} MB[/green]")
+
+            # Display dependency count
+            if result.deleted_dependencies:
+                console.print(f"[cyan]Deleted {result.deleted_dependencies} task dependencies[/cyan]")
+
+            return
 
         # Existing delete_tasks() path - preserved unchanged for backward compatibility
         # Task selection logic
