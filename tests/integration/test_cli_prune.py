@@ -130,7 +130,7 @@ def test_prune_mutual_exclusion_error(database, sample_tasks):
     result = runner.invoke(app, ["task", "prune", task_id, "--status", "completed"])
 
     assert result.exit_code != 0
-    assert "Cannot specify both task IDs and --status" in result.stdout
+    assert "Cannot use multiple filter methods together" in result.stdout
 
 
 def test_prune_no_filter_error(database):
@@ -138,7 +138,7 @@ def test_prune_no_filter_error(database):
     result = runner.invoke(app, ["task", "prune"])
 
     assert result.exit_code != 0
-    assert "Must specify either task IDs or --status" in result.stdout
+    assert "Must specify at least one filter method" in result.stdout
 
 
 def test_prune_invalid_status_error(database):
@@ -381,3 +381,282 @@ def test_prune_ambiguous_prefix_error(database):
     # Should fail with ambiguous match error
     assert result.exit_code != 0
     assert "Multiple tasks match" in result.stdout
+
+
+def test_prune_older_than_30_days(database):
+    """Test pruning tasks older than 30 days."""
+    from datetime import datetime, timedelta, timezone
+    from abathur.application import TaskCoordinator
+
+    coordinator = TaskCoordinator(database)
+
+    async def create_tasks_and_prune():
+        # Create old task (40 days ago)
+        old_task = Task(
+            prompt="Old task",
+            summary="Task to be pruned",
+            agent_type="test-agent",
+            source=TaskSource.HUMAN,
+            status=TaskStatus.COMPLETED,
+            submitted_at=datetime.now(timezone.utc) - timedelta(days=40),
+            completed_at=datetime.now(timezone.utc) - timedelta(days=40),
+        )
+        old_task_id = await coordinator.submit_task(old_task)
+
+        # Create recent task (10 days ago)
+        recent_task = Task(
+            prompt="Recent task",
+            summary="Task to be preserved",
+            agent_type="test-agent",
+            source=TaskSource.HUMAN,
+            status=TaskStatus.COMPLETED,
+            submitted_at=datetime.now(timezone.utc) - timedelta(days=10),
+            completed_at=datetime.now(timezone.utc) - timedelta(days=10),
+        )
+        recent_task_id = await coordinator.submit_task(recent_task)
+
+        return old_task_id, recent_task_id
+
+    old_task_id, recent_task_id = asyncio.run(create_tasks_and_prune())
+
+    # Execute: Run CLI command
+    result = runner.invoke(
+        app,
+        ["task", "prune", "--older-than", "30d", "--force"]
+    )
+
+    # Assert: Verify old task deleted, recent task preserved
+    assert result.exit_code == 0
+    assert "Successfully deleted 1 task(s)" in result.stdout or "✓" in result.stdout
+
+    # Verify database state
+    async def verify():
+        remaining_tasks = await database.list_tasks(TaskStatus.COMPLETED, limit=100)
+        assert len(remaining_tasks) == 1
+        assert remaining_tasks[0].id == recent_task_id
+
+    asyncio.run(verify())
+
+
+def test_prune_before_date(database):
+    """Test pruning tasks before a specific date."""
+    from datetime import datetime, timezone
+    from abathur.application import TaskCoordinator
+
+    coordinator = TaskCoordinator(database)
+
+    async def create_tasks():
+        # Create old task (before cutoff date)
+        old_task = Task(
+            prompt="Old task",
+            summary="Task before cutoff",
+            agent_type="test-agent",
+            source=TaskSource.HUMAN,
+            status=TaskStatus.COMPLETED,
+            submitted_at=datetime(2024, 12, 15, tzinfo=timezone.utc),
+            completed_at=datetime(2024, 12, 15, tzinfo=timezone.utc),
+        )
+        old_task_id = await coordinator.submit_task(old_task)
+
+        # Create new task (after cutoff date)
+        new_task = Task(
+            prompt="New task",
+            summary="Task after cutoff",
+            agent_type="test-agent",
+            source=TaskSource.HUMAN,
+            status=TaskStatus.COMPLETED,
+            submitted_at=datetime(2025, 1, 15, tzinfo=timezone.utc),
+            completed_at=datetime(2025, 1, 15, tzinfo=timezone.utc),
+        )
+        new_task_id = await coordinator.submit_task(new_task)
+
+        return old_task_id, new_task_id
+
+    old_task_id, new_task_id = asyncio.run(create_tasks())
+
+    # Execute: Run CLI with ISO date (YYYY-MM-DD format)
+    result = runner.invoke(
+        app,
+        ["task", "prune", "--before", "2025-01-01", "--force"]
+    )
+
+    # Assert: Verify correct deletion
+    assert result.exit_code == 0
+    assert "Successfully deleted 1 task(s)" in result.stdout or "✓" in result.stdout
+
+    # Verify database state
+    async def verify():
+        remaining_tasks = await database.list_tasks(TaskStatus.COMPLETED, limit=100)
+        assert len(remaining_tasks) == 1
+        assert remaining_tasks[0].id == new_task_id
+
+    asyncio.run(verify())
+
+
+def test_prune_time_based_with_child_blocking(database):
+    """Test that time-based prune respects child task blocking."""
+    from datetime import datetime, timedelta, timezone
+    from abathur.application import TaskCoordinator
+
+    coordinator = TaskCoordinator(database)
+
+    async def create_parent_and_child():
+        # Create parent task (old, completed)
+        parent_task = Task(
+            prompt="Parent task",
+            summary="Parent with child",
+            agent_type="test-agent",
+            source=TaskSource.HUMAN,
+            status=TaskStatus.COMPLETED,
+            submitted_at=datetime.now(timezone.utc) - timedelta(days=40),
+            completed_at=datetime.now(timezone.utc) - timedelta(days=40),
+        )
+        parent_id = await coordinator.submit_task(parent_task)
+
+        # Create child task (old, but running)
+        child_task = Task(
+            prompt="Child task",
+            summary="Active child task",
+            agent_type="test-agent",
+            source=TaskSource.HUMAN,
+            parent_task_id=parent_id,
+            status=TaskStatus.RUNNING,
+            submitted_at=datetime.now(timezone.utc) - timedelta(days=35),
+        )
+        await coordinator.submit_task(child_task)
+
+        return parent_id
+
+    parent_id = asyncio.run(create_parent_and_child())
+
+    # Execute: Attempt to prune parent (should be blocked)
+    result = runner.invoke(
+        app,
+        ["task", "prune", "--older-than", "30d", "--force"]
+    )
+
+    # Assert: Should show blocked message
+    assert result.exit_code == 0
+    assert "Cannot delete" in result.stdout or "child" in result.stdout.lower()
+
+    # Verify parent still exists
+    async def verify():
+        parent = await database.get_task(parent_id)
+        assert parent is not None
+
+    asyncio.run(verify())
+
+
+def test_prune_time_based_dry_run(database):
+    """Test dry-run mode shows preview without deleting."""
+    from datetime import datetime, timedelta, timezone
+    from abathur.application import TaskCoordinator
+
+    coordinator = TaskCoordinator(database)
+
+    async def create_old_tasks():
+        tasks = []
+        # Create two old completed tasks
+        for i in range(2):
+            submitted_time = datetime.now(timezone.utc) - timedelta(days=40 + i*10)
+            task = Task(
+                prompt=f"Old task {i}",
+                summary=f"Task to preview {i}",
+                agent_type="test-agent",
+                source=TaskSource.HUMAN,
+                status=TaskStatus.COMPLETED if i == 0 else TaskStatus.FAILED,
+                submitted_at=submitted_time,
+                completed_at=submitted_time if i == 0 else submitted_time,
+            )
+            task_id = await coordinator.submit_task(task)
+            tasks.append(task_id)
+        return tasks
+
+    task_ids = asyncio.run(create_old_tasks())
+
+    # Execute: Run with --dry-run
+    result = runner.invoke(
+        app,
+        ["task", "prune", "--older-than", "30d", "--dry-run"]
+    )
+
+    # Assert: Preview shown, but no deletion
+    assert result.exit_code == 0
+    assert "Dry-run mode" in result.stdout
+    assert "Would delete 2 task(s)" in result.stdout or "Tasks to Delete (2)" in result.stdout
+
+    # Verify no tasks were deleted
+    async def verify():
+        all_tasks = await database.list_tasks(limit=100)
+        assert len(all_tasks) == 2
+
+    asyncio.run(verify())
+
+
+def test_prune_time_based_displays_result(database):
+    """Test that PruneResult is displayed with proper formatting."""
+    from datetime import datetime, timedelta, timezone
+    from abathur.application import TaskCoordinator
+
+    coordinator = TaskCoordinator(database)
+
+    async def create_tasks_with_statuses():
+        # Create completed task
+        completed_time = datetime.now(timezone.utc) - timedelta(days=40)
+        completed_task = Task(
+            prompt="Completed task",
+            summary="Completed",
+            agent_type="test-agent",
+            source=TaskSource.HUMAN,
+            status=TaskStatus.COMPLETED,
+            submitted_at=completed_time,
+            completed_at=completed_time,
+        )
+        await coordinator.submit_task(completed_task)
+
+        # Create failed task
+        failed_time = datetime.now(timezone.utc) - timedelta(days=45)
+        failed_task = Task(
+            prompt="Failed task",
+            summary="Failed",
+            agent_type="test-agent",
+            source=TaskSource.HUMAN,
+            status=TaskStatus.FAILED,
+            submitted_at=failed_time,
+            completed_at=failed_time,
+        )
+        await coordinator.submit_task(failed_task)
+
+        # Create cancelled task
+        cancelled_time = datetime.now(timezone.utc) - timedelta(days=50)
+        cancelled_task = Task(
+            prompt="Cancelled task",
+            summary="Cancelled",
+            agent_type="test-agent",
+            source=TaskSource.HUMAN,
+            status=TaskStatus.CANCELLED,
+            submitted_at=cancelled_time,
+            completed_at=cancelled_time,
+        )
+        await coordinator.submit_task(cancelled_task)
+
+    asyncio.run(create_tasks_with_statuses())
+
+    # Execute: Prune old tasks
+    result = runner.invoke(
+        app,
+        ["task", "prune", "--older-than", "30d", "--force"]
+    )
+
+    # Assert: Verify result display
+    assert result.exit_code == 0
+    assert "Successfully deleted 3 task(s)" in result.stdout or "✓" in result.stdout
+    # Check for status breakdown table
+    assert "Breakdown by Status" in result.stdout or "completed" in result.stdout.lower()
+
+    # Verify database is empty
+    async def verify():
+        remaining_tasks = await database.list_tasks(limit=100)
+        assert len(remaining_tasks) == 0
+
+    asyncio.run(verify())
