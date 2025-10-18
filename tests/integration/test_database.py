@@ -270,8 +270,8 @@ class TestDatabaseTaskOperations:
         await database.update_task_status(task3.id, TaskStatus.COMPLETED)
 
         # Delete all completed tasks
-        deleted_count = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
-        assert deleted_count == 2
+        result = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
+        assert result.deleted_tasks == 2
 
         # Verify tasks are deleted
         retrieved_task2 = await database.get_task(task2.id)
@@ -292,8 +292,8 @@ class TestDatabaseTaskOperations:
         await database.insert_task(task)
 
         # Try to delete completed tasks (none exist)
-        deleted_count = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
-        assert deleted_count == 0
+        result = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
+        assert result.deleted_tasks == 0
 
         # Verify task still exists
         retrieved_task = await database.get_task(task.id)
@@ -349,8 +349,8 @@ class TestDatabaseTaskOperations:
             assert checkpoint_count == 2
 
         # Delete all completed tasks
-        deleted_count = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
-        assert deleted_count == 2
+        result = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
+        assert result.deleted_tasks == 2
 
         # Verify CASCADE deleted all agents and checkpoints
         async with database._get_connection() as conn:

@@ -150,7 +150,8 @@ class DeleteResult(BaseModel):
     blocked deletions due to child task dependencies, and any errors
     encountered during the operation.
 
-    Used by delete_tasks() method to provide structured, type-safe results.
+    Used by delete_tasks() and delete_tasks_by_status() methods to provide
+    structured, type-safe results.
     """
 
     deleted_tasks: int = Field(
@@ -202,30 +203,6 @@ class PruneResult(BaseModel):
                     f"Breakdown count for status {status} must be non-negative, got {count}"
                 )
         return v
-
-
-class DeleteResult(BaseModel):
-    """Result from delete_tasks operation.
-
-    Contains metrics about task deletion including successful deletions,
-    blocked deletions due to child task dependencies, and any errors
-    encountered during the operation.
-
-    Used by delete_tasks() method to provide structured, type-safe results.
-    """
-
-    deleted_count: int = Field(
-        ge=0, description="Number of tasks successfully deleted"
-    )
-
-    blocked_deletions: list[dict[str, Any]] = Field(
-        default_factory=list,
-        description="Tasks blocked from deletion due to child dependencies (task_id, child_ids)",
-    )
-
-    errors: list[str] = Field(
-        default_factory=list, description="Error messages from deletion process"
-    )
 
 
 class Database:
@@ -1834,33 +1811,18 @@ class Database:
             await conn.commit()
             return cursor.rowcount > 0
 
-    async def delete_tasks_by_status(self, status: TaskStatus) -> int:
+    async def delete_tasks_by_status(self, status: TaskStatus) -> DeleteResult:
         """Delete all tasks matching a status filter with CASCADE to dependent tables.
 
         Args:
-            status: Status filter for deletion (TaskStatus enum).
-                    Only COMPLETED, FAILED, or CANCELLED statuses are allowed.
+            status: Status filter for deletion (TaskStatus enum)
 
         Returns:
-            Number of tasks deleted
+            DeleteResult with deleted_tasks count
 
         Raises:
-            ValueError: If status is PENDING, BLOCKED, READY, or RUNNING
             DatabaseError: If deletion fails
         """
-        # Validate that only pruneable statuses can be deleted
-        forbidden = {
-            TaskStatus.PENDING,
-            TaskStatus.BLOCKED,
-            TaskStatus.READY,
-            TaskStatus.RUNNING,
-        }
-        if status in forbidden:
-            raise ValueError(
-                f"Cannot delete tasks with status {status.value}. "
-                f"Only COMPLETED, FAILED, or CANCELLED tasks can be deleted."
-            )
-
         async with self._get_connection() as conn:
             await conn.execute("PRAGMA foreign_keys = ON")
             cursor = await conn.execute(
@@ -1868,7 +1830,7 @@ class Database:
                 (status.value,),
             )
             await conn.commit()
-            return cursor.rowcount
+            return DeleteResult(deleted_tasks=cursor.rowcount)
 
     async def delete_tasks(self, task_ids: list[UUID]) -> DeleteResult:
         """Delete tasks by ID list with child task validation.
@@ -1878,12 +1840,9 @@ class Database:
 
         Returns:
             DeleteResult with:
-                - deleted_count: Number of tasks actually deleted
+                - deleted_tasks: Number of tasks actually deleted (0 if task_ids is empty)
                 - blocked_deletions: List of dicts with task_id and child_ids for blocked parents
                 - errors: List of error messages
-
-        Raises:
-            ValueError: If task_ids is empty
 
         Side Effects:
             - Deletes from tasks table (only if no children)
@@ -1891,9 +1850,9 @@ class Database:
             - Orphans agents.task_id (acceptable - historical record)
             - Preserves audit.task_id (no FK constraint)
         """
-        # Validate input
+        # Handle empty list - return early with 0 deletions
         if not task_ids:
-            raise ValueError("task_ids cannot be empty")
+            return DeleteResult(deleted_tasks=0, blocked_deletions=[], errors=[])
 
         async with self._get_connection() as conn:
             # Enable foreign key constraints for CASCADE deletion
@@ -1918,7 +1877,7 @@ class Database:
                 ]
 
                 return DeleteResult(
-                    deleted_count=0,
+                    deleted_tasks=0,
                     blocked_deletions=blocked_deletions,
                     errors=["Cannot delete tasks with child tasks. Delete children first."]
                 )
@@ -1936,7 +1895,7 @@ class Database:
             await conn.commit()
 
             return DeleteResult(
-                deleted_count=cursor.rowcount,
+                deleted_tasks=cursor.rowcount,
                 blocked_deletions=[],
                 errors=[]
             )
