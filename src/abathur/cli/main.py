@@ -511,34 +511,11 @@ def prune(
                 raise typer.BadParameter(f"Invalid filter parameters: {e}") from None
 
             # CLI-007: Task ID preview query for child validation
-            # CRITICAL: WHERE clause logic must match database.py:1847-1864 exactly
-            # to ensure preview query matches prune_tasks() deletion query
+            # Uses shared PruneFilters.build_where_clause() method to ensure
+            # preview query matches prune_tasks() deletion query exactly
 
-            # Build WHERE clause from PruneFilters (reuse database.py logic)
-            where_clauses = []
-            params = []
-
-            # Time filter (required - validated by PruneFilters model)
-            if filters.older_than_days is not None:
-                where_clauses.append(
-                    "(completed_at < date('now', ?) OR "
-                    "(completed_at IS NULL AND submitted_at < date('now', ?)))"
-                )
-                days_param = f"-{filters.older_than_days} days"
-                params.extend([days_param, days_param])
-            elif filters.before_date is not None:
-                where_clauses.append(
-                    "(completed_at < ? OR (completed_at IS NULL AND submitted_at < ?))"
-                )
-                before_iso = filters.before_date.isoformat()
-                params.extend([before_iso, before_iso])
-
-            # Status filter (always present - has default)
-            status_placeholders = ",".join("?" * len(filters.statuses))
-            where_clauses.append(f"status IN ({status_placeholders})")
-            params.extend([status.value for status in filters.statuses])
-
-            where_sql = " AND ".join(where_clauses)
+            # Build WHERE clause from PruneFilters (use shared method)
+            where_sql, params = filters.build_where_clause()
 
             # Build complete preview query
             limit_sql = f" LIMIT {filters.limit}" if filters.limit else ""
