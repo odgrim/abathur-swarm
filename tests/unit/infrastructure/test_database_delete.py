@@ -51,10 +51,10 @@ async def test_delete_single_task(db: Database, sample_task: Task):
     assert retrieved.id == sample_task.id
 
     # Delete task
-    deleted_count = await db.delete_tasks([sample_task.id])
+    result = await db.delete_tasks([sample_task.id])
 
     # Verify deletion
-    assert deleted_count == 1
+    assert result.deleted_tasks == 1
 
     # Verify task no longer exists
     retrieved_after = await db.get_task(sample_task.id)
@@ -91,10 +91,10 @@ async def test_delete_multiple_tasks(db: Database):
 
     # Delete all tasks
     task_ids = [task.id for task in tasks]
-    deleted_count = await db.delete_tasks(task_ids)
+    result = await db.delete_tasks(task_ids)
 
     # Verify deletion count
-    assert deleted_count == 3
+    assert result.deleted_tasks == 3
 
     # Verify all tasks are gone
     for task in tasks:
@@ -108,10 +108,10 @@ async def test_delete_nonexistent_task_returns_zero(db: Database):
     nonexistent_id = uuid4()
 
     # Delete non-existent task
-    deleted_count = await db.delete_tasks([nonexistent_id])
+    result = await db.delete_tasks([nonexistent_id])
 
     # Verify count is 0
-    assert deleted_count == 0
+    assert result.deleted_tasks == 0
 
 
 @pytest.mark.asyncio
@@ -124,10 +124,10 @@ async def test_delete_mixed_existing_nonexistent(db: Database, sample_task: Task
     task_ids = [sample_task.id, uuid4(), uuid4()]
 
     # Delete all IDs
-    deleted_count = await db.delete_tasks(task_ids)
+    result = await db.delete_tasks(task_ids)
 
     # Verify only 1 task was deleted
-    assert deleted_count == 1
+    assert result.deleted_tasks == 1
 
     # Verify the real task is gone
     assert await db.get_task(sample_task.id) is None
@@ -184,8 +184,8 @@ async def test_delete_cascades_to_task_dependencies(db: Database):
     assert dependencies[0].prerequisite_task_id == prerequisite_task.id
 
     # Delete the prerequisite task (should CASCADE delete dependency)
-    deleted_count = await db.delete_tasks([prerequisite_task.id])
-    assert deleted_count == 1
+    result = await db.delete_tasks([prerequisite_task.id])
+    assert result.deleted_tasks == 1
 
     # Verify dependency was CASCADE deleted
     dependencies_after = await db.get_task_dependencies(dependent_task.id)
@@ -216,8 +216,8 @@ async def test_delete_preserves_audit_records(db: Database, sample_task: Task):
         assert row["count"] == 1
 
     # Delete task
-    deleted_count = await db.delete_tasks([sample_task.id])
-    assert deleted_count == 1
+    result = await db.delete_tasks([sample_task.id])
+    assert result.deleted_tasks == 1
 
     # Verify audit record is still there (orphaned, but preserved)
     async with db._get_connection() as conn:
@@ -260,8 +260,8 @@ async def test_delete_orphans_agents_acceptably(db: Database, sample_task: Task)
         assert row["count"] == 1
 
     # Delete task (should CASCADE delete agent due to FK with ON DELETE CASCADE)
-    deleted_count = await db.delete_tasks([sample_task.id])
-    assert deleted_count == 1
+    result = await db.delete_tasks([sample_task.id])
+    assert result.deleted_tasks == 1
 
     # Verify agent was CASCADE deleted (updated behavior after migration)
     async with db._get_connection() as conn:
@@ -281,10 +281,10 @@ async def test_delete_empty_list_behavior(db: Database):
     # SQLite allows DELETE with empty IN clause, returns 0
     # Our implementation builds "IN ()" which is valid SQL
     # However, we should test actual behavior
-    deleted_count = await db.delete_tasks([])
+    result = await db.delete_tasks([])
 
     # Empty list should result in 0 deletions
-    assert deleted_count == 0
+    assert result.deleted_tasks == 0
 
 
 @pytest.mark.asyncio
@@ -294,10 +294,10 @@ async def test_delete_duplicate_ids(db: Database, sample_task: Task):
     await db.insert_task(sample_task)
 
     # Delete with duplicate IDs in list
-    deleted_count = await db.delete_tasks([sample_task.id, sample_task.id, sample_task.id])
+    result = await db.delete_tasks([sample_task.id, sample_task.id, sample_task.id])
 
     # Should only delete once (SQL IN clause deduplicates)
-    assert deleted_count == 1
+    assert result.deleted_tasks == 1
 
     # Verify task is gone
     assert await db.get_task(sample_task.id) is None
