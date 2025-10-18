@@ -66,7 +66,7 @@ class PruneFilters(BaseModel):
 
     vacuum_mode: str = Field(
         default="conditional",
-        description="VACUUM strategy: 'always', 'conditional', or 'never'"
+        description="VACUUM strategy: 'always', 'conditional', or 'never'",
     )
 
     @model_validator(mode="after")
@@ -94,6 +94,15 @@ class PruneFilters(BaseModel):
                 f"Cannot prune tasks with statuses: {invalid}. "
                 f"Only COMPLETED, FAILED, or CANCELLED tasks can be pruned."
             )
+        return v
+
+    @field_validator("vacuum_mode")
+    @classmethod
+    def validate_vacuum_mode(cls, v: str) -> str:
+        """Validate vacuum_mode is one of allowed values."""
+        allowed = {"always", "conditional", "never"}
+        if v not in allowed:
+            raise ValueError(f"vacuum_mode must be one of {allowed}, got '{v}'")
         return v
 
 
