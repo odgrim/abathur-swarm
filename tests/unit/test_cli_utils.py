@@ -139,3 +139,48 @@ class TestParseDurationToDays:
         assert parse_duration_to_days("30d") == 30  # Month approximation
         assert parse_duration_to_days("90d") == 90  # Quarter
         assert parse_duration_to_days("365d") == 365  # Year approximation
+
+    # Overflow validation tests
+    def test_parse_exceeds_maximum_years(self):
+        """Test that durations exceeding maximum in years raise ValueError."""
+        with pytest.raises(ValueError, match="Duration exceeds maximum allowed"):
+            parse_duration_to_days("101y")  # 101 * 365 = 36,865 days > 36,500
+        with pytest.raises(ValueError, match="Duration exceeds maximum allowed"):
+            parse_duration_to_days("200y")  # 200 * 365 = 73,000 days > 36,500
+
+    def test_parse_exceeds_maximum_months(self):
+        """Test that durations exceeding maximum in months raise ValueError."""
+        with pytest.raises(ValueError, match="Duration exceeds maximum allowed"):
+            parse_duration_to_days("1220m")  # 1220 * 30 = 36,600 days > 36,500
+
+    def test_parse_exceeds_maximum_weeks(self):
+        """Test that durations exceeding maximum in weeks raise ValueError."""
+        with pytest.raises(ValueError, match="Duration exceeds maximum allowed"):
+            parse_duration_to_days("5300w")  # 5300 * 7 = 37,100 days > 36,500
+
+    def test_parse_exceeds_maximum_days(self):
+        """Test that durations exceeding maximum in days raise ValueError."""
+        with pytest.raises(ValueError, match="Duration exceeds maximum allowed"):
+            parse_duration_to_days("40000d")  # 40,000 days > 36,500
+
+    def test_parse_extreme_overflow(self):
+        """Test that extreme overflow values are caught."""
+        with pytest.raises(ValueError, match="Duration exceeds maximum allowed"):
+            parse_duration_to_days("999999999999999y")
+
+    def test_parse_at_maximum_boundary(self):
+        """Test parsing at and near maximum boundary."""
+        # Just at or under the limit should work
+        assert parse_duration_to_days("100y") == 36_500  # 100 * 365 = 36,500 (exactly at limit)
+        assert parse_duration_to_days("99y") == 36_135  # 99 * 365 = 36,135 (under limit)
+
+    def test_parse_error_message_clarity(self):
+        """Test that overflow error messages contain helpful information."""
+        try:
+            parse_duration_to_days("101y")
+        except ValueError as e:
+            error_msg = str(e)
+            assert "101y" in error_msg  # Original input
+            assert "36865" in error_msg or "36,865" in error_msg  # Calculated days
+            assert "36500" in error_msg or "36,500" in error_msg  # Maximum limit
+            assert "100 years" in error_msg  # Human-readable limit

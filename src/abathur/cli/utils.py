@@ -2,6 +2,8 @@
 
 import re
 
+MAX_DURATION_DAYS = 36_500  # ~100 years, reasonable upper limit
+
 
 def parse_duration_to_days(duration_str: str) -> int:
     """
@@ -12,6 +14,7 @@ def parse_duration_to_days(duration_str: str) -> int:
     - "2w" = 14 days (2 weeks × 7 days)
     - "6m" = ~180 days (6 months × 30 days)
     - "1y" = 365 days
+    - Maximum allowed: 36,500 days (~100 years)
 
     Args:
         duration_str: Duration string with unit suffix (d/w/m/y)
@@ -20,7 +23,8 @@ def parse_duration_to_days(duration_str: str) -> int:
         Integer number of days
 
     Raises:
-        ValueError: If format is invalid, unsupported unit, or value is non-positive
+        ValueError: If format is invalid, unsupported unit, value is non-positive,
+                   or exceeds maximum allowed duration
 
     Examples:
         >>> parse_duration_to_days("30d")
@@ -31,6 +35,9 @@ def parse_duration_to_days(duration_str: str) -> int:
         180
         >>> parse_duration_to_days("1y")
         365
+        >>> parse_duration_to_days("101y")  # doctest: +SKIP
+        Traceback (most recent call last):
+        ValueError: Duration exceeds maximum allowed
     """
     # Regex pattern to match number + unit
     # Captures: integer value and single-character unit (d/w/m/y)
@@ -62,4 +69,10 @@ def parse_duration_to_days(duration_str: str) -> int:
         "y": 365,  # years (approximation: 365 days/year, no leap year)
     }
 
-    return value * multipliers[unit]
+    result_days = value * multipliers[unit]
+    if result_days > MAX_DURATION_DAYS:
+        raise ValueError(
+            f"Duration exceeds maximum allowed: '{duration_str}' = {result_days} days. "
+            f"Maximum allowed: {MAX_DURATION_DAYS} days (~100 years)."
+        )
+    return result_days
