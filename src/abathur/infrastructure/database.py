@@ -1775,14 +1775,14 @@ class Database:
             await conn.commit()
             return cursor.rowcount
 
-    async def delete_tasks(self, task_ids: list[UUID]) -> dict[str, Any]:
+    async def delete_tasks(self, task_ids: list[UUID]) -> DeleteResult:
         """Delete tasks by ID list with child task validation.
 
         Args:
             task_ids: List of task UUIDs to delete
 
         Returns:
-            Dictionary with:
+            DeleteResult with:
                 - deleted_count: Number of tasks actually deleted
                 - blocked_deletions: List of dicts with task_id and child_ids for blocked parents
                 - errors: List of error messages
@@ -1822,11 +1822,11 @@ class Database:
                     for parent_id, child_ids in parent_to_children.items()
                 ]
 
-                return {
-                    "deleted_count": 0,
-                    "blocked_deletions": blocked_deletions,
-                    "errors": ["Cannot delete tasks with child tasks. Delete children first."]
-                }
+                return DeleteResult(
+                    deleted_count=0,
+                    blocked_deletions=blocked_deletions,
+                    errors=["Cannot delete tasks with child tasks. Delete children first."]
+                )
 
             # Step 2: No child tasks - proceed with deletion
             # Build dynamic IN clause with placeholders
@@ -1840,11 +1840,11 @@ class Database:
             )
             await conn.commit()
 
-            return {
-                "deleted_count": cursor.rowcount,
-                "blocked_deletions": [],
-                "errors": []
-            }
+            return DeleteResult(
+                deleted_count=cursor.rowcount,
+                blocked_deletions=[],
+                errors=[]
+            )
 
     async def prune_tasks(self, filters: PruneFilters) -> PruneResult:
         """Prune tasks based on age and status criteria.
