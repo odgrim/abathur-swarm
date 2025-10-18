@@ -143,6 +143,31 @@ class PruneFilters(BaseModel):
         return (where_sql, params)
 
 
+class DeleteResult(BaseModel):
+    """Result from delete_tasks operation.
+
+    Contains metrics about task deletion including successful deletions,
+    blocked deletions due to child task dependencies, and any errors
+    encountered during the operation.
+
+    Used by delete_tasks() method to provide structured, type-safe results.
+    """
+
+    deleted_tasks: int = Field(
+        ge=0, description="Number of tasks successfully deleted"
+    )
+
+    blocked_deletions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Tasks that could not be deleted due to child task dependencies"
+    )
+
+    errors: list[str] = Field(
+        default_factory=list,
+        description="Error messages encountered during deletion"
+    )
+
+
 class PruneResult(BaseModel):
     """Statistics from prune operation.
 
