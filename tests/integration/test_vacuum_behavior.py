@@ -3,7 +3,7 @@
 Tests complete end-to-end workflows for VACUUM functionality:
 - VACUUM successfully reclaims space after deletion
 - VACUUM is disabled in dry-run mode
-- VACUUM is optional (controlled by vacuum flag)
+- VACUUM is optional (controlled by vacuum_mode: 'always', 'conditional', or 'never')
 - VACUUM behavior with zero deletions
 - VACUUM space calculation accuracy
 - VACUUM with large datasets
@@ -87,7 +87,7 @@ async def test_vacuum_reclaims_space(memory_db: Database):
     # Step 3: Delete all tasks WITH VACUUM enabled
     filters = PruneFilters(
         older_than_days=30,
-        vacuum=True,  # Enable VACUUM
+        vacuum_mode="always",  # Enable VACUUM
         dry_run=False
     )
     result = await memory_db.prune_tasks(filters)
@@ -95,7 +95,7 @@ async def test_vacuum_reclaims_space(memory_db: Database):
     # Step 4: Assertions
     assert result.deleted_tasks == 1000, f"Expected 1000 tasks deleted, got {result.deleted_tasks}"
     assert result.dry_run is False
-    assert result.reclaimed_bytes is not None, "reclaimed_bytes should not be None when vacuum=True"
+    assert result.reclaimed_bytes is not None, "reclaimed_bytes should not be None when vacuum_mode='always'"
     assert result.reclaimed_bytes >= 0, f"reclaimed_bytes should be non-negative, got {result.reclaimed_bytes}"
 
     # VACUUM should reclaim some space (even if minimal for in-memory DB)
@@ -121,11 +121,11 @@ async def test_vacuum_disabled_in_dry_run(memory_db: Database):
     task_ids = await create_tasks(memory_db, 100, TaskStatus.COMPLETED)
     assert len(task_ids) == 100
 
-    # Step 2: Run prune with dry_run=True and vacuum=True
+    # Step 2: Run prune with dry_run=True and vacuum_mode='always'
     # VACUUM should be skipped because dry_run takes precedence
     filters = PruneFilters(
         older_than_days=30,
-        vacuum=True,  # Request VACUUM
+        vacuum_mode="always",  # Request VACUUM
         dry_run=True  # But dry-run mode
     )
     result = await memory_db.prune_tasks(filters)
@@ -149,10 +149,10 @@ async def test_vacuum_optional_flag(memory_db: Database):
     task_ids = await create_tasks(memory_db, 200, TaskStatus.COMPLETED)
     assert len(task_ids) == 200
 
-    # Step 2: Delete tasks WITHOUT vacuum flag (vacuum=False)
+    # Step 2: Delete tasks WITHOUT vacuum (vacuum_mode='never')
     filters_no_vacuum = PruneFilters(
         older_than_days=30,
-        vacuum=False,  # Explicitly disable VACUUM
+        vacuum_mode="never",  # Explicitly disable VACUUM
         dry_run=False
     )
     result_no_vacuum = await memory_db.prune_tasks(filters_no_vacuum)
@@ -160,16 +160,16 @@ async def test_vacuum_optional_flag(memory_db: Database):
     # Step 3: Verify VACUUM did NOT run
     assert result_no_vacuum.deleted_tasks == 200
     assert result_no_vacuum.dry_run is False
-    assert result_no_vacuum.reclaimed_bytes is None, "reclaimed_bytes should be None when vacuum=False"
+    assert result_no_vacuum.reclaimed_bytes is None, "reclaimed_bytes should be None when vacuum_mode='never'"
 
     # Step 4: Recreate tasks for second test
     task_ids = await create_tasks(memory_db, 200, TaskStatus.COMPLETED)
     assert len(task_ids) == 200
 
-    # Step 5: Delete tasks WITH vacuum flag (vacuum=True)
+    # Step 5: Delete tasks WITH vacuum (vacuum_mode='always')
     filters_with_vacuum = PruneFilters(
         older_than_days=30,
-        vacuum=True,  # Enable VACUUM
+        vacuum_mode="always",  # Enable VACUUM
         dry_run=False
     )
     result_with_vacuum = await memory_db.prune_tasks(filters_with_vacuum)
@@ -177,7 +177,7 @@ async def test_vacuum_optional_flag(memory_db: Database):
     # Step 6: Verify VACUUM DID run
     assert result_with_vacuum.deleted_tasks == 200
     assert result_with_vacuum.dry_run is False
-    assert result_with_vacuum.reclaimed_bytes is not None, "reclaimed_bytes should not be None when vacuum=True"
+    assert result_with_vacuum.reclaimed_bytes is not None, "reclaimed_bytes should not be None when vacuum_mode='always'"
     assert result_with_vacuum.reclaimed_bytes >= 0
 
 
@@ -202,7 +202,7 @@ async def test_vacuum_with_zero_deletions(memory_db: Database):
     # Step 2: Try to delete tasks older than 99999 days (none match)
     filters = PruneFilters(
         older_than_days=99999,
-        vacuum=True,  # Request VACUUM
+        vacuum_mode="always",  # Request VACUUM
         dry_run=False
     )
     result = await memory_db.prune_tasks(filters)
@@ -611,7 +611,7 @@ async def test_vacuum_cli_integration(memory_db: Database):
     This test is a placeholder until the CLI prune command is updated with
     the --vacuum flag. Once implemented, this test should verify:
     1. CLI accepts --vacuum flag
-    2. CLI passes vacuum=True to database layer
+    2. CLI passes vacuum_mode='always' to database layer
     3. CLI displays reclaimed space in output
     """
     # Step 1: Create tasks for testing
@@ -621,7 +621,7 @@ async def test_vacuum_cli_integration(memory_db: Database):
     # Step 2: Test database-level VACUUM (what CLI will eventually call)
     filters = PruneFilters(
         older_than_days=30,
-        vacuum=True,
+        vacuum_mode="always",
         dry_run=False
     )
     result = await memory_db.prune_tasks(filters)
