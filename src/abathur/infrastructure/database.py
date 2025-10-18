@@ -696,6 +696,35 @@ class Database:
             if task_fk and task_fk["on_delete"] != "CASCADE":
                 print("Migrating database schema: adding CASCADE DELETE to checkpoints.task_id foreign key")
 
+                # Check for orphaned checkpoints BEFORE migration
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) as orphan_count
+                    FROM checkpoints c
+                    LEFT JOIN tasks t ON c.task_id = t.id
+                    WHERE t.id IS NULL
+                """)
+                orphan_result = await cursor.fetchone()
+                orphan_count = orphan_result["orphan_count"]
+
+                if orphan_count > 0:
+                    print(f"WARNING: Found {orphan_count} orphaned checkpoint records (task_id not in tasks table)")
+
+                    # Query and display first 5 orphaned records
+                    cursor = await conn.execute("""
+                        SELECT c.task_id, c.iteration, c.created_at
+                        FROM checkpoints c
+                        LEFT JOIN tasks t ON c.task_id = t.id
+                        WHERE t.id IS NULL
+                        ORDER BY c.created_at DESC
+                        LIMIT 5
+                    """)
+                    orphan_samples = await cursor.fetchall()
+                    print("Sample orphaned checkpoints:")
+                    for sample in orphan_samples:
+                        print(f"  - task_id: {sample['task_id']}, iteration: {sample['iteration']}, created_at: {sample['created_at']}")
+
+                    print("Migration will proceed: orphaned records will be preserved, but future orphans prevented by CASCADE DELETE")
+
                 # Temporarily disable foreign keys
                 await conn.execute("PRAGMA foreign_keys=OFF")
 
