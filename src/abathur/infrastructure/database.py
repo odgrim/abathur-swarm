@@ -571,63 +571,95 @@ class Database:
             )
 
             if task_fk and task_fk["on_delete"] != "CASCADE":
-                print("Migrating database schema: adding CASCADE DELETE to agents.task_id foreign key")
+                # Pre-migration data integrity check: detect orphaned agents
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) as orphan_count
+                    FROM agents a
+                    LEFT JOIN tasks t ON a.task_id = t.id
+                    WHERE a.task_id IS NOT NULL AND t.id IS NULL
+                """)
+                orphan_result = await cursor.fetchone()
+                orphan_count = orphan_result["orphan_count"]
 
-                # Temporarily disable foreign keys
-                await conn.execute("PRAGMA foreign_keys=OFF")
+                if orphan_count > 0:
+                    print(f"WARNING: Found {orphan_count} orphaned agent records (agents.task_id not in tasks table)")
 
-                # Create new table with CASCADE DELETE
-                await conn.execute(
-                    """
-                    CREATE TABLE agents_new (
-                        id TEXT PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        specialization TEXT NOT NULL,
-                        task_id TEXT NOT NULL,
-                        state TEXT NOT NULL,
-                        model TEXT NOT NULL,
-                        spawned_at TIMESTAMP NOT NULL,
-                        terminated_at TIMESTAMP,
-                        resource_usage TEXT,
-                        session_id TEXT,
-                        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
-                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                    # Query and display first 5 orphaned records
+                    cursor = await conn.execute("""
+                        SELECT a.id, a.name, a.task_id, a.spawned_at
+                        FROM agents a
+                        LEFT JOIN tasks t ON a.task_id = t.id
+                        WHERE a.task_id IS NOT NULL AND t.id IS NULL
+                        LIMIT 5
+                    """)
+                    orphans = await cursor.fetchall()
+
+                    print("Sample orphaned agent records:")
+                    for orphan in orphans:
+                        print(f"  - Agent ID: {orphan['id']}, Name: {orphan['name']}, "
+                              f"Task ID: {orphan['task_id']}, Spawned At: {orphan['spawned_at']}")
+
+                    print("SKIPPING CASCADE DELETE migration to prevent data loss.")
+                    print("Please manually clean up orphaned agents or restore missing tasks before retrying.")
+                else:
+                    # No orphans detected - proceed with migration
+                    print("Migrating database schema: adding CASCADE DELETE to agents.task_id foreign key")
+
+                    # Temporarily disable foreign keys
+                    await conn.execute("PRAGMA foreign_keys=OFF")
+
+                    # Create new table with CASCADE DELETE
+                    await conn.execute(
+                        """
+                        CREATE TABLE agents_new (
+                            id TEXT PRIMARY KEY,
+                            name TEXT NOT NULL,
+                            specialization TEXT NOT NULL,
+                            task_id TEXT NOT NULL,
+                            state TEXT NOT NULL,
+                            model TEXT NOT NULL,
+                            spawned_at TIMESTAMP NOT NULL,
+                            terminated_at TIMESTAMP,
+                            resource_usage TEXT,
+                            session_id TEXT,
+                            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                        )
+                        """
                     )
-                    """
-                )
 
-                # Copy data from old table to new table
-                await conn.execute(
-                    """
-                    INSERT INTO agents_new
-                    SELECT * FROM agents
-                    """
-                )
+                    # Copy data from old table to new table
+                    await conn.execute(
+                        """
+                        INSERT INTO agents_new
+                        SELECT * FROM agents
+                        """
+                    )
 
-                # Drop old table
-                await conn.execute("DROP TABLE agents")
+                    # Drop old table
+                    await conn.execute("DROP TABLE agents")
 
-                # Rename new table to agents
-                await conn.execute("ALTER TABLE agents_new RENAME TO agents")
+                    # Rename new table to agents
+                    await conn.execute("ALTER TABLE agents_new RENAME TO agents")
 
-                # Recreate indexes
-                await conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_agents_task ON agents(task_id)"
-                )
-                await conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_agents_state ON agents(state)"
-                )
-                await conn.execute(
-                    """CREATE INDEX IF NOT EXISTS idx_agents_session
-                       ON agents(session_id, spawned_at DESC)
-                       WHERE session_id IS NOT NULL"""
-                )
+                    # Recreate indexes
+                    await conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_agents_task ON agents(task_id)"
+                    )
+                    await conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_agents_state ON agents(state)"
+                    )
+                    await conn.execute(
+                        """CREATE INDEX IF NOT EXISTS idx_agents_session
+                           ON agents(session_id, spawned_at DESC)
+                           WHERE session_id IS NOT NULL"""
+                    )
 
-                # Re-enable foreign keys
-                await conn.execute("PRAGMA foreign_keys=ON")
+                    # Re-enable foreign keys
+                    await conn.execute("PRAGMA foreign_keys=ON")
 
-                await conn.commit()
-                print("Added CASCADE DELETE to agents.task_id foreign key")
+                    await conn.commit()
+                    print("Added CASCADE DELETE to agents.task_id foreign key")
 
         # Check if audit table exists and needs memory columns
         cursor = await conn.execute(
