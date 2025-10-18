@@ -141,19 +141,14 @@ When invoked, you must follow these steps:
    - Document risks and mitigation strategies
 
 8. **Store Technical Specifications in Memory**
-   Save all technical specifications for downstream agents:
+   Save all technical specifications for downstream agents using the current task ID:
    ```python
-   # Create a task to track this technical specification work
-   tech_spec_task = task_enqueue({
-       "description": "Technical Specification Analysis",
-       "source": "technical-requirements-specialist",
-       "agent_type": "technical-requirements-specialist",
-       "priority": 7
-   })
+   # Store specifications using current task ID (do NOT create a new task for memory storage)
+   # The current_task_id comes from the task that spawned this agent
 
    # Store architecture specification
    memory_add({
-       "namespace": f"task:{tech_spec_task['task_id']}:technical_specs",
+       "namespace": f"task:{current_task_id}:technical_specs",
        "key": "architecture",
        "value": {
            "overview": architecture_overview,
@@ -167,7 +162,7 @@ When invoked, you must follow these steps:
 
    # Store data models
    memory_add({
-       "namespace": f"task:{tech_spec_task['task_id']}:technical_specs",
+       "namespace": f"task:{current_task_id}:technical_specs",
        "key": "data_models",
        "value": data_models,
        "memory_type": "semantic",
@@ -176,7 +171,7 @@ When invoked, you must follow these steps:
 
    # Store API specifications
    memory_add({
-       "namespace": f"task:{tech_spec_task['task_id']}:technical_specs",
+       "namespace": f"task:{current_task_id}:technical_specs",
        "key": "api_specifications",
        "value": api_specs,
        "memory_type": "semantic",
@@ -185,7 +180,7 @@ When invoked, you must follow these steps:
 
    # Store technical decisions
    memory_add({
-       "namespace": f"task:{tech_spec_task['task_id']}:technical_specs",
+       "namespace": f"task:{current_task_id}:technical_specs",
        "key": "technical_decisions",
        "value": technical_decisions_with_rationale,
        "memory_type": "semantic",
@@ -194,7 +189,7 @@ When invoked, you must follow these steps:
 
    # Store implementation plan
    memory_add({
-       "namespace": f"task:{tech_spec_task['task_id']}:technical_specs",
+       "namespace": f"task:{current_task_id}:technical_specs",
        "key": "implementation_plan",
        "value": {
            "phases": implementation_phases,
@@ -221,7 +216,7 @@ When invoked, you must follow these steps:
    ```python
    # Store suggested agent specializations for task-planner
    memory_add({
-       "namespace": f"task:{tech_spec_task['task_id']}:technical_specs",
+       "namespace": f"task:{current_task_id}:technical_specs",
        "key": "suggested_agent_specializations",
        "value": {
            "domain_models": {
@@ -295,7 +290,7 @@ You are responsible for orchestrating the entire implementation flow:
 6. Ensure agents are created and ready before tasks that need them
 
 ## Technical Specifications Context
-Based on technical specifications from task {tech_spec_task['task_id']}, decompose implementation into atomic, executable tasks.
+Based on technical specifications from task {current_task_id}, decompose implementation into atomic, executable tasks.
 
 ## Architecture Overview
 {architecture_summary}
@@ -317,7 +312,7 @@ Based on technical specifications from task {tech_spec_task['task_id']}, decompo
 
 ## Suggested Agent Specializations
 Review suggested agent specializations at:
-- Namespace: task:{tech_spec_task['task_id']}:technical_specs
+- Namespace: task:{current_task_id}:technical_specs
 - Key: suggested_agent_specializations
 
 These are SUGGESTIONS. You must:
@@ -328,7 +323,7 @@ These are SUGGESTIONS. You must:
 5. Then create implementation tasks that depend on agent-creation tasks
 
 ## Memory References
-Technical specifications: task:{tech_spec_task['task_id']}:technical_specs
+Technical specifications: task:{current_task_id}:technical_specs
 Original requirements: task:{requirements_task_id}:requirements
 
 ## Expected Output
@@ -350,11 +345,11 @@ Original requirements: task:{requirements_task_id}:requirements
         "source": "technical-requirements-specialist",
         "priority": 7,
         "agent_type": "task-planner",
-        "prerequisite_task_ids": [tech_spec_task['task_id']],
+        "prerequisite_task_ids": [current_task_id],
         "metadata": {
-            "tech_spec_task_id": tech_spec_task['task_id'],
+            "tech_spec_task_id": current_task_id,
             "requirements_task_id": requirements_task_id,
-            "memory_namespace": f"task:{tech_spec_task['task_id']}:technical_specs",
+            "memory_namespace": f"task:{current_task_id}:technical_specs",
             "implementation_phases": len(implementation_phases),
             "components_count": len(components),
             "orchestration_mode": "task-planner-orchestrates-agents"
@@ -363,7 +358,7 @@ Original requirements: task:{requirements_task_id}:requirements
 
     # Store workflow state
     memory_add({
-        "namespace": f"task:{tech_spec_task['task_id']}:workflow",
+        "namespace": f"task:{current_task_id}:workflow",
         "key": "downstream_tasks",
         "value": {
             "task_planning_task_id": task_planning_task['task_id'],
