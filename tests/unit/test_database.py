@@ -35,9 +35,9 @@ class TestDeleteTasks:
 
         # Delete the task
         result = await database.delete_tasks([task.id])
-        assert result["deleted_count"] == 1
-        assert result["blocked_deletions"] == []
-        assert result["errors"] == []
+        assert result.deleted_tasks == 1
+        assert result.blocked_deletions == []
+        assert result.errors == []
 
         # Verify task is deleted
         deleted_task = await database.get_task(task.id)
@@ -58,9 +58,9 @@ class TestDeleteTasks:
         # Delete all tasks in single transaction
         task_ids = [task.id for task in tasks]
         result = await database.delete_tasks(task_ids)
-        assert result["deleted_count"] == 15
-        assert result["blocked_deletions"] == []
-        assert result["errors"] == []
+        assert result.deleted_tasks == 15
+        assert result.blocked_deletions == []
+        assert result.errors == []
 
         # Verify all tasks are deleted
         remaining_tasks = await database.list_tasks(limit=20)
@@ -79,9 +79,9 @@ class TestDeleteTasks:
 
         # Delete non-existent tasks
         result = await database.delete_tasks(non_existent_ids)
-        assert result["deleted_count"] == 0
-        assert result["blocked_deletions"] == []
-        assert result["errors"] == []
+        assert result.deleted_tasks == 0
+        assert result.blocked_deletions == []
+        assert result.errors == []
 
     @pytest.mark.asyncio
     async def test_delete_tasks_mixed_existent_nonexistent(self, database: Database) -> None:
@@ -100,9 +100,9 @@ class TestDeleteTasks:
 
         # Delete should only delete the 3 existing tasks
         result = await database.delete_tasks(task_ids)
-        assert result["deleted_count"] == 3
-        assert result["blocked_deletions"] == []
-        assert result["errors"] == []
+        assert result.deleted_tasks == 3
+        assert result.blocked_deletions == []
+        assert result.errors == []
 
         # Verify only the 3 existing tasks were deleted
         assert await database.get_task(task1.id) is None
@@ -124,15 +124,15 @@ class TestDeleteTasks:
 
         # Try to delete parent - should be blocked
         result = await database.delete_tasks([parent.id])
-        assert result["deleted_count"] == 0
-        assert len(result["blocked_deletions"]) == 1  # One parent blocked
-        assert result["errors"] == ["Cannot delete tasks with child tasks. Delete children first."]
+        assert result.deleted_tasks == 0
+        assert len(result.blocked_deletions) == 1  # One parent blocked
+        assert result.errors == ["Cannot delete tasks with child tasks. Delete children first."]
 
         # Verify parent still exists
         assert await database.get_task(parent.id) is not None
 
         # Verify child task IDs are in the blocked_deletions entry
-        blocked_entry = result["blocked_deletions"][0]
+        blocked_entry = result.blocked_deletions[0]
         assert blocked_entry["task_id"] == str(parent.id)
         assert str(child1.id) in blocked_entry["child_ids"]
         assert str(child2.id) in blocked_entry["child_ids"]
@@ -174,7 +174,7 @@ class TestDeleteTasks:
 
         # Delete task1 - should CASCADE delete dep1 (where task1 is prerequisite)
         result = await database.delete_tasks([task1.id])
-        assert result["deleted_count"] == 1
+        assert result.deleted_tasks == 1
 
         # Verify only dep1 was CASCADE deleted (dep2 should remain since task2 still exists)
         async with database._get_connection() as conn:
@@ -186,7 +186,7 @@ class TestDeleteTasks:
 
         # Now delete all remaining tasks (task2 and task3)
         result = await database.delete_tasks([task2.id, task3.id])
-        assert result["deleted_count"] == 2
+        assert result.deleted_tasks == 2
 
         # Verify all dependencies were CASCADE deleted
         async with database._get_connection() as conn:
@@ -198,7 +198,7 @@ class TestDeleteTasks:
 
     @pytest.mark.asyncio
     async def test_delete_returns_correct_counts(self, database: Database) -> None:
-        """Test delete_tasks() returns accurate deleted_count."""
+        """Test delete_tasks() returns accurate deleted_tasks."""
         # Create 10 tasks
         tasks = [Task(prompt=f"Task {i}", summary=f"Count test {i}") for i in range(10)]
         for task in tasks:
@@ -207,9 +207,9 @@ class TestDeleteTasks:
         # Delete all tasks
         task_ids = [task.id for task in tasks]
         result = await database.delete_tasks(task_ids)
-        assert result["deleted_count"] == 10
-        assert result["blocked_deletions"] == []
-        assert result["errors"] == []
+        assert result.deleted_tasks == 10
+        assert result.blocked_deletions == []
+        assert result.errors == []
 
         # Verify all deleted
         for task_id in task_ids:

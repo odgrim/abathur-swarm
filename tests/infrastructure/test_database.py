@@ -130,10 +130,10 @@ class TestDeleteTasksByStatus:
         await database.update_task_status(task2.id, TaskStatus.COMPLETED)
 
         # Act - delete all completed tasks
-        deleted_count = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
+        result = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
 
         # Assert - returns 2, both completed tasks deleted
-        assert deleted_count == 2
+        assert result.deleted_tasks == 2
 
         # Verify completed tasks are deleted
         assert await database.get_task(task1.id) is None
@@ -162,10 +162,10 @@ class TestDeleteTasksByStatus:
         await database.update_task_status(task3.id, TaskStatus.COMPLETED)
 
         # Act - delete all failed tasks
-        deleted_count = await database.delete_tasks_by_status(TaskStatus.FAILED)
+        result = await database.delete_tasks_by_status(TaskStatus.FAILED)
 
         # Assert - returns 2, both failed tasks deleted
-        assert deleted_count == 2
+        assert result.deleted_tasks == 2
 
         # Verify failed tasks are deleted
         assert await database.get_task(task1.id) is None
@@ -182,10 +182,10 @@ class TestDeleteTasksByStatus:
         await database.insert_task(task)
 
         # Act - try to delete completed tasks (none exist)
-        deleted_count = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
+        result = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
 
         # Assert - returns 0
-        assert deleted_count == 0
+        assert result.deleted_tasks == 0
 
         # Verify pending task still exists
         assert await database.get_task(task.id) is not None
@@ -229,10 +229,10 @@ class TestDeleteTasksByStatus:
             assert row[0] == 2
 
         # Act - delete all completed tasks (task1 and task2)
-        deleted_count = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
+        result = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
 
         # Assert - 2 tasks deleted
-        assert deleted_count == 2
+        assert result.deleted_tasks == 2
 
         # Verify CASCADE deleted both dependencies (dep1 and dep2)
         # dep1: task2 -> task1 (both deleted)
@@ -263,10 +263,10 @@ class TestDeleteTasksByStatus:
         await database.update_task_status(task_failed.id, TaskStatus.FAILED)
 
         # Act - delete only completed tasks
-        deleted_count = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
+        result = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
 
         # Assert - only 1 task deleted
-        assert deleted_count == 1
+        assert result.deleted_tasks == 1
 
         # Verify only completed task is deleted
         assert await database.get_task(task_completed.id) is None
@@ -323,10 +323,10 @@ class TestDeleteTasksByStatus:
             assert row[0] == 1
 
         # Act - delete all completed tasks
-        deleted_count = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
+        result = await database.delete_tasks_by_status(TaskStatus.COMPLETED)
 
         # Assert - 1 task deleted
-        assert deleted_count == 1
+        assert result.deleted_tasks == 1
         assert await database.get_task(task1.id) is None
 
         # Verify CASCADE deleted agent and checkpoint

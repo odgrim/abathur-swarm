@@ -143,6 +143,32 @@ class PruneFilters(BaseModel):
         return (where_sql, params)
 
 
+class DeleteResult(BaseModel):
+    """Result from delete_tasks operation.
+
+    Contains metrics about task deletion including successful deletions,
+    blocked deletions due to child task dependencies, and any errors
+    encountered during the operation.
+
+    Used by delete_tasks() and delete_tasks_by_status() methods to provide
+    structured, type-safe results.
+    """
+
+    deleted_tasks: int = Field(
+        ge=0, description="Number of tasks successfully deleted"
+    )
+
+    blocked_deletions: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Tasks that could not be deleted due to child task dependencies"
+    )
+
+    errors: list[str] = Field(
+        default_factory=list,
+        description="Error messages encountered during deletion"
+    )
+
+
 class PruneResult(BaseModel):
     """Statistics from prune operation.
 
@@ -1785,14 +1811,14 @@ class Database:
             await conn.commit()
             return cursor.rowcount > 0
 
-    async def delete_tasks_by_status(self, status: TaskStatus) -> int:
+    async def delete_tasks_by_status(self, status: TaskStatus) -> DeleteResult:
         """Delete all tasks matching a status filter with CASCADE to dependent tables.
 
         Args:
             status: Status filter for deletion (TaskStatus enum)
 
         Returns:
-            Number of tasks deleted
+            DeleteResult with deleted_tasks count
 
         Raises:
             DatabaseError: If deletion fails
@@ -1804,22 +1830,19 @@ class Database:
                 (status.value,),
             )
             await conn.commit()
-            return cursor.rowcount
+            return DeleteResult(deleted_tasks=cursor.rowcount)
 
-    async def delete_tasks(self, task_ids: list[UUID]) -> dict[str, Any]:
+    async def delete_tasks(self, task_ids: list[UUID]) -> DeleteResult:
         """Delete tasks by ID list with child task validation.
 
         Args:
             task_ids: List of task UUIDs to delete
 
         Returns:
-            Dictionary with:
-                - deleted_count: Number of tasks actually deleted
+            DeleteResult with:
+                - deleted_tasks: Number of tasks actually deleted (0 if task_ids is empty)
                 - blocked_deletions: List of dicts with task_id and child_ids for blocked parents
                 - errors: List of error messages
-
-        Raises:
-            ValueError: If task_ids is empty
 
         Side Effects:
             - Deletes from tasks table (only if no children)
@@ -1827,9 +1850,9 @@ class Database:
             - Orphans agents.task_id (acceptable - historical record)
             - Preserves audit.task_id (no FK constraint)
         """
-        # Validate input
+        # Handle empty list - return early with 0 deletions
         if not task_ids:
-            raise ValueError("task_ids cannot be empty")
+            return DeleteResult(deleted_tasks=0, blocked_deletions=[], errors=[])
 
         async with self._get_connection() as conn:
             # Enable foreign key constraints for CASCADE deletion
@@ -1853,11 +1876,11 @@ class Database:
                     for parent_id, child_ids in parent_to_children.items()
                 ]
 
-                return {
-                    "deleted_count": 0,
-                    "blocked_deletions": blocked_deletions,
-                    "errors": ["Cannot delete tasks with child tasks. Delete children first."]
-                }
+                return DeleteResult(
+                    deleted_tasks=0,
+                    blocked_deletions=blocked_deletions,
+                    errors=["Cannot delete tasks with child tasks. Delete children first."]
+                )
 
             # Step 2: No child tasks - proceed with deletion
             # Build dynamic IN clause with placeholders
@@ -1871,11 +1894,11 @@ class Database:
             )
             await conn.commit()
 
-            return {
-                "deleted_count": cursor.rowcount,
-                "blocked_deletions": [],
-                "errors": []
-            }
+            return DeleteResult(
+                deleted_tasks=cursor.rowcount,
+                blocked_deletions=[],
+                errors=[]
+            )
 
     async def prune_tasks(self, filters: PruneFilters) -> PruneResult:
         """Prune tasks based on age and status criteria.
