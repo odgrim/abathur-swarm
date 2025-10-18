@@ -60,6 +60,10 @@ class PruneFilters(BaseModel):
 
     dry_run: bool = Field(default=False, description="Preview mode without deletion")
 
+    vacuum: bool = Field(
+        default=False, description="Run VACUUM after deletion to reclaim space"
+    )
+
     @model_validator(mode="after")
     def validate_filters(self) -> "PruneFilters":
         """Ensure at least one time filter is specified."""
@@ -1961,7 +1965,7 @@ class Database:
 
                 # Step 5: VACUUM (outside transaction, optional)
                 reclaimed_bytes = None
-                if not filters.dry_run:
+                if filters.vacuum and not filters.dry_run:
                     # Get database size before VACUUM
                     cursor = await conn.execute("PRAGMA page_count")
                     page_count_row = await cursor.fetchone()
