@@ -62,13 +62,21 @@ class TestParseDurationToDays:
         assert parse_duration_to_days("4w") == 28
 
     def test_parse_months(self):
-        """Test parsing months duration (approximation)."""
+        """Test parsing months duration (uses 30-day approximation).
+
+        Note: Months always = 30 days for CLI convenience.
+        See DAYS_PER_MONTH_APPROX constant and test_parse_approximation_edge_cases.
+        """
         assert parse_duration_to_days("1m") == 30
         assert parse_duration_to_days("2m") == 60
         assert parse_duration_to_days("12m") == 360
 
     def test_parse_years(self):
-        """Test parsing years duration (approximation)."""
+        """Test parsing years duration (uses 365-day approximation).
+
+        Note: Years always = 365 days (does not account for leap years).
+        See DAYS_PER_YEAR_APPROX constant and test_parse_approximation_edge_cases.
+        """
         assert parse_duration_to_days("1y") == 365
         assert parse_duration_to_days("2y") == 730
         assert parse_duration_to_days("5y") == 1825
@@ -123,3 +131,32 @@ class TestParseDurationToDays:
         assert parse_duration_to_days("100w") == 700
         assert parse_duration_to_days("100m") == 3000
         assert parse_duration_to_days("10y") == 3650
+
+    def test_parse_approximation_edge_cases(self):
+        """Test that approximations are used consistently.
+
+        This test documents the intentional approximations:
+        - Months always = 30 days (not 28-31)
+        - Years always = 365 days (not accounting for leap years)
+
+        These approximations are intentional for CLI convenience and simplicity.
+        For precise calendar calculations, use a proper date/time library.
+        """
+        # Month approximation: "6m" = 180 days, not actual calendar months
+        assert parse_duration_to_days("6m") == 180
+        assert parse_duration_to_days("12m") == 360  # Not 365!
+
+        # Year approximation: Does not account for leap years
+        assert parse_duration_to_days("1y") == 365  # Not 366 in leap years
+        assert parse_duration_to_days("4y") == 1460  # Not 1461 (4*365 + 1 leap day)
+
+        # Verify constants are being used
+        assert parse_duration_to_days("1m") == DAYS_PER_MONTH_APPROX
+        assert parse_duration_to_days("1y") == DAYS_PER_YEAR_APPROX
+
+        # Verify 12 months ≠ 1 year due to approximations
+        twelve_months_in_days = parse_duration_to_days("12m")
+        one_year_in_days = parse_duration_to_days("1y")
+        assert twelve_months_in_days == 360  # 12 * 30
+        assert one_year_in_days == 365
+        assert twelve_months_in_days != one_year_in_days  # Approximations differ!
