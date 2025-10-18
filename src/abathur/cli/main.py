@@ -17,7 +17,7 @@ from rich.table import Table
 
 from abathur import __version__
 from abathur.cli.utils import parse_duration_to_days
-from abathur.infrastructure.database import PruneFilters
+from abathur.infrastructure.database import DeleteResult, PruneFilters
 
 logger = logging.getLogger(__name__)
 
@@ -787,7 +787,7 @@ def prune(
         console.print("[blue]Deleting tasks...[/blue]")
         try:
             result = await services["database"].delete_tasks(selected_task_ids)
-            deleted_count = result['deleted_count']
+            deleted_count = result.deleted_count
         except Exception as e:
             console.print(
                 f"[red]Error:[/red] Database operation failed: {type(e).__name__}: {e}"
@@ -808,16 +808,16 @@ def prune(
         )
 
         # Display additional information if present
-        if result.get('blocked_deletions'):
+        if result.blocked_deletions:
             console.print(
-                f"[yellow]![/yellow] Warning: {len(result['blocked_deletions'])} task(s) could not be deleted (have children)"
+                f"[yellow]![/yellow] Warning: {len(result.blocked_deletions)} task(s) could not be deleted (have children)"
             )
 
-        if result.get('errors'):
+        if result.errors:
             console.print(
-                f"[red]✗[/red] {len(result['errors'])} error(s) occurred during deletion"
+                f"[red]✗[/red] {len(result.errors)} error(s) occurred during deletion"
             )
-            for error in result['errors']:
+            for error in result.errors:
                 console.print(f"  [dim]- {error}[/dim]")
 
     asyncio.run(_prune())
