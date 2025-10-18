@@ -571,6 +571,37 @@ class Database:
             )
 
             if task_fk and task_fk["on_delete"] != "CASCADE":
+                print("Checking agents table for orphaned records...")
+
+                # Check for orphaned agents (agents referencing non-existent tasks)
+                cursor = await conn.execute(
+                    """
+                    SELECT COUNT(*) as orphan_count
+                    FROM agents
+                    WHERE task_id NOT IN (SELECT id FROM tasks)
+                    """
+                )
+                orphan_result = await cursor.fetchone()
+                orphan_count = orphan_result["orphan_count"] if orphan_result else 0
+
+                if orphan_count > 0:
+                    print(f"⚠ Found {orphan_count} orphaned agent record(s)")
+                    # Log sample orphans with details
+                    cursor = await conn.execute(
+                        """
+                        SELECT id, name, task_id, state, spawned_at
+                        FROM agents
+                        WHERE task_id NOT IN (SELECT id FROM tasks)
+                        LIMIT 5
+                        """
+                    )
+                    sample_orphans = await cursor.fetchall()
+                    for orphan in sample_orphans:
+                        print(f"  - Agent {orphan['id']} ({orphan['name']}) references missing task {orphan['task_id']}")
+                else:
+                    print("✓ No orphaned agents detected")
+
+                print("Applying CASCADE DELETE migration to agents.task_id foreign key...")
                 print("Migrating database schema: adding CASCADE DELETE to agents.task_id foreign key")
 
                 # Temporarily disable foreign keys
@@ -627,6 +658,7 @@ class Database:
                 await conn.execute("PRAGMA foreign_keys=ON")
 
                 await conn.commit()
+                print("✓ Successfully added CASCADE DELETE to agents.task_id foreign key")
                 print("Added CASCADE DELETE to agents.task_id foreign key")
 
         # Check if audit table exists and needs memory columns
@@ -694,6 +726,37 @@ class Database:
             )
 
             if task_fk and task_fk["on_delete"] != "CASCADE":
+                print("Checking checkpoints table for orphaned records...")
+
+                # Check for orphaned checkpoints (checkpoints referencing non-existent tasks)
+                cursor = await conn.execute(
+                    """
+                    SELECT COUNT(*) as orphan_count
+                    FROM checkpoints
+                    WHERE task_id NOT IN (SELECT id FROM tasks)
+                    """
+                )
+                orphan_result = await cursor.fetchone()
+                orphan_count = orphan_result["orphan_count"] if orphan_result else 0
+
+                if orphan_count > 0:
+                    print(f"⚠ Found {orphan_count} orphaned checkpoint record(s)")
+                    # Log sample orphans with details
+                    cursor = await conn.execute(
+                        """
+                        SELECT task_id, iteration, created_at
+                        FROM checkpoints
+                        WHERE task_id NOT IN (SELECT id FROM tasks)
+                        LIMIT 5
+                        """
+                    )
+                    sample_orphans = await cursor.fetchall()
+                    for orphan in sample_orphans:
+                        print(f"  - Checkpoint for task {orphan['task_id']} (iteration {orphan['iteration']}, created {orphan['created_at']})")
+                else:
+                    print("✓ No orphaned checkpoints detected")
+
+                print("Applying CASCADE DELETE migration to checkpoints.task_id foreign key...")
                 print("Migrating database schema: adding CASCADE DELETE to checkpoints.task_id foreign key")
 
                 # Temporarily disable foreign keys
@@ -738,6 +801,7 @@ class Database:
                 await conn.execute("PRAGMA foreign_keys=ON")
 
                 await conn.commit()
+                print("✓ Successfully added CASCADE DELETE to checkpoints.task_id foreign key")
                 print("Added CASCADE DELETE to checkpoints.task_id foreign key")
 
         # Check if audit table needs task_id to be nullable
