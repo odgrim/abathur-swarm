@@ -571,95 +571,72 @@ class Database:
             )
 
             if task_fk and task_fk["on_delete"] != "CASCADE":
-                print("Checking agents table for orphaned records...")
-
-                # Check for orphaned agents (agents referencing non-existent tasks)
-                cursor = await conn.execute(
-                    """
-                    SELECT COUNT(*) as orphan_count
-                    FROM agents
-                    WHERE task_id NOT IN (SELECT id FROM tasks)
-                    """
-                )
-                orphan_result = await cursor.fetchone()
-                orphan_count = orphan_result["orphan_count"] if orphan_result else 0
-
-                if orphan_count > 0:
-                    print(f"⚠ Found {orphan_count} orphaned agent record(s)")
-                    # Log sample orphans with details
-                    cursor = await conn.execute(
-                        """
-                        SELECT id, name, task_id, state, spawned_at
-                        FROM agents
-                        WHERE task_id NOT IN (SELECT id FROM tasks)
-                        LIMIT 5
-                        """
-                    )
-                    sample_orphans = await cursor.fetchall()
-                    for orphan in sample_orphans:
-                        print(f"  - Agent {orphan['id']} ({orphan['name']}) references missing task {orphan['task_id']}")
-                else:
-                    print("✓ No orphaned agents detected")
-
-                print("Applying CASCADE DELETE migration to agents.task_id foreign key...")
                 print("Migrating database schema: adding CASCADE DELETE to agents.task_id foreign key")
 
-                # Temporarily disable foreign keys
-                await conn.execute("PRAGMA foreign_keys=OFF")
+                try:
+                    # Temporarily disable foreign keys
+                    await conn.execute("PRAGMA foreign_keys=OFF")
 
-                # Create new table with CASCADE DELETE
-                await conn.execute(
-                    """
-                    CREATE TABLE agents_new (
-                        id TEXT PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        specialization TEXT NOT NULL,
-                        task_id TEXT NOT NULL,
-                        state TEXT NOT NULL,
-                        model TEXT NOT NULL,
-                        spawned_at TIMESTAMP NOT NULL,
-                        terminated_at TIMESTAMP,
-                        resource_usage TEXT,
-                        session_id TEXT,
-                        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
-                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                    # Create new table with CASCADE DELETE
+                    await conn.execute(
+                        """
+                        CREATE TABLE agents_new (
+                            id TEXT PRIMARY KEY,
+                            name TEXT NOT NULL,
+                            specialization TEXT NOT NULL,
+                            task_id TEXT NOT NULL,
+                            state TEXT NOT NULL,
+                            model TEXT NOT NULL,
+                            spawned_at TIMESTAMP NOT NULL,
+                            terminated_at TIMESTAMP,
+                            resource_usage TEXT,
+                            session_id TEXT,
+                            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                        )
+                        """
                     )
-                    """
-                )
 
-                # Copy data from old table to new table
-                await conn.execute(
-                    """
-                    INSERT INTO agents_new
-                    SELECT * FROM agents
-                    """
-                )
+                    # Copy data from old table to new table
+                    await conn.execute(
+                        """
+                        INSERT INTO agents_new
+                        SELECT * FROM agents
+                        """
+                    )
 
-                # Drop old table
-                await conn.execute("DROP TABLE agents")
+                    # Drop old table
+                    await conn.execute("DROP TABLE agents")
 
-                # Rename new table to agents
-                await conn.execute("ALTER TABLE agents_new RENAME TO agents")
+                    # Rename new table to agents
+                    await conn.execute("ALTER TABLE agents_new RENAME TO agents")
 
-                # Recreate indexes
-                await conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_agents_task ON agents(task_id)"
-                )
-                await conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_agents_state ON agents(state)"
-                )
-                await conn.execute(
-                    """CREATE INDEX IF NOT EXISTS idx_agents_session
-                       ON agents(session_id, spawned_at DESC)
-                       WHERE session_id IS NOT NULL"""
-                )
+                    # Recreate indexes
+                    await conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_agents_task ON agents(task_id)"
+                    )
+                    await conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_agents_state ON agents(state)"
+                    )
+                    await conn.execute(
+                        """CREATE INDEX IF NOT EXISTS idx_agents_session
+                           ON agents(session_id, spawned_at DESC)
+                           WHERE session_id IS NOT NULL"""
+                    )
 
-                # Re-enable foreign keys
-                await conn.execute("PRAGMA foreign_keys=ON")
+                    # Re-enable foreign keys
+                    await conn.execute("PRAGMA foreign_keys=ON")
 
-                await conn.commit()
-                print("✓ Successfully added CASCADE DELETE to agents.task_id foreign key")
-                print("Added CASCADE DELETE to agents.task_id foreign key")
+                    await conn.commit()
+                    print("Added CASCADE DELETE to agents.task_id foreign key")
+
+                except Exception as e:
+                    # Re-enable foreign keys even on error
+                    await conn.execute("PRAGMA foreign_keys=ON")
+                    await conn.rollback()
+                    print(f"✗ Migration failed: {type(e).__name__}: {e}")
+                    print("Database rolled back to previous state")
+                    raise  # Re-raise to prevent application from starting with failed migration
 
         # Check if audit table exists and needs memory columns
         cursor = await conn.execute(
@@ -726,83 +703,60 @@ class Database:
             )
 
             if task_fk and task_fk["on_delete"] != "CASCADE":
-                print("Checking checkpoints table for orphaned records...")
-
-                # Check for orphaned checkpoints (checkpoints referencing non-existent tasks)
-                cursor = await conn.execute(
-                    """
-                    SELECT COUNT(*) as orphan_count
-                    FROM checkpoints
-                    WHERE task_id NOT IN (SELECT id FROM tasks)
-                    """
-                )
-                orphan_result = await cursor.fetchone()
-                orphan_count = orphan_result["orphan_count"] if orphan_result else 0
-
-                if orphan_count > 0:
-                    print(f"⚠ Found {orphan_count} orphaned checkpoint record(s)")
-                    # Log sample orphans with details
-                    cursor = await conn.execute(
-                        """
-                        SELECT task_id, iteration, created_at
-                        FROM checkpoints
-                        WHERE task_id NOT IN (SELECT id FROM tasks)
-                        LIMIT 5
-                        """
-                    )
-                    sample_orphans = await cursor.fetchall()
-                    for orphan in sample_orphans:
-                        print(f"  - Checkpoint for task {orphan['task_id']} (iteration {orphan['iteration']}, created {orphan['created_at']})")
-                else:
-                    print("✓ No orphaned checkpoints detected")
-
-                print("Applying CASCADE DELETE migration to checkpoints.task_id foreign key...")
                 print("Migrating database schema: adding CASCADE DELETE to checkpoints.task_id foreign key")
 
-                # Temporarily disable foreign keys
-                await conn.execute("PRAGMA foreign_keys=OFF")
+                try:
+                    # Temporarily disable foreign keys
+                    await conn.execute("PRAGMA foreign_keys=OFF")
 
-                # Create new table with CASCADE DELETE
-                await conn.execute(
-                    """
-                    CREATE TABLE checkpoints_new (
-                        task_id TEXT NOT NULL,
-                        iteration INTEGER NOT NULL,
-                        state TEXT NOT NULL,
-                        created_at TIMESTAMP NOT NULL,
-                        session_id TEXT,
-                        PRIMARY KEY (task_id, iteration),
-                        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
-                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                    # Create new table with CASCADE DELETE
+                    await conn.execute(
+                        """
+                        CREATE TABLE checkpoints_new (
+                            task_id TEXT NOT NULL,
+                            iteration INTEGER NOT NULL,
+                            state TEXT NOT NULL,
+                            created_at TIMESTAMP NOT NULL,
+                            session_id TEXT,
+                            PRIMARY KEY (task_id, iteration),
+                            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                        )
+                        """
                     )
-                    """
-                )
 
-                # Copy data from old table to new table
-                await conn.execute(
-                    """
-                    INSERT INTO checkpoints_new
-                    SELECT * FROM checkpoints
-                    """
-                )
+                    # Copy data from old table to new table
+                    await conn.execute(
+                        """
+                        INSERT INTO checkpoints_new
+                        SELECT * FROM checkpoints
+                        """
+                    )
 
-                # Drop old table
-                await conn.execute("DROP TABLE checkpoints")
+                    # Drop old table
+                    await conn.execute("DROP TABLE checkpoints")
 
-                # Rename new table to checkpoints
-                await conn.execute("ALTER TABLE checkpoints_new RENAME TO checkpoints")
+                    # Rename new table to checkpoints
+                    await conn.execute("ALTER TABLE checkpoints_new RENAME TO checkpoints")
 
-                # Recreate indexes
-                await conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints(task_id, iteration DESC)"
-                )
+                    # Recreate indexes
+                    await conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints(task_id, iteration DESC)"
+                    )
 
-                # Re-enable foreign keys
-                await conn.execute("PRAGMA foreign_keys=ON")
+                    # Re-enable foreign keys
+                    await conn.execute("PRAGMA foreign_keys=ON")
 
-                await conn.commit()
-                print("✓ Successfully added CASCADE DELETE to checkpoints.task_id foreign key")
-                print("Added CASCADE DELETE to checkpoints.task_id foreign key")
+                    await conn.commit()
+                    print("Added CASCADE DELETE to checkpoints.task_id foreign key")
+
+                except Exception as e:
+                    # Re-enable foreign keys even on error
+                    await conn.execute("PRAGMA foreign_keys=ON")
+                    await conn.rollback()
+                    print(f"✗ Migration failed: {type(e).__name__}: {e}")
+                    print("Database rolled back to previous state")
+                    raise  # Re-raise to prevent application from starting with failed migration
 
         # Check if audit table needs task_id to be nullable
         cursor = await conn.execute(
@@ -819,40 +773,49 @@ class Database:
             if task_id_col and task_id_col["notnull"] == 1:
                 print("Migrating database schema: making audit.task_id nullable")
 
-                # Temporarily disable FK
-                await conn.execute("PRAGMA foreign_keys=OFF")
+                try:
+                    # Temporarily disable FK
+                    await conn.execute("PRAGMA foreign_keys=OFF")
 
-                # Recreate audit table with nullable task_id (no FK constraint)
-                await conn.execute("ALTER TABLE audit RENAME TO audit_old")
-                await conn.execute(
-                    """
-                    CREATE TABLE audit (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp TIMESTAMP NOT NULL,
-                        agent_id TEXT,
-                        task_id TEXT,
-                        action_type TEXT NOT NULL,
-                        action_data TEXT,
-                        result TEXT,
-                        memory_operation_type TEXT,
-                        memory_namespace TEXT,
-                        memory_entry_id INTEGER,
-                        FOREIGN KEY (agent_id) REFERENCES agents(id),
-                        FOREIGN KEY (memory_entry_id) REFERENCES memory_entries(id) ON DELETE SET NULL
+                    # Recreate audit table with nullable task_id (no FK constraint)
+                    await conn.execute("ALTER TABLE audit RENAME TO audit_old")
+                    await conn.execute(
+                        """
+                        CREATE TABLE audit (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            timestamp TIMESTAMP NOT NULL,
+                            agent_id TEXT,
+                            task_id TEXT,
+                            action_type TEXT NOT NULL,
+                            action_data TEXT,
+                            result TEXT,
+                            memory_operation_type TEXT,
+                            memory_namespace TEXT,
+                            memory_entry_id INTEGER,
+                            FOREIGN KEY (agent_id) REFERENCES agents(id),
+                            FOREIGN KEY (memory_entry_id) REFERENCES memory_entries(id) ON DELETE SET NULL
+                        )
+                        """
                     )
-                    """
-                )
-                await conn.execute(
-                    """
-                    INSERT INTO audit SELECT * FROM audit_old
-                    """
-                )
-                await conn.execute("DROP TABLE audit_old")
+                    await conn.execute(
+                        """
+                        INSERT INTO audit SELECT * FROM audit_old
+                        """
+                    )
+                    await conn.execute("DROP TABLE audit_old")
 
-                # Re-enable FK
-                await conn.execute("PRAGMA foreign_keys=ON")
-                await conn.commit()
-                print("Made audit.task_id nullable")
+                    # Re-enable FK
+                    await conn.execute("PRAGMA foreign_keys=ON")
+                    await conn.commit()
+                    print("Made audit.task_id nullable")
+
+                except Exception as e:
+                    # Re-enable foreign keys even on error
+                    await conn.execute("PRAGMA foreign_keys=ON")
+                    await conn.rollback()
+                    print(f"✗ Migration failed: {type(e).__name__}: {e}")
+                    print("Database rolled back to previous state")
+                    raise  # Re-raise to prevent application from starting with failed migration
 
     async def _create_tables(self, conn: Connection) -> None:
         """Create database tables."""
