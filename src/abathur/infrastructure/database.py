@@ -106,8 +106,7 @@ class PruneFilters(BaseModel):
         return v
 
     def build_where_clause(self) -> tuple[str, list[str]]:
-        """
-        Build SQL WHERE clause and parameters for task filtering.
+        """Build SQL WHERE clause and parameters for task filtering.
 
         Returns:
             Tuple of (where_clause_sql, parameters) where:
