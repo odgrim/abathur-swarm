@@ -389,7 +389,7 @@ async def test_vacuum_incremental_impact(file_db: Database) -> None:
 
         # Clean up: delete remaining tasks for next iteration
         cleanup_filters = PruneFilters(
-            older_than_days=0,  # Delete all old tasks
+            older_than_days=1,  # Delete all old tasks
             vacuum_mode="never"  # Don't vacuum during cleanup
         )
         await file_db.prune_tasks(cleanup_filters)
@@ -441,7 +441,7 @@ async def test_vacuum_conditional_vs_always_performance(file_db: Database) -> No
 
     # Clean up
     await file_db.prune_tasks(
-        PruneFilters(older_than_days=0, vacuum_mode="never")
+        PruneFilters(older_than_days=1, vacuum_mode="never")
     )
 
     # Test 2: Always mode with 500 deletions
@@ -456,7 +456,7 @@ async def test_vacuum_conditional_vs_always_performance(file_db: Database) -> No
 
     # Test 3: Never mode with 500 deletions (no VACUUM)
     await file_db.prune_tasks(
-        PruneFilters(older_than_days=0, vacuum_mode="never")
+        PruneFilters(older_than_days=1, vacuum_mode="never")
     )
     await _create_tasks(file_db, count=1_000, age_days=60)
 
