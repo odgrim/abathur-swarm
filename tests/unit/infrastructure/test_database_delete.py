@@ -9,7 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from abathur.domain.models import Task, TaskStatus, TaskSource, DependencyType, TaskDependency
-from abathur.infrastructure.database import Database
+from abathur.infrastructure.database import Database, DeleteResult
 
 
 @pytest.fixture
@@ -54,7 +54,10 @@ async def test_delete_single_task(db: Database, sample_task: Task):
     result = await db.delete_tasks([sample_task.id])
 
     # Verify deletion
-    assert result.deleted_tasks == 1
+    assert isinstance(result, DeleteResult)
+    assert result.deleted_count == 1
+    assert result.blocked_deletions == []
+    assert result.errors == []
 
     # Verify task no longer exists
     retrieved_after = await db.get_task(sample_task.id)
@@ -94,7 +97,10 @@ async def test_delete_multiple_tasks(db: Database):
     result = await db.delete_tasks(task_ids)
 
     # Verify deletion count
-    assert result.deleted_tasks == 3
+    assert isinstance(result, DeleteResult)
+    assert result.deleted_count == 3
+    assert result.blocked_deletions == []
+    assert result.errors == []
 
     # Verify all tasks are gone
     for task in tasks:
@@ -111,7 +117,10 @@ async def test_delete_nonexistent_task_returns_zero(db: Database):
     result = await db.delete_tasks([nonexistent_id])
 
     # Verify count is 0
-    assert result.deleted_tasks == 0
+    assert isinstance(result, DeleteResult)
+    assert result.deleted_count == 0
+    assert result.blocked_deletions == []
+    assert result.errors == []
 
 
 @pytest.mark.asyncio
@@ -127,7 +136,10 @@ async def test_delete_mixed_existing_nonexistent(db: Database, sample_task: Task
     result = await db.delete_tasks(task_ids)
 
     # Verify only 1 task was deleted
-    assert result.deleted_tasks == 1
+    assert isinstance(result, DeleteResult)
+    assert result.deleted_count == 1
+    assert result.blocked_deletions == []
+    assert result.errors == []
 
     # Verify the real task is gone
     assert await db.get_task(sample_task.id) is None
@@ -185,7 +197,10 @@ async def test_delete_cascades_to_task_dependencies(db: Database):
 
     # Delete the prerequisite task (should CASCADE delete dependency)
     result = await db.delete_tasks([prerequisite_task.id])
-    assert result.deleted_tasks == 1
+    assert isinstance(result, DeleteResult)
+    assert result.deleted_count == 1
+    assert result.blocked_deletions == []
+    assert result.errors == []
 
     # Verify dependency was CASCADE deleted
     dependencies_after = await db.get_task_dependencies(dependent_task.id)
@@ -217,7 +232,10 @@ async def test_delete_preserves_audit_records(db: Database, sample_task: Task):
 
     # Delete task
     result = await db.delete_tasks([sample_task.id])
-    assert result.deleted_tasks == 1
+    assert isinstance(result, DeleteResult)
+    assert result.deleted_count == 1
+    assert result.blocked_deletions == []
+    assert result.errors == []
 
     # Verify audit record is still there (orphaned, but preserved)
     async with db._get_connection() as conn:
@@ -261,7 +279,10 @@ async def test_delete_orphans_agents_acceptably(db: Database, sample_task: Task)
 
     # Delete task (should CASCADE delete agent due to FK with ON DELETE CASCADE)
     result = await db.delete_tasks([sample_task.id])
-    assert result.deleted_tasks == 1
+    assert isinstance(result, DeleteResult)
+    assert result.deleted_count == 1
+    assert result.blocked_deletions == []
+    assert result.errors == []
 
     # Verify agent was CASCADE deleted (updated behavior after migration)
     async with db._get_connection() as conn:
@@ -278,13 +299,14 @@ async def test_delete_orphans_agents_acceptably(db: Database, sample_task: Task)
 @pytest.mark.asyncio
 async def test_delete_empty_list_behavior(db: Database):
     """Test that deleting with empty list returns 0 (no error)."""
-    # SQLite allows DELETE with empty IN clause, returns 0
-    # Our implementation builds "IN ()" which is valid SQL
-    # However, we should test actual behavior
+    # The delete_tasks method handles empty list gracefully
     result = await db.delete_tasks([])
 
     # Empty list should result in 0 deletions
-    assert result.deleted_tasks == 0
+    assert isinstance(result, DeleteResult)
+    assert result.deleted_count == 0
+    assert result.blocked_deletions == []
+    assert result.errors == []
 
 
 @pytest.mark.asyncio
@@ -297,7 +319,34 @@ async def test_delete_duplicate_ids(db: Database, sample_task: Task):
     result = await db.delete_tasks([sample_task.id, sample_task.id, sample_task.id])
 
     # Should only delete once (SQL IN clause deduplicates)
-    assert result.deleted_tasks == 1
+    assert isinstance(result, DeleteResult)
+    assert result.deleted_count == 1
+    assert result.blocked_deletions == []
+    assert result.errors == []
 
     # Verify task is gone
     assert await db.get_task(sample_task.id) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_tasks_returns_delete_result_model(db: Database, sample_task: Task):
+    """Test that delete_tasks returns properly typed DeleteResult."""
+    await db.insert_task(sample_task)
+
+    result = await db.delete_tasks([sample_task.id])
+
+    # Verify type
+    assert isinstance(result, DeleteResult)
+
+    # Verify all required fields exist
+    assert hasattr(result, "deleted_count")
+    assert hasattr(result, "blocked_deletions")
+    assert hasattr(result, "errors")
+
+    # Verify field types and values
+    assert isinstance(result.deleted_count, int)
+    assert isinstance(result.blocked_deletions, list)
+    assert isinstance(result.errors, list)
+    assert result.deleted_count == 1
+    assert result.blocked_deletions == []
+    assert result.errors == []
