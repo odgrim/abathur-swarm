@@ -28,6 +28,10 @@ if TYPE_CHECKING:
     from abathur.services.session_service import SessionService
 
 
+# VACUUM threshold: only run conditional VACUUM if deleting this many tasks
+VACUUM_THRESHOLD_TASKS = 100
+
+
 class PruneFilters(BaseModel):
     """Filtering criteria for pruning operation.
 
@@ -1863,13 +1867,18 @@ class Database:
         """Prune tasks based on age and status criteria.
 
         Deletes tasks (and their dependencies) matching filter criteria.
-        Uses transaction for atomic deletion. Optionally runs VACUUM.
+        Uses transaction for atomic deletion.
+
+        VACUUM behavior depends on filters.vacuum_mode:
+        - "always": Always run VACUUM after deletion (may be slow)
+        - "conditional": Only run VACUUM if deleted_tasks >= 100 (default)
+        - "never": Never run VACUUM (fastest, but doesn't reclaim space)
 
         Args:
-            filters: PruneFilters with deletion criteria
+            filters: PruneFilters with deletion criteria and vacuum_mode
 
         Returns:
-            PruneResult with statistics about deleted tasks
+            PruneResult with deletion counts and reclaimed bytes (if VACUUM ran)
 
         Raises:
             ValueError: If filters are invalid
@@ -1996,31 +2005,42 @@ class Database:
                 # Commit transaction
                 await conn.commit()
 
-                # Step 5: VACUUM (outside transaction, optional)
+                # Step 5: VACUUM (outside transaction, conditional based on vacuum_mode)
                 reclaimed_bytes = None
                 if not filters.dry_run:
-                    # Get database size before VACUUM
-                    cursor = await conn.execute("PRAGMA page_count")
-                    page_count_row = await cursor.fetchone()
-                    cursor = await conn.execute("PRAGMA page_size")
-                    page_size_row = await cursor.fetchone()
+                    # Determine if VACUUM should run
+                    should_vacuum = False
 
-                    if page_count_row and page_size_row:
-                        page_count_before = page_count_row[0]
-                        page_size = page_size_row[0]
-                        size_before = page_count_before * page_size
+                    if filters.vacuum_mode == "always":
+                        should_vacuum = True
+                    elif filters.vacuum_mode == "conditional":
+                        # Conditional: only VACUUM if deleted_tasks >= threshold
+                        should_vacuum = deleted_tasks >= VACUUM_THRESHOLD_TASKS
+                    elif filters.vacuum_mode == "never":
+                        should_vacuum = False
 
-                        # Run VACUUM
-                        await conn.execute("VACUUM")
-
-                        # Get database size after VACUUM
+                    if should_vacuum:
+                        # Get database size before VACUUM
                         cursor = await conn.execute("PRAGMA page_count")
-                        page_count_after_row = await cursor.fetchone()
-                        if page_count_after_row:
-                            page_count_after = page_count_after_row[0]
-                            size_after = page_count_after * page_size
+                        page_count_row = await cursor.fetchone()
+                        cursor = await conn.execute("PRAGMA page_size")
+                        page_size_row = await cursor.fetchone()
 
-                            reclaimed_bytes = max(0, size_before - size_after)
+                        if page_count_row and page_size_row:
+                            page_count_before = page_count_row[0]
+                            page_size = page_size_row[0]
+                            size_before = page_count_before * page_size
+
+                            # Run VACUUM
+                            await conn.execute("VACUUM")
+
+                            # Get database size after VACUUM
+                            cursor = await conn.execute("PRAGMA page_count")
+                            page_count_after_row = await cursor.fetchone()
+                            if page_count_after_row:
+                                page_count_after = page_count_after_row[0]
+                                size_after = page_count_after * page_size
+                                reclaimed_bytes = size_before - size_after
 
                 return PruneResult(
                     deleted_tasks=deleted_tasks,
