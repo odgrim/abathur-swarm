@@ -795,3 +795,124 @@ class TestDatabasePruneOperations:
         # Verify
         assert await database.get_task(old_task.id) is None
         assert await database.get_task(recent_task.id) is not None
+
+    @pytest.mark.asyncio
+    async def test_prune_tasks_with_parent_child_mixed_statuses(
+        self, database: Database
+    ) -> None:
+        """Test pruning respects filter and orphans children without deleting them.
+
+        Tree structure:
+            Parent A (completed, old) -> Child B (running, recent)
+                                      -> Child C (completed, old)
+                                         -> Grandchild D (failed, recent)
+            Parent E (running, recent) -> Child F (completed, old)
+
+        Expected after pruning completed tasks older than 30 days:
+            - Delete: Parent A, Child C
+            - Orphan: Child B (parent_task_id = NULL)
+            - Orphan: Grandchild D (parent_task_id = NULL, since parent C deleted)
+            - Keep unchanged: Parent E, Child F (F not deleted because has running parent)
+        """
+        from datetime import datetime, timedelta, timezone
+        from abathur.infrastructure.database import PruneFilters
+
+        # Create task tree with mixed statuses and dates
+        parent_a = Task(prompt="Parent A", summary="Completed parent")
+        child_b = Task(
+            prompt="Child B",
+            summary="Running child",
+            parent_task_id=parent_a.id,
+        )
+        child_c = Task(
+            prompt="Child C",
+            summary="Completed child",
+            parent_task_id=parent_a.id,
+        )
+        grandchild_d = Task(
+            prompt="Grandchild D",
+            summary="Failed grandchild",
+            parent_task_id=child_c.id,
+        )
+        parent_e = Task(prompt="Parent E", summary="Running parent")
+        child_f = Task(
+            prompt="Child F",
+            summary="Completed child",
+            parent_task_id=parent_e.id,
+        )
+
+        # Insert all tasks
+        await database.insert_task(parent_a)
+        await database.insert_task(child_b)
+        await database.insert_task(child_c)
+        await database.insert_task(grandchild_d)
+        await database.insert_task(parent_e)
+        await database.insert_task(child_f)
+
+        # Set statuses and dates
+        old_date = datetime.now(timezone.utc) - timedelta(days=35)
+        recent_date = datetime.now(timezone.utc) - timedelta(days=5)
+
+        async with database._get_connection() as conn:
+            # Parent A: completed, old
+            await conn.execute(
+                "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+                (TaskStatus.COMPLETED.value, old_date.isoformat(), str(parent_a.id)),
+            )
+            # Child B: running, recent
+            await conn.execute(
+                "UPDATE tasks SET status = ?, started_at = ? WHERE id = ?",
+                (TaskStatus.RUNNING.value, recent_date.isoformat(), str(child_b.id)),
+            )
+            # Child C: completed, old
+            await conn.execute(
+                "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+                (TaskStatus.COMPLETED.value, old_date.isoformat(), str(child_c.id)),
+            )
+            # Grandchild D: failed, recent
+            await conn.execute(
+                "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+                (TaskStatus.FAILED.value, recent_date.isoformat(), str(grandchild_d.id)),
+            )
+            # Parent E: running, recent
+            await conn.execute(
+                "UPDATE tasks SET status = ?, started_at = ? WHERE id = ?",
+                (TaskStatus.RUNNING.value, recent_date.isoformat(), str(parent_e.id)),
+            )
+            # Child F: completed, old
+            await conn.execute(
+                "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+                (TaskStatus.COMPLETED.value, old_date.isoformat(), str(child_f.id)),
+            )
+            await conn.commit()
+
+        # Prune completed tasks older than 30 days
+        filters = PruneFilters(older_than_days=30, statuses=[TaskStatus.COMPLETED])
+        result = await database.prune_tasks(filters)
+
+        # Assert - should delete Parent A, Child C, Child F (3 completed old tasks)
+        assert result.deleted_tasks == 3
+        assert result.dry_run is False
+        assert TaskStatus.COMPLETED in result.breakdown_by_status
+        assert result.breakdown_by_status[TaskStatus.COMPLETED] == 3
+
+        # Verify deletions
+        assert await database.get_task(parent_a.id) is None  # Deleted
+        assert await database.get_task(child_c.id) is None  # Deleted
+        assert await database.get_task(child_f.id) is None  # Deleted
+
+        # Verify surviving tasks
+        child_b_after = await database.get_task(child_b.id)
+        grandchild_d_after = await database.get_task(grandchild_d.id)
+        parent_e_after = await database.get_task(parent_e.id)
+
+        assert child_b_after is not None  # Survived
+        assert grandchild_d_after is not None  # Survived
+        assert parent_e_after is not None  # Survived
+
+        # Verify orphaning - children should have parent_task_id set to NULL
+        assert child_b_after.parent_task_id is None  # Orphaned (parent deleted)
+        assert grandchild_d_after.parent_task_id is None  # Orphaned (parent deleted)
+
+        # Parent E should still be parent of its children (but child F was deleted)
+        assert parent_e_after.parent_task_id is None  # Was never a child
