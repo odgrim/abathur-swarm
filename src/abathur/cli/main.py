@@ -673,7 +673,7 @@ def prune(
 
             return
 
-        # Existing delete_tasks() path - preserved unchanged for backward compatibility
+        # Unified prune path - uses prune_tasks() for all selection strategies
         # Task selection logic
         selected_task_ids: list[UUID] = []
 
@@ -684,12 +684,18 @@ def prune(
                 selected_task_ids.append(resolved_id)
         elif task_status:
             # Filter by status
-            tasks = await services["database"].list_tasks(task_status, limit=10000)
+            # Use the CLI limit if specified, otherwise default to 10000
+            task_limit = limit if limit is not None else 10000
+            tasks = await services["database"].list_tasks(task_status, limit=task_limit)
             selected_task_ids = [task.id for task in tasks]
 
             if not selected_task_ids:
                 console.print(f"[green]✓[/green] No tasks found with status '{task_status.value}'")
                 return
+
+        # Apply limit to selected task IDs if specified (for task-ID based deletion)
+        if limit is not None and len(selected_task_ids) > limit:
+            selected_task_ids = selected_task_ids[:limit]
 
         # Fetch full task details for display
         tasks_to_delete = []
@@ -742,43 +748,13 @@ def prune(
                 console.print("[dim]Operation cancelled[/dim]")
                 raise typer.Exit(0)
 
-        # Check for child tasks before deletion
-        child_tasks = await services["database"].get_child_tasks(selected_task_ids)
-
-        if child_tasks:
-            console.print(
-                f"\n[yellow]![/yellow] Cannot delete {len(selected_task_ids)} task(s) - "
-                f"{len(child_tasks)} have child tasks:"
-            )
-
-            blocked_table = Table()
-            blocked_table.add_column("Parent ID", style="cyan", no_wrap=True)
-            blocked_table.add_column("Child ID", style="yellow", no_wrap=True)
-            blocked_table.add_column("Child Summary", style="magenta")
-
-            for child in child_tasks:
-                parent_id_str = str(child.parent_task_id)[:8] if child.parent_task_id else "unknown"
-                child_id_str = str(child.id)[:8]
-                summary_preview = (
-                    (child.summary[:40] + "...")
-                    if child.summary and len(child.summary) > 40
-                    else (child.summary or "-")
-                )
-                blocked_table.add_row(
-                    parent_id_str,
-                    child_id_str,
-                    summary_preview,
-                )
-
-            console.print(blocked_table)
-            console.print("\n[yellow]Delete child tasks first before deleting parent tasks.[/yellow]")
-            return
-
-        # Execute deletion with database error handling
+        # Execute deletion using unified prune_tasks() interface
         console.print("[blue]Deleting tasks...[/blue]")
         try:
-            result = await services["database"].delete_tasks(selected_task_ids)
-            deleted_count = result['deleted_count']
+            from abathur.infrastructure.database import PruneFilters
+            filters = PruneFilters(task_ids=selected_task_ids, vacuum_mode="never")
+            result = await services["database"].prune_tasks(filters)
+            deleted_count = result.deleted_tasks
         except Exception as e:
             console.print(
                 f"[red]Error:[/red] Database operation failed: {type(e).__name__}: {e}"
@@ -798,18 +774,16 @@ def prune(
             f"[green]✓[/green] Deleted {deleted_count} task(s)"
         )
 
-        # Display additional information if present
-        if result.get('blocked_deletions'):
-            console.print(
-                f"[yellow]![/yellow] Warning: {len(result['blocked_deletions'])} task(s) could not be deleted (have children)"
-            )
+        # Show breakdown if available
+        if result.breakdown_by_status:
+            breakdown_table = Table(title="Breakdown by Status")
+            breakdown_table.add_column("Status", style="cyan")
+            breakdown_table.add_column("Count", style="yellow", justify="right")
 
-        if result.get('errors'):
-            console.print(
-                f"[red]✗[/red] {len(result['errors'])} error(s) occurred during deletion"
-            )
-            for error in result['errors']:
-                console.print(f"  [dim]- {error}[/dim]")
+            for status, count in result.breakdown_by_status.items():
+                breakdown_table.add_row(status.value, str(count))
+
+            console.print(breakdown_table)
 
     asyncio.run(_prune())
 
