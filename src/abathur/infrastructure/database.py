@@ -1909,6 +1909,74 @@ class Database:
                 "errors": []
             }
 
+    async def _orphan_children_and_delete_tasks(
+        self, conn: Connection, task_ids: list[str]
+    ) -> None:
+        """Delete tasks and orphan their children (set parent_task_id to NULL).
+
+        This is the correct behavior for prune operations - only delete tasks
+        that match the filter criteria, and orphan any children that don't match.
+
+        Handles foreign key constraints by:
+        1. Setting children's parent_task_id to NULL (orphaning)
+        2. Cleaning up state table entries (no CASCADE on state.task_id FK)
+        3. Deleting task dependencies
+        4. Deleting the tasks themselves
+
+        Args:
+            conn: Active database connection
+            task_ids: List of task ID strings to delete
+
+        Side Effects:
+            - Updates tasks.parent_task_id to NULL for children (orphaning)
+            - Deletes from state table (explicit cleanup)
+            - Deletes from task_dependencies (explicit cleanup)
+            - Deletes from tasks table
+        """
+        if not task_ids:
+            return
+
+        task_id_placeholders = ",".join("?" * len(task_ids))
+
+        # Step 1: Orphan children (set parent_task_id to NULL)
+        # This allows us to delete parents without violating FK constraints
+        await conn.execute(
+            f"""
+            UPDATE tasks
+            SET parent_task_id = NULL
+            WHERE parent_task_id IN ({task_id_placeholders})
+            """,
+            tuple(task_ids),
+        )
+
+        # Step 2: Delete state entries for current tasks
+        await conn.execute(
+            f"""
+            DELETE FROM state
+            WHERE task_id IN ({task_id_placeholders})
+            """,
+            tuple(task_ids),
+        )
+
+        # Step 3: Delete task dependencies
+        await conn.execute(
+            f"""
+            DELETE FROM task_dependencies
+            WHERE prerequisite_task_id IN ({task_id_placeholders})
+               OR dependent_task_id IN ({task_id_placeholders})
+            """,
+            tuple(task_ids + task_ids),
+        )
+
+        # Step 4: Delete the tasks themselves
+        await conn.execute(
+            f"""
+            DELETE FROM tasks
+            WHERE id IN ({task_id_placeholders})
+            """,
+            tuple(task_ids),
+        )
+
     async def prune_tasks(self, filters: PruneFilters) -> PruneResult:
         """Prune tasks based on age and status criteria.
 
@@ -1931,6 +1999,9 @@ class Database:
             DatabaseError: If deletion fails
         """
         async with self._get_connection() as conn:
+            # Enable foreign key constraints
+            await conn.execute("PRAGMA foreign_keys = ON")
+
             # Build WHERE clause based on filters (use shared method)
             where_sql, params = filters.build_where_clause()
 
@@ -2004,26 +2075,23 @@ class Database:
                         breakdown_by_status=breakdown_by_status,
                     )
 
-                # Step 3: Delete dependencies (CASCADE handled by FK, but we do it explicitly)
+                # Step 3: Count dependencies before deletion (for reporting)
                 task_id_placeholders = ",".join("?" * len(task_ids))
                 cursor = await conn.execute(
                     f"""
-                    DELETE FROM task_dependencies
+                    SELECT COUNT(*) as count
+                    FROM task_dependencies
                     WHERE prerequisite_task_id IN ({task_id_placeholders})
                        OR dependent_task_id IN ({task_id_placeholders})
                     """,
                     tuple(task_ids + task_ids),
                 )
-                deleted_dependencies = cursor.rowcount
+                dep_row = await cursor.fetchone()
+                deleted_dependencies = dep_row["count"] if dep_row else 0
 
-                # Step 4: Delete tasks
-                await conn.execute(
-                    f"""
-                    DELETE FROM tasks
-                    WHERE id IN ({task_id_placeholders})
-                    """,
-                    tuple(task_ids),
-                )
+                # Step 4: Delete tasks (orphaning children that don't match the filter)
+                # This handles: orphaning children, state cleanup, dependency cleanup, task deletion
+                await self._orphan_children_and_delete_tasks(conn, task_ids)
 
                 # Commit transaction
                 await conn.commit()
