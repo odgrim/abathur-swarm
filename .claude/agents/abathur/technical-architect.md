@@ -37,21 +37,61 @@ When invoked, you must follow these steps:
        "namespace": "task:{requirements_task_id}:requirements",
        "key": "functional_requirements"
    })
-
    non_functional = memory_get({
        "namespace": "task:{requirements_task_id}:requirements",
        "key": "non_functional_requirements"
    })
-
    constraints = memory_get({
        "namespace": "task:{requirements_task_id}:requirements",
        "key": "constraints"
    })
-
    success_criteria = memory_get({
        "namespace": "task:{requirements_task_id}:requirements",
        "key": "success_criteria"
    })
+   ```
+
+1.5. **Check for Duplicate Architecture Work**
+   **CRITICAL**: Before proceeding with architectural analysis, verify you are not duplicating existing work:
+
+   ```python
+   # Extract problem_domain from task metadata
+   problem_domain = task_metadata.get('problem_domain', 'unknown')
+
+   # Search for existing architecture work in this domain
+   existing_architectures = memory_search({
+       "namespace_prefix": f"task:",
+       "memory_type": "semantic",
+       "query": f"{problem_domain} architecture overview technology_stack",
+       "limit": 10
+   })
+
+   # Check for overlapping architecture tasks in queue
+   queue_status = task_queue_status()
+   overlapping_tasks = [
+       task for task in queue_status.get('tasks', [])
+       if task.get('agent_type') == 'technical-architect'
+       and task.get('metadata', {}).get('problem_domain') == problem_domain
+       and task.get('task_id') != current_task_id
+       and task.get('status') in ['PENDING', 'IN_PROGRESS']
+   ]
+
+   # If duplicate work exists, STOP and reference existing work
+   if existing_architectures:
+       # Reuse existing architecture instead of duplicating
+       memory_add({
+           "namespace": f"task:{current_task_id}:architecture",
+           "key": "reused_architecture",
+           "value": {
+               "source_task_id": existing_architectures[0]['task_id'],
+               "reason": "Architecture for this domain already exists - preventing duplication",
+               "namespace": existing_architectures[0]['namespace']
+           },
+           "memory_type": "episodic",
+           "created_by": "technical-architect"
+       })
+       # Skip to step 10 (spawning downstream tasks) using existing architecture
+       return
    ```
 
 2. **Search for Relevant Documentation and Architecture Patterns**
@@ -149,19 +189,31 @@ When invoked, you must follow these steps:
    - Mitigation strategies for each identified risk
 
 9. **Store Architecture in Memory**
-   Save architectural decisions and analysis:
+   Save architectural decisions and analysis using the CURRENT task ID (do NOT spawn a new task):
    ```python
-   # Create task to track architectural work
-   arch_task = task_enqueue({
-       "description": "Technical Architecture Analysis",
-       "source": "technical-architect",
-       "agent_type": "technical-architect",
-       "priority": 7
-   })
+   # Extract current task ID - the technical-architect IS already executing as a task
+   # Query for current IN_PROGRESS technical-architect task
+   current_tasks = task_list(filter={"agent_type": "technical-architect", "status": "IN_PROGRESS"})
+   current_task_id = None
 
-   # Store architectural overview
+   # Find the current task (spawned by requirements-gatherer or task-planner)
+   for task in current_tasks:
+       if task.get('source') in ['requirements-gatherer', 'task-planner', 'project-orchestrator']:
+           current_task_id = task['task_id']
+           break
+
+   # Fallback: If task_id is available in globals/context
+   if not current_task_id and 'task_id' in globals():
+       current_task_id = task_id
+
+   # Last resort: Create descriptive namespace (should rarely happen)
+   if not current_task_id:
+       import time
+       current_task_id = f"arch_{problem_domain}_{int(time.time())}"
+
+   # Store architectural overview using CURRENT task ID (NO self-spawning)
    memory_add({
-       "namespace": f"task:{arch_task['task_id']}:architecture",
+       "namespace": f"task:{current_task_id}:architecture",
        "key": "overview",
        "value": {
            "architectural_style": architectural_style,
@@ -176,7 +228,7 @@ When invoked, you must follow these steps:
 
    # Store technology stack decisions
    memory_add({
-       "namespace": f"task:{arch_task['task_id']}:architecture",
+       "namespace": f"task:{current_task_id}:architecture",
        "key": "technology_stack",
        "value": {
            "languages": language_choices,
@@ -191,7 +243,7 @@ When invoked, you must follow these steps:
 
    # Store risk assessment
    memory_add({
-       "namespace": f"task:{arch_task['task_id']}:architecture",
+       "namespace": f"task:{current_task_id}:architecture",
        "key": "risks",
        "value": {
            "identified_risks": risk_list,
@@ -215,7 +267,7 @@ When invoked, you must follow these steps:
 # Technical Requirements Analysis Task
 
 ## Architecture Context
-Based on architectural analysis from task {arch_task['task_id']}, create comprehensive technical specifications.
+Based on architectural analysis from task {current_task_id}, create comprehensive technical specifications.
 
 ## Architectural Overview
 {architecture_summary}
@@ -230,7 +282,7 @@ Based on architectural analysis from task {arch_task['task_id']}, create compreh
 {requirements_summary}
 
 ## Memory References
-Architecture: task:{arch_task['task_id']}:architecture
+Architecture: task:{current_task_id}:architecture
 Requirements: task:{requirements_task_id}:requirements
 
 ## Expected Deliverables
@@ -250,9 +302,9 @@ Spawn task-planner to decompose into executable tasks.
         "source": "technical-architect",
         "priority": 7,
         "agent_type": "technical-requirements-specialist",
-        "prerequisite_task_ids": [arch_task['task_id']],
+        "prerequisite_task_ids": [current_task_id],
         "metadata": {
-            "architecture_task_id": arch_task['task_id'],
+            "architecture_task_id": current_task_id,
             "requirements_task_id": requirements_task_id,
             "decomposed": False
         }
@@ -275,6 +327,23 @@ This is subproject {subproject['priority']} of {len(subprojects)} in a decompose
 ### Subproject Overview
 {subproject['scope']}
 
+### SCOPE BOUNDARIES (CRITICAL - Prevent Duplication)
+
+**This Subproject's Discrete Scope:**
+- Scope ID: {subproject['scope_id']}
+- Included Components: {subproject['components']}
+- Excluded Components: {components_handled_by_other_subprojects}
+
+**Non-Overlapping Guarantee:**
+- Other subprojects handle: {list_other_subproject_scopes}
+- Your EXCLUSIVE responsibility: {this_subproject_exclusive_areas}
+- Shared interfaces: {shared_components_with_clear_ownership}
+
+**Coordination with Other Specialists:**
+- Do NOT create tasks for: {components_in_other_scopes}
+- Dependencies on other specialists: {dependency_list}
+- Your specialist task-planners must respect these boundaries
+
 ### Boundaries
 Included: {subproject['included']}
 Excluded: {subproject['excluded']}
@@ -283,7 +352,7 @@ Excluded: {subproject['excluded']}
 {subproject['interfaces']}
 
 ## Architecture Context
-Based on architectural analysis from task {arch_task['task_id']}.
+Based on architectural analysis from task {current_task_id}.
 
 ### Overall System Architecture
 {high_level_architecture}
@@ -301,9 +370,9 @@ Based on architectural analysis from task {arch_task['task_id']}.
 {subproject['dependencies']}
 
 ## Memory References
-Architecture: task:{arch_task['task_id']}:architecture
+Architecture: task:{current_task_id}:architecture
 Requirements: task:{requirements_task_id}:requirements
-Subproject Specification: task:{arch_task['task_id']}:architecture/subproject_{subproject['name']}
+Subproject Specification: task:{current_task_id}:architecture/subproject_{subproject['name']}
 
 ## Expected Deliverables
 - Technical specifications for {subproject['name']} components
@@ -324,7 +393,7 @@ Spawn task-planner to decompose into executable tasks for THIS subproject.
 """
 
         # Determine prerequisite tasks (foundational subprojects must complete first)
-        prerequisites = [arch_task['task_id']]
+        prerequisites = [current_task_id]
         if subproject.get('depends_on_subprojects'):
             # Add task IDs of prerequisite subprojects
             for dep_name in subproject['depends_on_subprojects']:
@@ -339,7 +408,7 @@ Spawn task-planner to decompose into executable tasks for THIS subproject.
             "agent_type": "technical-requirements-specialist",
             "prerequisite_task_ids": prerequisites,
             "metadata": {
-                "architecture_task_id": arch_task['task_id'],
+                "architecture_task_id": current_task_id,
                 "requirements_task_id": requirements_task_id,
                 "decomposed": True,
                 "subproject_name": subproject['name'],
@@ -358,7 +427,7 @@ Spawn task-planner to decompose into executable tasks for THIS subproject.
 
     # Store workflow state
     memory_add({
-        "namespace": f"task:{arch_task['task_id']}:workflow",
+        "namespace": f"task:{current_task_id}:workflow",
         "key": "downstream_tasks",
         "value": {
             "decomposed": True,
@@ -371,6 +440,10 @@ Spawn task-planner to decompose into executable tasks for THIS subproject.
     ```
 
 **Best Practices:**
+- **PREVENT DUPLICATION**: Always check for existing architecture work before starting
+- **VERIFY SPECIALIST UNIQUENESS**: Check for existing technical-requirements-specialist tasks before spawning
+- **DEFINE DISCRETE SCOPES**: Ensure each specialist has non-overlapping component boundaries
+- **COORDINATE VIA DEPENDENCIES**: Use dependencies between specialists instead of duplicating work
 - Make evidence-based architectural decisions (research first with WebSearch/WebFetch)
 - Document all architectural decisions with rationale and alternatives considered
 - Consider scalability, maintainability, testability, and observability in architecture
