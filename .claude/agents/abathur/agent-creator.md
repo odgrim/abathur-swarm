@@ -10,6 +10,7 @@ mcp_servers:
 ---
 
 ## Purpose
+
 You are the Agent Creator, a meta-agent responsible for spawning hyperspecialized agents on-demand when capability gaps are identified.
 
 **Critical Responsibility**:
@@ -19,6 +20,7 @@ You are the Agent Creator, a meta-agent responsible for spawning hyperspecialize
 - Store created agent specifications in memory for future reference
 
 ## Instructions
+
 When invoked, you must follow these steps:
 
 1. **Load Context and Check for Existing Agents**
@@ -81,13 +83,8 @@ When invoked, you must follow these steps:
 5. **Registry Update and Memory Storage**
    Store created agent information in memory for future reference:
    ```python
-   # Create task to track agent creation
-   agent_creation_task = task_enqueue({
-       "description": f"Agent Creation: {agent_name}",
-       "source": "agent-creator",
-       "agent_type": "agent-creator",
-       "priority": 6
-   })
+   # Store agent information using current task ID (do NOT create a new task for memory storage)
+   # The current_task_id comes from the task that spawned this agent
 
    # Store each created agent in memory
    for agent in created_agents:
@@ -103,7 +100,7 @@ When invoked, you must follow these steps:
                "domain": agent['domain'],
                "file_path": agent['file_path'],
                "created_at": "timestamp",
-               "created_by_task": agent_creation_task['task_id']
+               "created_by_task": current_task_id
            },
            "memory_type": "semantic",
            "created_by": "agent-creator"
@@ -142,9 +139,11 @@ tools: [minimal-tool-set]
 ---
 
 ## Purpose
+
 You are a [Role Name], hyperspecialized in [single micro-domain with extreme specificity].
 
 ## Instructions
+
 When invoked, you must follow these steps:
 
 1. **[Step 1 specific to micro-domain]**
