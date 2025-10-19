@@ -279,11 +279,16 @@ class Database:
             if self._shared_conn is None:
                 self._shared_conn = await aiosqlite.connect(":memory:")
                 self._shared_conn.row_factory = aiosqlite.Row
+                # Enable foreign keys for shared memory connection
+                await self._shared_conn.execute("PRAGMA foreign_keys=ON")
             yield self._shared_conn
         else:
             # File databases get new connections each time
             async with aiosqlite.connect(str(self.db_path)) as conn:
                 conn.row_factory = aiosqlite.Row
+                # CRITICAL: Enable foreign keys for EVERY new connection
+                # SQLite defaults to foreign_keys=OFF, so we must enable it explicitly
+                await conn.execute("PRAGMA foreign_keys=ON")
                 yield conn
 
     async def validate_foreign_keys(self) -> list[tuple[str, ...]]:
@@ -1844,7 +1849,6 @@ class Database:
             DatabaseError: If deletion fails
         """
         async with self._get_connection() as conn:
-            await conn.execute("PRAGMA foreign_keys = ON")
             cursor = await conn.execute(
                 "DELETE FROM tasks WHERE id = ?",
                 (str(task_id),),
@@ -1865,7 +1869,6 @@ class Database:
             DatabaseError: If deletion fails
         """
         async with self._get_connection() as conn:
-            await conn.execute("PRAGMA foreign_keys = ON")
             cursor = await conn.execute(
                 "DELETE FROM tasks WHERE status = ?",
                 (status.value,),
@@ -1959,9 +1962,10 @@ class Database:
 
         Handles foreign key constraints by:
         1. Setting children's parent_task_id to NULL (orphaning)
-        2. Cleaning up state table entries (no CASCADE on state.task_id FK)
-        3. Deleting task dependencies
-        4. Deleting the tasks themselves
+        2. Nullifying audit.agent_id to allow agent CASCADE deletion
+        3. Deleting state table entries (no CASCADE on state.task_id FK)
+        4. Deleting task dependencies (CASCADE but explicit for clarity)
+        5. Deleting the tasks themselves (agents, checkpoints CASCADE automatically)
 
         Args:
             conn: Active database connection
@@ -1969,9 +1973,10 @@ class Database:
 
         Side Effects:
             - Updates tasks.parent_task_id to NULL for children (orphaning)
+            - Updates audit.agent_id to NULL for affected agents
             - Deletes from state table (explicit cleanup)
             - Deletes from task_dependencies (explicit cleanup)
-            - Deletes from tasks table
+            - Deletes from tasks table (agents, checkpoints CASCADE)
         """
         if not task_ids:
             return
@@ -1989,7 +1994,20 @@ class Database:
             tuple(task_ids),
         )
 
-        # Step 2: Delete state entries for current tasks
+        # Step 2: Clean up audit.agent_id to allow agent CASCADE deletion
+        # audit.agent_id has FK to agents WITHOUT CASCADE, so we must NULL it first
+        await conn.execute(
+            f"""
+            UPDATE audit
+            SET agent_id = NULL
+            WHERE agent_id IN (
+                SELECT id FROM agents WHERE task_id IN ({task_id_placeholders})
+            )
+            """,
+            tuple(task_ids),
+        )
+
+        # Step 3: Delete state entries for current tasks
         await conn.execute(
             f"""
             DELETE FROM state
@@ -1998,7 +2016,7 @@ class Database:
             tuple(task_ids),
         )
 
-        # Step 3: Delete task dependencies
+        # Step 4: Delete task dependencies
         await conn.execute(
             f"""
             DELETE FROM task_dependencies
@@ -2008,7 +2026,13 @@ class Database:
             tuple(task_ids + task_ids),
         )
 
-        # Step 4: Delete the tasks themselves
+        # Step 5: Delete the tasks themselves
+        # At this point:
+        # - Children are orphaned (parent_task_id=NULL)
+        # - Audit entries won't block agent deletion (agent_id=NULL)
+        # - State entries are deleted
+        # - Task dependencies are deleted
+        # - Agents, checkpoints will CASCADE
         await conn.execute(
             f"""
             DELETE FROM tasks
@@ -2042,9 +2066,6 @@ class Database:
             DatabaseError: If deletion fails
         """
         async with self._get_connection() as conn:
-            # Enable foreign key constraints
-            await conn.execute("PRAGMA foreign_keys = ON")
-
             # STEP 1: SELECT tasks to delete using filters
             where_sql, params = filters.build_where_clause()
             limit_sql = f"LIMIT {filters.limit}" if filters.limit else ""

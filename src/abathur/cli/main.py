@@ -684,12 +684,18 @@ def prune(
                 selected_task_ids.append(resolved_id)
         elif task_status:
             # Filter by status
-            tasks = await services["database"].list_tasks(task_status, limit=10000)
+            # Use the CLI limit if specified, otherwise default to 10000
+            task_limit = limit if limit is not None else 10000
+            tasks = await services["database"].list_tasks(task_status, limit=task_limit)
             selected_task_ids = [task.id for task in tasks]
 
             if not selected_task_ids:
                 console.print(f"[green]✓[/green] No tasks found with status '{task_status.value}'")
                 return
+
+        # Apply limit to selected task IDs if specified (for task-ID based deletion)
+        if limit is not None and len(selected_task_ids) > limit:
+            selected_task_ids = selected_task_ids[:limit]
 
         # Fetch full task details for display
         tasks_to_delete = []
