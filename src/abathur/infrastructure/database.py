@@ -35,9 +35,18 @@ VACUUM_THRESHOLD_TASKS = 100
 class PruneFilters(BaseModel):
     """Filtering criteria for pruning operation.
 
-    At least one of older_than_days or before_date must be specified.
-    Only completed, failed, or cancelled tasks can be pruned.
+    Supports three selection strategies:
+    1. By IDs: task_ids list (direct selection)
+    2. By status: statuses list (all tasks with given statuses)
+    3. By time: older_than_days or before_date (time-based filtering)
+
+    Can combine strategies (e.g., task_ids + statuses, or time + statuses).
     """
+
+    task_ids: list[UUID] | None = Field(
+        default=None,
+        description="Specific task IDs to delete (direct selection)",
+    )
 
     older_than_days: int | None = Field(
         default=None,
@@ -49,13 +58,9 @@ class PruneFilters(BaseModel):
         default=None, description="Delete tasks completed/submitted before this date"
     )
 
-    statuses: list[TaskStatus] = Field(
-        default_factory=lambda: [
-            TaskStatus.COMPLETED,
-            TaskStatus.FAILED,
-            TaskStatus.CANCELLED,
-        ],
-        description="Task statuses to prune",
+    statuses: list[TaskStatus] | None = Field(
+        default=None,
+        description="Task statuses to prune (None = all pruneable statuses)",
     )
 
     limit: int | None = Field(
@@ -71,11 +76,25 @@ class PruneFilters(BaseModel):
 
     @model_validator(mode="after")
     def validate_filters(self) -> "PruneFilters":
-        """Ensure at least one time filter is specified."""
-        if self.older_than_days is None and self.before_date is None:
+        """Ensure at least one selection criterion is specified."""
+        has_ids = self.task_ids is not None and len(self.task_ids) > 0
+        has_time = self.older_than_days is not None or self.before_date is not None
+        has_status = self.statuses is not None and len(self.statuses) > 0
+
+        if not (has_ids or has_time or has_status):
             raise ValueError(
-                "At least one of 'older_than_days' or 'before_date' must be specified"
+                "At least one selection criterion must be specified: "
+                "'task_ids', 'older_than_days', 'before_date', or 'statuses'"
             )
+
+        # Set default statuses if using time-based selection without explicit statuses
+        if has_time and self.statuses is None:
+            self.statuses = [
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+            ]
+
         return self
 
     @field_validator("statuses")
@@ -108,6 +127,11 @@ class PruneFilters(BaseModel):
     def build_where_clause(self) -> tuple[str, list[str]]:
         """Build SQL WHERE clause and parameters for task filtering.
 
+        Handles multiple selection strategies:
+        - ID-based: WHERE id IN (...)
+        - Time-based: WHERE completed_at/submitted_at < ...
+        - Status-based: WHERE status IN (...)
+
         Returns:
             Tuple of (where_clause_sql, parameters) where:
             - where_clause_sql: SQL WHERE condition without 'WHERE' keyword
@@ -119,7 +143,13 @@ class PruneFilters(BaseModel):
         where_clauses = []
         params = []
 
-        # Time filter (required - validated by PruneFilters model)
+        # ID filter (if specified, most specific)
+        if self.task_ids is not None and len(self.task_ids) > 0:
+            id_placeholders = ",".join("?" * len(self.task_ids))
+            where_clauses.append(f"id IN ({id_placeholders})")
+            params.extend([str(task_id) for task_id in self.task_ids])
+
+        # Time filter (optional)
         if self.older_than_days is not None:
             where_clauses.append(
                 "(completed_at < date('now', ?) OR "
@@ -134,37 +164,18 @@ class PruneFilters(BaseModel):
             before_iso = self.before_date.isoformat()
             params.extend([before_iso, before_iso])
 
-        # Status filter (always present - has default)
-        status_placeholders = ",".join("?" * len(self.statuses))
-        where_clauses.append(f"status IN ({status_placeholders})")
-        params.extend([status.value for status in self.statuses])
+        # Status filter (optional)
+        if self.statuses is not None and len(self.statuses) > 0:
+            status_placeholders = ",".join("?" * len(self.statuses))
+            where_clauses.append(f"status IN ({status_placeholders})")
+            params.extend([status.value for status in self.statuses])
+
+        # Default to always match if no filters (shouldn't happen due to validation)
+        if not where_clauses:
+            where_clauses.append("1=1")
 
         where_sql = " AND ".join(where_clauses)
         return (where_sql, params)
-
-
-class DeleteResult(BaseModel):
-    """Result from delete_tasks operation.
-
-    Contains metrics about task deletion including successful deletions,
-    blocked deletions due to child task dependencies, and any errors
-    encountered during the operation.
-
-    Used by delete_tasks() method to provide structured, type-safe results.
-    """
-
-    deleted_count: int = Field(
-        ge=0, description="Number of tasks successfully deleted"
-    )
-
-    blocked_deletions: list[dict[str, Any]] = Field(
-        default_factory=list,
-        description="Tasks blocked from deletion due to child dependencies (task_id, child_ids)",
-    )
-
-    errors: list[str] = Field(
-        default_factory=list, description="Error messages from deletion process"
-    )
 
 
 class PruneResult(BaseModel):
@@ -268,11 +279,16 @@ class Database:
             if self._shared_conn is None:
                 self._shared_conn = await aiosqlite.connect(":memory:")
                 self._shared_conn.row_factory = aiosqlite.Row
+                # Enable foreign keys for shared memory connection
+                await self._shared_conn.execute("PRAGMA foreign_keys=ON")
             yield self._shared_conn
         else:
             # File databases get new connections each time
             async with aiosqlite.connect(str(self.db_path)) as conn:
                 conn.row_factory = aiosqlite.Row
+                # CRITICAL: Enable foreign keys for EVERY new connection
+                # SQLite defaults to foreign_keys=OFF, so we must enable it explicitly
+                await conn.execute("PRAGMA foreign_keys=ON")
                 yield conn
 
     async def validate_foreign_keys(self) -> list[tuple[str, ...]]:
@@ -650,63 +666,95 @@ class Database:
             )
 
             if task_fk and task_fk["on_delete"] != "CASCADE":
-                print("Migrating database schema: adding CASCADE DELETE to agents.task_id foreign key")
+                # Pre-migration data integrity check: detect orphaned agents
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) as orphan_count
+                    FROM agents a
+                    LEFT JOIN tasks t ON a.task_id = t.id
+                    WHERE a.task_id IS NOT NULL AND t.id IS NULL
+                """)
+                orphan_result = await cursor.fetchone()
+                orphan_count = orphan_result["orphan_count"]
 
-                # Temporarily disable foreign keys
-                await conn.execute("PRAGMA foreign_keys=OFF")
+                if orphan_count > 0:
+                    print(f"WARNING: Found {orphan_count} orphaned agent records (agents.task_id not in tasks table)")
 
-                # Create new table with CASCADE DELETE
-                await conn.execute(
-                    """
-                    CREATE TABLE agents_new (
-                        id TEXT PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        specialization TEXT NOT NULL,
-                        task_id TEXT NOT NULL,
-                        state TEXT NOT NULL,
-                        model TEXT NOT NULL,
-                        spawned_at TIMESTAMP NOT NULL,
-                        terminated_at TIMESTAMP,
-                        resource_usage TEXT,
-                        session_id TEXT,
-                        FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
-                        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                    # Query and display first 5 orphaned records
+                    cursor = await conn.execute("""
+                        SELECT a.id, a.name, a.task_id, a.spawned_at
+                        FROM agents a
+                        LEFT JOIN tasks t ON a.task_id = t.id
+                        WHERE a.task_id IS NOT NULL AND t.id IS NULL
+                        LIMIT 5
+                    """)
+                    orphans = await cursor.fetchall()
+
+                    print("Sample orphaned agent records:")
+                    for orphan in orphans:
+                        print(f"  - Agent ID: {orphan['id']}, Name: {orphan['name']}, "
+                              f"Task ID: {orphan['task_id']}, Spawned At: {orphan['spawned_at']}")
+
+                    print("SKIPPING CASCADE DELETE migration to prevent data loss.")
+                    print("Please manually clean up orphaned agents or restore missing tasks before retrying.")
+                else:
+                    # No orphans detected - proceed with migration
+                    print("Migrating database schema: adding CASCADE DELETE to agents.task_id foreign key")
+
+                    # Temporarily disable foreign keys
+                    await conn.execute("PRAGMA foreign_keys=OFF")
+
+                    # Create new table with CASCADE DELETE
+                    await conn.execute(
+                        """
+                        CREATE TABLE agents_new (
+                            id TEXT PRIMARY KEY,
+                            name TEXT NOT NULL,
+                            specialization TEXT NOT NULL,
+                            task_id TEXT NOT NULL,
+                            state TEXT NOT NULL,
+                            model TEXT NOT NULL,
+                            spawned_at TIMESTAMP NOT NULL,
+                            terminated_at TIMESTAMP,
+                            resource_usage TEXT,
+                            session_id TEXT,
+                            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                        )
+                        """
                     )
-                    """
-                )
 
-                # Copy data from old table to new table
-                await conn.execute(
-                    """
-                    INSERT INTO agents_new
-                    SELECT * FROM agents
-                    """
-                )
+                    # Copy data from old table to new table
+                    await conn.execute(
+                        """
+                        INSERT INTO agents_new
+                        SELECT * FROM agents
+                        """
+                    )
 
-                # Drop old table
-                await conn.execute("DROP TABLE agents")
+                    # Drop old table
+                    await conn.execute("DROP TABLE agents")
 
-                # Rename new table to agents
-                await conn.execute("ALTER TABLE agents_new RENAME TO agents")
+                    # Rename new table to agents
+                    await conn.execute("ALTER TABLE agents_new RENAME TO agents")
 
-                # Recreate indexes
-                await conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_agents_task ON agents(task_id)"
-                )
-                await conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_agents_state ON agents(state)"
-                )
-                await conn.execute(
-                    """CREATE INDEX IF NOT EXISTS idx_agents_session
-                       ON agents(session_id, spawned_at DESC)
-                       WHERE session_id IS NOT NULL"""
-                )
+                    # Recreate indexes
+                    await conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_agents_task ON agents(task_id)"
+                    )
+                    await conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_agents_state ON agents(state)"
+                    )
+                    await conn.execute(
+                        """CREATE INDEX IF NOT EXISTS idx_agents_session
+                           ON agents(session_id, spawned_at DESC)
+                           WHERE session_id IS NOT NULL"""
+                    )
 
-                # Re-enable foreign keys
-                await conn.execute("PRAGMA foreign_keys=ON")
+                    # Re-enable foreign keys
+                    await conn.execute("PRAGMA foreign_keys=ON")
 
-                await conn.commit()
-                print("Added CASCADE DELETE to agents.task_id foreign key")
+                    await conn.commit()
+                    print("Added CASCADE DELETE to agents.task_id foreign key")
 
         # Check if audit table exists and needs memory columns
         cursor = await conn.execute(
@@ -1801,7 +1849,6 @@ class Database:
             DatabaseError: If deletion fails
         """
         async with self._get_connection() as conn:
-            await conn.execute("PRAGMA foreign_keys = ON")
             cursor = await conn.execute(
                 "DELETE FROM tasks WHERE id = ?",
                 (str(task_id),),
@@ -1809,100 +1856,199 @@ class Database:
             await conn.commit()
             return cursor.rowcount > 0
 
-    async def delete_tasks_by_status(self, status: TaskStatus) -> DeleteResult:
+    async def delete_tasks_by_status(self, status: TaskStatus) -> int:
         """Delete all tasks matching a status filter with CASCADE to dependent tables.
 
         Args:
             status: Status filter for deletion (TaskStatus enum)
 
         Returns:
-            DeleteResult with deleted_count
+            Number of tasks deleted
 
         Raises:
             DatabaseError: If deletion fails
         """
         async with self._get_connection() as conn:
-            await conn.execute("PRAGMA foreign_keys = ON")
             cursor = await conn.execute(
                 "DELETE FROM tasks WHERE status = ?",
                 (status.value,),
             )
             await conn.commit()
-            return DeleteResult(deleted_count=cursor.rowcount)
+            return cursor.rowcount
 
-    async def delete_tasks(self, task_ids: list[UUID]) -> DeleteResult:
-        """Delete tasks by ID list with child task validation.
+    async def _delete_tasks_by_ids(
+        self,
+        conn: Connection,
+        task_ids: list[str],
+        collect_stats: bool = False
+    ) -> dict[str, Any]:
+        """Core task deletion logic - unified implementation.
+
+        This is the single source of truth for task deletion.
+        Both delete_tasks() and prune_tasks() use this.
 
         Args:
-            task_ids: List of task UUIDs to delete
+            conn: Active database connection (with foreign keys enabled)
+            task_ids: List of task ID strings to delete
+            collect_stats: Whether to collect status breakdown statistics
 
         Returns:
-            DeleteResult with:
-                - deleted_count: Number of tasks actually deleted (0 if task_ids is empty)
-                - blocked_deletions: List of dicts with task_id and child_ids for blocked parents
-                - errors: List of error messages
+            Dictionary with:
+                - deleted_count: Number of tasks deleted
+                - deleted_dependencies: Number of dependencies deleted
+                - breakdown_by_status: Dict of status -> count (if collect_stats=True)
 
         Side Effects:
-            - Deletes from tasks table (only if no children)
-            - CASCADE deletes from task_dependencies (automatic via FK)
-            - Orphans agents.task_id (acceptable - historical record)
-            - Preserves audit.task_id (no FK constraint)
+            - Orphans children (sets parent_task_id to NULL)
+            - Deletes state entries
+            - Deletes task dependencies
+            - Deletes tasks
         """
-        # Handle empty list - return early with 0 deletions
         if not task_ids:
-            return DeleteResult(deleted_count=0, blocked_deletions=[], errors=[])
+            return {
+                "deleted_count": 0,
+                "deleted_dependencies": 0,
+                "breakdown_by_status": {}
+            }
 
-        async with self._get_connection() as conn:
-            # Enable foreign key constraints for CASCADE deletion
-            await conn.execute("PRAGMA foreign_keys = ON")
+        task_id_placeholders = ",".join("?" * len(task_ids))
 
-            # Step 1: Check for child tasks - block deletion of parents
-            child_tasks = await self.get_child_tasks(task_ids)
-
-            if child_tasks:
-                # Build blocked deletions report
-                parent_to_children: dict[str, list[str]] = {}
-                for child in child_tasks:
-                    if child.parent_task_id:
-                        parent_id = str(child.parent_task_id)
-                        if parent_id not in parent_to_children:
-                            parent_to_children[parent_id] = []
-                        parent_to_children[parent_id].append(str(child.id))
-
-                blocked_deletions = [
-                    {"task_id": parent_id, "child_ids": child_ids}
-                    for parent_id, child_ids in parent_to_children.items()
-                ]
-
-                return DeleteResult(
-                    deleted_count=0,
-                    blocked_deletions=blocked_deletions,
-                    errors=["Cannot delete tasks with child tasks. Delete children first."]
-                )
-
-            # Step 2: No child tasks - proceed with deletion
-            # Build dynamic IN clause with placeholders
-            placeholders = ",".join("?" * len(task_ids))
-            query = f"DELETE FROM tasks WHERE id IN ({placeholders})"
-
-            # Execute deletion with UUID strings as parameters
+        # Collect statistics if requested
+        breakdown_by_status = {}
+        if collect_stats:
             cursor = await conn.execute(
-                query,
-                tuple(str(tid) for tid in task_ids),
+                f"""
+                SELECT status, COUNT(*) as count
+                FROM tasks
+                WHERE id IN ({task_id_placeholders})
+                GROUP BY status
+                """,
+                tuple(task_ids),
             )
-            await conn.commit()
+            status_rows = await cursor.fetchall()
+            breakdown_by_status = {
+                TaskStatus(row["status"]): row["count"] for row in status_rows
+            }
 
-            return DeleteResult(
-                deleted_count=cursor.rowcount,
-                blocked_deletions=[],
-                errors=[]
+        # Count dependencies before deletion
+        cursor = await conn.execute(
+            f"""
+            SELECT COUNT(*) as count
+            FROM task_dependencies
+            WHERE prerequisite_task_id IN ({task_id_placeholders})
+               OR dependent_task_id IN ({task_id_placeholders})
+            """,
+            tuple(task_ids + task_ids),
+        )
+        dep_row = await cursor.fetchone()
+        deleted_dependencies = dep_row["count"] if dep_row else 0
+
+        # Execute deletion (orphans children, cleans state, deletes tasks)
+        await self._orphan_children_and_delete_tasks(conn, task_ids)
+
+        return {
+            "deleted_count": len(task_ids),
+            "deleted_dependencies": deleted_dependencies,
+            "breakdown_by_status": breakdown_by_status
+        }
+
+    async def _orphan_children_and_delete_tasks(
+        self, conn: Connection, task_ids: list[str]
+    ) -> None:
+        """Delete tasks and orphan their children (set parent_task_id to NULL).
+
+        This is the correct behavior for prune operations - only delete tasks
+        that match the filter criteria, and orphan any children that don't match.
+
+        Handles foreign key constraints by:
+        1. Setting children's parent_task_id to NULL (orphaning)
+        2. Nullifying audit.agent_id to allow agent CASCADE deletion
+        3. Deleting state table entries (no CASCADE on state.task_id FK)
+        4. Deleting task dependencies (CASCADE but explicit for clarity)
+        5. Deleting the tasks themselves (agents, checkpoints CASCADE automatically)
+
+        Args:
+            conn: Active database connection
+            task_ids: List of task ID strings to delete
+
+        Side Effects:
+            - Updates tasks.parent_task_id to NULL for children (orphaning)
+            - Updates audit.agent_id to NULL for affected agents
+            - Deletes from state table (explicit cleanup)
+            - Deletes from task_dependencies (explicit cleanup)
+            - Deletes from tasks table (agents, checkpoints CASCADE)
+        """
+        if not task_ids:
+            return
+
+        task_id_placeholders = ",".join("?" * len(task_ids))
+
+        # Step 1: Orphan children (set parent_task_id to NULL)
+        # This allows us to delete parents without violating FK constraints
+        await conn.execute(
+            f"""
+            UPDATE tasks
+            SET parent_task_id = NULL
+            WHERE parent_task_id IN ({task_id_placeholders})
+            """,
+            tuple(task_ids),
+        )
+
+        # Step 2: Clean up audit.agent_id to allow agent CASCADE deletion
+        # audit.agent_id has FK to agents WITHOUT CASCADE, so we must NULL it first
+        await conn.execute(
+            f"""
+            UPDATE audit
+            SET agent_id = NULL
+            WHERE agent_id IN (
+                SELECT id FROM agents WHERE task_id IN ({task_id_placeholders})
             )
+            """,
+            tuple(task_ids),
+        )
+
+        # Step 3: Delete state entries for current tasks
+        await conn.execute(
+            f"""
+            DELETE FROM state
+            WHERE task_id IN ({task_id_placeholders})
+            """,
+            tuple(task_ids),
+        )
+
+        # Step 4: Delete task dependencies
+        await conn.execute(
+            f"""
+            DELETE FROM task_dependencies
+            WHERE prerequisite_task_id IN ({task_id_placeholders})
+               OR dependent_task_id IN ({task_id_placeholders})
+            """,
+            tuple(task_ids + task_ids),
+        )
+
+        # Step 5: Delete the tasks themselves
+        # At this point:
+        # - Children are orphaned (parent_task_id=NULL)
+        # - Audit entries won't block agent deletion (agent_id=NULL)
+        # - State entries are deleted
+        # - Task dependencies are deleted
+        # - Agents, checkpoints will CASCADE
+        await conn.execute(
+            f"""
+            DELETE FROM tasks
+            WHERE id IN ({task_id_placeholders})
+            """,
+            tuple(task_ids),
+        )
 
     async def prune_tasks(self, filters: PruneFilters) -> PruneResult:
         """Prune tasks based on age and status criteria.
 
-        Deletes tasks (and their dependencies) matching filter criteria.
-        Uses transaction for atomic deletion.
+        This method handles:
+        1. Task selection (via filters)
+        2. Task deletion (via unified core)
+        3. Statistics collection
+        4. Optional VACUUM
 
         VACUUM behavior depends on filters.vacuum_mode:
         - "always": Always run VACUUM after deletion (may be slow)
@@ -1920,116 +2066,67 @@ class Database:
             DatabaseError: If deletion fails
         """
         async with self._get_connection() as conn:
-            # Build WHERE clause based on filters (use shared method)
+            # STEP 1: SELECT tasks to delete using filters
             where_sql, params = filters.build_where_clause()
+            limit_sql = f"LIMIT {filters.limit}" if filters.limit else ""
+
+            cursor = await conn.execute(
+                f"""
+                SELECT id FROM tasks
+                WHERE {where_sql}
+                ORDER BY submitted_at ASC
+                {limit_sql}
+                """,
+                tuple(params),
+            )
+            task_rows = await cursor.fetchall()
+            task_ids = [row["id"] for row in task_rows]
+
+            if not task_ids:
+                # Nothing to delete
+                return PruneResult(
+                    deleted_tasks=0,
+                    deleted_dependencies=0,
+                    reclaimed_bytes=None,
+                    dry_run=filters.dry_run,
+                    breakdown_by_status={},
+                )
 
             # Start transaction
             await conn.execute("BEGIN TRANSACTION")
 
             try:
-                # Step 1: Get breakdown by status BEFORE deletion
-                cursor = await conn.execute(
-                    f"""
-                    SELECT status, COUNT(*) as count
-                    FROM tasks
-                    WHERE {where_sql}
-                    GROUP BY status
-                    """,
-                    tuple(params),
-                )
-                status_rows = await cursor.fetchall()
-                breakdown_by_status = {
-                    TaskStatus(row["status"]): row["count"] for row in status_rows
-                }
-
-                # Step 2: Collect task IDs to delete (respecting limit)
-                limit_sql = f"LIMIT {filters.limit}" if filters.limit else ""
-                cursor = await conn.execute(
-                    f"""
-                    SELECT id FROM tasks
-                    WHERE {where_sql}
-                    ORDER BY submitted_at ASC
-                    {limit_sql}
-                    """,
-                    tuple(params),
-                )
-                task_rows = await cursor.fetchall()
-                task_ids = [row["id"] for row in task_rows]
-                deleted_tasks = len(task_ids)
-
-                if deleted_tasks == 0:
-                    # Nothing to delete
-                    await conn.execute("ROLLBACK")
-                    return PruneResult(
-                        deleted_tasks=0,
-                        deleted_dependencies=0,
-                        reclaimed_bytes=None,
-                        dry_run=filters.dry_run,
-                        breakdown_by_status={},
-                    )
-
-                # If dry run, rollback and return statistics
+                # STEP 2: DELETE tasks using unified core (collects stats)
                 if filters.dry_run:
-                    # Count dependencies that would be deleted
-                    task_id_placeholders = ",".join("?" * len(task_ids))
-                    cursor = await conn.execute(
-                        f"""
-                        SELECT COUNT(*) as count
-                        FROM task_dependencies
-                        WHERE prerequisite_task_id IN ({task_id_placeholders})
-                           OR dependent_task_id IN ({task_id_placeholders})
-                        """,
-                        tuple(task_ids + task_ids),
+                    # Dry run: collect stats without deleting
+                    result = await self._delete_tasks_by_ids(
+                        conn, task_ids, collect_stats=True
                     )
-                    dep_row = await cursor.fetchone()
-                    deleted_dependencies = dep_row["count"] if dep_row else 0
-
                     await conn.execute("ROLLBACK")
+
                     return PruneResult(
-                        deleted_tasks=deleted_tasks,
-                        deleted_dependencies=deleted_dependencies,
+                        deleted_tasks=result["deleted_count"],
+                        deleted_dependencies=result["deleted_dependencies"],
                         reclaimed_bytes=None,
                         dry_run=True,
-                        breakdown_by_status=breakdown_by_status,
+                        breakdown_by_status=result["breakdown_by_status"],
                     )
+                else:
+                    # Real deletion
+                    result = await self._delete_tasks_by_ids(
+                        conn, task_ids, collect_stats=True
+                    )
+                    await conn.commit()
 
-                # Step 3: Delete dependencies (CASCADE handled by FK, but we do it explicitly)
-                task_id_placeholders = ",".join("?" * len(task_ids))
-                cursor = await conn.execute(
-                    f"""
-                    DELETE FROM task_dependencies
-                    WHERE prerequisite_task_id IN ({task_id_placeholders})
-                       OR dependent_task_id IN ({task_id_placeholders})
-                    """,
-                    tuple(task_ids + task_ids),
-                )
-                deleted_dependencies = cursor.rowcount
-
-                # Step 4: Delete tasks
-                await conn.execute(
-                    f"""
-                    DELETE FROM tasks
-                    WHERE id IN ({task_id_placeholders})
-                    """,
-                    tuple(task_ids),
-                )
-
-                # Commit transaction
-                await conn.commit()
-
-                # Step 5: VACUUM (outside transaction, conditional based on vacuum_mode)
-                reclaimed_bytes = None
-                if not filters.dry_run:
-                    # Determine if VACUUM should run
+                    # STEP 3: VACUUM (outside transaction, conditional)
+                    reclaimed_bytes = None
                     should_vacuum = False
 
                     if filters.vacuum_mode == "always":
                         should_vacuum = True
                     elif filters.vacuum_mode == "conditional":
-                        # Conditional: only VACUUM if deleted_tasks >= threshold
-                        should_vacuum = deleted_tasks >= VACUUM_THRESHOLD_TASKS
-                    elif filters.vacuum_mode == "never":
-                        should_vacuum = False
+                        should_vacuum = result["deleted_count"] >= VACUUM_THRESHOLD_TASKS
+                    # "never" mode: should_vacuum stays False
 
                     if should_vacuum:
                         # Get database size before VACUUM
@@ -2054,13 +2151,13 @@ class Database:
                                 size_after = page_count_after * page_size
                                 reclaimed_bytes = size_before - size_after
 
-                return PruneResult(
-                    deleted_tasks=deleted_tasks,
-                    deleted_dependencies=deleted_dependencies,
-                    reclaimed_bytes=reclaimed_bytes,
-                    dry_run=False,
-                    breakdown_by_status=breakdown_by_status,
-                )
+                    return PruneResult(
+                        deleted_tasks=result["deleted_count"],
+                        deleted_dependencies=result["deleted_dependencies"],
+                        reclaimed_bytes=reclaimed_bytes,
+                        dry_run=False,
+                        breakdown_by_status=result["breakdown_by_status"],
+                    )
 
             except Exception as e:
                 await conn.execute("ROLLBACK")
