@@ -977,40 +977,49 @@ class Database:
             if task_id_col and task_id_col["notnull"] == 1:
                 print("Migrating database schema: making audit.task_id nullable")
 
-                # Temporarily disable FK
-                await conn.execute("PRAGMA foreign_keys=OFF")
+                try:
+                    # Temporarily disable FK
+                    await conn.execute("PRAGMA foreign_keys=OFF")
 
-                # Recreate audit table with nullable task_id (no FK constraint)
-                await conn.execute("ALTER TABLE audit RENAME TO audit_old")
-                await conn.execute(
-                    """
-                    CREATE TABLE audit (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp TIMESTAMP NOT NULL,
-                        agent_id TEXT,
-                        task_id TEXT,
-                        action_type TEXT NOT NULL,
-                        action_data TEXT,
-                        result TEXT,
-                        memory_operation_type TEXT,
-                        memory_namespace TEXT,
-                        memory_entry_id INTEGER,
-                        FOREIGN KEY (agent_id) REFERENCES agents(id),
-                        FOREIGN KEY (memory_entry_id) REFERENCES memory_entries(id) ON DELETE SET NULL
+                    # Recreate audit table with nullable task_id (no FK constraint)
+                    await conn.execute("ALTER TABLE audit RENAME TO audit_old")
+                    await conn.execute(
+                        """
+                        CREATE TABLE audit (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            timestamp TIMESTAMP NOT NULL,
+                            agent_id TEXT,
+                            task_id TEXT,
+                            action_type TEXT NOT NULL,
+                            action_data TEXT,
+                            result TEXT,
+                            memory_operation_type TEXT,
+                            memory_namespace TEXT,
+                            memory_entry_id INTEGER,
+                            FOREIGN KEY (agent_id) REFERENCES agents(id),
+                            FOREIGN KEY (memory_entry_id) REFERENCES memory_entries(id) ON DELETE SET NULL
+                        )
+                        """
                     )
-                    """
-                )
-                await conn.execute(
-                    """
-                    INSERT INTO audit SELECT * FROM audit_old
-                    """
-                )
-                await conn.execute("DROP TABLE audit_old")
+                    await conn.execute(
+                        """
+                        INSERT INTO audit SELECT * FROM audit_old
+                        """
+                    )
+                    await conn.execute("DROP TABLE audit_old")
 
-                # Re-enable FK
-                await conn.execute("PRAGMA foreign_keys=ON")
-                await conn.commit()
-                print("Made audit.task_id nullable")
+                    # Re-enable FK
+                    await conn.execute("PRAGMA foreign_keys=ON")
+                    await conn.commit()
+                    print("Made audit.task_id nullable")
+
+                except Exception as e:
+                    # Re-enable foreign keys even on error
+                    await conn.execute("PRAGMA foreign_keys=ON")
+                    await conn.rollback()
+                    print(f"✗ Migration failed: {type(e).__name__}: {e}")
+                    print("Database rolled back to previous state")
+                    raise  # Re-raise to prevent application from starting with failed migration
 
     async def _create_tables(self, conn: Connection) -> None:
         """Create database tables."""
