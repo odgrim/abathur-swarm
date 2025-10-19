@@ -86,6 +86,8 @@ asyncio_mode = "auto"
 addopts = "-ra -q --strict-markers --cov=abathur --cov-report=term-missing --cov-report=html"
 markers = [
     "performance: marks tests as performance tests (deselect with '-m \"not performance\"')",
+    "benchmark: marks tests as performance benchmark tests (deselect with '-m \"not benchmark\"')",
+    "slow: marks tests as slow-running tests (>30 seconds) (deselect with '-m \"not slow\"')",
 ]
 
 [tool.coverage.run]
