@@ -405,8 +405,28 @@ class AbathurTaskQueueServer:
         task_branch = arguments.get("task_branch")
         worktree_path = arguments.get("worktree_path")
 
-        # Note: summary validation is handled by domain model (Pydantic)
-        # Pass summary as-is to service layer, which will validate via Task model
+        # Validate summary (explicit validation at MCP layer)
+        if summary is not None:
+            # Validate summary is string
+            if not isinstance(summary, str):
+                return {
+                    "error": "ValidationError",
+                    "message": "summary must be a string",
+                }
+
+            # Reject whitespace-only or empty summaries
+            if not summary.strip():
+                return {
+                    "error": "ValidationError",
+                    "message": "summary cannot be empty or whitespace-only",
+                }
+
+            # Validate max length (140 characters)
+            if len(summary) > 140:
+                return {
+                    "error": "ValidationError",
+                    "message": f"summary must not exceed 140 characters, got {len(summary)}",
+                }
 
         # Validate agent_type - reject generic/invalid agent types
         invalid_agent_types = [
