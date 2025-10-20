@@ -906,3 +906,175 @@ async def test_prune_vacuum_default_is_conditional() -> None:
         # Cleanup
         if db_path.exists():
             db_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_prune_auto_skip_vacuum_large_operation() -> None:
+    """Test vacuum_mode auto-selection to 'never' for large prune operations (>10,000 tasks)."""
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from abathur.domain.models import Task, TaskSource, TaskStatus
+    from abathur.infrastructure.database import Database, PruneFilters
+
+    # Setup: Create temporary database
+    with TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = Database(db_path)
+
+        try:
+            await db.initialize()
+
+            # Create 10,001 completed tasks (exceeds AUTO_SKIP_VACUUM_THRESHOLD)
+            tasks_to_insert = []
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=31)
+
+            for i in range(10_001):
+                task = Task(
+                    prompt=f"Old task {i}",
+                    summary=f"Task {i}",
+                    agent_type="test-agent",
+                    status=TaskStatus.COMPLETED,
+                    source=TaskSource.AGENT_IMPLEMENTATION,
+                    completed_at=cutoff_date,
+                )
+                # Manually set completed_at to old date
+                task.completed_at = cutoff_date
+                tasks_to_insert.append(task)
+
+            # Batch insert for performance
+            async with db._get_connection() as conn:
+                for task in tasks_to_insert:
+                    await db.insert_task(task)
+
+            # Verify setup: Should have 10,001 completed tasks
+            all_tasks = await db.list_tasks(TaskStatus.COMPLETED, limit=15000)
+            assert len(all_tasks) == 10_001
+
+            # Execute: Prune with vacuum_mode="conditional" (should be auto-overridden to "never")
+            filters = PruneFilters(older_than_days=30, vacuum_mode="conditional")
+            result = await db.prune_tasks(filters)
+
+            # Assert: VACUUM should be auto-skipped due to large task count
+            assert result.deleted_tasks == 10_001
+            assert result.vacuum_auto_skipped is True  # Auto-skip flag set
+            assert result.reclaimed_bytes is None  # VACUUM was skipped
+
+            # Verify tasks were actually deleted
+            remaining_tasks = await db.list_tasks(TaskStatus.COMPLETED, limit=15000)
+            assert len(remaining_tasks) == 0
+
+            await db.close()
+        finally:
+            # Cleanup
+            if db_path.exists():
+                db_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_prune_auto_skip_respects_explicit_never() -> None:
+    """Test that vacuum_auto_skipped=False when vacuum_mode is explicitly 'never'."""
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from abathur.domain.models import Task, TaskSource, TaskStatus
+    from abathur.infrastructure.database import Database, PruneFilters
+
+    # Setup: Create temporary database
+    with TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = Database(db_path)
+
+        try:
+            await db.initialize()
+
+            # Create 10,001 completed tasks (exceeds threshold)
+            tasks_to_insert = []
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=31)
+
+            for i in range(10_001):
+                task = Task(
+                    prompt=f"Old task {i}",
+                    summary=f"Task {i}",
+                    agent_type="test-agent",
+                    status=TaskStatus.COMPLETED,
+                    source=TaskSource.AGENT_IMPLEMENTATION,
+                    completed_at=cutoff_date,
+                )
+                task.completed_at = cutoff_date
+                tasks_to_insert.append(task)
+
+            # Batch insert
+            for task in tasks_to_insert:
+                await db.insert_task(task)
+
+            # Execute: Prune with vacuum_mode="never" (explicit, not auto-selected)
+            filters = PruneFilters(older_than_days=30, vacuum_mode="never")
+            result = await db.prune_tasks(filters)
+
+            # Assert: vacuum_auto_skipped should be False (user explicitly chose 'never')
+            assert result.deleted_tasks == 10_001
+            assert result.vacuum_auto_skipped is False  # NOT auto-skipped, user explicitly chose 'never'
+            assert result.reclaimed_bytes is None  # VACUUM was skipped (but by user choice)
+
+            await db.close()
+        finally:
+            # Cleanup
+            if db_path.exists():
+                db_path.unlink()
+
+
+@pytest.mark.asyncio
+async def test_prune_no_auto_skip_below_threshold() -> None:
+    """Test that auto-skip does NOT trigger for prune operations below 10,000 tasks."""
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from abathur.domain.models import Task, TaskSource, TaskStatus
+    from abathur.infrastructure.database import Database, PruneFilters
+
+    # Setup: Create temporary database
+    with TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = Database(db_path)
+
+        try:
+            await db.initialize()
+
+            # Create exactly 200 completed tasks (above conditional threshold but below auto-skip)
+            tasks_to_insert = []
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=31)
+
+            for i in range(200):
+                task = Task(
+                    prompt=f"Old task {i}",
+                    summary=f"Task {i}",
+                    agent_type="test-agent",
+                    status=TaskStatus.COMPLETED,
+                    source=TaskSource.AGENT_IMPLEMENTATION,
+                    completed_at=cutoff_date,
+                )
+                task.completed_at = cutoff_date
+                tasks_to_insert.append(task)
+
+            # Batch insert
+            for task in tasks_to_insert:
+                await db.insert_task(task)
+
+            # Execute: Prune with vacuum_mode="conditional"
+            filters = PruneFilters(older_than_days=30, vacuum_mode="conditional")
+            result = await db.prune_tasks(filters)
+
+            # Assert: VACUUM should run (above 100 threshold, below 10,000 auto-skip threshold)
+            assert result.deleted_tasks == 200
+            assert result.vacuum_auto_skipped is False  # No auto-skip
+            assert result.reclaimed_bytes is not None  # VACUUM ran
+
+            await db.close()
+        finally:
+            # Cleanup
+            if db_path.exists():
+                db_path.unlink()
