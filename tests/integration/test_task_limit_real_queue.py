@@ -487,7 +487,8 @@ async def test_scenario_5_failed_tasks_count_toward_limit(
             failed_count += 1
             # Failed tasks should have timestamps
             assert task.started_at is not None
-            assert task.failed_at is not None
+            # Note: completed_at is used for all terminal states (completed, failed, cancelled)
+            assert task.completed_at is not None
             # Verify error message stored
             assert task.error_message is not None
             assert "Simulated task failure" in task.error_message
