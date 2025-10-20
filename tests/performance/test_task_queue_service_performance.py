@@ -192,7 +192,7 @@ async def test_serialize_performance_all_fields(
     Performance Target: <1ms per serialization
 
     Validates that serializing tasks with all fields (including summary) is fast enough
-    for real-time operations. The Task model has 28 fields, and serialization should
+    for real-time operations. The Task model has 29 fields, and serialization should
     remain performant even with all fields populated.
     """
     # Create task with ALL fields populated (except parent_task_id and session_id to avoid foreign key constraints)
@@ -240,7 +240,7 @@ async def test_serialize_performance_all_fields(
     # Assert target: P99 < 1ms
     assert stats["p99"] < 1.0, f"P99 latency {stats['p99']:.4f}ms exceeds 1ms target"
 
-    # Verify field count (Task model has 28 fields as of this implementation)
+    # Verify field count (Task model has 29 fields as of this implementation)
     assert len(serialized) >= 25, f"Expected at least 25 fields, got {len(serialized)}"
 
 

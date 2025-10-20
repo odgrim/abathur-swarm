@@ -1,14 +1,14 @@
 """Unit tests for _serialize_task function complete field coverage.
 
 This test file specifically validates that the _serialize_task function
-in task_queue_server.py correctly serializes ALL 28 Task model fields.
+in task_queue_server.py correctly serializes ALL 29 Task model fields.
 
 This addresses the critical bug (FR004) where _serialize_task was only
-returning 14 of 28 fields, blocking task_get and task_list from returning
+returning 14 of 29 fields, blocking task_get and task_list from returning
 complete task information.
 
 Test Coverage:
-- All 28 Task model fields present in serialization
+- All 29 Task model fields present in serialization
 - Correct type conversions (UUID→str, datetime→ISO, enum→value)
 - Null value handling
 - Dependencies list serialization (list[UUID] → list[str])
@@ -22,7 +22,7 @@ from abathur.domain.models import DependencyType, Task, TaskSource, TaskStatus
 
 
 def _serialize_task(task: Task) -> dict:
-    """Serialize Task object to JSON-compatible dict with ALL 28 Task model fields.
+    """Serialize Task object to JSON-compatible dict with ALL 29 Task model fields.
 
     This is a copy of the production function for isolated testing.
     """
@@ -63,11 +63,12 @@ def _serialize_task(task: Task) -> dict:
         # Branch tracking fields
         "feature_branch": task.feature_branch,
         "task_branch": task.task_branch,
+        "worktree_path": task.worktree_path,
     }
 
 
-def test_serialize_task_all_28_fields_present() -> None:
-    """Test that _serialize_task returns all 28 Task model fields.
+def test_serialize_task_all_29_fields_present() -> None:
+    """Test that _serialize_task returns all 29 Task model fields.
 
     This test validates the fix for FR004 where _serialize_task was missing:
     - retry_count
@@ -119,7 +120,7 @@ def test_serialize_task_all_28_fields_present() -> None:
     # Act - serialize task
     serialized = _serialize_task(task)
 
-    # Assert - all 28 fields present
+    # Assert - all 29 fields present
     expected_fields = {
         "id",
         "prompt",
@@ -149,10 +150,11 @@ def test_serialize_task_all_28_fields_present() -> None:
         "dependency_depth",
         "feature_branch",
         "task_branch",
+        "worktree_path",
     }
 
     actual_fields = set(serialized.keys())
-    assert len(actual_fields) == 28, f"Expected 28 fields, got {len(actual_fields)}"
+    assert len(actual_fields) == 29, f"Expected 29 fields, got {len(actual_fields)}"
     assert (
         actual_fields == expected_fields
     ), f"Missing: {expected_fields - actual_fields}, Extra: {actual_fields - expected_fields}"
@@ -324,8 +326,8 @@ def test_serialize_task_backward_compatibility() -> None:
     # Act
     serialized = _serialize_task(task)
 
-    # Assert - all 28 fields still present
-    assert len(serialized.keys()) == 28
+    # Assert - all 29 fields still present
+    assert len(serialized.keys()) == 29
     assert "summary" in serialized
     assert serialized["summary"] is None
 
