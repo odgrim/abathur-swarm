@@ -372,14 +372,15 @@ class TestDatabaseAgentOperations:
     @pytest.mark.asyncio
     async def test_insert_and_update_agent(self, database: Database) -> None:
         """Test inserting and updating agent state."""
-        # Create a task first (required for foreign key constraint)
-        task = Task(prompt="Agent test task", summary="Agent test task")
+        # Create prerequisite task first (FK constraint requirement)
+        task = Task(prompt="Test task for agent", summary="Agent test task")
         await database.insert_task(task)
+        task_id = task.id
 
         agent = Agent(
             name="test-agent",
             specialization="testing",
-            task_id=task.id,
+            task_id=task_id,
         )
 
         await database.insert_agent(agent)
@@ -397,34 +398,36 @@ class TestDatabaseStateOperations:
     @pytest.mark.asyncio
     async def test_set_and_get_state(self, database: Database) -> None:
         """Test setting and getting shared state."""
-        # Create a task first (required for foreign key constraint)
-        task = Task(prompt="State test task", summary="State test task")
+        # Create prerequisite task first (FK constraint requirement)
+        task = Task(prompt="Test task for state", summary="State test task")
         await database.insert_task(task)
+        task_id = task.id
 
         state_data = {"iteration": 5, "result": "success"}
 
-        await database.set_state(task.id, "loop_state", state_data)
+        await database.set_state(task_id, "loop_state", state_data)
 
-        retrieved_state = await database.get_state(task.id, "loop_state")
+        retrieved_state = await database.get_state(task_id, "loop_state")
 
         assert retrieved_state == state_data
 
     @pytest.mark.asyncio
     async def test_update_existing_state(self, database: Database) -> None:
         """Test updating existing state."""
-        # Create a task first (required for foreign key constraint)
-        task = Task(prompt="State update test task", summary="State update test task")
+        # Create prerequisite task first (FK constraint requirement)
+        task = Task(prompt="Test task for state update", summary="State update test")
         await database.insert_task(task)
+        task_id = task.id
 
         initial_state = {"iteration": 1}
 
-        await database.set_state(task.id, "loop_state", initial_state)
+        await database.set_state(task_id, "loop_state", initial_state)
 
         # Update the same key
         updated_state = {"iteration": 2}
-        await database.set_state(task.id, "loop_state", updated_state)
+        await database.set_state(task_id, "loop_state", updated_state)
 
-        retrieved_state = await database.get_state(task.id, "loop_state")
+        retrieved_state = await database.get_state(task_id, "loop_state")
 
         assert retrieved_state == updated_state
 
@@ -446,22 +449,24 @@ class TestDatabaseAuditOperations:
     @pytest.mark.asyncio
     async def test_log_audit_entry(self, database: Database) -> None:
         """Test logging an audit entry."""
-        # Create a task first (required for foreign key constraint)
-        task = Task(prompt="Audit test task", summary="Audit test task")
+        # Create prerequisite task first (needed for agent)
+        task = Task(prompt="Test task for audit", summary="Audit test task")
         await database.insert_task(task)
+        task_id = task.id
 
-        # Create an agent (required for foreign key constraint on agent_id)
+        # Create prerequisite agent (FK constraint requirement)
         agent = Agent(
-            name="audit-test-agent",
-            specialization="testing",
-            task_id=task.id,
+            name="test-audit-agent",
+            specialization="auditing",
+            task_id=task_id,
         )
         await database.insert_agent(agent)
+        agent_id = agent.id
 
         await database.log_audit(
-            task_id=task.id,
+            task_id=task_id,
             action_type="execute_task",
-            agent_id=agent.id,
+            agent_id=agent_id,
             action_data={"command": "test"},
             result="success",
         )
