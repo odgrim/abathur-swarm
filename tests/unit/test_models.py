@@ -300,12 +300,12 @@ class TestTask:
         # Arrange & Act - create multiple tasks with different summaries
         task1 = Task(prompt="Task 1", summary="Summary 1")
         task2 = Task(prompt="Task 2", summary="Summary 2")
-        task3 = Task(prompt="Task 3")  # No summary
+        task3 = Task(prompt="Task 3", summary="Summary 3")
 
         # Assert - each task has correct summary
         assert task1.summary == "Summary 1"
         assert task2.summary == "Summary 2"
-        assert task3.summary is None
+        assert task3.summary == "Summary 3"
 
         # Verify no cross-contamination
         assert task1.summary != task2.summary

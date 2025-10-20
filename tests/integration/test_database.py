@@ -28,6 +28,7 @@ class TestDatabaseTaskOperations:
         """Test inserting and retrieving a task."""
         task = Task(
             prompt="Test task prompt",
+            summary="Test task prompt",
             agent_type="test-agent",
             input_data={"key": "value"},
             priority=7,
@@ -51,6 +52,7 @@ class TestDatabaseTaskOperations:
         """Test updating task status."""
         task = Task(
             prompt="Test task",
+            summary="Test task",
         )
 
         await database.insert_task(task)
@@ -75,9 +77,9 @@ class TestDatabaseTaskOperations:
     async def test_list_tasks(self, database: Database) -> None:
         """Test listing tasks."""
         # Create several tasks
-        task1 = Task(prompt="Task 1", priority=5)
-        task2 = Task(prompt="Task 2", priority=8)
-        task3 = Task(prompt="Task 3", priority=3)
+        task1 = Task(prompt="Task 1", summary="Task 1", priority=5)
+        task2 = Task(prompt="Task 2", summary="Task 2", priority=8)
+        task3 = Task(prompt="Task 3", summary="Task 3", priority=3)
 
         await database.insert_task(task1)
         await database.insert_task(task2)
@@ -96,8 +98,8 @@ class TestDatabaseTaskOperations:
     async def test_list_tasks_by_status(self, database: Database) -> None:
         """Test listing tasks filtered by status."""
         # Create tasks with different statuses
-        task1 = Task(prompt="Task 1")
-        task2 = Task(prompt="Task 2")
+        task1 = Task(prompt="Task 1", summary="Task 1")
+        task2 = Task(prompt="Task 2", summary="Task 2")
 
         await database.insert_task(task1)
         await database.insert_task(task2)
@@ -119,9 +121,9 @@ class TestDatabaseTaskOperations:
     async def test_dequeue_next_task(self, database: Database) -> None:
         """Test dequeuing the next highest priority task."""
         # Create tasks with different priorities
-        task1 = Task(prompt="Task 1", priority=5)
-        task2 = Task(prompt="Task 2", priority=8)
-        task3 = Task(prompt="Task 3", priority=3)
+        task1 = Task(prompt="Task 1", summary="Task 1", priority=5)
+        task2 = Task(prompt="Task 2", summary="Task 2", priority=8)
+        task3 = Task(prompt="Task 3", summary="Task 3", priority=3)
 
         await database.insert_task(task1)
         await database.insert_task(task2)
@@ -144,11 +146,12 @@ class TestDatabaseTaskOperations:
     @pytest.mark.asyncio
     async def test_task_with_parent(self, database: Database) -> None:
         """Test task with parent relationship."""
-        parent_task = Task(prompt="Parent task")
+        parent_task = Task(prompt="Parent task", summary="Parent task")
         await database.insert_task(parent_task)
 
         child_task = Task(
             prompt="Child task",
+            summary="Child task",
             parent_task_id=parent_task.id,
         )
         await database.insert_task(child_task)
@@ -369,7 +372,11 @@ class TestDatabaseAgentOperations:
     @pytest.mark.asyncio
     async def test_insert_and_update_agent(self, database: Database) -> None:
         """Test inserting and updating agent state."""
-        task_id = uuid4()
+        # Create prerequisite task first (FK constraint requirement)
+        task = Task(prompt="Test task for agent", summary="Agent test task")
+        await database.insert_task(task)
+        task_id = task.id
+
         agent = Agent(
             name="test-agent",
             specialization="testing",
@@ -391,7 +398,11 @@ class TestDatabaseStateOperations:
     @pytest.mark.asyncio
     async def test_set_and_get_state(self, database: Database) -> None:
         """Test setting and getting shared state."""
-        task_id = uuid4()
+        # Create prerequisite task first (FK constraint requirement)
+        task = Task(prompt="Test task for state", summary="State test task")
+        await database.insert_task(task)
+        task_id = task.id
+
         state_data = {"iteration": 5, "result": "success"}
 
         await database.set_state(task_id, "loop_state", state_data)
@@ -403,7 +414,11 @@ class TestDatabaseStateOperations:
     @pytest.mark.asyncio
     async def test_update_existing_state(self, database: Database) -> None:
         """Test updating existing state."""
-        task_id = uuid4()
+        # Create prerequisite task first (FK constraint requirement)
+        task = Task(prompt="Test task for state update", summary="State update test")
+        await database.insert_task(task)
+        task_id = task.id
+
         initial_state = {"iteration": 1}
 
         await database.set_state(task_id, "loop_state", initial_state)
@@ -419,9 +434,11 @@ class TestDatabaseStateOperations:
     @pytest.mark.asyncio
     async def test_get_nonexistent_state(self, database: Database) -> None:
         """Test getting state that doesn't exist."""
-        task_id = uuid4()
+        # Create a task first (required for foreign key constraint)
+        task = Task(prompt="Nonexistent state test task", summary="Nonexistent state test task")
+        await database.insert_task(task)
 
-        retrieved_state = await database.get_state(task_id, "nonexistent")
+        retrieved_state = await database.get_state(task.id, "nonexistent")
 
         assert retrieved_state is None
 
@@ -432,8 +449,19 @@ class TestDatabaseAuditOperations:
     @pytest.mark.asyncio
     async def test_log_audit_entry(self, database: Database) -> None:
         """Test logging an audit entry."""
-        task_id = uuid4()
-        agent_id = uuid4()
+        # Create prerequisite task first (needed for agent)
+        task = Task(prompt="Test task for audit", summary="Audit test task")
+        await database.insert_task(task)
+        task_id = task.id
+
+        # Create prerequisite agent (FK constraint requirement)
+        agent = Agent(
+            name="test-audit-agent",
+            specialization="auditing",
+            task_id=task_id,
+        )
+        await database.insert_agent(agent)
+        agent_id = agent.id
 
         await database.log_audit(
             task_id=task_id,

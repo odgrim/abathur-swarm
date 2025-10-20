@@ -24,6 +24,7 @@ async def test_migration_adds_new_columns() -> None:
     # Verify new columns exist by inserting a task with new fields
     task = Task(
         prompt="Test migration",
+        summary="Test migration",
         source=TaskSource.AGENT_PLANNER,
         calculated_priority=7.5,
         dependency_depth=1,
@@ -50,8 +51,8 @@ async def test_task_dependencies_table_created() -> None:
     await db.initialize()
 
     # Create two tasks
-    task1 = Task(prompt="Task 1")
-    task2 = Task(prompt="Task 2")
+    task1 = Task(prompt="Task 1", summary="Task 1")
+    task2 = Task(prompt="Task 2", summary="Task 2")
     await db.insert_task(task1)
     await db.insert_task(task2)
 
@@ -113,8 +114,8 @@ async def test_dependency_resolution() -> None:
     await db.initialize()
 
     # Create prerequisite and dependent tasks
-    prereq_task = Task(prompt="Prerequisite task")
-    dependent_task = Task(prompt="Dependent task")
+    prereq_task = Task(prompt="Prerequisite task", summary="Prerequisite task")
+    dependent_task = Task(prompt="Dependent task", summary="Dependent task")
     await db.insert_task(prereq_task)
     await db.insert_task(dependent_task)
 
@@ -149,10 +150,10 @@ async def test_multiple_dependencies() -> None:
     await db.initialize()
 
     # Create prerequisite tasks
-    prereq1 = Task(prompt="Prerequisite 1")
-    prereq2 = Task(prompt="Prerequisite 2")
-    prereq3 = Task(prompt="Prerequisite 3")
-    dependent = Task(prompt="Dependent task")
+    prereq1 = Task(prompt="Prerequisite 1", summary="Prerequisite 1")
+    prereq2 = Task(prompt="Prerequisite 2", summary="Prerequisite 2")
+    prereq3 = Task(prompt="Prerequisite 3", summary="Prerequisite 3")
+    dependent = Task(prompt="Dependent task", summary="Dependent task")
 
     await db.insert_task(prereq1)
     await db.insert_task(prereq2)
@@ -198,7 +199,7 @@ async def test_backward_compatibility() -> None:
     await db.initialize()
 
     # Create task with minimal fields (defaults should be used)
-    task = Task(prompt="Minimal task")
+    task = Task(prompt="Minimal task", summary="Minimal task")
     await db.insert_task(task)
 
     # Retrieve and verify defaults
@@ -229,7 +230,11 @@ async def test_task_status_values() -> None:
     ]
 
     for status in statuses:
-        task = Task(prompt=f"Task with status {status.value}", status=status)
+        task = Task(
+            prompt=f"Task with status {status.value}",
+            summary=f"Task with status {status.value}",
+            status=status
+        )
         await db.insert_task(task)
 
         retrieved = await db.get_task(task.id)
@@ -253,7 +258,11 @@ async def test_task_source_values() -> None:
     ]
 
     for source in sources:
-        task = Task(prompt=f"Task from {source.value}", source=source)
+        task = Task(
+            prompt=f"Task from {source.value}",
+            summary=f"Task from {source.value}",
+            source=source
+        )
         await db.insert_task(task)
 
         retrieved = await db.get_task(task.id)
@@ -274,6 +283,7 @@ async def test_deadline_persistence() -> None:
     deadline = datetime.now(timezone.utc)
     task = Task(
         prompt="Task with deadline",
+        summary="Task with deadline",
         deadline=deadline,
         estimated_duration_seconds=7200,
     )
@@ -327,8 +337,8 @@ async def test_unique_dependency_constraint() -> None:
     db = Database(Path(":memory:"))
     await db.initialize()
 
-    task1 = Task(prompt="Task 1")
-    task2 = Task(prompt="Task 2")
+    task1 = Task(prompt="Task 1", summary="Task 1")
+    task2 = Task(prompt="Task 2", summary="Task 2")
     await db.insert_task(task1)
     await db.insert_task(task2)
 

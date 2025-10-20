@@ -499,7 +499,7 @@ async def test_existing_task_fields_unaffected(
 
     assert "error" not in get_result
 
-    # Verify all 28 Task fields present
+    # Verify all 29 Task fields present
     expected_fields = {
         "id",
         "prompt",
@@ -529,11 +529,12 @@ async def test_existing_task_fields_unaffected(
         "dependency_depth",
         "feature_branch",
         "task_branch",
+        "worktree_path",
     }
 
     actual_fields = set(get_result.keys())
 
-    assert len(actual_fields) == 28, f"Expected 28 fields, got {len(actual_fields)}"
+    assert len(actual_fields) == 29, f"Expected 29 fields, got {len(actual_fields)}"
     assert actual_fields == expected_fields, f"Missing fields: {expected_fields - actual_fields}"
 
     # Verify summary field specifically present
