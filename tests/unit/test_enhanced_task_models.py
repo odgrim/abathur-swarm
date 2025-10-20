@@ -65,7 +65,7 @@ class TestTaskModel:
 
     def test_task_with_defaults(self) -> None:
         """Task can be created with minimal fields."""
-        task = Task(prompt="Test task")
+        task = Task(prompt="Test task", summary="Test task")
         assert task.id is not None
         assert task.prompt == "Test task"
         assert task.source == TaskSource.HUMAN
@@ -79,7 +79,7 @@ class TestTaskModel:
 
     def test_task_with_source(self) -> None:
         """Task can be created with specific source."""
-        task = Task(prompt="Agent task", source=TaskSource.AGENT_PLANNER)
+        task = Task(prompt="Agent task", summary="Agent task", source=TaskSource.AGENT_PLANNER)
         assert task.source == TaskSource.AGENT_PLANNER
 
     def test_task_with_priority_fields(self) -> None:
@@ -87,6 +87,7 @@ class TestTaskModel:
         deadline = datetime.now(timezone.utc)
         task = Task(
             prompt="Urgent task",
+            summary="Urgent task",
             calculated_priority=8.5,
             deadline=deadline,
             estimated_duration_seconds=3600,
@@ -103,6 +104,7 @@ class TestTaskModel:
         dep2 = uuid4()
         task = Task(
             prompt="Dependent task",
+            summary="Dependent task",
             dependencies=[dep1, dep2],
             dependency_type=DependencyType.PARALLEL,
         )
@@ -115,6 +117,7 @@ class TestTaskModel:
         """Task can be serialized to JSON."""
         task = Task(
             prompt="Serializable task",
+            summary="Serializable task",
             source=TaskSource.AGENT_IMPLEMENTATION,
             calculated_priority=7.5,
             dependency_depth=1,
@@ -197,33 +200,33 @@ class TestTaskModelValidation:
     def test_priority_bounds(self) -> None:
         """Task priority must be between 0 and 10."""
         # Valid priorities
-        task1 = Task(prompt="Test", priority=0)
+        task1 = Task(prompt="Test", summary="Test", priority=0)
         assert task1.priority == 0
 
-        task2 = Task(prompt="Test", priority=10)
+        task2 = Task(prompt="Test", summary="Test", priority=10)
         assert task2.priority == 10
 
         # Invalid priorities should raise validation error
         with pytest.raises(ValidationError):
-            Task(prompt="Test", priority=-1)
+            Task(prompt="Test", summary="Test", priority=-1)
 
         with pytest.raises(ValidationError):
-            Task(prompt="Test", priority=11)
+            Task(prompt="Test", summary="Test", priority=11)
 
     def test_calculated_priority_non_negative(self) -> None:
         """Calculated priority can be any non-negative float."""
-        task = Task(prompt="Test", calculated_priority=0.0)
+        task = Task(prompt="Test", summary="Test", calculated_priority=0.0)
         assert task.calculated_priority == 0.0
 
-        task2 = Task(prompt="Test", calculated_priority=100.5)
+        task2 = Task(prompt="Test", summary="Test", calculated_priority=100.5)
         assert task2.calculated_priority == 100.5
 
     def test_dependency_depth_non_negative(self) -> None:
         """Dependency depth must be non-negative."""
-        task = Task(prompt="Test", dependency_depth=0)
+        task = Task(prompt="Test", summary="Test", dependency_depth=0)
         assert task.dependency_depth == 0
 
-        task2 = Task(prompt="Test", dependency_depth=10)
+        task2 = Task(prompt="Test", summary="Test", dependency_depth=10)
         assert task2.dependency_depth == 10
 
 
@@ -232,10 +235,10 @@ class TestModelDefaults:
 
     def test_task_defaults(self) -> None:
         """Verify all Task field defaults."""
-        task = Task(prompt="Test")
+        task = Task(prompt="Test", summary="Test")
 
         # Core fields
-        assert task.agent_type == "general"
+        assert task.agent_type == "requirements-gatherer"
         assert task.priority == 5
         assert task.status == TaskStatus.PENDING
         assert task.input_data == {}
