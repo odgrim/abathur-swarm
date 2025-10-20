@@ -148,6 +148,144 @@ async def hierarchical_task_breakdown():
 - Use `get_dependency_chain()` to visualize task dependencies
 - Check task status and error messages for detailed information
 
+## Task Deletion and Database Maintenance
+
+### Pruning Tasks
+
+The `prune` command removes old or completed tasks from the database to manage storage and improve performance.
+
+#### Basic Usage
+
+```bash
+# Delete a specific task by ID
+abathur task prune ebec23ad --force
+
+# Delete all completed tasks
+abathur task prune --status completed --force
+
+# Delete tasks older than 30 days
+abathur task prune --older-than 30d --force
+
+# Preview what would be deleted (dry-run)
+abathur task prune --older-than 30d --dry-run
+```
+
+### Understanding VACUUM Performance
+
+When deleting tasks, SQLite marks the space as "free" but doesn't immediately return it to the operating system. The VACUUM operation reclaims this space by rebuilding the database file.
+
+**Trade-off:** VACUUM reclaims disk space but takes time and locks the database during execution.
+
+#### VACUUM Modes
+
+Control VACUUM behavior with the `--vacuum` flag:
+
+**`--vacuum=conditional` (default)**
+- Runs VACUUM only if ≥100 tasks are deleted
+- **Recommended for most operations**
+- Balances performance and space reclamation
+
+```bash
+# Default behavior - VACUUM runs if deleting ≥100 tasks
+abathur task prune --older-than 30d --force
+```
+
+**`--vacuum=never`**
+- Never runs VACUUM, fastest deletion
+- **Recommended for large deletions (>10,000 tasks)**
+- Prevents multi-minute delays
+
+```bash
+# Fast deletion for large batches
+abathur task prune --older-than 180d --vacuum=never --force
+```
+
+**`--vacuum=always`**
+- Always runs VACUUM, regardless of deletion count
+- Use when disk space is critical
+- **Warning:** May cause multi-minute delays for large databases
+
+```bash
+# Always reclaim space immediately
+abathur task prune --older-than 30d --vacuum=always --force
+```
+
+### Performance Guidelines by Database Size
+
+| Database Size | Task Count | VACUUM Duration | Recommendation |
+|---------------|------------|-----------------|----------------|
+| Small         | < 1,000    | < 1 second      | Use default (`conditional`) |
+| Medium        | 1,000 - 10,000 | 1-10 seconds | Use default (`conditional`) |
+| Large         | 10,000 - 100,000 | 10 sec - 2 min | Use `--vacuum=never` for bulk operations |
+| Very Large    | > 100,000  | 2+ minutes      | **Always use `--vacuum=never`** |
+
+#### Critical Performance Recommendation
+
+**For deletions of >10,000 tasks, always use `--vacuum=never`** to avoid multi-minute delays that block database access:
+
+```bash
+# CRITICAL: Use --vacuum=never for large deletions
+abathur task prune --older-than 180d --vacuum=never --force
+```
+
+#### Manual VACUUM During Maintenance
+
+If you skip VACUUM during deletion, you can manually reclaim space during off-hours:
+
+```bash
+# Run manual VACUUM during maintenance window
+sqlite3 ~/.abathur/abathur.db "VACUUM;"
+```
+
+### Best Practices for Task Deletion
+
+1. **Preview before deleting**:
+   ```bash
+   # Check what will be deleted
+   abathur task prune --older-than 30d --dry-run
+   ```
+
+2. **Choose appropriate VACUUM mode**:
+   - Small deletion (<100 tasks): Use default
+   - Medium deletion (100-10,000 tasks): Use default
+   - Large deletion (>10,000 tasks): Use `--vacuum=never`
+
+3. **Schedule maintenance VACUUM**:
+   ```bash
+   # Add to cron for weekly maintenance
+   0 2 * * 0 sqlite3 ~/.abathur/abathur.db "VACUUM;"
+   ```
+
+4. **Monitor database size**:
+   ```bash
+   # Check database size
+   ls -lh ~/.abathur/abathur.db
+   ```
+
+### Troubleshooting VACUUM Issues
+
+**Problem**: Deletion takes too long
+
+**Solution**: Use `--vacuum=never` for large batch deletions:
+```bash
+abathur task prune --older-than 90d --vacuum=never --force
+```
+
+**Problem**: Database file size not shrinking
+
+**Solution**: Run manual VACUUM:
+```bash
+sqlite3 ~/.abathur/abathur.db "VACUUM;"
+```
+
+**Problem**: Database locked during deletion
+
+**Solution**: VACUUM holds exclusive lock. Wait for completion or use `--vacuum=never` next time.
+
+**See Also:**
+- Technical benchmark documentation: `tests/benchmarks/README.md`
+- Troubleshooting guide: `docs/task_queue_troubleshooting.md`
+
 ## FAQ
 
 **Q: How many dependencies can a task have?**
@@ -162,6 +300,15 @@ A: Yes, the system dynamically recalculates priority based on various factors.
 **Q: How are human tasks prioritized?**
 A: Human tasks (HUMAN source) receive a higher priority boost compared to agent-generated tasks.
 
+**Q: When should I use `--vacuum=never`?**
+A: Always use `--vacuum=never` when deleting more than 10,000 tasks to avoid multi-minute delays. See `src/abathur/infrastructure/database.py:32` for the VACUUM threshold.
+
+**Q: How do I know if VACUUM ran?**
+A: When VACUUM runs, the CLI displays: `VACUUM completed: X.XX MB reclaimed`. If VACUUM is skipped, you'll see: `VACUUM skipped (--vacuum=never)` or `VACUUM skipped (conditional mode, only N tasks deleted, threshold is 100)`.
+
+**Q: Can I delete tasks while agents are running?**
+A: Yes, but VACUUM (if run) will lock the database briefly. Use `--vacuum=never` to avoid blocking operations.
+
 ## Conclusion
 
-The Abathur Task Queue System provides a flexible, intelligent platform for managing complex, multi-agent workflows with robust dependency management and dynamic prioritization.
+The Abathur Task Queue System provides a flexible, intelligent platform for managing complex, multi-agent workflows with robust dependency management and dynamic prioritization. Use the task deletion and VACUUM controls to maintain optimal database performance as your task history grows.
