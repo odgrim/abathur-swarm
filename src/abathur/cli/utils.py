@@ -24,7 +24,6 @@ Examples:
 """
 
 import re
-from typing import Optional
 
 
 # Duration conversion constants
@@ -41,6 +40,8 @@ DURATION_MULTIPLIERS = {
     "y": DAYS_PER_YEAR_APPROX,
 }
 
+MAX_DURATION_DAYS = 36_500  # ~100 years, reasonable upper limit
+
 
 def parse_duration_to_days(duration_str: str) -> int:
     """
@@ -54,7 +55,9 @@ def parse_duration_to_days(duration_str: str) -> int:
         Number of days as integer
 
     Raises:
-        ValueError: If duration string format is invalid or unit is unsupported
+        ValueError: If duration string format is invalid, unit is unsupported,
+                   duration is zero (not allowed), or duration exceeds
+                   maximum allowed duration (~100 years)
 
     Examples:
         >>> parse_duration_to_days('7d')
@@ -67,7 +70,7 @@ def parse_duration_to_days(duration_str: str) -> int:
         365
     """
     # Validate format
-    match = re.match(r'^(\d+)([dwmy])$', duration_str.lower())
+    match = re.match(r'^(\d+)([dwmy])$', duration_str.lower().strip())
     if not match:
         raise ValueError(
             f"Invalid duration format: '{duration_str}'. "
@@ -75,10 +78,27 @@ def parse_duration_to_days(duration_str: str) -> int:
         )
 
     value = int(match.group(1))
+
+    # Validate non-zero positive value
+    if value == 0:
+        raise ValueError(
+            f"Duration must be positive: '{duration_str}'. "
+            "Zero duration is not allowed."
+        )
+
     unit = match.group(2)
 
     # Validate unit and calculate days
     if unit not in DURATION_MULTIPLIERS:
         raise ValueError(f"Unsupported time unit: '{unit}'. Supported: d, w, m, y")
 
-    return value * DURATION_MULTIPLIERS[unit]
+    result = value * DURATION_MULTIPLIERS[unit]
+
+    # Validate maximum duration
+    if result > MAX_DURATION_DAYS:
+        raise ValueError(
+            f"Duration exceeds maximum allowed: '{duration_str}' = {result} days. "
+            f"Maximum allowed: {MAX_DURATION_DAYS} days (~100 years)."
+        )
+
+    return result

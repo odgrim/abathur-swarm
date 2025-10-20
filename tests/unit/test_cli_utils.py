@@ -119,11 +119,15 @@ class TestParseDurationToDays:
             parse_duration_to_days("7.5d")
 
     def test_zero_duration(self):
-        """Test parsing zero duration."""
-        assert parse_duration_to_days("0d") == 0
-        assert parse_duration_to_days("0w") == 0
-        assert parse_duration_to_days("0m") == 0
-        assert parse_duration_to_days("0y") == 0
+        """Test that zero duration raises ValueError."""
+        with pytest.raises(ValueError, match="Duration must be positive"):
+            parse_duration_to_days("0d")
+        with pytest.raises(ValueError, match="Duration must be positive"):
+            parse_duration_to_days("0w")
+        with pytest.raises(ValueError, match="Duration must be positive"):
+            parse_duration_to_days("0m")
+        with pytest.raises(ValueError, match="Duration must be positive"):
+            parse_duration_to_days("0y")
 
     def test_large_duration(self):
         """Test parsing large duration values."""
@@ -131,6 +135,18 @@ class TestParseDurationToDays:
         assert parse_duration_to_days("100w") == 700
         assert parse_duration_to_days("100m") == 3000
         assert parse_duration_to_days("10y") == 3650
+
+    def test_maximum_duration_boundary(self):
+        """Test maximum duration validation (100 years)."""
+        # Exactly 100 years should be allowed
+        assert parse_duration_to_days("100y") == 36500
+
+        # Exceeding 100 years should raise ValueError
+        with pytest.raises(ValueError, match="Duration exceeds maximum allowed"):
+            parse_duration_to_days("101y")
+
+        with pytest.raises(ValueError, match="Duration exceeds maximum allowed"):
+            parse_duration_to_days("40000d")
 
     def test_parse_approximation_edge_cases(self):
         """Test that approximations are used consistently.
