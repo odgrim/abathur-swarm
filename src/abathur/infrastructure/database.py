@@ -1310,12 +1310,15 @@ class Database:
 
     async def _create_indexes(self, conn: Connection) -> None:
         """Create all performance indexes."""
-        # Sessions indexes (4 indexes)
+        # Sessions indexes (5 indexes)
         await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_pk ON sessions(id)")
         await conn.execute(
             """CREATE INDEX IF NOT EXISTS idx_sessions_status_updated
                ON sessions(status, last_update_time DESC)
                WHERE status IN ('active', 'paused')"""
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)"
         )
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_user_created ON sessions(user_id, created_at DESC)"
