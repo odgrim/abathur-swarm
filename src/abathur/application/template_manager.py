@@ -355,11 +355,13 @@ class TemplateManager:
 
         Updates:
         - All agent files from template (overwrites existing)
+        - Core skills from template (overwrites existing)
         - MCP config files (overwrites existing)
         - README and documentation files
 
         Preserves:
         - Custom agents not in template
+        - Custom skills not in template
         - Custom subdirectories
 
         Args:
@@ -413,6 +415,43 @@ class TemplateManager:
 
             if preserved_count > 0:
                 logger.info("preserved_custom_agents", count=preserved_count)
+
+        # Update skills directory (similar to agents - preserve custom, update template)
+        src_skills = src_dir / "skills"
+        dest_skills = dest_dir / "skills"
+
+        if src_skills.exists():
+            dest_skills.mkdir(parents=True, exist_ok=True)
+
+            # Get list of template skills (all skill directories with SKILL.md)
+            template_skills = set()
+            for skill_dir in src_skills.iterdir():
+                if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
+                    template_skills.add(skill_dir.name)
+
+            # Update/copy template skills
+            skills_updated = 0
+            for skill_name in template_skills:
+                src_skill = src_skills / skill_name
+                dest_skill = dest_skills / skill_name
+
+                # Remove existing and copy fresh from template
+                if dest_skill.exists():
+                    shutil.rmtree(dest_skill)
+                shutil.copytree(src_skill, dest_skill)
+                skills_updated += 1
+
+            logger.info("updated_skills", count=skills_updated)
+
+            # Count custom skills that were preserved
+            custom_skills = 0
+            for skill_dir in dest_skills.iterdir():
+                if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
+                    if skill_dir.name not in template_skills:
+                        custom_skills += 1
+
+            if custom_skills > 0:
+                logger.info("preserved_custom_skills", count=custom_skills)
 
         # Update README and documentation
         for doc_file in ["README.md", "AGENTS.md"]:
