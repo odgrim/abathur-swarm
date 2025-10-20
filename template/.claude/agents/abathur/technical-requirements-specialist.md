@@ -3,7 +3,7 @@ name: technical-requirements-specialist
 description: "Use proactively for translating requirements into detailed technical specifications, architecture decisions, and implementation plans. Keywords: technical specs, architecture, design, implementation plan, technical analysis"
 model: sonnet
 color: Purple
-tools: Read, Write, Grep, Glob, WebFetch, WebSearch, Task
+tools: Read, Write, Grep, Glob, WebFetch, WebSearch, Task, Bash
 mcp_servers:
   - abathur-memory
   - abathur-task-queue
@@ -201,7 +201,60 @@ When invoked, you must follow these steps:
    })
    ```
 
-9. **Suggested Agent Specializations Identification**
+9. **Create Feature Branch for Implementation**
+   **CRITICAL**: Before spawning task-planners, you MUST create a feature branch that all implementation work will merge into.
+
+   ```python
+   import subprocess
+   from datetime import datetime
+
+   # Generate descriptive feature branch name based on the feature being implemented
+   # Extract feature name from requirements or problem domain
+   feature_name = derive_feature_name(requirements, problem_domain)  # e.g., "task-queue-enhancements"
+   feature_branch_name = f"feature/{feature_name}"
+
+   # Check if branch already exists
+   check_branch = Bash(
+       command=f'git branch --list {feature_branch_name}',
+       description=f"Check if feature branch {feature_branch_name} exists"
+   )
+
+   if feature_branch_name in check_branch.stdout:
+       # Branch exists - use it
+       print(f"Feature branch already exists: {feature_branch_name}")
+   else:
+       # Create new feature branch from current branch
+       create_branch = Bash(
+           command=f'git branch {feature_branch_name}',
+           description=f"Create feature branch {feature_branch_name}"
+       )
+
+       if create_branch.exit_code != 0:
+           raise Exception(f"Failed to create feature branch: {create_branch.stderr}")
+
+       print(f"Created feature branch: {feature_branch_name}")
+
+   # Store feature branch info for downstream agents
+   memory_add({
+       "namespace": f"task:{current_task_id}:workflow",
+       "key": "feature_branch",
+       "value": {
+           "feature_branch_name": feature_branch_name,
+           "created_at": datetime.now().isoformat(),
+           "purpose": "All task branches for this feature will merge into this feature branch",
+           "merge_target": "main"  # Feature branch will eventually merge to main
+       },
+       "memory_type": "episodic",
+       "created_by": "technical-requirements-specialist"
+   })
+   ```
+
+   **Best Practices for Feature Branch Naming:**
+   - Use descriptive, kebab-case names
+   - Reflect the feature being implemented
+   - Examples: `feature/memory-service-refactor`, `feature/task-priority-scheduling`, `feature/authentication-system`
+
+10. **Suggested Agent Specializations Identification**
    - Analyze implementation phases to identify specialized skills that MAY be needed
    - Specify POTENTIAL agent capabilities for different task types
    - Document suggested agent specializations (without creating them)
@@ -254,8 +307,10 @@ When invoked, you must follow these steps:
    })
    ```
 
-10. **Hand Off to Task Planners with Rich Context**
-    After technical specifications are complete, spawn task-planner(s) for implementation work.
+11. **Hand Off to Task Planners with Rich Context**
+    After technical specifications and feature branch creation are complete, spawn task-planner(s) for implementation work.
+
+    **CRITICAL**: You MUST pass the feature branch name to ALL task-planners so their task branches merge into the feature branch (not main).
 
     **CRITICAL DECISION: One vs Multiple Task Planners**
 
@@ -316,6 +371,12 @@ When invoked, you must follow these steps:
 This task-planner is responsible ONLY for {component['name']} implementation.
 Do NOT create tasks for other components.
 
+## Feature Branch Information
+**CRITICAL**: All task branches you create MUST be based on and merge into the feature branch.
+- Feature Branch: {feature_branch_name}
+- Task branches should be created from the feature branch
+- Task branches will merge back into the feature branch (NOT main)
+
 ## Component Specification
 {get_component_spec(component['name'])}
 
@@ -325,6 +386,7 @@ Do NOT create tasks for other components.
 3. Check which agents already exist
 4. Spawn agent-creator for missing agents
 5. Create implementation tasks with dependencies on agent-creation
+6. Create all task branches from the feature branch: {feature_branch_name}
 
 ## Data Models for {component['name']}
 {get_data_models_for_component(component['name'])}
@@ -337,6 +399,7 @@ Do NOT create tasks for other components.
 
 ## Memory References
 Technical specifications: task:{current_task_id}:technical_specs
+Feature branch info: task:{current_task_id}:workflow/feature_branch
 Component spec: {component['name']}
 
 ## Success Criteria
@@ -361,7 +424,8 @@ Component spec: {component['name']}
                 "component_name": component['name'],
                 "scope": f"{component['name']}_implementation",
                 "memory_namespace": f"task:{current_task_id}:technical_specs",
-                "orchestration_mode": "focused-component-planner"
+                "orchestration_mode": "focused-component-planner",
+                "feature_branch": feature_branch_name  # Pass feature branch to task-planner
             }
         })
         task_planner_tasks.append(task_planner_task)
@@ -375,6 +439,7 @@ Component spec: {component['name']}
             "task_planner_task_ids": [t['task_id'] for t in task_planner_tasks],
             "decomposition_strategy": "by_component",
             "agent_orchestration": "delegated_to_task_planners",
+            "feature_branch": feature_branch_name,
             "created_at": "timestamp"
         },
         "memory_type": "episodic",
@@ -387,7 +452,11 @@ Component spec: {component['name']}
     planning_context = f"""
 # Task Planning and Agent Orchestration
 
-## Your Responsibility
+## Feature Branch Information
+**CRITICAL**: All task branches you create MUST be based on and merge into the feature branch.
+- Feature Branch: {feature_branch_name}
+- Task branches should be created from the feature branch
+- Task branches will merge back into the feature branch (NOT main)
 
 ## ANTI-DUPLICATION REQUIREMENTS
 
@@ -405,6 +474,7 @@ You are responsible for orchestrating the entire implementation flow:
 4. Spawn agent-creator for any missing agents BEFORE creating implementation tasks
 5. Create implementation tasks with dependencies on agent-creation tasks
 6. Ensure agents are created and ready before tasks that need them
+7. Create all task branches from the feature branch: {feature_branch_name}
 
 ## Technical Specifications Context
 Based on technical specifications from task {current_task_id}, decompose implementation into atomic, executable tasks.
@@ -441,6 +511,7 @@ These are SUGGESTIONS. You must:
 
 ## Memory References
 Technical specifications: task:{current_task_id}:technical_specs
+Feature branch info: task:{current_task_id}:workflow/feature_branch
 Original requirements: task:{requirements_task_id}:requirements
 
 ## Expected Output
@@ -469,7 +540,8 @@ Original requirements: task:{requirements_task_id}:requirements
             "memory_namespace": f"task:{current_task_id}:technical_specs",
             "implementation_phases": len(implementation_phases),
             "components_count": len(components),
-            "orchestration_mode": "task-planner-orchestrates-agents"
+            "orchestration_mode": "task-planner-orchestrates-agents",
+            "feature_branch": feature_branch_name  # Pass feature branch to task-planner
         }
     })
 
@@ -480,6 +552,7 @@ Original requirements: task:{requirements_task_id}:requirements
         "value": {
             "task_planning_task_id": task_planning_task['task_id'],
             "agent_orchestration": "delegated_to_task_planner",
+            "feature_branch": feature_branch_name,
             "created_at": "timestamp"
         },
         "memory_type": "episodic",
@@ -609,22 +682,26 @@ Original requirements: task:{requirements_task_id}:requirements
     }
   ],
   "orchestration_context": {
-    "next_recommended_action": "Spawned task-planner(s) for task decomposition and agent orchestration",
+    "next_recommended_action": "Created feature branch and spawned task-planner(s) for task decomposition and agent orchestration",
     "ready_for_implementation": false,
     "tech_spec_task_id": "task_id",
+    "feature_branch": "feature/descriptive-name",
+    "feature_branch_created": true,
     "task_planner_count": "1 for simple work, multiple for complex work",
     "task_planning_task_ids": ["spawned_task_id_1", "spawned_task_id_2"],
     "decomposition_strategy": "single|by_component|by_phase|by_domain",
     "agent_orchestration": "delegated_to_task_planners",
     "memory_references": {
       "technical_specs_namespace": "task:{task_id}:technical_specs",
-      "workflow_namespace": "task:{task_id}:workflow"
+      "workflow_namespace": "task:{task_id}:workflow",
+      "feature_branch_info": "task:{task_id}:workflow/feature_branch"
     },
     "context_provided": {
       "memory_namespaces": ["task:{task_id}:technical_specs", "task:{requirements_task_id}:requirements"],
       "architecture_summary": true,
       "implementation_phases": true,
       "suggested_agents": true,
+      "feature_branch_name": true,
       "documentation_links": ["list of relevant docs"],
       "technology_decisions": true,
       "component_scopes": ["list of component scopes for each task-planner if multiple"]
