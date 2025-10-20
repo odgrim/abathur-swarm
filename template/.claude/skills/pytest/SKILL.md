@@ -32,49 +32,50 @@ This project organizes tests into the following categories:
 
 ### Run All Tests (Excluding Performance/Benchmarks)
 ```bash
-pytest -m "not performance and not benchmark and not slow"
+pytest -n auto -m "not performance and not benchmark and not slow"
 ```
 
 ### Run All Tests Including Coverage
 ```bash
-pytest
+pytest -n auto
 ```
-Note: Default configuration includes coverage reporting to terminal and HTML.
+Note: Default configuration includes coverage reporting to terminal and HTML. The `-n auto` flag automatically detects available CPU cores for parallel execution.
 
 ### Run Unit Tests Only
 ```bash
-pytest tests/unit/
+pytest -n auto tests/unit/
 ```
 
 ### Run Integration Tests Only
 ```bash
-pytest tests/integration/
+pytest -n auto tests/integration/
 ```
 
 ### Run E2E Tests Only
 ```bash
-pytest tests/e2e/
+pytest -n auto tests/e2e/
 ```
 
 ### Run Performance Tests
 ```bash
-pytest -m performance
+pytest -n auto -m performance
 ```
 
 ### Run Benchmark Tests
 ```bash
-pytest -m benchmark
+pytest -n auto -m benchmark
 ```
 
 ### Run a Specific Test File
 ```bash
-pytest tests/unit/services/test_memory_service.py
+pytest -n auto tests/unit/services/test_memory_service.py
 ```
 
 ### Run a Specific Test Function
 ```bash
 pytest tests/unit/services/test_memory_service.py::test_function_name
 ```
+Note: Single test functions don't benefit from parallelization, so `-n auto` is omitted here.
 
 ### Run a Specific Test Class
 ```bash
@@ -83,89 +84,90 @@ pytest tests/unit/services/test_memory_service.py::TestClassName
 
 ### Run Tests with Verbose Output
 ```bash
-pytest -v tests/unit/
+pytest -n auto -v tests/unit/
 ```
 
 ### Run Tests with Extra Verbose Output (Show All Test Details)
 ```bash
-pytest -vv tests/unit/
+pytest -n auto -vv tests/unit/
 ```
 
 ### Run Tests and Stop on First Failure
 ```bash
-pytest -x tests/unit/
+pytest -n auto -x tests/unit/
 ```
 
 ### Run Tests and Show Local Variables on Failure
 ```bash
-pytest -l tests/unit/
+pytest -n auto -l tests/unit/
 ```
 
 ### Run Failed Tests from Last Run
 ```bash
-pytest --lf
+pytest -n auto --lf
 ```
 
 ### Run Failed Tests First, Then Others
 ```bash
-pytest --ff
+pytest -n auto --ff
 ```
 
 ### Run Tests with Minimal Traceback
 ```bash
-pytest --tb=line tests/unit/
+pytest -n auto --tb=line tests/unit/
 ```
 
 ### Run Tests with No Traceback (Just Pass/Fail)
 ```bash
-pytest --tb=no tests/unit/
+pytest -n auto --tb=no tests/unit/
 ```
 
 ### Run Tests with Full Traceback
 ```bash
-pytest --tb=long tests/unit/
+pytest -n auto --tb=long tests/unit/
 ```
 
 ### Run Tests with Print Statements Visible
 ```bash
-pytest -s tests/unit/
+pytest -n auto -s tests/unit/
 ```
 
 ### Run Tests Matching a Keyword Expression
 ```bash
-pytest -k "memory" tests/
+pytest -n auto -k "memory" tests/
 ```
 
 ### Run Tests Excluding Slow Tests
 ```bash
-pytest -m "not slow"
+pytest -n auto -m "not slow"
 ```
 
 ## Common Combinations
 
 ### Quick Feedback Loop (Fast Tests, Stop on First Failure)
 ```bash
-pytest tests/unit/ -x --tb=line
+pytest -n auto tests/unit/ -x --tb=line
 ```
 
 ### Debugging a Specific Test
 ```bash
 pytest tests/unit/test_file.py::test_name -vv -s -l
 ```
+Note: Debugging specific tests doesn't use `-n auto` as it's more effective to run single tests serially.
 
 ### CI/CD Validation (All Tests with Coverage)
 ```bash
-pytest -m "not performance and not benchmark and not slow"
+pytest -n auto -m "not performance and not benchmark and not slow"
 ```
 
 ### Performance Analysis
 ```bash
-pytest -m performance -v
+pytest -n auto -m performance -v
 ```
 
 ### Full Test Suite with Detailed Output
 ```bash
-pytest -v --tb=short
+pytest -n auto -v --tb=short
 ```
 
 ## Project-Specific Configuration
@@ -177,6 +179,7 @@ This project has pytest configured in `pyproject.toml` with:
 - **Default options**: `-ra -q --strict-markers --cov=abathur --cov-report=term-missing --cov-report=html`
 - **Coverage source**: `src/`
 - **Coverage reports**: Terminal with missing lines + HTML report in `htmlcov/`
+- **Parallel execution**: pytest-xdist installed for parallel test execution with `-n auto`
 
 ## Markers
 
@@ -188,44 +191,46 @@ Available test markers:
 ## Best Practices for Agents
 
 1. **Default to fast tests first**: Run unit tests before integration tests
-2. **Use `-x --tb=line` for quick feedback**: Stop on first failure with minimal traceback
-3. **Add `-v` for clarity**: Verbose output helps understand what's being tested
-4. **Exclude slow tests during iteration**: Use `-m "not slow"` for faster feedback
-5. **Run full suite before commits**: Ensure all tests pass with `pytest`
-6. **Check coverage**: Review coverage reports to ensure adequate test coverage
-7. **Use specific paths**: Run only relevant tests when working on specific features
-8. **Debug with `-vv -s -l`**: Show all details, print statements, and local variables
+2. **Use `-n auto` for speed**: Parallel execution automatically uses all CPU cores for faster test runs
+3. **Use `-x --tb=line` for quick feedback**: Stop on first failure with minimal traceback
+4. **Add `-v` for clarity**: Verbose output helps understand what's being tested
+5. **Exclude slow tests during iteration**: Use `-m "not slow"` for faster feedback
+6. **Run full suite before commits**: Ensure all tests pass with `pytest -n auto`
+7. **Check coverage**: Review coverage reports to ensure adequate test coverage
+8. **Use specific paths**: Run only relevant tests when working on specific features
+9. **Debug with `-vv -s -l`**: Show all details, print statements, and local variables (omit `-n auto` when debugging)
+10. **Serial execution when needed**: Omit `-n auto` for single tests, debugging, or tests requiring shared state
 
 ## Examples for Common Scenarios
 
 ### After Writing New Code
 ```bash
-# Run relevant unit tests
-pytest tests/unit/services/test_new_service.py -v
+# Run relevant unit tests in parallel
+pytest -n auto tests/unit/services/test_new_service.py -v
 ```
 
 ### Before Committing
 ```bash
-# Run all tests except performance/benchmarks
-pytest -m "not performance and not benchmark and not slow"
+# Run all tests except performance/benchmarks in parallel
+pytest -n auto -m "not performance and not benchmark and not slow"
 ```
 
 ### Investigating a Failure
 ```bash
-# Run specific failing test with full debugging
+# Run specific failing test with full debugging (serial execution)
 pytest tests/unit/test_file.py::test_failing_function -vvs -l --tb=long
 ```
 
 ### Checking Test Coverage
 ```bash
-# Run with coverage and open HTML report
-pytest --cov=abathur --cov-report=html && open htmlcov/index.html
+# Run with coverage in parallel and open HTML report
+pytest -n auto --cov=abathur --cov-report=html && open htmlcov/index.html
 ```
 
 ### Running Tests in Background
 ```bash
-# Run tests in background for long-running suites
-pytest tests/benchmarks/ -v --tb=line &
+# Run tests in background for long-running suites (parallel)
+pytest -n auto tests/benchmarks/ -v --tb=line &
 ```
 
 ## Notes
@@ -235,3 +240,5 @@ pytest tests/benchmarks/ -v --tb=line &
 - Coverage reports are generated by default; use `--no-cov` to disable
 - HTML coverage reports are saved to `htmlcov/` directory
 - Strict markers mode is enabled; use only registered markers
+- **Parallel execution with `-n auto`**: Automatically detects CPU cores and runs tests in parallel for significant speed improvements
+- **When to skip `-n auto`**: Single test functions, debugging sessions, or tests that require shared state/resources
