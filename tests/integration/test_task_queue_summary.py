@@ -5,13 +5,13 @@ Tests end-to-end workflows for the summary field:
 - Database persistence and retrieval
 - MCP tool integration (task_enqueue, task_get, task_list)
 - Backward compatibility (tasks without summary)
-- Serialization (all 28 fields returned)
+- Serialization (all 29 fields returned)
 
 Coverage:
 - FR001: Add summary field to Task model (Pydantic validation)
 - FR002: Store summary in database (ALTER TABLE migration)
 - FR003: MCP tools accept/return summary
-- FR004: task_get returns ALL 28 Task fields
+- FR004: task_get returns ALL 29 Task fields
 - NFR002: Backward compatibility (summary=None for old tasks)
 """
 
@@ -342,17 +342,17 @@ async def test_mcp_task_get_returns_summary(
 
 
 @pytest.mark.asyncio
-async def test_mcp_task_get_returns_all_28_fields(
+async def test_mcp_task_get_returns_all_29_fields(
     memory_db: Database, task_queue_service: TaskQueueService
 ):
-    """Test MCP task_get returns ALL 28 Task fields (FR004).
+    """Test MCP task_get returns ALL 29 Task fields (FR004).
 
     Verifies:
     - _serialize_task includes all Task model fields
     - No fields omitted in serialization
     - Matches Task model field count
 
-    Expected fields (28 total):
+    Expected fields (29 total):
     1. id, 2. prompt, 3. agent_type, 4. priority, 5. status
     6. input_data, 7. result_data, 8. error_message, 9. retry_count
     10. max_retries, 11. max_execution_timeout_seconds
@@ -360,7 +360,7 @@ async def test_mcp_task_get_returns_all_28_fields(
     16. created_by, 17. parent_task_id, 18. dependencies, 19. session_id
     20. summary, 21. source, 22. dependency_type, 23. calculated_priority
     24. deadline, 25. estimated_duration_seconds, 26. dependency_depth
-    27. feature_branch, 28. task_branch
+    27. feature_branch, 28. task_branch, 29. worktree_path
     """
     # Arrange - create task with all optional fields populated
     task = await task_queue_service.enqueue_task(
@@ -381,7 +381,7 @@ async def test_mcp_task_get_returns_all_28_fields(
     retrieved_task = await memory_db.get_task(task.id)
     serialized = retrieved_task.model_dump()  # type: ignore[union-attr]
 
-    # Assert - all 28 fields present
+    # Assert - all 29 fields present
     expected_fields = {
         "id",
         "prompt",
@@ -411,10 +411,11 @@ async def test_mcp_task_get_returns_all_28_fields(
         "dependency_depth",
         "feature_branch",
         "task_branch",
+        "worktree_path",
     }
 
     actual_fields = set(serialized.keys())
-    assert len(actual_fields) == 28, f"Expected 28 fields, got {len(actual_fields)}"
+    assert len(actual_fields) == 29, f"Expected 29 fields, got {len(actual_fields)}"
     assert actual_fields == expected_fields, f"Missing fields: {expected_fields - actual_fields}"
 
     # Assert - summary field specifically present
