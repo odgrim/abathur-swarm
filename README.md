@@ -1,6 +1,6 @@
-# Abathur - Hivemind Swarm Management System
+# Abathur
 
-**Production-ready CLI orchestration system for managing swarms of specialized Claude agents with task queues, concurrent execution, iterative refinement loops, and comprehensive observability.**
+A CLI orchestration system for managing swarms of specialized Claude agents with task queues, concurrent execution, and iterative refinement.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -10,36 +10,30 @@
 
 ## Features
 
-### Core Capabilities
-
-✅ **Task Queue Management**
-- Priority-based queue (0-10 scale) with FIFO tiebreaker
-- ACID-compliant SQLite persistence with WAL mode
-- Task dependencies and cancellation
+**Task Queue Management**
+- Priority-based queue with task dependencies
+- SQLite persistence with WAL mode
 - Automatic retry with exponential backoff
-- Optional task summaries for quick identification (max 500 chars)
+- Task cancellation support
 
-✅ **Concurrent Agent Swarms**
-- 10+ Claude agents running simultaneously
+**Concurrent Agent Swarms**
+- Multiple Claude agents running simultaneously
 - Semaphore-based concurrency control
 - Dynamic agent lifecycle management
-- Health monitoring with idle timeout
+- Health monitoring
 
-✅ **Iterative Refinement Loops**
-- Multiple convergence strategies (threshold, stability, test pass, custom, LLM judge)
+**Iterative Refinement Loops**
+- Multiple convergence strategies
 - Automatic checkpointing and crash recovery
-- Configurable max iterations and timeouts
-- Iteration history tracking
+- Configurable iteration limits and timeouts
 
-✅ **MCP Integration**
-- Full MCP server lifecycle management
+**MCP Integration**
+- MCP server lifecycle management
 - Agent-to-server binding
 - Health monitoring with auto-restart
-- Configuration with environment variable expansion
 
-✅ **Observability**
-- Structured logging with structlog (JSON format)
-- Comprehensive audit trails
+**Observability**
+- Structured logging with audit trails
 - Rich CLI output with tables and progress bars
 - Resource and failure statistics
 
@@ -55,25 +49,12 @@
 
 ## Installation
 
-### From PyPI (Coming Soon)
-
-```bash
-pip install abathur
-```
-
 ### From Source
 
 ```bash
 git clone https://github.com/yourorg/abathur.git
 cd abathur
 poetry install
-```
-
-### Docker (Coming Soon)
-
-```bash
-docker pull abathur/abathur:latest
-docker run -it abathur/abathur:latest abathur version
 ```
 
 ---
@@ -175,13 +156,12 @@ Abathur follows **Clean Architecture** principles with clear layer separation:
 └──────────────────────────────────────────┘
 ```
 
-### Key Design Patterns
+### Design Patterns
 
-- **Priority Queue**: O(log n) task scheduling with dependency resolution
-- **Semaphore Control**: Concurrent agent execution with resource limits
-- **Exponential Backoff**: Intelligent retry with jitter for transient errors
-- **Checkpoint/Resume**: Crash-resistant loop execution
-- **Leader-Follower**: Hierarchical swarm coordination (up to depth 3)
+- Priority Queue: Task scheduling with dependency resolution
+- Semaphore Control: Concurrent agent execution with resource limits
+- Exponential Backoff: Retry with jitter for transient errors
+- Checkpoint/Resume: Crash-resistant loop execution
 
 ---
 
@@ -360,50 +340,31 @@ abathur --help
 
 ## Project Status
 
-### ✅ Phase 0: Foundation (COMPLETE)
+This is a working system with the following components implemented:
 
-- SQLite database with WAL mode (96.43% coverage)
-- Configuration system with hierarchy (82.76% coverage)
+- SQLite database with WAL mode
+- Configuration system with hierarchy
 - Structured logging with audit trails
 - Domain models with Pydantic validation
-- CI/CD pipeline (Python 3.10, 3.11, 3.12)
-- **30/30 tests passing**
-
-### ✅ Phase 1: MVP (COMPLETE)
-
 - Template Manager (Git-based cloning, caching, validation)
 - Task Coordinator (priority queue, retry logic)
 - Claude Client (async API, retry with backoff)
 - Agent Executor (YAML-based agents, lifecycle management)
-- MCP Configuration Loader
-
-### ✅ Phase 2: Swarm Coordination (COMPLETE)
-
-- Swarm Orchestrator (10+ concurrent agents)
+- Swarm Orchestrator
 - Agent Pool (dynamic lifecycle, health monitoring)
 - Resource Monitor (CPU/memory tracking, limits)
-
-### ✅ Phase 3: Production Features (COMPLETE)
-
 - Loop Executor (iterative refinement, convergence detection, checkpointing)
-- MCP Manager (full server lifecycle, health monitoring, auto-restart)
-- CLI (20+ commands with rich output)
-- Comprehensive test suite
-- User guide and API documentation
-- Security audit
-- Deployment packages (PyPI, Docker, Homebrew)
-
-### Overall Progress: **100%** ✅
+- MCP Manager (server lifecycle, health monitoring, auto-restart)
+- CLI with rich output
 
 ---
 
-## Performance Characteristics
+## Performance
 
-- **Task Scheduling**: O(log n) with indexed queries
-- **Dependency Check**: O(d) per task
-- **Concurrent Agents**: 10+ simultaneous agents
-- **Task Throughput**: 1,000+ tasks/hour (depends on task complexity)
-- **Database**: >99.9% ACID reliability with WAL mode
+- Task Scheduling: O(log n) with indexed queries
+- Dependency Check: O(d) per task
+- Concurrent Agents: Configurable limit
+- Database: SQLite with WAL mode
 
 ---
 
@@ -459,5 +420,3 @@ MIT License - see [LICENSE](LICENSE) file for details
 ---
 
 **Version**: 0.1.0
-**Status**: Production Ready ✅
-**Last Updated**: 2025-10-09
