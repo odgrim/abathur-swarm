@@ -96,6 +96,24 @@ async def test_complete_task_workflow_enqueue_get_complete(
     memory_db: Database, task_queue_service: TaskQueueService
 ):
     """Test complete workflow: enqueue → get → dequeue → complete."""
+    # Create prerequisite session first (FK constraint requirement)
+    from datetime import datetime, timezone
+    async with memory_db._get_connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO sessions (id, app_name, user_id, created_at, last_update_time)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "test-session-123",
+                "test-app",
+                "test-user",
+                datetime.now(timezone.utc).isoformat(),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        await conn.commit()
+
     # Step 1: Enqueue task
     enqueued_task = await task_queue_service.enqueue_task(
         description="Integration test task",
@@ -715,6 +733,24 @@ async def test_fifo_tiebreaker_for_equal_priority(
 @pytest.mark.asyncio
 async def test_task_with_session_id(memory_db: Database, task_queue_service: TaskQueueService):
     """Test that tasks can be linked to sessions."""
+    # Create prerequisite session first (FK constraint requirement)
+    from datetime import datetime, timezone
+    async with memory_db._get_connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO sessions (id, app_name, user_id, created_at, last_update_time)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "integration-test-session",
+                "test-app",
+                "test-user",
+                datetime.now(timezone.utc).isoformat(),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        await conn.commit()
+
     # Create task with session ID
     task = await task_queue_service.enqueue_task(
         description="Task with session",
