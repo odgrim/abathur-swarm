@@ -60,7 +60,7 @@ class TestCycleDetectionPerformance:
         # Create 100 tasks in a complex graph structure
         tasks = []
         for i in range(100):
-            task = Task(prompt=f"Task {i}", status=TaskStatus.PENDING)
+            task = Task(prompt=f"Task {i}", summary=f"Task {i}", status=TaskStatus.PENDING)
             await db.insert_task(task)
             tasks.append(task)
 
@@ -109,7 +109,7 @@ class TestCycleDetectionPerformance:
         # Create 100 tasks
         tasks = []
         for i in range(100):
-            task = Task(prompt=f"Task {i}", status=TaskStatus.PENDING)
+            task = Task(prompt=f"Task {i}", summary=f"Task {i}", status=TaskStatus.PENDING)
             await db.insert_task(task)
             tasks.append(task)
 
@@ -162,7 +162,7 @@ class TestTopologicalSortPerformance:
         # Create 100 tasks
         tasks = []
         for i in range(100):
-            task = Task(prompt=f"Task {i}", status=TaskStatus.PENDING)
+            task = Task(prompt=f"Task {i}", summary=f"Task {i}", status=TaskStatus.PENDING)
             await db.insert_task(task)
             tasks.append(task)
 
@@ -207,7 +207,7 @@ class TestTopologicalSortPerformance:
         # Create 1000 tasks
         tasks = []
         for i in range(1000):
-            task = Task(prompt=f"Task {i}", status=TaskStatus.PENDING)
+            task = Task(prompt=f"Task {i}", summary=f"Task {i}", status=TaskStatus.PENDING)
             await db.insert_task(task)
             tasks.append(task)
 
@@ -247,7 +247,7 @@ class TestDepthCalculationPerformance:
         # Create 10-level linear dependency chain
         tasks = []
         for i in range(10):
-            task = Task(prompt=f"Task {i}", status=TaskStatus.PENDING)
+            task = Task(prompt=f"Task {i}", summary=f"Task {i}", status=TaskStatus.PENDING)
             await db.insert_task(task)
             tasks.append(task)
 
@@ -278,7 +278,7 @@ class TestDepthCalculationPerformance:
         # Create 10-level dependency chain
         tasks = []
         for i in range(10):
-            task = Task(prompt=f"Task {i}", status=TaskStatus.PENDING)
+            task = Task(prompt=f"Task {i}", summary=f"Task {i}", status=TaskStatus.PENDING)
             await db.insert_task(task)
             tasks.append(task)
 
@@ -323,7 +323,7 @@ class TestGraphCachePerformance:
         # Create some tasks and dependencies
         tasks = []
         for i in range(50):
-            task = Task(prompt=f"Task {i}", status=TaskStatus.PENDING)
+            task = Task(prompt=f"Task {i}", summary=f"Task {i}", status=TaskStatus.PENDING)
             await db.insert_task(task)
             tasks.append(task)
 
@@ -363,7 +363,7 @@ class TestGraphCachePerformance:
         # Create 1000 tasks with dependencies
         tasks = []
         for i in range(1000):
-            task = Task(prompt=f"Task {i}", status=TaskStatus.PENDING)
+            task = Task(prompt=f"Task {i}", summary=f"Task {i}", status=TaskStatus.PENDING)
             await db.insert_task(task)
             tasks.append(task)
 
@@ -401,7 +401,7 @@ class TestValidationPerformance:
         # Create 100 tasks
         tasks = []
         for i in range(100):
-            task = Task(prompt=f"Task {i}", status=TaskStatus.PENDING)
+            task = Task(prompt=f"Task {i}", summary=f"Task {i}", status=TaskStatus.PENDING)
             await db.insert_task(task)
             tasks.append(task)
 
@@ -444,7 +444,7 @@ class TestPerformanceBenchmarkReport:
         # Benchmark 1: Cycle detection (100 tasks)
         tasks_100 = []
         for i in range(100):
-            task = Task(prompt=f"Task {i}", status=TaskStatus.PENDING)
+            task = Task(prompt=f"Task {i}", summary=f"Task {i}", status=TaskStatus.PENDING)
             await db.insert_task(task)
             tasks_100.append(task)
 
@@ -494,7 +494,7 @@ class TestPerformanceBenchmarkReport:
         # Benchmark 3: Depth calculation (10 levels)
         tasks_10 = []
         for i in range(10):
-            task = Task(prompt=f"Depth {i}", status=TaskStatus.PENDING)
+            task = Task(prompt=f"Depth {i}", summary=f"Depth {i}", status=TaskStatus.PENDING)
             await db.insert_task(task)
             tasks_10.append(task)
 
