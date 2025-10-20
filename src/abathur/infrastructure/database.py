@@ -31,6 +31,10 @@ if TYPE_CHECKING:
 # VACUUM threshold: only run conditional VACUUM if deleting this many tasks
 VACUUM_THRESHOLD_TASKS = 100
 
+# Auto-skip VACUUM threshold: automatically set vacuum_mode='never' for large prunes
+# Rationale: VACUUM on 10,000+ tasks can take minutes, blocking the database
+AUTO_SKIP_VACUUM_THRESHOLD = 10_000
+
 
 class PruneFilters(BaseModel):
     """Filtering criteria for pruning operation.
@@ -202,6 +206,11 @@ class PruneResult(BaseModel):
         default_factory=dict, description="Count of deleted tasks by status"
     )
 
+    vacuum_auto_skipped: bool = Field(
+        default=False,
+        description="Whether VACUUM was automatically skipped due to large task count (>10,000 tasks)"
+    )
+
     @field_validator("breakdown_by_status")
     @classmethod
     def validate_breakdown_values(cls, v: dict[TaskStatus, int]) -> dict[TaskStatus, int]:
@@ -351,86 +360,91 @@ class Database:
                 # Migrate from old schema to new schema
                 print("Migrating database schema: template_name → prompt + agent_type")
 
-                # Temporarily disable foreign keys for migration
-                await conn.execute("PRAGMA foreign_keys=OFF")
+                try:
+                    # Temporarily disable foreign keys for migration
+                    await conn.execute("PRAGMA foreign_keys=OFF")
 
-                # Create new table with updated schema
-                await conn.execute(
-                    """
-                    CREATE TABLE tasks_new (
-                        id TEXT PRIMARY KEY,
-                        prompt TEXT NOT NULL,
-                        agent_type TEXT NOT NULL DEFAULT 'general',
-                        priority INTEGER NOT NULL DEFAULT 5,
-                        status TEXT NOT NULL,
-                        input_data TEXT NOT NULL,
-                        result_data TEXT,
-                        error_message TEXT,
-                        retry_count INTEGER DEFAULT 0,
-                        max_retries INTEGER DEFAULT 3,
-                        submitted_at TIMESTAMP NOT NULL,
-                        started_at TIMESTAMP,
-                        completed_at TIMESTAMP,
-                        created_by TEXT,
-                        parent_task_id TEXT,
-                        dependencies TEXT,
-                        FOREIGN KEY (parent_task_id) REFERENCES tasks(id)
+                    # Create new table with updated schema
+                    await conn.execute(
+                        """
+                        CREATE TABLE tasks_new (
+                            id TEXT PRIMARY KEY,
+                            prompt TEXT NOT NULL,
+                            agent_type TEXT NOT NULL DEFAULT 'general',
+                            priority INTEGER NOT NULL DEFAULT 5,
+                            status TEXT NOT NULL,
+                            input_data TEXT NOT NULL,
+                            result_data TEXT,
+                            error_message TEXT,
+                            retry_count INTEGER DEFAULT 0,
+                            max_retries INTEGER DEFAULT 3,
+                            submitted_at TIMESTAMP NOT NULL,
+                            started_at TIMESTAMP,
+                            completed_at TIMESTAMP,
+                            created_by TEXT,
+                            parent_task_id TEXT,
+                            dependencies TEXT,
+                            FOREIGN KEY (parent_task_id) REFERENCES tasks(id)
+                        )
+                        """
                     )
-                    """
-                )
 
-                # Copy data from old table to new table
-                # template_name becomes prompt, agent_type defaults to 'general'
-                await conn.execute(
-                    """
-                    INSERT INTO tasks_new (
-                        id, prompt, agent_type, priority, status, input_data,
-                        result_data, error_message, retry_count, max_retries,
-                        submitted_at, started_at, completed_at, created_by,
-                        parent_task_id, dependencies
+                    # Copy data from old table to new table
+                    # template_name becomes prompt, agent_type defaults to 'general'
+                    await conn.execute(
+                        """
+                        INSERT INTO tasks_new (
+                            id, prompt, agent_type, priority, status, input_data,
+                            result_data, error_message, retry_count, max_retries,
+                            submitted_at, started_at, completed_at, created_by,
+                            parent_task_id, dependencies
+                        )
+                        SELECT
+                            id, template_name, 'general', priority, status, input_data,
+                            result_data, error_message, retry_count, max_retries,
+                            submitted_at, started_at, completed_at, created_by,
+                            parent_task_id, dependencies
+                        FROM tasks
+                        """
                     )
-                    SELECT
-                        id, template_name, 'general', priority, status, input_data,
-                        result_data, error_message, retry_count, max_retries,
-                        submitted_at, started_at, completed_at, created_by,
-                        parent_task_id, dependencies
-                    FROM tasks
-                    """
-                )
 
-                # Drop old table
-                await conn.execute("DROP TABLE tasks")
+                    # Drop old table
+                    await conn.execute("DROP TABLE tasks")
 
-                # Rename new table to tasks
-                await conn.execute("ALTER TABLE tasks_new RENAME TO tasks")
+                    # Rename new table to tasks
+                    await conn.execute("ALTER TABLE tasks_new RENAME TO tasks")
 
-                # Recreate indexes
-                await conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_tasks_status_priority
-                    ON tasks(status, priority DESC, submitted_at ASC)
-                    """
-                )
+                    # Recreate indexes
+                    await conn.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS idx_tasks_status_priority
+                        ON tasks(status, priority DESC, submitted_at ASC)
+                        """
+                    )
 
-                await conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_tasks_submitted_at
-                    ON tasks(submitted_at)
-                    """
-                )
+                    await conn.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS idx_tasks_submitted_at
+                        ON tasks(submitted_at)
+                        """
+                    )
 
-                await conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS idx_tasks_parent
-                    ON tasks(parent_task_id)
-                    """
-                )
+                    await conn.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS idx_tasks_parent
+                        ON tasks(parent_task_id)
+                        """
+                    )
 
-                # Re-enable foreign keys
-                await conn.execute("PRAGMA foreign_keys=ON")
+                    await conn.commit()
+                    print("Database migration completed successfully")
 
-                await conn.commit()
-                print("Database migration completed successfully")
+                except Exception:
+                    await conn.execute("ROLLBACK")
+                    raise
+                finally:
+                    # Always re-enable foreign keys, even if re-enable fails
+                    await conn.execute("PRAGMA foreign_keys=ON")
 
             # Migration: Add last_updated_at and max_execution_timeout_seconds columns
             if "last_updated_at" not in column_names:
@@ -666,72 +680,121 @@ class Database:
             )
 
             if task_fk and task_fk["on_delete"] != "CASCADE":
-                print("Migrating database schema: adding CASCADE DELETE to agents.task_id foreign key")
+                # Pre-migration data integrity check: detect orphaned agents
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) as orphan_count
+                    FROM agents a
+                    LEFT JOIN tasks t ON a.task_id = t.id
+                    WHERE a.task_id IS NOT NULL AND t.id IS NULL
+                """)
+                orphan_result = await cursor.fetchone()
+                orphan_count = orphan_result["orphan_count"]
 
-                try:
-                    # Temporarily disable foreign keys
-                    await conn.execute("PRAGMA foreign_keys=OFF")
+                if orphan_count > 0:
+                    print(f"\n{'='*80}")
+                    print(f"CASCADE DELETE MIGRATION BLOCKED: Orphaned agent records detected")
+                    print(f"{'='*80}")
+                    print(f"Found {orphan_count} agent record(s) with task_id references to non-existent tasks.")
+                    print(f"Enabling CASCADE DELETE would cause these agents to be deleted when their")
+                    print(f"referenced tasks are deleted (but the tasks are already missing).")
 
-                    # Create new table with CASCADE DELETE
-                    await conn.execute(
-                        """
-                        CREATE TABLE agents_new (
-                            id TEXT PRIMARY KEY,
-                            name TEXT NOT NULL,
-                            specialization TEXT NOT NULL,
-                            task_id TEXT NOT NULL,
-                            state TEXT NOT NULL,
-                            model TEXT NOT NULL,
-                            spawned_at TIMESTAMP NOT NULL,
-                            terminated_at TIMESTAMP,
-                            resource_usage TEXT,
-                            session_id TEXT,
-                            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
-                            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                    # Query and display first 5 orphaned records
+                    cursor = await conn.execute("""
+                        SELECT a.id, a.name, a.task_id, a.spawned_at
+                        FROM agents a
+                        LEFT JOIN tasks t ON a.task_id = t.id
+                        WHERE a.task_id IS NOT NULL AND t.id IS NULL
+                        LIMIT 5
+                    """)
+                    orphans = await cursor.fetchall()
+
+                    print(f"\nSample orphaned records (showing {min(orphan_count, 5)} of {orphan_count}):")
+                    for orphan in orphans:
+                        print(f"  - Agent ID: {orphan['id']}, Name: {orphan['name']}, "
+                              f"Task ID: {orphan['task_id']}, Spawned At: {orphan['spawned_at']}")
+
+                    print(f"\nRECOMMENDED ACTIONS:")
+                    print(f"1. Identify all orphaned agents:")
+                    print(f"   SELECT a.id, a.name, a.task_id, a.spawned_at")
+                    print(f"   FROM agents a")
+                    print(f"   LEFT JOIN tasks t ON a.task_id = t.id")
+                    print(f"   WHERE a.task_id IS NOT NULL AND t.id IS NULL;")
+                    print(f"\n2. Choose one of the following:")
+                    print(f"   a) Delete orphaned agents (if they're obsolete):")
+                    print(f"      DELETE FROM agents")
+                    print(f"      WHERE task_id NOT IN (SELECT id FROM tasks);")
+                    print(f"\n   b) Restore missing tasks (if they were deleted by mistake)")
+                    print(f"\n   c) Set task_id to NULL for orphaned agents (keep agents but break reference):")
+                    print(f"      UPDATE agents SET task_id = NULL")
+                    print(f"      WHERE task_id NOT IN (SELECT id FROM tasks);")
+
+                    print(f"\nSKIPPING CASCADE DELETE migration to prevent unintended data loss.")
+                    print(f"Please resolve orphaned records and restart to retry migration.")
+                    print(f"{'='*80}\n")
+                else:
+                    # No orphans detected - proceed with migration
+                    print("Migrating database schema: adding CASCADE DELETE to agents.task_id foreign key")
+
+                    try:
+                        # Temporarily disable foreign keys
+                        await conn.execute("PRAGMA foreign_keys=OFF")
+
+                        # Create new table with CASCADE DELETE
+                        await conn.execute(
+                            """
+                            CREATE TABLE agents_new (
+                                id TEXT PRIMARY KEY,
+                                name TEXT NOT NULL,
+                                specialization TEXT NOT NULL,
+                                task_id TEXT NOT NULL,
+                                state TEXT NOT NULL,
+                                model TEXT NOT NULL,
+                                spawned_at TIMESTAMP NOT NULL,
+                                terminated_at TIMESTAMP,
+                                resource_usage TEXT,
+                                session_id TEXT,
+                                FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                            )
+                            """
                         )
-                        """
-                    )
 
-                    # Copy data from old table to new table
-                    await conn.execute(
-                        """
-                        INSERT INTO agents_new
-                        SELECT * FROM agents
-                        """
-                    )
+                        # Copy data from old table to new table
+                        await conn.execute(
+                            """
+                            INSERT INTO agents_new
+                            SELECT * FROM agents
+                            """
+                        )
 
-                    # Drop old table
-                    await conn.execute("DROP TABLE agents")
+                        # Drop old table
+                        await conn.execute("DROP TABLE agents")
 
-                    # Rename new table to agents
-                    await conn.execute("ALTER TABLE agents_new RENAME TO agents")
+                        # Rename new table to agents
+                        await conn.execute("ALTER TABLE agents_new RENAME TO agents")
 
-                    # Recreate indexes
-                    await conn.execute(
-                        "CREATE INDEX IF NOT EXISTS idx_agents_task ON agents(task_id)"
-                    )
-                    await conn.execute(
-                        "CREATE INDEX IF NOT EXISTS idx_agents_state ON agents(state)"
-                    )
-                    await conn.execute(
-                        """CREATE INDEX IF NOT EXISTS idx_agents_session
-                           ON agents(session_id, spawned_at DESC)
-                           WHERE session_id IS NOT NULL"""
-                    )
+                        # Recreate indexes
+                        await conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_agents_task ON agents(task_id)"
+                        )
+                        await conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_agents_state ON agents(state)"
+                        )
+                        await conn.execute(
+                            """CREATE INDEX IF NOT EXISTS idx_agents_session
+                               ON agents(session_id, spawned_at DESC)
+                               WHERE session_id IS NOT NULL"""
+                        )
 
-                    # Re-enable foreign keys
-                    await conn.execute("PRAGMA foreign_keys=ON")
+                        await conn.commit()
+                        print("Added CASCADE DELETE to agents.task_id foreign key")
 
-                    await conn.commit()
-                    print("Added CASCADE DELETE to agents.task_id foreign key")
-
-                except Exception as e:
-                    # Re-enable foreign keys even on error
-                    await conn.execute("PRAGMA foreign_keys=ON")
-                    await conn.rollback()
-                    print(f"✗ Migration failed: {type(e).__name__}: {e}")
-                    print("Database rolled back to previous state")
-                    raise  # Re-raise to prevent application from starting with failed migration
+                    except Exception:
+                        await conn.execute("ROLLBACK")
+                        raise
+                    finally:
+                        # Always re-enable foreign keys, even if re-enable fails
+                        await conn.execute("PRAGMA foreign_keys=ON")
 
         # Check if audit table exists and needs memory columns
         cursor = await conn.execute(
@@ -798,60 +861,106 @@ class Database:
             )
 
             if task_fk and task_fk["on_delete"] != "CASCADE":
-                print("Migrating database schema: adding CASCADE DELETE to checkpoints.task_id foreign key")
+                # Pre-migration data integrity check: detect orphaned checkpoints
+                cursor = await conn.execute("""
+                    SELECT COUNT(*) as orphan_count
+                    FROM checkpoints c
+                    LEFT JOIN tasks t ON c.task_id = t.id
+                    WHERE c.task_id IS NOT NULL AND t.id IS NULL
+                """)
+                orphan_result = await cursor.fetchone()
+                orphan_count = orphan_result["orphan_count"]
 
-                try:
-                    # Temporarily disable foreign keys
-                    await conn.execute("PRAGMA foreign_keys=OFF")
+                if orphan_count > 0:
+                    print(f"\n{'='*80}")
+                    print(f"CASCADE DELETE MIGRATION BLOCKED: Orphaned checkpoint records detected")
+                    print(f"{'='*80}")
+                    print(f"Found {orphan_count} checkpoint record(s) with task_id references to non-existent tasks.")
+                    print(f"Enabling CASCADE DELETE would cause these checkpoints to be deleted when their")
+                    print(f"referenced tasks are deleted (but the tasks are already missing).")
 
-                    # Create new table with CASCADE DELETE
-                    await conn.execute(
-                        """
-                        CREATE TABLE checkpoints_new (
-                            task_id TEXT NOT NULL,
-                            iteration INTEGER NOT NULL,
-                            state TEXT NOT NULL,
-                            created_at TIMESTAMP NOT NULL,
-                            session_id TEXT,
-                            PRIMARY KEY (task_id, iteration),
-                            FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
-                            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                    # Query and display first 5 orphaned records
+                    cursor = await conn.execute("""
+                        SELECT c.task_id, c.iteration, c.created_at
+                        FROM checkpoints c
+                        LEFT JOIN tasks t ON c.task_id = t.id
+                        WHERE c.task_id IS NOT NULL AND t.id IS NULL
+                        LIMIT 5
+                    """)
+                    orphans = await cursor.fetchall()
+
+                    print(f"\nSample orphaned records (showing {min(orphan_count, 5)} of {orphan_count}):")
+                    for orphan in orphans:
+                        print(f"  - Task ID: {orphan['task_id']}, Iteration: {orphan['iteration']}, "
+                              f"Created At: {orphan['created_at']}")
+
+                    print(f"\nRECOMMENDED ACTIONS:")
+                    print(f"1. Identify all orphaned checkpoints:")
+                    print(f"   SELECT c.task_id, c.iteration, c.created_at")
+                    print(f"   FROM checkpoints c")
+                    print(f"   LEFT JOIN tasks t ON c.task_id = t.id")
+                    print(f"   WHERE c.task_id IS NOT NULL AND t.id IS NULL;")
+                    print(f"\n2. Choose one of the following:")
+                    print(f"   a) Delete orphaned checkpoints (if they're obsolete):")
+                    print(f"      DELETE FROM checkpoints")
+                    print(f"      WHERE task_id NOT IN (SELECT id FROM tasks);")
+                    print(f"\n   b) Restore missing tasks (if they were deleted by mistake)")
+
+                    print(f"\nSKIPPING CASCADE DELETE migration to prevent unintended data loss.")
+                    print(f"Please resolve orphaned records and restart to retry migration.")
+                    print(f"{'='*80}\n")
+                else:
+                    # No orphans detected - proceed with migration
+                    print("Migrating database schema: adding CASCADE DELETE to checkpoints.task_id foreign key")
+
+                    try:
+                        # Temporarily disable foreign keys
+                        await conn.execute("PRAGMA foreign_keys=OFF")
+
+                        # Create new table with CASCADE DELETE
+                        await conn.execute(
+                            """
+                            CREATE TABLE checkpoints_new (
+                                task_id TEXT NOT NULL,
+                                iteration INTEGER NOT NULL,
+                                state TEXT NOT NULL,
+                                created_at TIMESTAMP NOT NULL,
+                                session_id TEXT,
+                                PRIMARY KEY (task_id, iteration),
+                                FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+                            )
+                            """
                         )
-                        """
-                    )
 
-                    # Copy data from old table to new table
-                    await conn.execute(
-                        """
-                        INSERT INTO checkpoints_new
-                        SELECT * FROM checkpoints
-                        """
-                    )
+                        # Copy data from old table to new table
+                        await conn.execute(
+                            """
+                            INSERT INTO checkpoints_new
+                            SELECT * FROM checkpoints
+                            """
+                        )
 
-                    # Drop old table
-                    await conn.execute("DROP TABLE checkpoints")
+                        # Drop old table
+                        await conn.execute("DROP TABLE checkpoints")
 
-                    # Rename new table to checkpoints
-                    await conn.execute("ALTER TABLE checkpoints_new RENAME TO checkpoints")
+                        # Rename new table to checkpoints
+                        await conn.execute("ALTER TABLE checkpoints_new RENAME TO checkpoints")
 
-                    # Recreate indexes
-                    await conn.execute(
-                        "CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints(task_id, iteration DESC)"
-                    )
+                        # Recreate indexes
+                        await conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints(task_id, iteration DESC)"
+                        )
 
-                    # Re-enable foreign keys
-                    await conn.execute("PRAGMA foreign_keys=ON")
+                        await conn.commit()
+                        print("Added CASCADE DELETE to checkpoints.task_id foreign key")
 
-                    await conn.commit()
-                    print("Added CASCADE DELETE to checkpoints.task_id foreign key")
-
-                except Exception as e:
-                    # Re-enable foreign keys even on error
-                    await conn.execute("PRAGMA foreign_keys=ON")
-                    await conn.rollback()
-                    print(f"✗ Migration failed: {type(e).__name__}: {e}")
-                    print("Database rolled back to previous state")
-                    raise  # Re-raise to prevent application from starting with failed migration
+                    except Exception:
+                        await conn.execute("ROLLBACK")
+                        raise
+                    finally:
+                        # Always re-enable foreign keys, even if re-enable fails
+                        await conn.execute("PRAGMA foreign_keys=ON")
 
         # Check if audit table needs task_id to be nullable
         cursor = await conn.execute(
@@ -1882,6 +1991,9 @@ class Database:
         This is the single source of truth for task deletion.
         Both delete_tasks() and prune_tasks() use this.
 
+        Handles large deletions by batching task IDs to avoid SQLite's
+        999 parameter limit (SQLITE_MAX_VARIABLE_NUMBER).
+
         Args:
             conn: Active database connection (with foreign keys enabled)
             task_ids: List of task ID strings to delete
@@ -1906,45 +2018,63 @@ class Database:
                 "breakdown_by_status": {}
             }
 
-        task_id_placeholders = ",".join("?" * len(task_ids))
+        # SQLite has a limit of 999 SQL parameters per query (SQLITE_MAX_VARIABLE_NUMBER).
+        # To safely handle large deletions, we batch task IDs into chunks of 900.
+        # This ensures we stay well below the limit even when parameters are used multiple times
+        # in a single query (e.g., "WHERE id IN (?) OR parent_id IN (?)").
+        BATCH_SIZE = 900
 
-        # Collect statistics if requested
-        breakdown_by_status = {}
-        if collect_stats:
+        # Accumulate statistics across all batches
+        total_deleted_count = 0
+        total_deleted_dependencies = 0
+        combined_breakdown_by_status: dict[TaskStatus, int] = {}
+
+        # Process task IDs in batches
+        for i in range(0, len(task_ids), BATCH_SIZE):
+            batch = task_ids[i:i + BATCH_SIZE]
+            task_id_placeholders = ",".join("?" * len(batch))
+
+            # Collect statistics if requested
+            if collect_stats:
+                cursor = await conn.execute(
+                    f"""
+                    SELECT status, COUNT(*) as count
+                    FROM tasks
+                    WHERE id IN ({task_id_placeholders})
+                    GROUP BY status
+                    """,
+                    tuple(batch),
+                )
+                status_rows = await cursor.fetchall()
+                for row in status_rows:
+                    status = TaskStatus(row["status"])
+                    combined_breakdown_by_status[status] = (
+                        combined_breakdown_by_status.get(status, 0) + row["count"]
+                    )
+
+            # Count dependencies before deletion for this batch
             cursor = await conn.execute(
                 f"""
-                SELECT status, COUNT(*) as count
-                FROM tasks
-                WHERE id IN ({task_id_placeholders})
-                GROUP BY status
+                SELECT COUNT(*) as count
+                FROM task_dependencies
+                WHERE prerequisite_task_id IN ({task_id_placeholders})
+                   OR dependent_task_id IN ({task_id_placeholders})
                 """,
-                tuple(task_ids),
+                tuple(batch + batch),
             )
-            status_rows = await cursor.fetchall()
-            breakdown_by_status = {
-                TaskStatus(row["status"]): row["count"] for row in status_rows
-            }
+            dep_row = await cursor.fetchone()
+            batch_deleted_dependencies = dep_row["count"] if dep_row else 0
+            total_deleted_dependencies += batch_deleted_dependencies
 
-        # Count dependencies before deletion
-        cursor = await conn.execute(
-            f"""
-            SELECT COUNT(*) as count
-            FROM task_dependencies
-            WHERE prerequisite_task_id IN ({task_id_placeholders})
-               OR dependent_task_id IN ({task_id_placeholders})
-            """,
-            tuple(task_ids + task_ids),
-        )
-        dep_row = await cursor.fetchone()
-        deleted_dependencies = dep_row["count"] if dep_row else 0
+            # Execute deletion for this batch (orphans children, cleans state, deletes tasks)
+            await self._orphan_children_and_delete_tasks(conn, batch)
 
-        # Execute deletion (orphans children, cleans state, deletes tasks)
-        await self._orphan_children_and_delete_tasks(conn, task_ids)
+            total_deleted_count += len(batch)
 
         return {
-            "deleted_count": len(task_ids),
-            "deleted_dependencies": deleted_dependencies,
-            "breakdown_by_status": breakdown_by_status
+            "deleted_count": total_deleted_count,
+            "deleted_dependencies": total_deleted_dependencies,
+            "breakdown_by_status": combined_breakdown_by_status
         }
 
     async def _orphan_children_and_delete_tasks(
@@ -1954,6 +2084,9 @@ class Database:
 
         This is the correct behavior for prune operations - only delete tasks
         that match the filter criteria, and orphan any children that don't match.
+
+        Handles large deletions by batching task IDs to avoid SQLite's
+        999 parameter limit (SQLITE_MAX_VARIABLE_NUMBER).
 
         Handles foreign key constraints by:
         1. Setting children's parent_task_id to NULL (orphaning)
@@ -1976,65 +2109,72 @@ class Database:
         if not task_ids:
             return
 
-        task_id_placeholders = ",".join("?" * len(task_ids))
+        # SQLite has a limit of 999 SQL parameters per query (SQLITE_MAX_VARIABLE_NUMBER).
+        # Batch task IDs into chunks of 900 to safely handle large deletions.
+        BATCH_SIZE = 900
 
-        # Step 1: Orphan children (set parent_task_id to NULL)
-        # This allows us to delete parents without violating FK constraints
-        await conn.execute(
-            f"""
-            UPDATE tasks
-            SET parent_task_id = NULL
-            WHERE parent_task_id IN ({task_id_placeholders})
-            """,
-            tuple(task_ids),
-        )
+        # Process task IDs in batches, executing all 5 deletion steps for each batch
+        for i in range(0, len(task_ids), BATCH_SIZE):
+            batch = task_ids[i:i + BATCH_SIZE]
+            task_id_placeholders = ",".join("?" * len(batch))
 
-        # Step 2: Clean up audit.agent_id to allow agent CASCADE deletion
-        # audit.agent_id has FK to agents WITHOUT CASCADE, so we must NULL it first
-        await conn.execute(
-            f"""
-            UPDATE audit
-            SET agent_id = NULL
-            WHERE agent_id IN (
-                SELECT id FROM agents WHERE task_id IN ({task_id_placeholders})
+            # Step 1: Orphan children (set parent_task_id to NULL)
+            # This allows us to delete parents without violating FK constraints
+            await conn.execute(
+                f"""
+                UPDATE tasks
+                SET parent_task_id = NULL
+                WHERE parent_task_id IN ({task_id_placeholders})
+                """,
+                tuple(batch),
             )
-            """,
-            tuple(task_ids),
-        )
 
-        # Step 3: Delete state entries for current tasks
-        await conn.execute(
-            f"""
-            DELETE FROM state
-            WHERE task_id IN ({task_id_placeholders})
-            """,
-            tuple(task_ids),
-        )
+            # Step 2: Clean up audit.agent_id to allow agent CASCADE deletion
+            # audit.agent_id has FK to agents WITHOUT CASCADE, so we must NULL it first
+            await conn.execute(
+                f"""
+                UPDATE audit
+                SET agent_id = NULL
+                WHERE agent_id IN (
+                    SELECT id FROM agents WHERE task_id IN ({task_id_placeholders})
+                )
+                """,
+                tuple(batch),
+            )
 
-        # Step 4: Delete task dependencies
-        await conn.execute(
-            f"""
-            DELETE FROM task_dependencies
-            WHERE prerequisite_task_id IN ({task_id_placeholders})
-               OR dependent_task_id IN ({task_id_placeholders})
-            """,
-            tuple(task_ids + task_ids),
-        )
+            # Step 3: Delete state entries for current tasks
+            await conn.execute(
+                f"""
+                DELETE FROM state
+                WHERE task_id IN ({task_id_placeholders})
+                """,
+                tuple(batch),
+            )
 
-        # Step 5: Delete the tasks themselves
-        # At this point:
-        # - Children are orphaned (parent_task_id=NULL)
-        # - Audit entries won't block agent deletion (agent_id=NULL)
-        # - State entries are deleted
-        # - Task dependencies are deleted
-        # - Agents, checkpoints will CASCADE
-        await conn.execute(
-            f"""
-            DELETE FROM tasks
-            WHERE id IN ({task_id_placeholders})
-            """,
-            tuple(task_ids),
-        )
+            # Step 4: Delete task dependencies
+            await conn.execute(
+                f"""
+                DELETE FROM task_dependencies
+                WHERE prerequisite_task_id IN ({task_id_placeholders})
+                   OR dependent_task_id IN ({task_id_placeholders})
+                """,
+                tuple(batch + batch),
+            )
+
+            # Step 5: Delete the tasks themselves
+            # At this point:
+            # - Children are orphaned (parent_task_id=NULL)
+            # - Audit entries won't block agent deletion (agent_id=NULL)
+            # - State entries are deleted
+            # - Task dependencies are deleted
+            # - Agents, checkpoints will CASCADE
+            await conn.execute(
+                f"""
+                DELETE FROM tasks
+                WHERE id IN ({task_id_placeholders})
+                """,
+                tuple(batch),
+            )
 
     async def prune_tasks(self, filters: PruneFilters) -> PruneResult:
         """Prune tasks based on age and status criteria.
@@ -2085,7 +2225,17 @@ class Database:
                     reclaimed_bytes=None,
                     dry_run=filters.dry_run,
                     breakdown_by_status={},
+                    vacuum_auto_skipped=False,
                 )
+
+            # Auto-selection: override vacuum_mode to 'never' for large prune operations
+            # Only applies to 'conditional' mode - 'always' is never overridden
+            vacuum_auto_skipped = False
+            effective_vacuum_mode = filters.vacuum_mode
+
+            if len(task_ids) >= AUTO_SKIP_VACUUM_THRESHOLD and filters.vacuum_mode == "conditional":
+                effective_vacuum_mode = "never"
+                vacuum_auto_skipped = True
 
             # Start transaction
             await conn.execute("BEGIN TRANSACTION")
@@ -2105,6 +2255,7 @@ class Database:
                         reclaimed_bytes=None,
                         dry_run=True,
                         breakdown_by_status=result["breakdown_by_status"],
+                        vacuum_auto_skipped=vacuum_auto_skipped,
                     )
                 else:
                     # Real deletion
@@ -2114,12 +2265,13 @@ class Database:
                     await conn.commit()
 
                     # STEP 3: VACUUM (outside transaction, conditional)
+                    # Use effective_vacuum_mode which may have been auto-overridden
                     reclaimed_bytes = None
                     should_vacuum = False
 
-                    if filters.vacuum_mode == "always":
+                    if effective_vacuum_mode == "always":
                         should_vacuum = True
-                    elif filters.vacuum_mode == "conditional":
+                    elif effective_vacuum_mode == "conditional":
                         should_vacuum = result["deleted_count"] >= VACUUM_THRESHOLD_TASKS
                     # "never" mode: should_vacuum stays False
 
@@ -2152,6 +2304,7 @@ class Database:
                         reclaimed_bytes=reclaimed_bytes,
                         dry_run=False,
                         breakdown_by_status=result["breakdown_by_status"],
+                        vacuum_auto_skipped=vacuum_auto_skipped,
                     )
 
             except Exception as e:
