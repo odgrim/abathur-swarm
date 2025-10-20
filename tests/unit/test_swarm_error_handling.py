@@ -15,7 +15,7 @@ class TestSwarmErrorHandling:
     async def test_task_marked_failed_on_error(self) -> None:
         """Test that tasks are marked as FAILED when execution fails."""
         # Create mock dependencies
-        task_coordinator = AsyncMock()
+        task_queue_service = AsyncMock()
         agent_executor = AsyncMock()
 
         # Create a test task
@@ -38,13 +38,12 @@ class TestSwarmErrorHandling:
         )
         agent_executor.execute_task.return_value = failed_result
 
-        # Mock task coordinator methods
-        task_coordinator.get_task.return_value = task
-        task_coordinator.update_task_status = AsyncMock()
+        # Mock task queue service methods
+        task_queue_service.fail_task = AsyncMock()
 
         # Create orchestrator
-        orchestrator = SwarmOrchestrator(  # type: ignore
-            task_coordinator=task_coordinator,
+        orchestrator = SwarmOrchestrator(
+            task_queue_service=task_queue_service,
             agent_executor=agent_executor,
             max_concurrent_agents=1,
         )
@@ -56,16 +55,16 @@ class TestSwarmErrorHandling:
         assert result.success is False
         assert result.error == "Claude CLI error: test error message"
 
-        # Verify task status was updated to FAILED
-        task_coordinator.update_task_status.assert_called_with(
-            task_id, TaskStatus.FAILED, error_message="Claude CLI error: test error message"
+        # Verify fail_task was called with error message
+        task_queue_service.fail_task.assert_called_once_with(
+            task_id, error_message="Claude CLI error: test error message"
         )
 
     @pytest.mark.asyncio
     async def test_task_marked_failed_then_retry_on_error_with_retries_available(self) -> None:
         """Test that tasks are marked FAILED first, then retried if retries are available."""
         # Create mock dependencies
-        task_coordinator = AsyncMock()
+        task_queue_service = AsyncMock()
         agent_executor = AsyncMock()
 
         # Create a test task with retries available
@@ -89,14 +88,12 @@ class TestSwarmErrorHandling:
         )
         agent_executor.execute_task.return_value = failed_result
 
-        # Mock task coordinator methods
-        task_coordinator.get_task.return_value = task
-        task_coordinator.update_task_status = AsyncMock()
-        task_coordinator.retry_task = AsyncMock()
+        # Mock task queue service methods
+        task_queue_service.fail_task = AsyncMock()
 
         # Create orchestrator
-        orchestrator = SwarmOrchestrator(  # type: ignore
-            task_coordinator=task_coordinator,
+        orchestrator = SwarmOrchestrator(
+            task_queue_service=task_queue_service,
             agent_executor=agent_executor,
             max_concurrent_agents=1,
         )
@@ -107,20 +104,16 @@ class TestSwarmErrorHandling:
         # Verify result
         assert result.success is False
 
-        # Verify task status was updated to FAILED FIRST
-        update_calls = task_coordinator.update_task_status.call_args_list
-        assert len(update_calls) == 1
-        assert update_calls[0][0] == (task_id, TaskStatus.FAILED)
-        assert update_calls[0][1]["error_message"] == "Claude CLI error: temporary failure"
-
-        # Verify retry_task was called AFTER marking as FAILED
-        task_coordinator.retry_task.assert_called_once_with(task_id)
+        # Verify fail_task was called with error message
+        task_queue_service.fail_task.assert_called_once_with(
+            task_id, error_message="Claude CLI error: temporary failure"
+        )
 
     @pytest.mark.asyncio
     async def test_task_marked_completed_on_success(self) -> None:
         """Test that tasks are marked as COMPLETED when execution succeeds."""
         # Create mock dependencies
-        task_coordinator = AsyncMock()
+        task_queue_service = AsyncMock()
         agent_executor = AsyncMock()
 
         # Create a test task
@@ -142,12 +135,12 @@ class TestSwarmErrorHandling:
         )
         agent_executor.execute_task.return_value = success_result
 
-        # Mock task coordinator methods
-        task_coordinator.update_task_status = AsyncMock()
+        # Mock task queue service methods
+        task_queue_service.complete_task = AsyncMock()
 
         # Create orchestrator
-        orchestrator = SwarmOrchestrator(  # type: ignore
-            task_coordinator=task_coordinator,
+        orchestrator = SwarmOrchestrator(
+            task_queue_service=task_queue_service,
             agent_executor=agent_executor,
             max_concurrent_agents=1,
         )
@@ -158,5 +151,5 @@ class TestSwarmErrorHandling:
         # Verify result
         assert result.success is True
 
-        # Verify task status was updated to COMPLETED
-        task_coordinator.update_task_status.assert_called_once_with(task_id, TaskStatus.COMPLETED)
+        # Verify complete_task was called
+        task_queue_service.complete_task.assert_called_once_with(task_id)
