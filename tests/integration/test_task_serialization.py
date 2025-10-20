@@ -1,6 +1,6 @@
 """Integration tests for Task serialization in MCP server.
 
-Tests that _serialize_task includes ALL 28 Task model fields:
+Tests that _serialize_task includes ALL 29 Task model fields:
 1. Core identification (5): id, prompt, agent_type, priority, status
 2. Data fields (3): input_data, result_data, error_message
 3. Retry and timeout (3): retry_count, max_retries, max_execution_timeout_seconds
@@ -8,7 +8,7 @@ Tests that _serialize_task includes ALL 28 Task model fields:
 5. Relationship fields (4): created_by, parent_task_id, dependencies, session_id
 6. Summary field (1): summary
 7. Enhanced task queue (6): source, dependency_type, calculated_priority, deadline, estimated_duration_seconds, dependency_depth
-8. Branch tracking (2): feature_branch, task_branch
+8. Branch tracking (3): feature_branch, task_branch, worktree_path
 
 Coverage Target: Complete serialization validation
 """
@@ -53,10 +53,10 @@ def mcp_server(memory_db: Database) -> AbathurTaskQueueServer:
 
 
 @pytest.mark.asyncio
-async def test_serialize_task_includes_all_28_fields(
+async def test_serialize_task_includes_all_29_fields(
     memory_db: Database, task_queue_service: TaskQueueService, mcp_server: AbathurTaskQueueServer
 ) -> None:
-    """Test that _serialize_task includes all 28 Task model fields."""
+    """Test that _serialize_task includes all 29 Task model fields."""
     # Create prerequisite task first (no dependencies)
     prereq_task = await task_queue_service.enqueue_task(
         description="Prerequisite task",
@@ -88,7 +88,7 @@ async def test_serialize_task_includes_all_28_fields(
     # Serialize task using MCP server's _serialize_task method
     serialized = mcp_server._serialize_task(retrieved_task)
 
-    # Verify all 28 fields are present
+    # Verify all 29 fields are present
     expected_fields = {
         # Core identification (5)
         "id",
@@ -123,9 +123,10 @@ async def test_serialize_task_includes_all_28_fields(
         "deadline",
         "estimated_duration_seconds",
         "dependency_depth",
-        # Branch tracking fields (2)
+        # Branch tracking fields (3)
         "feature_branch",
         "task_branch",
+        "worktree_path",
     }
 
     actual_fields = set(serialized.keys())
@@ -301,7 +302,7 @@ async def test_serialize_task_enum_values(
 async def test_serialize_task_field_count_matches_model(
     memory_db: Database, mcp_server: AbathurTaskQueueServer
 ) -> None:
-    """Test that serialized dict has exactly 28 fields matching Task model."""
+    """Test that serialized dict has exactly 29 fields matching Task model."""
     # Create a simple task directly in database
     task_id = uuid4()
     async with memory_db._get_connection() as conn:
@@ -340,7 +341,7 @@ async def test_serialize_task_field_count_matches_model(
     model_field_count = len(TaskModel.model_fields)
 
     # Verify serialized dict has same number of fields
-    assert len(serialized) == model_field_count == 28, f"Expected 28 fields, got {len(serialized)}"
+    assert len(serialized) == model_field_count == 29, f"Expected 29 fields, got {len(serialized)}"
 
 
 if __name__ == "__main__":
