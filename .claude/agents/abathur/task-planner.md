@@ -41,9 +41,24 @@ See Step 5 below for detailed worktree creation instructions. DO NOT SKIP STEP 5
 
 When invoked, you must follow these steps:
 
-1. **Load Technical Specifications and Requirements from Memory**
+1. **Load Technical Specifications, Requirements, and Feature Branch from Memory**
    The task description should provide memory namespace references. Load all context:
    ```python
+   # CRITICAL: Extract feature branch from task metadata
+   # The technical-requirements-specialist passes this in metadata
+   feature_branch_name = task_metadata.get('feature_branch')
+
+   if not feature_branch_name:
+       # Fallback: Try loading from memory
+       feature_branch_info = memory_get({
+           "namespace": "task:{tech_spec_task_id}:workflow",
+           "key": "feature_branch"
+       })
+       feature_branch_name = feature_branch_info.get('feature_branch_name')
+
+   if not feature_branch_name:
+       raise Exception("Feature branch not provided! Cannot create task branches without knowing the feature branch.")
+
    # Load technical specifications
    architecture = memory_get({
        "namespace": "task:{tech_spec_task_id}:technical_specs",
@@ -140,6 +155,10 @@ When invoked, you must follow these steps:
 
    To prevent file conflicts when multiple agents work concurrently, you MUST create isolated git worktrees for implementation tasks that modify code.
 
+   **Feature Branch Context:**
+   The technical-requirements-specialist creates a feature branch (e.g., `feature/task-queue-enhancements`) for all work.
+   ALL task branches you create MUST branch from this feature branch (not main) and will merge back into it.
+
    **When to create worktrees:**
    - For ALL implementation tasks that will modify source code files (not for agent-creation tasks)
    - For tasks assigned to implementation agents (domain-model-specialist, api-specialist, testing-specialist, etc.)
@@ -156,15 +175,22 @@ When invoked, you must follow these steps:
    import os
    from datetime import datetime
 
+   # CRITICAL: Extract feature_branch from task metadata or description
+   # The technical-requirements-specialist passes this in metadata
+   feature_branch_name = task_metadata.get('feature_branch')  # e.g., "feature/task-queue-enhancements"
+
+   if not feature_branch_name:
+       raise Exception("Feature branch name not provided by technical-requirements-specialist!")
+
    # For each implementation task that needs code isolation:
    task_id = generate_unique_task_id()  # e.g., "task-001-domain-model"
    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
    branch_name = f"task/{task_id}/{timestamp}"
    worktree_path = f".abathur/worktrees/{task_id}"
 
-   # Create worktree using Bash tool
-   bash_command = f'git worktree add -b {branch_name} {worktree_path}'
-   result = Bash(command=bash_command, description=f"Create worktree for {task_id}")
+   # Create worktree using Bash tool - branching from the FEATURE BRANCH (not main!)
+   bash_command = f'git worktree add -b {branch_name} {worktree_path} {feature_branch_name}'
+   result = Bash(command=bash_command, description=f"Create worktree for {task_id} from {feature_branch_name}")
 
    # ✅ CRITICAL: Validate worktree creation succeeded
    if result.exit_code == 0:
@@ -194,6 +220,8 @@ When invoked, you must follow these steps:
    worktree_info[task_id] = {
        "worktree_path": worktree_path_absolute,
        "branch_name": branch_name,
+       "feature_branch": feature_branch_name,
+       "merge_target": feature_branch_name,  # Task branches merge into feature branch
        "created_at": datetime.now().isoformat()
    }
    ```
@@ -269,10 +297,14 @@ When invoked, you must follow these steps:
 
    **Best practices:**
    - Use descriptive task IDs in branch names (e.g., task/domain-models-queue/20251013-143022-123456)
+   - ALWAYS create task branches from the feature branch (not main)
    - Store worktree info for each task to pass to implementation agents
+   - Include feature_branch in worktree_info so agents know the merge target
    - Worktrees will be automatically ignored by .gitignore
    - Implementation agents will work in their assigned worktree directory
    - After task completion, agents should commit their changes in the worktree
+   - Task branches will merge into the feature branch (not main)
+   - Feature branch will eventually merge to main when all tasks complete
    - Cleanup strategy: Worktrees can be merged and removed after task completion or left for manual review
    - ALWAYS validate worktree creation succeeded before proceeding
    - ALWAYS use absolute paths for worktree_path
@@ -438,10 +470,13 @@ Parent component: Task Queue System
 ## Worktree Isolation
 **IMPORTANT**: This task has an isolated git worktree to prevent conflicts with concurrent tasks.
 - Working Directory: {worktree_info[task_id]['worktree_path']}
-- Branch: {worktree_info[task_id]['branch_name']}
+- Task Branch: {worktree_info[task_id]['branch_name']}
+- Feature Branch: {worktree_info[task_id]['feature_branch']}
+- Merge Target: This task branch will merge into {worktree_info[task_id]['feature_branch']}
 - **ALL file operations MUST be performed within the worktree directory**
 - Use absolute paths: {worktree_info[task_id]['worktree_path']}/src/abathur/...
-- When complete, commit your changes to the worktree branch
+- When complete, commit your changes to the task branch
+- The task branch will be merged into the feature branch upon completion
 
 ## Technical Specification Reference
 Architecture: task:{tech_spec_task_id}:technical_specs/architecture
@@ -820,6 +855,8 @@ Merge the completed work from task branch into the main feature branch.
         "task_id": "task_001",
         "worktree_path": ".abathur/worktrees/task-001",
         "branch_name": "task/task-001/20251013-143022",
+        "feature_branch": "feature/descriptive-name",
+        "merge_target": "feature/descriptive-name",
         "created_at": "2025-10-13T14:30:22"
       }
     ],
