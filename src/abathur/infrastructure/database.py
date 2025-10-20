@@ -1991,6 +1991,9 @@ class Database:
         This is the single source of truth for task deletion.
         Both delete_tasks() and prune_tasks() use this.
 
+        Handles large deletions by batching task IDs to avoid SQLite's
+        999 parameter limit (SQLITE_MAX_VARIABLE_NUMBER).
+
         Args:
             conn: Active database connection (with foreign keys enabled)
             task_ids: List of task ID strings to delete
@@ -2015,45 +2018,63 @@ class Database:
                 "breakdown_by_status": {}
             }
 
-        task_id_placeholders = ",".join("?" * len(task_ids))
+        # SQLite has a limit of 999 SQL parameters per query (SQLITE_MAX_VARIABLE_NUMBER).
+        # To safely handle large deletions, we batch task IDs into chunks of 900.
+        # This ensures we stay well below the limit even when parameters are used multiple times
+        # in a single query (e.g., "WHERE id IN (?) OR parent_id IN (?)").
+        BATCH_SIZE = 900
 
-        # Collect statistics if requested
-        breakdown_by_status = {}
-        if collect_stats:
+        # Accumulate statistics across all batches
+        total_deleted_count = 0
+        total_deleted_dependencies = 0
+        combined_breakdown_by_status: dict[TaskStatus, int] = {}
+
+        # Process task IDs in batches
+        for i in range(0, len(task_ids), BATCH_SIZE):
+            batch = task_ids[i:i + BATCH_SIZE]
+            task_id_placeholders = ",".join("?" * len(batch))
+
+            # Collect statistics if requested
+            if collect_stats:
+                cursor = await conn.execute(
+                    f"""
+                    SELECT status, COUNT(*) as count
+                    FROM tasks
+                    WHERE id IN ({task_id_placeholders})
+                    GROUP BY status
+                    """,
+                    tuple(batch),
+                )
+                status_rows = await cursor.fetchall()
+                for row in status_rows:
+                    status = TaskStatus(row["status"])
+                    combined_breakdown_by_status[status] = (
+                        combined_breakdown_by_status.get(status, 0) + row["count"]
+                    )
+
+            # Count dependencies before deletion for this batch
             cursor = await conn.execute(
                 f"""
-                SELECT status, COUNT(*) as count
-                FROM tasks
-                WHERE id IN ({task_id_placeholders})
-                GROUP BY status
+                SELECT COUNT(*) as count
+                FROM task_dependencies
+                WHERE prerequisite_task_id IN ({task_id_placeholders})
+                   OR dependent_task_id IN ({task_id_placeholders})
                 """,
-                tuple(task_ids),
+                tuple(batch + batch),
             )
-            status_rows = await cursor.fetchall()
-            breakdown_by_status = {
-                TaskStatus(row["status"]): row["count"] for row in status_rows
-            }
+            dep_row = await cursor.fetchone()
+            batch_deleted_dependencies = dep_row["count"] if dep_row else 0
+            total_deleted_dependencies += batch_deleted_dependencies
 
-        # Count dependencies before deletion
-        cursor = await conn.execute(
-            f"""
-            SELECT COUNT(*) as count
-            FROM task_dependencies
-            WHERE prerequisite_task_id IN ({task_id_placeholders})
-               OR dependent_task_id IN ({task_id_placeholders})
-            """,
-            tuple(task_ids + task_ids),
-        )
-        dep_row = await cursor.fetchone()
-        deleted_dependencies = dep_row["count"] if dep_row else 0
+            # Execute deletion for this batch (orphans children, cleans state, deletes tasks)
+            await self._orphan_children_and_delete_tasks(conn, batch)
 
-        # Execute deletion (orphans children, cleans state, deletes tasks)
-        await self._orphan_children_and_delete_tasks(conn, task_ids)
+            total_deleted_count += len(batch)
 
         return {
-            "deleted_count": len(task_ids),
-            "deleted_dependencies": deleted_dependencies,
-            "breakdown_by_status": breakdown_by_status
+            "deleted_count": total_deleted_count,
+            "deleted_dependencies": total_deleted_dependencies,
+            "breakdown_by_status": combined_breakdown_by_status
         }
 
     async def _orphan_children_and_delete_tasks(
@@ -2063,6 +2084,9 @@ class Database:
 
         This is the correct behavior for prune operations - only delete tasks
         that match the filter criteria, and orphan any children that don't match.
+
+        Handles large deletions by batching task IDs to avoid SQLite's
+        999 parameter limit (SQLITE_MAX_VARIABLE_NUMBER).
 
         Handles foreign key constraints by:
         1. Setting children's parent_task_id to NULL (orphaning)
@@ -2085,65 +2109,72 @@ class Database:
         if not task_ids:
             return
 
-        task_id_placeholders = ",".join("?" * len(task_ids))
+        # SQLite has a limit of 999 SQL parameters per query (SQLITE_MAX_VARIABLE_NUMBER).
+        # Batch task IDs into chunks of 900 to safely handle large deletions.
+        BATCH_SIZE = 900
 
-        # Step 1: Orphan children (set parent_task_id to NULL)
-        # This allows us to delete parents without violating FK constraints
-        await conn.execute(
-            f"""
-            UPDATE tasks
-            SET parent_task_id = NULL
-            WHERE parent_task_id IN ({task_id_placeholders})
-            """,
-            tuple(task_ids),
-        )
+        # Process task IDs in batches, executing all 5 deletion steps for each batch
+        for i in range(0, len(task_ids), BATCH_SIZE):
+            batch = task_ids[i:i + BATCH_SIZE]
+            task_id_placeholders = ",".join("?" * len(batch))
 
-        # Step 2: Clean up audit.agent_id to allow agent CASCADE deletion
-        # audit.agent_id has FK to agents WITHOUT CASCADE, so we must NULL it first
-        await conn.execute(
-            f"""
-            UPDATE audit
-            SET agent_id = NULL
-            WHERE agent_id IN (
-                SELECT id FROM agents WHERE task_id IN ({task_id_placeholders})
+            # Step 1: Orphan children (set parent_task_id to NULL)
+            # This allows us to delete parents without violating FK constraints
+            await conn.execute(
+                f"""
+                UPDATE tasks
+                SET parent_task_id = NULL
+                WHERE parent_task_id IN ({task_id_placeholders})
+                """,
+                tuple(batch),
             )
-            """,
-            tuple(task_ids),
-        )
 
-        # Step 3: Delete state entries for current tasks
-        await conn.execute(
-            f"""
-            DELETE FROM state
-            WHERE task_id IN ({task_id_placeholders})
-            """,
-            tuple(task_ids),
-        )
+            # Step 2: Clean up audit.agent_id to allow agent CASCADE deletion
+            # audit.agent_id has FK to agents WITHOUT CASCADE, so we must NULL it first
+            await conn.execute(
+                f"""
+                UPDATE audit
+                SET agent_id = NULL
+                WHERE agent_id IN (
+                    SELECT id FROM agents WHERE task_id IN ({task_id_placeholders})
+                )
+                """,
+                tuple(batch),
+            )
 
-        # Step 4: Delete task dependencies
-        await conn.execute(
-            f"""
-            DELETE FROM task_dependencies
-            WHERE prerequisite_task_id IN ({task_id_placeholders})
-               OR dependent_task_id IN ({task_id_placeholders})
-            """,
-            tuple(task_ids + task_ids),
-        )
+            # Step 3: Delete state entries for current tasks
+            await conn.execute(
+                f"""
+                DELETE FROM state
+                WHERE task_id IN ({task_id_placeholders})
+                """,
+                tuple(batch),
+            )
 
-        # Step 5: Delete the tasks themselves
-        # At this point:
-        # - Children are orphaned (parent_task_id=NULL)
-        # - Audit entries won't block agent deletion (agent_id=NULL)
-        # - State entries are deleted
-        # - Task dependencies are deleted
-        # - Agents, checkpoints will CASCADE
-        await conn.execute(
-            f"""
-            DELETE FROM tasks
-            WHERE id IN ({task_id_placeholders})
-            """,
-            tuple(task_ids),
-        )
+            # Step 4: Delete task dependencies
+            await conn.execute(
+                f"""
+                DELETE FROM task_dependencies
+                WHERE prerequisite_task_id IN ({task_id_placeholders})
+                   OR dependent_task_id IN ({task_id_placeholders})
+                """,
+                tuple(batch + batch),
+            )
+
+            # Step 5: Delete the tasks themselves
+            # At this point:
+            # - Children are orphaned (parent_task_id=NULL)
+            # - Audit entries won't block agent deletion (agent_id=NULL)
+            # - State entries are deleted
+            # - Task dependencies are deleted
+            # - Agents, checkpoints will CASCADE
+            await conn.execute(
+                f"""
+                DELETE FROM tasks
+                WHERE id IN ({task_id_placeholders})
+                """,
+                tuple(batch),
+            )
 
     async def prune_tasks(self, filters: PruneFilters) -> PruneResult:
         """Prune tasks based on age and status criteria.
@@ -2198,10 +2229,11 @@ class Database:
                 )
 
             # Auto-selection: override vacuum_mode to 'never' for large prune operations
+            # Only applies to 'conditional' mode - 'always' is never overridden
             vacuum_auto_skipped = False
             effective_vacuum_mode = filters.vacuum_mode
 
-            if len(task_ids) >= AUTO_SKIP_VACUUM_THRESHOLD and filters.vacuum_mode != "never":
+            if len(task_ids) >= AUTO_SKIP_VACUUM_THRESHOLD and filters.vacuum_mode == "conditional":
                 effective_vacuum_mode = "never"
                 vacuum_auto_skipped = True
 
