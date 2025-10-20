@@ -3,12 +3,14 @@
 import asyncio
 import json
 import logging
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+import aiosqlite
 import typer
 from pydantic import ValidationError
 from rich.console import Console
@@ -540,7 +542,7 @@ def prune(
             async with services["database"]._get_connection() as conn:
                 cursor = await conn.execute(preview_query, tuple(params))
                 rows = await cursor.fetchall()
-                preview_task_ids = [row["id"] for row in rows]
+                preview_task_ids = [UUID(row["id"]) for row in rows]
 
             # Early return if no tasks match
             if not preview_task_ids:
@@ -627,20 +629,73 @@ def prune(
 
             # Component 5: Prune Execution (~10 lines)
             console.print("[blue]Deleting tasks...[/blue]")
+
+            # Show progress indicator for VACUUM if expected to run
+            show_vacuum_progress = (
+                filters.vacuum_mode == "always" or
+                (filters.vacuum_mode == "conditional" and len(preview_task_ids) >= 100)
+            )
+
             try:
-                result = await services["database"].prune_tasks(filters)
-            except Exception as e:
+                if show_vacuum_progress:
+                    # Use progress indicator for operations that will VACUUM
+                    with Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        console=console,
+                    ) as progress:
+                        task_desc = progress.add_task(
+                            description="Deleting tasks and optimizing database...",
+                            total=None
+                        )
+                        result = await services["database"].prune_tasks(filters)
+                else:
+                    # No VACUUM expected, run without progress indicator
+                    result = await services["database"].prune_tasks(filters)
+            except sqlite3.OperationalError as e:
+                # Database locked, busy, or permission issues
                 console.print(
-                    f"[red]Error:[/red] Database operation failed: {type(e).__name__}: {e}"
+                    "[red]Error:[/red] Database is locked or busy.\n"
+                    "This can happen if another process is using the database.\n"
+                    "Try again in a few moments."
                 )
-                logger.exception(
-                    "Database error during task pruning",
-                    extra={
-                        "operation": "task_prune",
-                        "task_count": len(preview_task_ids),
-                        "error_type": type(e).__name__
-                    }
+                logger.error(f"Database operational error: {e}")
+                raise typer.Exit(1)
+            except sqlite3.IntegrityError as e:
+                # Foreign key violations, constraint failures
+                console.print(
+                    "[red]Error:[/red] Database integrity constraint violated.\n"
+                    "This may indicate data corruption or concurrent modifications.\n"
+                    f"Details: {e}"
                 )
+                logger.error(f"Database integrity error: {e}")
+                raise typer.Exit(1)
+            except aiosqlite.Error as e:
+                # General aiosqlite errors (connection, protocol, etc.)
+                console.print(
+                    "[red]Error:[/red] Database connection or protocol error.\n"
+                    f"Details: {e}\n"
+                    "Check database file permissions and disk space."
+                )
+                logger.error(f"Aiosqlite error: {e}")
+                raise typer.Exit(1)
+            except ValueError as e:
+                # Validation errors from our code
+                console.print(
+                    f"[red]Error:[/red] Invalid parameters: {e}\n"
+                    "Check your command arguments and try again."
+                )
+                logger.error(f"Validation error: {e}")
+                raise typer.Exit(1)
+            except Exception as e:
+                # Unexpected errors - still catch for safety
+                console.print(
+                    f"[red]Error:[/red] Unexpected error during task deletion.\n"
+                    f"Type: {type(e).__name__}\n"
+                    f"Details: {e}\n"
+                    "Please report this issue if it persists."
+                )
+                logger.exception("Unexpected error in prune command")
                 raise typer.Exit(1)
 
             # Component 6: PruneResult Display (~25 lines)
@@ -659,7 +714,12 @@ def prune(
                 console.print(breakdown_table)
 
             # Display VACUUM information
-            if result.reclaimed_bytes is not None:
+            if result.vacuum_auto_skipped:
+                # Auto-skipped for large prune operation
+                console.print(f"\n[yellow]⚠[/yellow]  VACUUM automatically skipped (deleting {result.deleted_tasks} tasks)")
+                console.print("[dim]Large prune operations (>10,000 tasks) skip VACUUM to avoid long database locks.[/dim]")
+                console.print("[dim]Run 'abathur task prune --older-than 0d --vacuum=always' to manually VACUUM if needed.[/dim]")
+            elif result.reclaimed_bytes is not None:
                 reclaimed_mb = result.reclaimed_bytes / (1024 * 1024)
                 console.print(f"\n[green]VACUUM completed: {reclaimed_mb:.2f} MB reclaimed[/green]")
             elif filters.vacuum_mode == "never":
@@ -712,6 +772,38 @@ def prune(
             console.print("[green]✓[/green] No tasks to delete")
             return
 
+        # Child Task Validation - check if any selected tasks have children
+        child_tasks = await services["database"].get_child_tasks(selected_task_ids)
+
+        if child_tasks:
+            console.print(
+                f"\n[yellow]![/yellow] Cannot delete {len(selected_task_ids)} task(s) - "
+                f"{len(child_tasks)} have child tasks:"
+            )
+
+            blocked_table = Table()
+            blocked_table.add_column("Parent ID", style="cyan", no_wrap=True)
+            blocked_table.add_column("Child ID", style="yellow", no_wrap=True)
+            blocked_table.add_column("Child Summary", style="magenta")
+
+            for child in child_tasks:
+                parent_id_str = str(child.parent_task_id)[:8] if child.parent_task_id else "unknown"
+                child_id_str = str(child.id)[:8]
+                summary_preview = (
+                    (child.summary[:40] + "...")
+                    if child.summary and len(child.summary) > 40
+                    else (child.summary or "-")
+                )
+                blocked_table.add_row(
+                    parent_id_str,
+                    child_id_str,
+                    summary_preview,
+                )
+
+            console.print(blocked_table)
+            console.print("\n[yellow]Delete child tasks first before deleting parent tasks.[/yellow]")
+            return
+
         # Display preview table
         table = Table(title=f"Tasks to Delete ({len(tasks_to_delete)})")
         table.add_column("ID", style="cyan", no_wrap=True)
@@ -750,23 +842,73 @@ def prune(
 
         # Execute deletion using unified prune_tasks() interface
         console.print("[blue]Deleting tasks...[/blue]")
+
+        # Show progress indicator for VACUUM if expected to run
+        # Note: Don't show for large operations (>10,000) since VACUUM will be auto-skipped
+        show_vacuum_progress = (
+            len(selected_task_ids) < 10_000 and  # Auto-skip threshold
+            (vacuum == "always" or (vacuum == "conditional" and len(selected_task_ids) >= 100))
+        )
+
         try:
-            from abathur.infrastructure.database import PruneFilters
-            filters = PruneFilters(task_ids=selected_task_ids, vacuum_mode="never")
-            result = await services["database"].prune_tasks(filters)
+            filters = PruneFilters(task_ids=selected_task_ids, vacuum_mode=vacuum)
+
+            if show_vacuum_progress:
+                # Use progress indicator for operations that will VACUUM
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=console,
+                ) as progress:
+                    task_desc = progress.add_task(
+                        description="Deleting tasks and optimizing database...",
+                        total=None
+                    )
+                    result = await services["database"].prune_tasks(filters)
+            else:
+                # No VACUUM expected, run without progress indicator
+                result = await services["database"].prune_tasks(filters)
+
             deleted_count = result.deleted_tasks
+        except sqlite3.OperationalError as e:
+            console.print(
+                "[red]Error:[/red] Database is locked or busy.\n"
+                "This can happen if another process is using the database.\n"
+                "Try again in a few moments."
+            )
+            logger.error(f"Database operational error: {e}")
+            raise typer.Exit(1)
+        except sqlite3.IntegrityError as e:
+            console.print(
+                "[red]Error:[/red] Database integrity constraint violated.\n"
+                "This may indicate data corruption or concurrent modifications.\n"
+                f"Details: {e}"
+            )
+            logger.error(f"Database integrity error: {e}")
+            raise typer.Exit(1)
+        except aiosqlite.Error as e:
+            console.print(
+                "[red]Error:[/red] Database connection or protocol error.\n"
+                f"Details: {e}\n"
+                "Check database file permissions and disk space."
+            )
+            logger.error(f"Aiosqlite error: {e}")
+            raise typer.Exit(1)
+        except ValueError as e:
+            console.print(
+                f"[red]Error:[/red] Invalid parameters: {e}\n"
+                "Check your command arguments and try again."
+            )
+            logger.error(f"Validation error: {e}")
+            raise typer.Exit(1)
         except Exception as e:
             console.print(
-                f"[red]Error:[/red] Database operation failed: {type(e).__name__}: {e}"
+                f"[red]Error:[/red] Unexpected error during task deletion.\n"
+                f"Type: {type(e).__name__}\n"
+                f"Details: {e}\n"
+                "Please report this issue if it persists."
             )
-            logger.exception(
-                "Database error during task deletion",
-                extra={
-                    "operation": "task_prune",
-                    "task_count": len(selected_task_ids),
-                    "error_type": type(e).__name__
-                }
-            )
+            logger.exception("Unexpected error in delete command")
             raise typer.Exit(1)
 
         # Display results
@@ -784,6 +926,21 @@ def prune(
                 breakdown_table.add_row(status.value, str(count))
 
             console.print(breakdown_table)
+
+        # Display VACUUM auto-skip warning if applicable
+        if result.vacuum_auto_skipped:
+            console.print(f"\n[yellow]⚠[/yellow]  VACUUM automatically skipped (deleting {result.deleted_tasks} tasks)")
+            console.print("[dim]Large prune operations (>10,000 tasks) skip VACUUM to avoid long database locks.[/dim]")
+            console.print("[dim]Run 'VACUUM;' manually in SQLite CLI if you need to reclaim disk space.[/dim]")
+
+        # Display VACUUM information
+        if result.reclaimed_bytes is not None:
+            reclaimed_mb = result.reclaimed_bytes / (1024 * 1024)
+            console.print(f"\n[green]VACUUM completed: {reclaimed_mb:.2f} MB reclaimed[/green]")
+        elif vacuum == "never":
+            console.print("\n[dim]VACUUM skipped (--vacuum=never)[/dim]")
+        elif vacuum == "conditional" and result.deleted_tasks < 100:
+            console.print(f"\n[dim]VACUUM skipped (conditional mode, only {result.deleted_tasks} tasks deleted, threshold is 100)[/dim]")
 
     asyncio.run(_prune())
 
