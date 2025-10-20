@@ -214,6 +214,7 @@ class TestPhase1SchemaValidation:
         # Create test task with all Phase 1 fields
         test_task = Task(
             prompt="Phase 1 validation test task",
+            summary="Phase 1 validation test task",
             source=TaskSource.AGENT_PLANNER,
             dependency_type=DependencyType.PARALLEL,
             calculated_priority=7.5,
@@ -236,11 +237,11 @@ class TestPhase1SchemaValidation:
     async def test_task_dependency_insert_and_retrieve(self, memory_db: Database) -> None:
         """Test inserting and retrieving task dependencies."""
         # Create prerequisite task
-        prereq_task = Task(prompt="Prerequisite task")
+        prereq_task = Task(prompt="Prerequisite task", summary="Prerequisite task")
         await memory_db.insert_task(prereq_task)
 
         # Create dependent task
-        dependent_task = Task(prompt="Dependent task")
+        dependent_task = Task(prompt="Dependent task", summary="Dependent task")
         await memory_db.insert_task(dependent_task)
 
         # Create dependency
@@ -262,11 +263,11 @@ class TestPhase1SchemaValidation:
     async def test_dependency_resolution_workflow(self, memory_db: Database) -> None:
         """Test dependency resolution marks dependencies as resolved."""
         # Create prerequisite task
-        prereq_task = Task(prompt="Prerequisite task")
+        prereq_task = Task(prompt="Prerequisite task", summary="Prerequisite task")
         await memory_db.insert_task(prereq_task)
 
         # Create dependent task
-        dependent_task = Task(prompt="Dependent task")
+        dependent_task = Task(prompt="Dependent task", summary="Dependent task")
         await memory_db.insert_task(dependent_task)
 
         # Create dependency
@@ -294,7 +295,7 @@ class TestPhase1SchemaValidation:
     async def test_all_task_status_enums_supported(self, memory_db: Database) -> None:
         """Test that all TaskStatus enum values are properly persisted."""
         for status in TaskStatus:
-            task = Task(prompt=f"Status test {status.value}", status=status)
+            task = Task(prompt=f"Status test {status.value}", summary=f"Status test {status.value}", status=status)
             await memory_db.insert_task(task)
             retrieved = await memory_db.get_task(task.id)
             assert (
@@ -305,7 +306,7 @@ class TestPhase1SchemaValidation:
     async def test_all_task_source_enums_supported(self, memory_db: Database) -> None:
         """Test that all TaskSource enum values are properly persisted."""
         for source in TaskSource:
-            task = Task(prompt=f"Source test {source.value}", source=source)
+            task = Task(prompt=f"Source test {source.value}", summary=f"Source test {source.value}", source=source)
             await memory_db.insert_task(task)
             retrieved = await memory_db.get_task(task.id)
             assert (
@@ -316,7 +317,7 @@ class TestPhase1SchemaValidation:
     async def test_all_dependency_type_enums_supported(self, memory_db: Database) -> None:
         """Test that all DependencyType enum values are properly persisted."""
         for dep_type in DependencyType:
-            task = Task(prompt=f"DepType test {dep_type.value}", dependency_type=dep_type)
+            task = Task(prompt=f"DepType test {dep_type.value}", summary=f"DepType test {dep_type.value}", dependency_type=dep_type)
             await memory_db.insert_task(task)
             retrieved = await memory_db.get_task(task.id)
             assert (
@@ -362,7 +363,7 @@ class TestPhase1SchemaValidation:
     async def test_task_foreign_key_constraints_enforced(self, memory_db: Database) -> None:
         """Test that foreign key constraints are enforced for task dependencies."""
         # Create dependent task
-        dependent_task = Task(prompt="Dependent task")
+        dependent_task = Task(prompt="Dependent task", summary="Dependent task")
         await memory_db.insert_task(dependent_task)
 
         # Try to create dependency with non-existent prerequisite
@@ -388,7 +389,7 @@ class TestPhase1SchemaValidation:
     async def test_tasks_table_supports_nullable_optional_fields(self, memory_db: Database) -> None:
         """Test that optional Phase 1 fields can be NULL."""
         # Create task with minimal fields (let optional fields be None)
-        minimal_task = Task(prompt="Minimal task")
+        minimal_task = Task(prompt="Minimal task", summary="Minimal task")
 
         await memory_db.insert_task(minimal_task)
         retrieved = await memory_db.get_task(minimal_task.id)
