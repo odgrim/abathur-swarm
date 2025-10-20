@@ -369,7 +369,11 @@ class TestDatabaseAgentOperations:
     @pytest.mark.asyncio
     async def test_insert_and_update_agent(self, database: Database) -> None:
         """Test inserting and updating agent state."""
-        task_id = uuid4()
+        # Create prerequisite task first (FK constraint requirement)
+        task = Task(prompt="Test task for agent", summary="Agent test task")
+        await database.insert_task(task)
+        task_id = task.id
+
         agent = Agent(
             name="test-agent",
             specialization="testing",
@@ -391,7 +395,11 @@ class TestDatabaseStateOperations:
     @pytest.mark.asyncio
     async def test_set_and_get_state(self, database: Database) -> None:
         """Test setting and getting shared state."""
-        task_id = uuid4()
+        # Create prerequisite task first (FK constraint requirement)
+        task = Task(prompt="Test task for state", summary="State test task")
+        await database.insert_task(task)
+        task_id = task.id
+
         state_data = {"iteration": 5, "result": "success"}
 
         await database.set_state(task_id, "loop_state", state_data)
@@ -403,7 +411,11 @@ class TestDatabaseStateOperations:
     @pytest.mark.asyncio
     async def test_update_existing_state(self, database: Database) -> None:
         """Test updating existing state."""
-        task_id = uuid4()
+        # Create prerequisite task first (FK constraint requirement)
+        task = Task(prompt="Test task for state update", summary="State update test")
+        await database.insert_task(task)
+        task_id = task.id
+
         initial_state = {"iteration": 1}
 
         await database.set_state(task_id, "loop_state", initial_state)
@@ -432,8 +444,19 @@ class TestDatabaseAuditOperations:
     @pytest.mark.asyncio
     async def test_log_audit_entry(self, database: Database) -> None:
         """Test logging an audit entry."""
-        task_id = uuid4()
-        agent_id = uuid4()
+        # Create prerequisite task first (needed for agent)
+        task = Task(prompt="Test task for audit", summary="Audit test task")
+        await database.insert_task(task)
+        task_id = task.id
+
+        # Create prerequisite agent (FK constraint requirement)
+        agent = Agent(
+            name="test-audit-agent",
+            specialization="auditing",
+            task_id=task_id,
+        )
+        await database.insert_agent(agent)
+        agent_id = agent.id
 
         await database.log_audit(
             task_id=task_id,
