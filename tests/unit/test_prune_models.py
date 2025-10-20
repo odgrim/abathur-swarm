@@ -59,7 +59,7 @@ class TestPruneFilters:
 
     def test_requires_time_filter(self):
         """Test that at least one time filter is required."""
-        with pytest.raises(ValueError, match="At least one of"):
+        with pytest.raises(ValueError, match="At least one selection criterion must be specified"):
             PruneFilters()
 
     def test_forbids_pending_status(self):
