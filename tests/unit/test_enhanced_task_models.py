@@ -235,7 +235,7 @@ class TestModelDefaults:
         task = Task(prompt="Test")
 
         # Core fields
-        assert task.agent_type == "general"
+        assert task.agent_type == "requirements-gatherer"  # Default agent type for new tasks
         assert task.priority == 5
         assert task.status == TaskStatus.PENDING
         assert task.input_data == {}
