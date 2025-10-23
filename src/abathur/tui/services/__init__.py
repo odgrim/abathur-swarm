@@ -1,1 +1,1 @@
-"""TUI services package."""
+"""TUI-specific services."""

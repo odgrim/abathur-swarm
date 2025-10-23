@@ -1,115 +1,59 @@
-"""Main screen for Abathur Task Queue TUI.
+"""Main screen for TaskQueueTUI application.
 
-This screen provides the primary interface for viewing task queues,
-displaying a tree view of tasks on the left and detailed information
-on the right.
+This is a placeholder implementation for Phase 1.
+Full implementation will be completed in subsequent phases.
 """
 
+from typing import Any
+
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Static
+from textual.widgets import Header, Footer, Static
 
 
-class MainScreen(Screen):
-    """Primary screen with task tree, detail panel, stats header, and footer.
+class MainScreen(Screen[Any]):
+    """Main application screen with task visualization layout.
 
-    Layout:
-    - Header: Queue statistics (Phase 3)
-    - Body: Horizontal split
-        - Left (60%): Task tree view (Phase 2)
-        - Right (40%): Task detail panel (Phase 3)
-    - Footer: Keybinding help text
-    """
+    Layout structure (to be implemented):
+    - Header: QueueStatsHeader with real-time metrics
+    - Content: Horizontal split
+      - Left (60%): TaskTreeWidget with hierarchical task tree
+      - Right (40%): TaskDetailPanel showing selected task details
+    - Footer: Keyboard shortcuts and help text
 
-    CSS = """
-    MainScreen {
-        layout: vertical;
-    }
-
-    #stats-header {
-        height: 3;
-        background: $panel;
-        border: solid $primary;
-        content-align: center middle;
-        text-style: bold;
-    }
-
-    #content {
-        layout: horizontal;
-        height: 1fr;
-    }
-
-    #tree-panel {
-        width: 60%;
-        border-right: solid $primary;
-        padding: 1 2;
-        content-align: center middle;
-    }
-
-    #detail-panel {
-        width: 40%;
-        padding: 1 2;
-        content-align: center middle;
-    }
+    This is a placeholder for Phase 1. Full widget composition
+    will be implemented in Phase 2 and Phase 3.
     """
 
     def compose(self) -> ComposeResult:
-        """Create child widgets for the main screen.
+        """Create child widgets for this screen.
 
-        Yields:
-            Widgets that compose the main screen layout.
+        Phase 1 placeholder: Basic layout with static content.
         """
-        # Header
         yield Header()
-
-        # Stats header (placeholder for Phase 3)
-        yield Static(
-            "Queue Stats (Coming in Phase 3)",
-            id="stats-header",
-        )
-
-        # Main content area with horizontal split
-        with Vertical(id="content"):
-            with Horizontal():
-                # Left panel: Task tree (placeholder for Phase 2)
-                yield Static(
-                    "Task Tree\n(Coming in Phase 2)",
-                    id="tree-panel",
-                )
-
-                # Right panel: Task details (placeholder for Phase 3)
-                yield Static(
-                    "Task Details\n(Coming in Phase 3)",
-                    id="detail-panel",
-                )
-
-        # Footer with keybinding hints
+        yield Static("Task Queue Visualization - Coming Soon", id="content")
         yield Footer()
 
     def on_mount(self) -> None:
         """Called when screen is mounted - setup initial state."""
-        # Set footer help text
-        self.app.title = "Abathur Task Queue Visualizer"
-        self.app.sub_title = "Phase 1 - Foundation"
+        # Placeholder - will initialize data refresh in later phases
+        pass
 
     async def refresh_data(self) -> None:
         """Refresh data from services.
 
-        This will be implemented in Phase 2 when TaskDataService is available.
-        For Phase 1, this is a placeholder.
+        This will be implemented in Phase 2 when TaskDataService is integrated.
         """
-        # TODO: Phase 2 - Implement data refresh from TaskDataService
+        # Placeholder - will fetch and update task data
         pass
 
-    def apply_filter(self, filter_state) -> None:
+    def apply_filter(self, filter_state: dict) -> None:  # type: ignore[type-arg]
         """Apply filter to displayed data.
 
         Args:
-            filter_state: Filter criteria to apply
+            filter_state: Filter criteria from FilterScreen
 
-        This will be implemented in Phase 2 when filtering is active.
-        For Phase 1, this is a placeholder.
+        This will be implemented in Phase 4 when FilterScreen is complete.
         """
-        # TODO: Phase 2 - Implement filter application
+        # Placeholder - will filter task list
         pass
