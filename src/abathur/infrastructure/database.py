@@ -2736,6 +2736,50 @@ class Database:
             resolved_at=datetime.fromisoformat(row["resolved_at"]) if row["resolved_at"] else None,
         )
 
+    def _build_tree_structure(self, tree_nodes: list[Any]) -> dict[UUID, list[UUID]]:
+        """Build parent -> children adjacency list from flat tree nodes.
+
+        This helper method constructs a hierarchical tree structure from a flat
+        list of TreeNode objects. It builds an adjacency list mapping each parent
+        task ID to its list of child task IDs, and populates the children field
+        in each TreeNode object.
+
+        Args:
+            tree_nodes: Flat list of TreeNode objects with task_id, task, and
+                       parent_task_id attributes. The children field will be
+                       populated by this method.
+
+        Returns:
+            Dict mapping parent_id (UUID) to list of child IDs (list[UUID]).
+            Parent IDs with no children are not included in the dict.
+
+        Example:
+            >>> nodes = [
+            ...     TreeNode(task_id=uuid1, parent_id=None, children=[]),
+            ...     TreeNode(task_id=uuid2, parent_id=uuid1, children=[]),
+            ...     TreeNode(task_id=uuid3, parent_id=uuid1, children=[]),
+            ... ]
+            >>> adjacency = db._build_tree_structure(nodes)
+            >>> adjacency[uuid1]  # Returns [uuid2, uuid3]
+            >>> nodes[0].children  # Now contains [uuid2, uuid3]
+        """
+        # Build adjacency list mapping parent_id -> [child_ids]
+        children_map: dict[UUID, list[UUID]] = {}
+
+        for node in tree_nodes:
+            # Get parent_task_id from the task object
+            parent_id = node.task.parent_task_id
+            if parent_id is not None:
+                if parent_id not in children_map:
+                    children_map[parent_id] = []
+                children_map[parent_id].append(node.task_id)
+
+        # Populate children field in TreeNode objects
+        for node in tree_nodes:
+            node.children = children_map.get(node.task_id, [])
+
+        return children_map
+
     # Agent operations
     async def insert_agent(self, agent: Agent) -> None:
         """Insert a new agent into the database."""
