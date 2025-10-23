@@ -323,6 +323,35 @@ class TreeNode(BaseModel):
         self.children_ids.append(child_id)
 
 
+class RecursivePruneResult(PruneResult):
+    """Enhanced result with tree-specific statistics.
+
+    Extends PruneResult with additional metrics specific to recursive
+    tree deletion operations, including depth tracking and tree-level
+    deletion statistics.
+    """
+
+    tree_depth: int = Field(
+        ge=0,
+        description="Maximum depth of deleted tree"
+    )
+
+    deleted_by_depth: dict[int, int] = Field(
+        default_factory=dict,
+        description="Count of tasks deleted at each depth level"
+    )
+
+    trees_deleted: int = Field(
+        ge=0,
+        description="Number of complete task trees deleted"
+    )
+
+    partial_trees: int = Field(
+        ge=0,
+        description="Number of trees partially deleted"
+    )
+
+
 class Database:
     """SQLite database with WAL mode for concurrent access."""
 
