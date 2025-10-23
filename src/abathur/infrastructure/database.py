@@ -2431,6 +2431,163 @@ class Database:
                 tuple(batch),
             )
 
+    async def delete_task_trees_recursive(
+        self,
+        root_task_ids: list[UUID],
+        filters: PruneFilters
+    ) -> RecursivePruneResult:
+        """Delete task trees in leaves-to-root order within single transaction.
+
+        Implements recursive tree deletion with validation that all descendants
+        match the status criteria before deletion. Uses topological sorting to
+        ensure leaves-to-root deletion order.
+
+        Algorithm:
+        1. BEGIN TRANSACTION
+        2. For each root_task_id:
+           - Get tree with get_task_tree_with_status(filter_statuses=filters.statuses)
+           - Check all descendants match criteria with check_tree_all_match_status
+           - If not all match: skip tree (partial_trees++)
+           - If all match: add to deletion set (trees_deleted++)
+        3. Topological sort tasks by depth (deepest first)
+        4. Group by depth level, batch delete with _delete_tasks_by_ids
+        5. Build RecursivePruneResult with statistics
+        6. COMMIT (or ROLLBACK on error/dry_run)
+
+        Args:
+            root_task_ids: Root task IDs to delete (with their trees)
+            filters: PruneFilters with status criteria and dry_run flag
+
+        Returns:
+            RecursivePruneResult with deletion statistics and tree metrics
+
+        Raises:
+            ValueError: If root_task_ids is empty
+            RuntimeError: If deletion fails or transaction error occurs
+        """
+        if not root_task_ids:
+            raise ValueError("root_task_ids cannot be empty")
+
+        # Use filters.statuses for criteria, defaulting to pruneable statuses
+        allowed_statuses = filters.statuses or [
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        ]
+
+        async with self._get_connection() as conn:
+            # BEGIN TRANSACTION
+            await conn.execute("BEGIN TRANSACTION")
+
+            try:
+                # STEP 1: Identify which trees can be deleted (all descendants match)
+                trees_to_delete: dict[UUID, dict[UUID, TreeNode]] = {}
+                trees_deleted_count = 0
+                partial_trees_count = 0
+
+                for root_task_id in root_task_ids:
+                    # Get tree with status filtering
+                    tree = await self.get_task_tree_with_status(
+                        root_task_ids=[root_task_id],
+                        filter_statuses=allowed_statuses,
+                        max_depth=100,
+                    )
+
+                    # Check if all descendants match the status criteria
+                    match_results = await self.check_tree_all_match_status(
+                        root_task_ids=[root_task_id],
+                        allowed_statuses=allowed_statuses,
+                    )
+
+                    all_match = match_results.get(root_task_id, False)
+
+                    if all_match and tree:
+                        # All descendants match - safe to delete this tree
+                        trees_to_delete[root_task_id] = tree
+                        trees_deleted_count += 1
+                    else:
+                        # Not all descendants match - skip this tree
+                        partial_trees_count += 1
+
+                # If no trees to delete, return early
+                if not trees_to_delete:
+                    await conn.execute("ROLLBACK")
+                    return RecursivePruneResult(
+                        deleted_tasks=0,
+                        deleted_dependencies=0,
+                        reclaimed_bytes=None,
+                        dry_run=filters.dry_run,
+                        breakdown_by_status={},
+                        vacuum_auto_skipped=False,
+                        tree_depth=0,
+                        deleted_by_depth={},
+                        trees_deleted=0,
+                        partial_trees=partial_trees_count,
+                    )
+
+                # STEP 2: Flatten all trees and sort by depth (deepest first)
+                all_nodes: list[TreeNode] = []
+                max_depth = 0
+                deleted_by_depth: dict[int, int] = {}
+
+                for tree in trees_to_delete.values():
+                    for node in tree.values():
+                        all_nodes.append(node)
+                        max_depth = max(max_depth, node.depth)
+                        deleted_by_depth[node.depth] = deleted_by_depth.get(node.depth, 0) + 1
+
+                # Sort by depth (deepest first) for leaves-to-root deletion
+                all_nodes.sort(key=lambda n: n.depth, reverse=True)
+
+                # Convert nodes to task IDs for deletion
+                task_ids_to_delete = [str(node.id) for node in all_nodes]
+
+                # STEP 3: Collect status breakdown before deletion
+                status_breakdown: dict[TaskStatus, int] = {}
+                for node in all_nodes:
+                    status_breakdown[node.status] = status_breakdown.get(node.status, 0) + 1
+
+                # STEP 4: Delete tasks
+                if filters.dry_run:
+                    # Dry run: rollback without deleting
+                    await conn.execute("ROLLBACK")
+
+                    return RecursivePruneResult(
+                        deleted_tasks=len(task_ids_to_delete),
+                        deleted_dependencies=0,  # Would need to query for accurate count
+                        reclaimed_bytes=None,
+                        dry_run=True,
+                        breakdown_by_status=status_breakdown,
+                        vacuum_auto_skipped=False,
+                        tree_depth=max_depth,
+                        deleted_by_depth=deleted_by_depth,
+                        trees_deleted=trees_deleted_count,
+                        partial_trees=partial_trees_count,
+                    )
+                else:
+                    # Real deletion using unified core
+                    result = await self._delete_tasks_by_ids(
+                        conn, task_ids_to_delete, collect_stats=False
+                    )
+                    await conn.commit()
+
+                    return RecursivePruneResult(
+                        deleted_tasks=result["deleted_count"],
+                        deleted_dependencies=result["deleted_dependencies"],
+                        reclaimed_bytes=None,  # VACUUM not performed in this method
+                        dry_run=False,
+                        breakdown_by_status=status_breakdown,
+                        vacuum_auto_skipped=False,
+                        tree_depth=max_depth,
+                        deleted_by_depth=deleted_by_depth,
+                        trees_deleted=trees_deleted_count,
+                        partial_trees=partial_trees_count,
+                    )
+
+            except Exception as e:
+                await conn.execute("ROLLBACK")
+                raise RuntimeError(f"Failed to delete task trees recursively: {e}") from e
+
     async def prune_tasks(self, filters: PruneFilters) -> PruneResult:
         """Prune tasks based on age and status criteria.
 
