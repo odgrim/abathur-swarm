@@ -22,19 +22,82 @@ All worktrees are created in the `.abathur/` directory with the following struct
 
 ```
 .abathur/
-├── feature-auth/              # Worktree directory
-│   ├── venv/                  # Isolated virtualenv for this branch
-│   ├── src/                   # Source code (git worktree)
-│   ├── tests/                 # Tests
-│   └── pyproject.toml         # Dependencies
-└── bugfix-memory-leak/        # Another worktree
-    ├── venv/
-    └── ...
+├── features/                  # Feature branch worktrees (created by technical-requirements-specialist)
+│   ├── task-queue-enhancements/   # Feature worktree for entire feature
+│   │   ├── src/               # Source code (git worktree)
+│   │   ├── tests/             # Tests
+│   │   └── pyproject.toml     # Dependencies
+│   └── memory-service/        # Another feature worktree
+│       └── ...
+├── worktrees/                 # Task-specific worktrees (created by task-planner)
+│   ├── task-001-domain-model/ # Individual task worktree
+│   │   ├── src/               # Source code (git worktree)
+│   │   └── ...
+│   └── task-002-api/          # Another task worktree
+│       └── ...
+└── [legacy single worktrees]  # Old-style worktrees (deprecated)
+    ├── feature-auth/
+    └── bugfix-memory-leak/
 ```
+
+**Worktree Hierarchy:**
+- **Feature Worktrees** (`.abathur/features/`): Created by `technical-requirements-specialist` for entire features
+  - Branch: `feature/feature-name`
+  - Purpose: Main working directory for a feature
+  - Contains all changes for the feature
+  - Eventually merges to `main`
+
+- **Task Worktrees** (`.abathur/worktrees/`): Created by `task-planner` for individual tasks
+  - Branch: `task/task-id/timestamp`
+  - Purpose: Isolated work for a single atomic task
+  - Merges into the feature branch (not main)
+  - Enables parallel task execution without conflicts
 
 ## Core Commands
 
-### Create New Worktree with Virtual Environment
+### Create Feature Worktree (for entire feature)
+
+Creates a feature branch as a git worktree for all work related to a feature:
+
+```bash
+# Create feature worktree
+FEATURE_NAME="task-queue-enhancements"
+FEATURE_BRANCH="feature/$FEATURE_NAME"
+WORKTREE_PATH=".abathur/features/$FEATURE_NAME"
+
+# Ensure .abathur/features directory exists
+mkdir -p .abathur/features
+
+# Create feature worktree from main
+git worktree add -b "$FEATURE_BRANCH" "$WORKTREE_PATH"
+
+# Verify creation
+test -d "$WORKTREE_PATH" && echo "Feature worktree created at $WORKTREE_PATH"
+```
+
+### Create Task Worktree (for individual task)
+
+Creates a task-specific worktree that branches from a feature branch:
+
+```bash
+# Create task worktree from feature branch
+FEATURE_BRANCH="feature/task-queue-enhancements"
+TASK_ID="task-001-domain-model"
+TIMESTAMP=$(date +%Y%m%d-%H%M%S-%N)
+TASK_BRANCH="task/$TASK_ID/$TIMESTAMP"
+WORKTREE_PATH=".abathur/worktrees/$TASK_ID"
+
+# Ensure .abathur/worktrees directory exists
+mkdir -p .abathur/worktrees
+
+# Create task worktree from feature branch (not main!)
+git worktree add -b "$TASK_BRANCH" "$WORKTREE_PATH" "$FEATURE_BRANCH"
+
+# Verify creation
+test -d "$WORKTREE_PATH" && echo "Task worktree created at $WORKTREE_PATH"
+```
+
+### Create New Worktree with Virtual Environment (Legacy)
 
 Creates a new git worktree and sets up an isolated Python virtual environment:
 
