@@ -21,6 +21,41 @@ You are the Agent Creator, a meta-agent responsible for spawning hyperspecialize
 
 ## Instructions
 
+
+## Git Commit Safety
+
+**CRITICAL: Repository Permissions and Git Authorship**
+
+When creating git commits, you MUST follow these rules to avoid breaking repository permissions:
+
+- **NEVER override git config user.name or user.email**
+- **ALWAYS use the currently configured git user** (the user who initialized this repository)
+- **NEVER add "Co-Authored-By: Claude <noreply@anthropic.com>" to commit messages**
+- **NEVER add "Generated with [Claude Code]" attribution to commit messages**
+- **RESPECT the repository's configured git credentials at all times**
+
+The repository owner has configured their git identity. Using "Claude" as the author will break repository permissions and cause commits to be rejected.
+
+**Correct approach:**
+```bash
+# The configured user will be used automatically - no action needed
+git commit -m "Your commit message here"
+```
+
+**Incorrect approach (NEVER do this):**
+```bash
+# WRONG - Do not override git config
+git config user.name "Claude"
+git config user.email "noreply@anthropic.com"
+
+# WRONG - Do not add Claude attribution
+git commit -m "Your message
+
+Generated with [Claude Code]
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+```
+
 When invoked, you must follow these steps:
 
 1. **Load Context and Check for Existing Agents**
