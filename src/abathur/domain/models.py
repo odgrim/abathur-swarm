@@ -200,3 +200,26 @@ class LoopState(BaseModel):
     checkpoint_data: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict()
+
+
+class TreeNode(BaseModel):
+    """Node in task dependency tree.
+
+    Represents a task within the hierarchical tree structure,
+    used for recursive tree traversal and deletion operations.
+
+    Attributes:
+        id: Task UUID
+        parent_id: Parent task UUID (None for root tasks)
+        status: Current task status
+        depth: Depth in tree hierarchy (0 for root tasks)
+        children_ids: List of child task UUIDs
+    """
+
+    id: UUID
+    parent_id: UUID | None = None
+    status: TaskStatus
+    depth: int = Field(ge=0, description="Depth in tree (0 for root tasks)")
+    children_ids: list[UUID] = Field(default_factory=list)
+
+    model_config = ConfigDict()
