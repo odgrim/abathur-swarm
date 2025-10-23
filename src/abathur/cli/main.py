@@ -989,6 +989,66 @@ def task_status(watch: bool = typer.Option(False, help="Watch mode (live updates
     asyncio.run(_status())
 
 
+@task_app.command("visualize")
+def visualize_queue(
+    refresh_interval: float = typer.Option(2.0, "--refresh-interval", help="Auto-refresh interval in seconds"),
+    no_auto_refresh: bool = typer.Option(False, "--no-auto-refresh", help="Disable auto-refresh"),
+    view_mode: str = typer.Option("tree", "--view-mode", help="Initial view mode (tree, dependency, timeline, feature-branch, flat-list)"),
+    no_unicode: bool = typer.Option(False, "--no-unicode", help="Use ASCII instead of Unicode box-drawing"),
+) -> None:
+    """Launch interactive TUI for task queue visualization.
+
+    Examples:
+        abathur task visualize                              # Launch with defaults (tree view, auto-refresh)
+        abathur task visualize --no-auto-refresh            # Launch without auto-refresh
+        abathur task visualize --view-mode dependency       # Start with dependency view
+        abathur task visualize --refresh-interval 5.0       # Refresh every 5 seconds
+        abathur task visualize --no-unicode                 # Use ASCII box-drawing
+    """
+
+    async def _visualize() -> None:
+        try:
+            from abathur.tui.app import TaskQueueTUI
+            from abathur.tui.services.task_data_service import TaskDataService
+        except ImportError as e:
+            console.print(f"[red]Error:[/red] TUI components not yet implemented")
+            console.print(f"[dim]Missing: {e}[/dim]")
+            console.print("[yellow]The TUI is still under development. Use 'abathur task list' for now.[/yellow]")
+            raise typer.Exit(1)
+
+        try:
+            # Initialize services using existing helper
+            services = await _get_services()
+
+            # Create TaskDataService
+            task_data_service = TaskDataService(
+                database=services["database"],
+                task_queue_service=services["task_queue_service"],
+                dependency_resolver=services["task_queue_service"].dependency_resolver,
+            )
+
+            # Create TUI app
+            tui_app = TaskQueueTUI(
+                task_data_service=task_data_service,
+                refresh_interval=None if no_auto_refresh else refresh_interval,
+                initial_view_mode=view_mode,
+                use_unicode=not no_unicode,
+            )
+
+            # Run TUI
+            await tui_app.run_async()
+
+        except Exception as e:
+            console.print(f"[red]Error:[/red] Failed to launch TUI: {e}")
+            logger.exception("TUI launch failed")
+            raise typer.Exit(1)
+
+    try:
+        asyncio.run(_visualize())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]TUI closed[/yellow]")
+
+
 # ===== Swarm Commands =====
 swarm_app = typer.Typer(help="Agent swarm management", no_args_is_help=True)
 app.add_typer(swarm_app, name="swarm")
