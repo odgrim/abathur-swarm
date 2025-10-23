@@ -610,6 +610,127 @@ Required methods:
 
    Repeat for ALL atomic tasks with similarly rich context, hyperspecialized agents, AND proper agent-creation dependencies.
 
+8a. **Create Validation Tasks for Each Implementation Task (MANDATORY)**
+   **CRITICAL**: For EACH implementation task that has a worktree, you MUST create a corresponding validation task that runs immediately after the implementation completes.
+
+   **Purpose**: These per-task validation tasks create a test-then-route workflow:
+   - If tests pass: Route to merge (enqueue merge task)
+   - If tests fail: Route to remediation (enqueue fix task back to implementation agent)
+
+   **This creates the implementation → validation → (merge OR remediation) workflow.**
+
+   **Validation Task Creation Pattern**:
+   ```python
+   # For each implementation task with a worktree, create a validation task
+   for task_id in implementation_tasks_with_worktrees:
+       implementation_task_info = task_info[task_id]
+
+       validation_task_description = f"""
+# Validate Implementation: {task_id}
+
+## Context
+This validation task runs tests on the completed implementation in the worktree.
+Based on test results, this task will either route to merge or remediation.
+
+## Worktree Information
+- **Worktree Path**: {implementation_task_info['worktree_path']}
+- **Task Branch**: {implementation_task_info['task_branch']}
+- **Feature Branch**: {implementation_task_info['feature_branch']}
+- **Implementation Task**: {implementation_task_info['task_id']}
+- **Agent Type**: {implementation_task_info['agent_type']}
+
+## Your Responsibilities
+
+You are the validation-specialist. Your job is to:
+
+1. **Navigate to worktree**: `cd {implementation_task_info['worktree_path']}`
+2. **Run comprehensive tests**:
+   - Type checking: `mypy src/ --strict`
+   - Linting: `ruff check src/ tests/`
+   - Unit tests: `pytest tests/unit -v --cov=src`
+   - Integration tests: `pytest tests/integration -v`
+3. **Analyze results**:
+   - If ALL tests pass: Enqueue merge task to git-worktree-merge-orchestrator
+   - If ANY test fails: Enqueue remediation task back to {implementation_task_info['agent_type']}
+4. **Store results in memory**: Document validation outcome
+
+## Routing Logic
+
+### If Tests Pass (Success Path)
+Enqueue merge task with metadata:
+```python
+task_enqueue({{
+    "description": "Merge {implementation_task_info['task_branch']} into {implementation_task_info['feature_branch']}",
+    "agent_type": "git-worktree-merge-orchestrator",
+    "source": "validation-specialist",
+    "feature_branch": "{implementation_task_info['feature_branch']}",
+    "metadata": {{
+        "worktree_path": "{implementation_task_info['worktree_path']}",
+        "task_branch": "{implementation_task_info['task_branch']}",
+        "feature_branch": "{implementation_task_info['feature_branch']}",
+        "validation_passed": True
+    }}
+}})
+```
+
+### If Tests Fail (Remediation Path)
+Enqueue remediation task back to implementation agent:
+```python
+task_enqueue({{
+    "description": "Fix validation errors in {implementation_task_info['worktree_path']}...",
+    "agent_type": "{implementation_task_info['agent_type']}",
+    "source": "validation-specialist",
+    "worktree_path": "{implementation_task_info['worktree_path']}",
+    "feature_branch": "{implementation_task_info['feature_branch']}",
+    "metadata": {{
+        "task_type": "remediation",
+        "original_task_id": "{implementation_task_info['task_id']}",
+        "validation_failed": True
+    }}
+}})
+# Then create another validation task to re-check after remediation
+```
+
+## Success Criteria
+- Tests run successfully in worktree
+- Routing decision made (merge OR remediation)
+- Next task enqueued
+- Results stored in memory
+
+## Estimated Duration
+10-15 minutes
+"""
+
+       # Create validation task that depends on implementation task
+       validation_task = task_enqueue({{
+           "description": validation_task_description,
+           "source": "task-planner",
+           "priority": 7,  # High priority - blocks merge
+           "agent_type": "validation-specialist",
+           "estimated_duration_seconds": 900,  # 15 minutes
+           "prerequisite_task_ids": [implementation_task_info['task_id']],  # Waits for implementation
+           "feature_branch": feature_branch_name,
+           "metadata": {{
+               "task_type": "validation",
+               "worktree_path": implementation_task_info['worktree_path'],
+               "task_branch": implementation_task_info['task_branch'],
+               "feature_branch": implementation_task_info['feature_branch'],
+               "implementation_task_id": implementation_task_info['task_id'],
+               "original_agent_type": implementation_task_info['agent_type']
+           }}
+       }})
+
+       # Store validation task ID for tracking
+       validation_task_ids[task_id] = validation_task['task_id']
+   ```
+
+   **Key Points**:
+   - Create ONE validation task per implementation task with a worktree
+   - Validation tasks depend on their implementation task (use prerequisite_task_ids)
+   - Validation tasks use the validation-specialist agent
+   - Pass worktree information in metadata so validation-specialist can find the code
+   - Validation specialist will handle the routing logic (merge OR remediation)
+
 9. **Create Final Validation Task (MANDATORY)**
    **CRITICAL**: After creating all implementation tasks, you MUST create a final validation task that ensures code quality before marking the feature complete.
 
@@ -791,6 +912,8 @@ This task depends on completion of ALL implementation tasks:
 - **ALWAYS use prerequisite_task_ids to make implementation tasks depend on agent-creation tasks**
 - **🚨 ALWAYS create git worktrees for implementation tasks that modify code (step 5) 🚨**
 - **🚨 ALWAYS include worktree information in task descriptions and input_data for implementation tasks 🚨**
+- **🚨 ALWAYS create per-task validation tasks (step 8a) for each implementation task with a worktree 🚨**
+- **🚨 Validation tasks create the test-then-route workflow: implementation → validation → (merge OR remediation) 🚨**
 - **🚨 ALWAYS create a final validation task (step 9) that runs mypy, linters, and tests 🚨**
 - **🚨 NEVER mark a feature complete until the validation task passes 🚨**
 - **NEVER use generic agent types like "python-backend-developer", "general-purpose", or "implementation-specialist"**
