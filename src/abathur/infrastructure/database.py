@@ -250,6 +250,26 @@ class PruneResult(BaseModel):
         description="Whether VACUUM was automatically skipped due to large task count (>10,000 tasks)"
     )
 
+    tree_depth: int | None = Field(
+        default=None,
+        description="Maximum depth of deleted tree (None if not recursive)"
+    )
+
+    deleted_by_depth: dict[int, int] | None = Field(
+        default=None,
+        description="Count of tasks deleted at each depth level {0: 5, 1: 12, 2: 8}"
+    )
+
+    trees_affected: int | None = Field(
+        default=None,
+        description="Number of tree roots processed (None if not recursive)"
+    )
+
+    partial_trees_preserved: int | None = Field(
+        default=None,
+        description="Number of trees skipped due to non-matching children"
+    )
+
     @field_validator("breakdown_by_status")
     @classmethod
     def validate_breakdown_values(cls, v: dict[TaskStatus, int]) -> dict[TaskStatus, int]:
