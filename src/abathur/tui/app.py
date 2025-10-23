@@ -3,17 +3,17 @@
 This module implements the main TUI app class for Abathur task queue visualization.
 """
 
-from uuid import UUID
 from typing import Any
+from uuid import UUID
 
 from textual.app import App
 from textual.binding import Binding
 from textual.reactive import var
 from textual.timer import Timer
 
-from .models import ViewMode, FilterState
-from .screens.main_screen import MainScreen
+from .models import FilterState, ViewMode
 from .screens.filter_screen import FilterScreen
+from .screens.main_screen import MainScreen
 from .services.task_data_service import TaskDataService
 
 
