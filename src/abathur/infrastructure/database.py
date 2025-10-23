@@ -29,46 +29,6 @@ if TYPE_CHECKING:
     from abathur.services.session_service import SessionService
 
 
-@dataclass
-class TreeNode:
-    """Node in task tree discovered by WITH RECURSIVE CTE.
-
-    Represents a task in the hierarchical tree structure with its
-    position and relationships.
-
-    Attributes:
-        id: Task UUID
-        parent_id: Parent task UUID (None for root nodes)
-        status: Task status (TaskStatus enum value string)
-        depth: Distance from root in tree hierarchy (0 = root)
-    """
-    id: UUID
-    parent_id: UUID | None
-    status: str
-    depth: int
-
-    @classmethod
-    def from_row(cls, row_dict: dict[str, Any]) -> "TreeNode":
-        """Create TreeNode from database row dictionary.
-
-        Args:
-            row_dict: Dictionary with 'id', 'parent_id', 'status', 'depth' keys
-
-        Returns:
-            TreeNode instance
-
-        Raises:
-            KeyError: If required fields are missing
-            ValueError: If UUID parsing fails
-        """
-        return cls(
-            id=UUID(row_dict["id"]),
-            parent_id=UUID(row_dict["parent_id"]) if row_dict.get("parent_id") else None,
-            status=row_dict["status"],
-            depth=row_dict["depth"]
-        )
-
-
 # VACUUM threshold: only run conditional VACUUM if deleting this many tasks
 VACUUM_THRESHOLD_TASKS = 100
 
@@ -78,8 +38,11 @@ AUTO_SKIP_VACUUM_THRESHOLD = 10_000
 
 
 @dataclass
-class TreeNode:
-    """Runtime data structure representing a node in task tree during recursive operations."""
+class TreeDiscoveryNode:
+    """Runtime data structure representing a node in task tree during recursive operations.
+
+    Named TreeDiscoveryNode to avoid conflicts with TUI's TreeNode Pydantic model.
+    """
     id: UUID
     parent_id: UUID | None
     status: TaskStatus
@@ -87,8 +50,8 @@ class TreeNode:
     children_ids: list[UUID] = field(default_factory=list)
 
     @classmethod
-    def from_row(cls, row: dict) -> "TreeNode":
-        """Construct TreeNode from database query result row."""
+    def from_row(cls, row: dict) -> "TreeDiscoveryNode":
+        """Construct TreeDiscoveryNode from database query result row."""
         return cls(
             id=UUID(row["id"]),
             parent_id=UUID(row["parent_id"]) if row["parent_id"] else None,
@@ -2402,7 +2365,7 @@ class Database:
         conn: Connection,
         root_task_ids: list[UUID],
         max_depth: int = 100
-    ) -> list[TreeNode]:
+    ) -> list[TreeDiscoveryNode]:
         """Execute WITH RECURSIVE CTE to discover all descendants of root tasks.
 
         Uses SQLite's WITH RECURSIVE common table expression to efficiently
@@ -2473,7 +2436,7 @@ class Database:
                 "status": row[2],
                 "depth": row[3]
             }
-            nodes.append(TreeNode.from_row(row_dict))
+            nodes.append(TreeDiscoveryNode.from_row(row_dict))
 
         return nodes
 
