@@ -16,10 +16,14 @@ from pydantic import ValidationError
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
+from rich.text import Text
+from rich.tree import Tree
 
 from abathur import __version__
 from abathur.cli.utils import parse_duration_to_days
+from abathur.domain.models import TaskStatus
 from abathur.infrastructure.database import PruneFilters
+from abathur.tui.models import TreeNode
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +174,191 @@ async def _get_services() -> dict[str, Any]:
         "loop_executor": loop_executor,
         "config_manager": config_manager,
     }
+
+
+# ===== Tree Visualization Helpers =====
+def _get_status_color(status: TaskStatus) -> str:
+    """Get Rich color name for task status.
+
+    Uses semantic colors for accessibility:
+    - Green tones: Success, completion, ready
+    - Red tones: Failure, errors
+    - Yellow/Orange: Warnings, blocked
+    - Blue/Cyan: Information, pending
+    - Magenta: Active, running
+    - Dim/Gray: Cancelled, inactive
+
+    Args:
+        status: TaskStatus enum value
+
+    Returns:
+        Rich color name string (e.g., "green", "red", "blue")
+    """
+    color_map = {
+        TaskStatus.PENDING: "blue",
+        TaskStatus.BLOCKED: "yellow",
+        TaskStatus.READY: "cyan",
+        TaskStatus.RUNNING: "magenta",
+        TaskStatus.COMPLETED: "green",
+        TaskStatus.FAILED: "red",
+        TaskStatus.CANCELLED: "dim",
+    }
+    return color_map.get(status, "white")
+
+
+def _get_status_symbol(status: TaskStatus) -> str:
+    """Get Unicode symbol for task status.
+
+    Provides visual indicator in addition to color for accessibility.
+    Supports users with color blindness or limited color terminals.
+
+    Args:
+        status: TaskStatus enum value
+
+    Returns:
+        Unicode status symbol character
+    """
+    symbol_map = {
+        TaskStatus.PENDING: "○",      # Empty circle
+        TaskStatus.BLOCKED: "⊗",      # Circled X
+        TaskStatus.READY: "◎",        # Double circle
+        TaskStatus.RUNNING: "◉",      # Filled circle
+        TaskStatus.COMPLETED: "✓",    # Check mark
+        TaskStatus.FAILED: "✗",       # X mark
+        TaskStatus.CANCELLED: "⊘",    # Circle with slash
+    }
+    return symbol_map.get(status, "•")
+
+
+def _render_tree_preview(
+    tree_nodes: list[TreeNode],
+    max_depth: int = 5,
+    console: Console | None = None,
+) -> None:
+    """Render hierarchical tree structure using Rich Tree widget.
+
+    Displays task hierarchy with color-coded status, truncating at max_depth
+    to prevent overwhelming output for large trees.
+
+    Args:
+        tree_nodes: Nodes to visualize (from _discover_task_tree)
+        max_depth: Maximum tree depth to display (default 5, shows "..." beyond)
+        console: Rich console for output (uses global console if None)
+
+    Example:
+        >>> nodes = await database._discover_task_tree(conn, [root_id])
+        >>> _render_tree_preview(nodes, max_depth=3, console=console)
+
+    Output format:
+        Task Tree (3 tasks)
+        ├── ✓ Implement feature X (completed)
+        │   ├── ✓ Write unit tests (completed)
+        │   └── ✓ Update documentation (completed)
+        └── ○ Follow-up task Y (pending)
+    """
+    if console is None:
+        # Use global console instance
+        console = globals()["console"]
+
+    if not tree_nodes:
+        console.print("[yellow]No tasks to display[/yellow]")
+        return
+
+    # Build node map and identify roots
+    node_map = {node.task_id: node for node in tree_nodes}
+    root_nodes = [
+        node for node in tree_nodes
+        if node.task.parent_task_id is None or node.task.parent_task_id not in node_map
+    ]
+
+    # Create root tree with title
+    root_tree = Tree(
+        Text(f"Task Tree ({len(tree_nodes)} tasks)", style="bold cyan"),
+        guide_style="dim"  # Dim connecting lines
+    )
+
+    def add_subtree(
+        parent_widget: Tree,
+        node: TreeNode,
+        current_depth: int
+    ) -> None:
+        """Recursively add nodes to tree widget with depth truncation."""
+
+        # Check depth limit
+        if current_depth >= max_depth:
+            parent_widget.add(
+                Text("... (more items)", style="dim italic")
+            )
+            return
+
+        # Create node label with color coding and status symbol
+        label = _format_node_label(node)
+
+        # Add node to parent
+        subtree = parent_widget.add(label)
+
+        # Get and sort children by priority (highest first)
+        children = [
+            node_map[child_id]
+            for child_id in node.children
+            if child_id in node_map
+        ]
+        children.sort(
+            key=lambda n: n.task.calculated_priority,
+            reverse=True
+        )
+
+        # Add children recursively
+        for child in children:
+            add_subtree(subtree, child, current_depth + 1)
+
+    # Build tree from root nodes
+    for root_node in root_nodes:
+        add_subtree(root_tree, root_node, 0)
+
+    # Render to console
+    console.print(root_tree)
+
+
+def _format_node_label(node: TreeNode) -> Text:
+    """Format tree node with color-coded status and summary.
+
+    Returns Rich Text object with styling based on task status.
+
+    Args:
+        node: TreeNode to format
+
+    Returns:
+        Rich Text with status symbol, summary, and metadata
+    """
+    # Get status color and symbol
+    status_color = _get_status_color(node.task.status)
+    status_symbol = _get_status_symbol(node.task.status)
+
+    # Truncate summary to 40 chars
+    summary = node.task.summary[:40] if node.task.summary else "No summary"
+    if node.task.summary and len(node.task.summary) > 40:
+        summary += "..."
+
+    # Get task ID prefix (first 8 chars)
+    task_id_prefix = str(node.task.id)[:8]
+
+    # Create styled text
+    text = Text()
+
+    # Add status symbol
+    text.append(f"{status_symbol} ", style=status_color)
+
+    # Add summary
+    text.append(summary, style=status_color)
+
+    # Add status label in parentheses
+    text.append(f" ({node.task.status.value})", style="dim")
+
+    # Add task ID prefix
+    text.append(f" [{task_id_prefix}]", style="dim cyan")
+
+    return text
 
 
 # ===== Version =====
