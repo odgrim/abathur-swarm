@@ -1,4 +1,4 @@
-# Abathur TUI Task Visualizer Guide
+# Abathur Task Graph Guide
 
 The Abathur TUI (Text User Interface) provides an interactive, real-time terminal interface for visualizing and managing task queues.
 
