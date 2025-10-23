@@ -1568,33 +1568,44 @@ def mem_list(
     asyncio.run(_list())
 
 
-@mem_app.command("task")
-def mem_task(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> None:
-    """Show all memory entries for a specific task.
+@mem_app.command("show")
+def mem_show(
+    namespace_prefix: str = typer.Argument(..., help="Namespace prefix to filter memories")
+) -> None:
+    """Show all memory entries matching a namespace prefix.
 
     Examples:
-        abathur mem task ebec23ad
-        abathur mem task ebec23ad-1234-5678-90ab-cdef12345678
+        abathur mem show task:535a8666
+        abathur mem show project:my-project
+        abathur mem show user:alice
     """
 
-    async def _task() -> None:
+    async def _show() -> None:
         services = await _get_services()
 
-        # Resolve task ID
-        resolved_id = await _resolve_task_id(task_id, services)
+        # If the prefix looks like a task ID without "task:" prefix, add it
+        if namespace_prefix and ":" not in namespace_prefix:
+            # Might be a bare task ID, try to resolve it
+            try:
+                resolved_id = await _resolve_task_id(namespace_prefix, services)
+                task = await services["task_coordinator"].get_task(resolved_id)
+                if task:
+                    # Display task context
+                    console.print(f"[bold]Task {resolved_id}[/bold]")
+                    if task.summary:
+                        console.print(f"Summary: [magenta]{task.summary}[/magenta]\n")
+                    final_prefix = f"task:{resolved_id}"
+                else:
+                    final_prefix = namespace_prefix
+            except Exception:
+                # Not a valid task ID, use as-is
+                final_prefix = namespace_prefix
+        else:
+            final_prefix = namespace_prefix
 
-        # Check if task exists
-        task = await services["task_coordinator"].get_task(resolved_id)
-        if not task:
-            console.print(f"[red]Error:[/red] Task {task_id} not found")
-            raise typer.Exit(1)
+        console.print(f"[dim]Searching for memories with prefix: {final_prefix}[/dim]\n")
 
-        console.print(f"[bold]Task {resolved_id}[/bold]")
-        if task.summary:
-            console.print(f"Summary: [magenta]{task.summary}[/magenta]\n")
-
-        # Query memories for this task
-        namespace_prefix = f"task:{resolved_id}:"
+        # Query memories with the given prefix
         query = """
             SELECT id, namespace, key, value, memory_type, version, created_by, updated_by, created_at, updated_at
             FROM memory_entries
@@ -1603,11 +1614,11 @@ def mem_task(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> No
         """
 
         async with services["database"]._get_connection() as conn:
-            cursor = await conn.execute(query, (f"{namespace_prefix}%",))
+            cursor = await conn.execute(query, (f"{final_prefix}%",))
             rows = await cursor.fetchall()
 
         if not rows:
-            console.print("[yellow]No memories found for this task[/yellow]")
+            console.print(f"[yellow]No memories found with prefix '{final_prefix}'[/yellow]")
             return
 
         console.print(f"[green]Found {len(rows)} memory entries[/green]\n")
@@ -1636,7 +1647,7 @@ def mem_task(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> No
             except json.JSONDecodeError:
                 console.print(row["value"])
 
-    asyncio.run(_task())
+    asyncio.run(_show())
 
 
 @mem_app.command("prune")
