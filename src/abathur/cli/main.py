@@ -555,6 +555,32 @@ def task_show(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> N
         if task.error_message:
             console.print(f"\n[red]Error:[/red] {task.error_message}")
 
+        # Retrieve child tasks
+        children = await services["database"].get_child_tasks([resolved_id])
+
+        if children:
+            console.print("\n[bold]Child Tasks:[/bold]")
+            child_table = Table()
+            child_table.add_column("ID", style="cyan", no_wrap=True)
+            child_table.add_column("Summary", style="magenta")
+            child_table.add_column("Status", style="yellow")
+
+            for child in children:
+                # Truncate summary to 40 chars (matches task list pattern)
+                summary_preview = (
+                    (child.summary[:40] + "...")
+                    if child.summary and len(child.summary) > 40
+                    else (child.summary or "-")
+                )
+                # Add row: 8-char ID prefix, truncated summary, status
+                child_table.add_row(
+                    str(child.id)[:8],
+                    summary_preview,
+                    child.status.value
+                )
+
+            console.print(child_table)
+
     asyncio.run(_status())
 
 
