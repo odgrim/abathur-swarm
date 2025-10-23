@@ -1,0 +1,148 @@
+{
+    "machine_info": {
+        "node": "devkit.local",
+        "processor": "arm",
+        "machine": "arm64",
+        "python_compiler": "Clang 20.1.4 ",
+        "python_implementation": "CPython",
+        "python_implementation_version": "3.10.19",
+        "python_version": "3.10.19",
+        "python_build": [
+            "main",
+            "Oct 10 2025 12:33:41"
+        ],
+        "release": "24.6.0",
+        "system": "Darwin",
+        "cpu": {
+            "python_version": "3.10.19.final.0 (64 bit)",
+            "cpuinfo_version": [
+                9,
+                0,
+                0
+            ],
+            "cpuinfo_version_string": "9.0.0",
+            "arch": "ARM_8",
+            "bits": 64,
+            "count": 16,
+            "arch_string_raw": "arm64",
+            "brand_raw": "Apple M4 Max"
+        }
+    },
+    "commit_info": {
+        "id": "d7a09cb1e08476b287dc679cf9fe3bc35d899441",
+        "time": "2025-10-22T21:55:06-07:00",
+        "author_time": "2025-10-22T21:55:06-07:00",
+        "dirty": false,
+        "project": "abathur-swarm",
+        "branch": "task/phase5-performance-tests/20251022-221245-111829000"
+    },
+    "benchmarks": [
+        {
+            "group": null,
+            "name": "test_1000_task_tree_under_5s",
+            "fullname": "tests/performance/test_recursive_prune_performance.py::test_1000_task_tree_under_5s",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.07360879145562649,
+                "max": 0.07643287535756826,
+                "mean": 0.07513502247344989,
+                "stddev": 0.0009873339608189007,
+                "rounds": 13,
+                "median": 0.07498854212462902,
+                "iqr": 0.0015180832706391811,
+                "q1": 0.0744970419909805,
+                "q3": 0.07601512526161969,
+                "iqr_outliers": 0,
+                "stddev_outliers": 6,
+                "outliers": "6;0",
+                "ld15iqr": 0.07360879145562649,
+                "hd15iqr": 0.07643287535756826,
+                "ops": 13.309372474778527,
+                "total": 0.9767552921548486,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_deep_tree_performance",
+            "fullname": "tests/performance/test_recursive_prune_performance.py::test_deep_tree_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.004883083514869213,
+                "max": 0.00780870858579874,
+                "mean": 0.005442760647538136,
+                "stddev": 0.00035718270867943046,
+                "rounds": 106,
+                "median": 0.005354291293770075,
+                "iqr": 0.0003093760460615158,
+                "q1": 0.005232124589383602,
+                "q3": 0.005541500635445118,
+                "iqr_outliers": 5,
+                "stddev_outliers": 15,
+                "outliers": "15;5",
+                "ld15iqr": 0.004883083514869213,
+                "hd15iqr": 0.0060735829174518585,
+                "ops": 183.73029143809936,
+                "total": 0.5769326286390424,
+                "iterations": 1
+            }
+        },
+        {
+            "group": null,
+            "name": "test_wide_tree_performance",
+            "fullname": "tests/performance/test_recursive_prune_performance.py::test_wide_tree_performance",
+            "params": null,
+            "param": null,
+            "extra_info": {},
+            "options": {
+                "disable_gc": false,
+                "timer": "perf_counter",
+                "min_rounds": 5,
+                "max_time": 1.0,
+                "min_time": 5e-06,
+                "warmup": false
+            },
+            "stats": {
+                "min": 0.0053550004959106445,
+                "max": 0.006186707876622677,
+                "mean": 0.005754189772738351,
+                "stddev": 0.0002845941000403216,
+                "rounds": 9,
+                "median": 0.0058071669191122055,
+                "iqr": 0.0004500837530940771,
+                "q1": 0.005526457913219929,
+                "q3": 0.005976541666314006,
+                "iqr_outliers": 0,
+                "stddev_outliers": 3,
+                "outliers": "3;0",
+                "ld15iqr": 0.0053550004959106445,
+                "hd15iqr": 0.006186707876622677,
+                "ops": 173.78641294343544,
+                "total": 0.05178770795464516,
+                "iterations": 1
+            }
+        }
+    ],
+    "datetime": "2025-10-23T06:15:35.705919+00:00",
+    "version": "5.1.0"
+}
