@@ -79,6 +79,11 @@ class PruneFilters(BaseModel):
         description="VACUUM strategy: 'always', 'conditional', or 'never'",
     )
 
+    recursive: bool = Field(
+        default=False,
+        description="Enable recursive tree deletion with status checking"
+    )
+
     @model_validator(mode="after")
     def validate_filters(self) -> "PruneFilters":
         """Ensure at least one selection criterion is specified."""
@@ -251,6 +256,24 @@ class RecursivePruneResult(PruneResult):
         ge=0,
         description="Number of trees partially deleted"
     )
+
+
+class TreeNode(BaseModel):
+    """Runtime data structure for task tree traversal (not persisted)."""
+
+    id: UUID = Field(description="Task identifier")
+    parent_id: UUID | None = Field(default=None, description="Parent task reference")
+    status: TaskStatus = Field(description="Current task status")
+    depth: int = Field(ge=0, le=100, description="Depth in tree (0 for root)")
+    children_ids: list[UUID] = Field(default_factory=list, description="Direct children")
+
+    def is_leaf(self) -> bool:
+        """Check if node is a leaf (no children)."""
+        return len(self.children_ids) == 0
+
+    def add_child(self, child_id: UUID) -> None:
+        """Add child ID to children list."""
+        self.children_ids.append(child_id)
 
 
 class Database:
