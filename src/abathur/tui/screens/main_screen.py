@@ -8,7 +8,7 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.screen import Screen
-from textual.widgets import Header, Footer, Static
+from textual.widgets import Footer, Header, Static
 
 
 class MainScreen(Screen[Any]):
