@@ -56,7 +56,21 @@ A CLI orchestration system for managing swarms of specialized Claude agents with
 
 ## Installation
 
-### From Source
+### Using pip
+
+```bash
+pip install abathur
+```
+
+### Using pipx (Recommended for CLI tools)
+
+[pipx](https://pipx.pypa.io/) installs the CLI in an isolated environment, preventing dependency conflicts:
+
+```bash
+pipx install abathur
+```
+
+### For Development
 
 ```bash
 git clone https://github.com/yourorg/abathur.git
@@ -346,11 +360,10 @@ pre-commit run --all-files
 ### Running Locally
 
 ```bash
-# Use module invocation (workaround for entry point issue)
-python -m abathur.cli.main --help
-
-# Or install in editable mode
+# Install in editable mode
 poetry install
+
+# Use the CLI
 abathur --help
 ```
 
@@ -395,23 +408,6 @@ This is a working system with the following components implemented:
 - Dependency Check: O(d) per task
 - Concurrent Agents: Configurable limit
 - Database: SQLite with WAL mode
-
----
-
-## Known Issues
-
-### CLI Entry Point
-
-**Status**: Documented, workaround available
-
-**Issue**: Entry point may not work with some Typer versions
-
-**Workaround**:
-```bash
-python -m abathur.cli.main <command>
-```
-
-**Priority**: Low (all functionality works via workaround)
 
 ---
 
