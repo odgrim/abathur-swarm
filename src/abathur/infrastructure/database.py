@@ -1926,6 +1926,109 @@ class Database:
             rows = await cursor.fetchall()
             return [self._row_to_task(row) for row in rows]
 
+    async def check_tree_all_match_status(
+        self,
+        root_task_ids: list[UUID],
+        allowed_statuses: list[TaskStatus]
+    ) -> dict[UUID, bool]:
+        """Check if entire tree matches deletion criteria.
+
+        For each root task, recursively checks if all descendants (including the root)
+        have statuses in the allowed_statuses list. Uses SQL WITH RECURSIVE for
+        efficient tree traversal.
+
+        Args:
+            root_task_ids: Root task IDs to check (non-empty list required)
+            allowed_statuses: Statuses matching deletion criteria (e.g., [COMPLETED, FAILED, CANCELLED])
+
+        Returns:
+            Mapping of root_task_id -> bool (True if all descendants match, False otherwise)
+
+        Raises:
+            ValueError: If root_task_ids or allowed_statuses is empty
+            DatabaseError: If SQL query fails
+
+        Performance:
+            O(n) where n = total descendants across all trees
+        """
+        # Validate parameters
+        if not root_task_ids:
+            raise ValueError("root_task_ids cannot be empty")
+        if not allowed_statuses:
+            raise ValueError("allowed_statuses cannot be empty")
+
+        # Convert statuses to values for SQL
+        status_values = [status.value for status in allowed_statuses]
+
+        result: dict[UUID, bool] = {}
+
+        async with self._get_connection() as conn:
+            # Process each root task individually
+            # Future optimization: batch multiple roots into single query
+            for root_task_id in root_task_ids:
+                root_id_str = str(root_task_id)
+
+                # Build status filter placeholders
+                status_placeholders = ",".join("?" * len(status_values))
+
+                # Count total descendants (including root) using WITH RECURSIVE
+                total_count_query = f"""
+                    WITH RECURSIVE task_tree(id, parent_task_id, status, depth) AS (
+                        -- Base case: root task
+                        SELECT id, parent_task_id, status, 0 as depth
+                        FROM tasks
+                        WHERE id = ?
+
+                        UNION ALL
+
+                        -- Recursive case: children of tasks in tree
+                        SELECT t.id, t.parent_task_id, t.status, tree.depth + 1
+                        FROM tasks t
+                        INNER JOIN task_tree tree ON t.parent_task_id = tree.id
+                        WHERE tree.depth < 100  -- Prevent infinite loops
+                    )
+                    SELECT COUNT(*) as total_count
+                    FROM task_tree
+                """
+
+                cursor = await conn.execute(total_count_query, (root_id_str,))
+                total_row = await cursor.fetchone()
+                total_count = total_row["total_count"] if total_row else 0
+
+                # Count descendants with allowed statuses using WITH RECURSIVE
+                matching_count_query = f"""
+                    WITH RECURSIVE task_tree(id, parent_task_id, status, depth) AS (
+                        -- Base case: root task
+                        SELECT id, parent_task_id, status, 0 as depth
+                        FROM tasks
+                        WHERE id = ?
+
+                        UNION ALL
+
+                        -- Recursive case: children of tasks in tree
+                        SELECT t.id, t.parent_task_id, t.status, tree.depth + 1
+                        FROM tasks t
+                        INNER JOIN task_tree tree ON t.parent_task_id = tree.id
+                        WHERE tree.depth < 100  -- Prevent infinite loops
+                    )
+                    SELECT COUNT(*) as matching_count
+                    FROM task_tree
+                    WHERE status IN ({status_placeholders})
+                """
+
+                cursor = await conn.execute(
+                    matching_count_query,
+                    (root_id_str, *status_values)
+                )
+                matching_row = await cursor.fetchone()
+                matching_count = matching_row["matching_count"] if matching_row else 0
+
+                # All descendants match if counts are equal and > 0
+                all_match = total_count > 0 and total_count == matching_count
+                result[root_task_id] = all_match
+
+        return result
+
     async def delete_task(self, task_id: UUID) -> bool:
         """Delete a single task by UUID.
 
