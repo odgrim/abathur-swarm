@@ -3,6 +3,7 @@
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -26,6 +27,46 @@ if TYPE_CHECKING:
     from abathur.services.document_index_service import DocumentIndexService
     from abathur.services.memory_service import MemoryService
     from abathur.services.session_service import SessionService
+
+
+@dataclass
+class TreeNode:
+    """Node in task tree discovered by WITH RECURSIVE CTE.
+
+    Represents a task in the hierarchical tree structure with its
+    position and relationships.
+
+    Attributes:
+        id: Task UUID
+        parent_id: Parent task UUID (None for root nodes)
+        status: Task status (TaskStatus enum value string)
+        depth: Distance from root in tree hierarchy (0 = root)
+    """
+    id: UUID
+    parent_id: UUID | None
+    status: str
+    depth: int
+
+    @classmethod
+    def from_row(cls, row_dict: dict[str, Any]) -> "TreeNode":
+        """Create TreeNode from database row dictionary.
+
+        Args:
+            row_dict: Dictionary with 'id', 'parent_id', 'status', 'depth' keys
+
+        Returns:
+            TreeNode instance
+
+        Raises:
+            KeyError: If required fields are missing
+            ValueError: If UUID parsing fails
+        """
+        return cls(
+            id=UUID(row_dict["id"]),
+            parent_id=UUID(row_dict["parent_id"]) if row_dict.get("parent_id") else None,
+            status=row_dict["status"],
+            depth=row_dict["depth"]
+        )
 
 
 # VACUUM threshold: only run conditional VACUUM if deleting this many tasks
@@ -248,6 +289,19 @@ class Database:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         async with self._get_connection() as conn:
+            # Verify SQLite version supports WITH RECURSIVE (3.8.3+)
+            cursor = await conn.execute("SELECT sqlite_version()")
+            version_row = await cursor.fetchone()
+            if version_row:
+                version = version_row[0]
+                # Parse version as tuple for comparison
+                version_parts = tuple(int(x) for x in version.split('.'))
+                required_parts = (3, 8, 3)
+                if version_parts < required_parts:
+                    raise RuntimeError(
+                        f"SQLite 3.8.3+ required for WITH RECURSIVE, found {version}"
+                    )
+
             # Enable WAL mode for concurrent reads
             await conn.execute("PRAGMA journal_mode=WAL")
             await conn.execute("PRAGMA synchronous=NORMAL")
@@ -2313,6 +2367,86 @@ class Database:
             except Exception as e:
                 await conn.execute("ROLLBACK")
                 raise RuntimeError(f"Failed to prune tasks: {e}") from e
+
+    async def _discover_task_tree(
+        self,
+        conn: Connection,
+        root_task_ids: list[UUID],
+        max_depth: int = 100
+    ) -> list[TreeNode]:
+        """Execute WITH RECURSIVE CTE to discover all descendants of root tasks.
+
+        Uses SQLite's WITH RECURSIVE common table expression to efficiently
+        traverse the task hierarchy and discover all descendants of the given
+        root tasks. Returns nodes ordered by depth (deepest first) for safe
+        deletion order.
+
+        Args:
+            conn: Active database connection within transaction
+            root_task_ids: Root task IDs to start tree traversal from
+            max_depth: Maximum tree depth to prevent infinite loops (default 100)
+
+        Returns:
+            All nodes in discovered trees, ordered by depth DESC (deepest first)
+
+        Raises:
+            ValueError: If root_task_ids is empty
+            aiosqlite.DatabaseError: If SQL execution fails
+
+        Example:
+            >>> async with self._get_connection() as conn:
+            ...     nodes = await self._discover_task_tree(
+            ...         conn,
+            ...         [UUID('ebec23ad-...')],
+            ...         max_depth=50
+            ...     )
+            >>> # nodes[0] is deepest descendant
+            >>> # nodes[-1] is root task
+        """
+        if not root_task_ids:
+            raise ValueError("root_task_ids cannot be empty")
+
+        # Build parameter placeholders for IN clause
+        placeholders = ",".join("?" * len(root_task_ids))
+
+        # WITH RECURSIVE CTE query
+        # - Base case: Select root tasks with depth=0
+        # - Recursive case: Join children with parent tree, increment depth
+        # - Order by depth DESC to get leaves first (safe deletion order)
+        query = f"""
+        WITH RECURSIVE task_tree (id, parent_id, status, depth) AS (
+          SELECT id, parent_task_id, status, 0 as depth
+          FROM tasks
+          WHERE id IN ({placeholders})
+          UNION ALL
+          SELECT t.id, t.parent_task_id, t.status, tree.depth + 1
+          FROM tasks t
+          JOIN task_tree tree ON t.parent_task_id = tree.id
+          WHERE tree.depth < ?
+        )
+        SELECT * FROM task_tree
+        ORDER BY depth DESC
+        """
+
+        # Build parameters: root task IDs as strings + max_depth
+        params = [str(task_id) for task_id in root_task_ids] + [max_depth]
+
+        cursor = await conn.execute(query, params)
+        rows = await cursor.fetchall()
+
+        # Convert rows to TreeNode objects
+        nodes = []
+        for row in rows:
+            # aiosqlite.Row supports both index and name access
+            row_dict = {
+                "id": row[0],
+                "parent_id": row[1],
+                "status": row[2],
+                "depth": row[3]
+            }
+            nodes.append(TreeNode.from_row(row_dict))
+
+        return nodes
 
     def _row_to_task(self, row: aiosqlite.Row) -> Task:
         """Convert database row to Task model."""
