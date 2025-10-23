@@ -1311,7 +1311,7 @@ def visualize_queue(
     view_mode: str = typer.Option("tree", "--view-mode", help="Initial view mode (tree, dependency, timeline, feature-branch, flat-list)"),
     no_unicode: bool = typer.Option(False, "--no-unicode", help="Use ASCII instead of Unicode box-drawing"),
 ) -> None:
-    """Launch interactive TUI for task queue visualization.
+    """Launch the Abathur Task Graph TUI.
 
     Examples:
         abathur task visualize                              # Launch with defaults (tree view, auto-refresh)
