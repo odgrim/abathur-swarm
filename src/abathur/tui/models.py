@@ -14,8 +14,12 @@ from abathur.domain.models import Task, TaskStatus, TaskSource
 class ViewMode(str, Enum):
     """Task visualization modes for TUI."""
 
-    TREE = "tree"  # Hierarchical tree view
-    FLAT = "flat"  # Flat list view
+    TREE = "tree"  # Hierarchical tree view (parent-child relationships)
+    DEPENDENCY = "dependency"  # Dependency graph view (prerequisite relationships)
+    TIMELINE = "timeline"  # Timeline view (sorted by creation/deadline)
+    FEATURE_BRANCH = "feature_branch"  # Feature branch view (grouped by feature)
+    FLAT_LIST = "flat_list"  # Flat list view (simple list)
+    FLAT = "flat"  # Alias for FLAT_LIST (for backward compatibility)
     DAG = "dag"  # Full DAG visualization (future)
 
 
@@ -77,9 +81,9 @@ class TreeLayout(BaseModel):
         Returns:
             List of TreeNode objects that should be rendered
         """
-        visible = []
+        visible: list[TreeNode] = []
 
-        def traverse(node_id: UUID, is_visible: bool):
+        def traverse(node_id: UUID, is_visible: bool) -> None:
             """Recursively traverse tree and collect visible nodes."""
             if node_id not in self.nodes:
                 return
@@ -124,8 +128,8 @@ class TreeLayout(BaseModel):
                 parent_map[child_id] = node_id
 
         # Trace path from task to root
-        path = []
-        current = task_id
+        path: list[UUID] = []
+        current: UUID | None = task_id
 
         # Guard against cycles and missing nodes
         visited = set()

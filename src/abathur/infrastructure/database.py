@@ -688,7 +688,7 @@ class Database:
                     WHERE a.task_id IS NOT NULL AND t.id IS NULL
                 """)
                 orphan_result = await cursor.fetchone()
-                orphan_count = orphan_result["orphan_count"]
+                orphan_count = orphan_result["orphan_count"] if orphan_result else 0
 
                 if orphan_count > 0:
                     print(f"\n{'='*80}")
@@ -869,7 +869,7 @@ class Database:
                     WHERE c.task_id IS NOT NULL AND t.id IS NULL
                 """)
                 orphan_result = await cursor.fetchone()
-                orphan_count = orphan_result["orphan_count"]
+                orphan_count = orphan_result["orphan_count"] if orphan_result else 0
 
                 if orphan_count > 0:
                     print(f"\n{'='*80}")
@@ -2178,6 +2178,56 @@ class Database:
                 """,
                 tuple(batch),
             )
+
+    async def _find_root_tasks_for_recursive_prune(
+        self,
+        filters: PruneFilters
+    ) -> list[UUID]:
+        """Find root tasks matching prune filters for recursive deletion.
+
+        Logic:
+        1. Find all tasks matching filter criteria (status, session_id, etc.)
+        2. Filter to only root tasks (parent_id IS NULL or parent not in result set)
+
+        Args:
+            filters: PruneFilters with status criteria
+
+        Returns:
+            List of root task UUIDs
+        """
+        async with self._get_connection() as conn:
+            # Build WHERE clause using existing filter logic
+            where_sql, params = filters.build_where_clause()
+            limit_sql = f"LIMIT {filters.limit}" if filters.limit else ""
+
+            # Query all tasks matching the filters
+            cursor = await conn.execute(
+                f"""
+                SELECT id, parent_task_id FROM tasks
+                WHERE {where_sql}
+                ORDER BY submitted_at ASC
+                {limit_sql}
+                """,
+                tuple(params),
+            )
+            task_rows = await cursor.fetchall()
+
+            if not task_rows:
+                return []
+
+            # Build set of all matching task IDs for fast lookup
+            matching_task_ids = {row["id"] for row in task_rows}
+
+            # Identify root tasks:
+            # - Tasks with parent_task_id IS NULL (true roots)
+            # - Tasks whose parent_task_id is NOT in the matching set (orphans within this selection)
+            root_task_ids = []
+            for row in task_rows:
+                parent_id = row["parent_task_id"]
+                if parent_id is None or parent_id not in matching_task_ids:
+                    root_task_ids.append(UUID(row["id"]))
+
+            return root_task_ids
 
     async def prune_tasks(self, filters: PruneFilters) -> PruneResult:
         """Prune tasks based on age and status criteria.

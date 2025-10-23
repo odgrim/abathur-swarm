@@ -113,6 +113,11 @@ class TaskQueueService:
 
         logger.debug("TaskQueueService initialized")
 
+    @property
+    def dependency_resolver(self) -> DependencyResolver:
+        """Access to dependency resolver for external use (e.g., TUI services)."""
+        return self._dependency_resolver
+
     async def enqueue_task(
         self,
         description: str,

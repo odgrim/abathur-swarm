@@ -11,7 +11,7 @@ from textual.binding import Binding
 from textual.reactive import var
 from textual.timer import Timer
 
-from .models import ViewMode
+from .models import ViewMode, FilterState
 from .screens.main_screen import MainScreen
 from .screens.filter_screen import FilterScreen
 from .services.task_data_service import TaskDataService
@@ -162,7 +162,11 @@ class TaskQueueTUI(App[None]):
         Opens FilterScreen modal for user to set filter criteria.
         Applies filter via callback when modal is dismissed.
         """
-        self.push_screen(FilterScreen(), callback=self._on_filter_applied)
+        def handle_filter(result: FilterState | None) -> None:
+            """Handle filter screen result."""
+            self._on_filter_applied(result)
+
+        self.push_screen(FilterScreen(), callback=handle_filter)
 
     def action_cycle_view_mode(self) -> None:
         """Handle view mode keybinding (v).
@@ -195,11 +199,11 @@ class TaskQueueTUI(App[None]):
 
     # Event handlers
 
-    def _on_filter_applied(self, filter_state: dict[str, Any] | None) -> None:
+    def _on_filter_applied(self, filter_state: FilterState | None) -> None:
         """Handle filter application from FilterScreen modal.
 
         Args:
-            filter_state: Filter criteria dict or None if cancelled
+            filter_state: FilterState model or None if cancelled
 
         Applies the filter to the current screen's data view.
         """
