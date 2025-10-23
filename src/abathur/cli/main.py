@@ -85,6 +85,35 @@ async def _resolve_task_id(task_id_prefix: str, services: dict[str, Any]) -> UUI
     return matches[0].id
 
 
+# Helper to render tree preview for recursive deletion
+def _render_tree_preview(tasks: list[Any], max_depth: int = 5) -> None:
+    """Render hierarchical tree preview of tasks to be deleted.
+
+    Args:
+        tasks: List of Task objects to preview
+        max_depth: Maximum depth to display in tree
+    """
+    from abathur.tui.rendering.tree_renderer import TreeRenderer
+
+    # Build task hierarchy
+    task_map = {task.id: task for task in tasks}
+    root_tasks = [task for task in tasks if task.parent_task_id is None]
+
+    # Create tree renderer
+    renderer = TreeRenderer()
+
+    # Compute layout
+    dependency_graph: dict[UUID, list[UUID]] = {}  # Empty for now, used by renderer
+    layout = renderer.compute_layout(tasks, dependency_graph)
+
+    # Render tree with depth limit
+    tree = renderer.render_tree(layout, use_unicode=TreeRenderer.supports_unicode())
+
+    console.print("\n[bold cyan]Tasks to Delete (Tree View)[/bold cyan]")
+    console.print(tree)
+    console.print(f"\n[dim]Showing {len(tasks)} tasks (max depth: {max_depth})[/dim]")
+
+
 # Helper to get database and services
 async def _get_services() -> dict[str, Any]:
     """Get initialized services with API key or Claude CLI authentication."""
@@ -585,6 +614,8 @@ def prune(
     limit: int | None = typer.Option(None, "--limit", help="Maximum tasks to delete", min=1),
     force: bool = typer.Option(False, "--force", help="Skip confirmation prompt"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be deleted without deleting"),
+    recursive: bool = typer.Option(False, "--recursive", help="Recursively delete task and all its descendants"),
+    preview_depth: int = typer.Option(5, "--preview-depth", help="Maximum depth to display in tree preview", min=1, max=50),
     vacuum: str = typer.Option(
         "conditional",
         "--vacuum",
@@ -849,8 +880,15 @@ def prune(
 
             # Component 3: Dry-Run Check (~5 lines)
             if dry_run:
+                # Show tree preview if recursive mode
+                if recursive:
+                    _render_tree_preview(tasks_to_delete, max_depth=preview_depth)
+
                 console.print("\n[blue]Dry-run mode - no changes will be made[/blue]")
-                console.print(f"[dim]Would delete {len(tasks_to_delete)} task(s)[/dim]")
+                if recursive:
+                    console.print(f"[dim]Would delete {len(tasks_to_delete)} task(s) in recursive mode[/dim]")
+                else:
+                    console.print(f"[dim]Would delete {len(tasks_to_delete)} task(s)[/dim]")
                 return
 
             # Component 4: Confirmation Prompt (~10 lines)
@@ -934,7 +972,10 @@ def prune(
 
             # Component 6: PruneResult Display (~25 lines)
             # Display result summary
-            console.print(f"\n[green]✓[/green] Successfully deleted {result.deleted_tasks} task(s)")
+            if recursive:
+                console.print(f"\n[green]✓[/green] Successfully deleted {result.deleted_tasks} task(s) in recursive mode")
+            else:
+                console.print(f"\n[green]✓[/green] Successfully deleted {result.deleted_tasks} task(s)")
 
             # Display breakdown by status
             if result.breakdown_by_status:
@@ -1062,8 +1103,15 @@ def prune(
 
         # Dry-run mode
         if dry_run:
+            # Show tree preview if recursive mode
+            if recursive:
+                _render_tree_preview(tasks_to_delete, max_depth=preview_depth)
+
             console.print("\n[blue]Dry-run mode - no changes will be made[/blue]")
-            console.print(f"[dim]Would delete {len(tasks_to_delete)} task(s)[/dim]")
+            if recursive:
+                console.print(f"[dim]Would delete {len(tasks_to_delete)} task(s) in recursive mode[/dim]")
+            else:
+                console.print(f"[dim]Would delete {len(tasks_to_delete)} task(s)[/dim]")
             return
 
         # Confirmation prompt (unless --force)
@@ -1150,9 +1198,14 @@ def prune(
             raise typer.Exit(1)
 
         # Display results
-        console.print(
-            f"[green]✓[/green] Deleted {deleted_count} task(s)"
-        )
+        if recursive:
+            console.print(
+                f"[green]✓[/green] Deleted {deleted_count} task(s) in recursive mode"
+            )
+        else:
+            console.print(
+                f"[green]✓[/green] Deleted {deleted_count} task(s)"
+            )
 
         # Show breakdown if available
         if result.breakdown_by_status:
