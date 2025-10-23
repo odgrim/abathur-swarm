@@ -1,12 +1,10 @@
-"""Integration tests for recursive tree deletion (complete tree scenario).
+"""Integration tests for recursive tree deletion (mixed status scenario).
 
-Tests complete end-to-end workflows for delete_task_trees_recursive:
-- Complete tree deletion (all descendants match criteria)
-- Transaction integrity (rollback on error)
-- Statistical accuracy (tree_depth, deleted_by_depth, trees_deleted)
-- Orphan prevention (no orphaned tasks remain)
-- Dry run mode (preview without deletion)
-- Multiple tree deletion
+Tests end-to-end workflows for delete_task_trees_recursive with mixed status trees:
+- Mixed status tree preservation (tree NOT deleted when descendants have different statuses)
+- Correct partial_trees count
+- All tasks remain in database when tree doesn't match criteria
+- Dry run mode shows correct partial_trees count
 """
 
 import asyncio
@@ -34,18 +32,16 @@ async def create_task_tree(
     db: Database,
     root_status: TaskStatus,
     child_statuses: list[TaskStatus],
-    grandchild_statuses: list[list[TaskStatus]],
-) -> tuple[UUID, list[UUID], list[list[UUID]]]:
-    """Helper to create a task tree with specified statuses.
+) -> tuple[UUID, list[UUID]]:
+    """Helper to create a simple task tree with specified statuses.
 
     Args:
         db: Database instance
         root_status: Status for root task
         child_statuses: List of statuses for child tasks
-        grandchild_statuses: List of lists of statuses for grandchildren
 
     Returns:
-        Tuple of (root_id, [child_ids], [[grandchild_ids]])
+        Tuple of (root_id, [child_ids])
     """
     # Create root task
     root_task = Task(
@@ -61,8 +57,6 @@ async def create_task_tree(
 
     # Create child tasks
     child_ids = []
-    all_grandchild_ids = []
-
     for i, child_status in enumerate(child_statuses):
         child_task = Task(
             prompt=f"Child task {i}",
@@ -77,78 +71,51 @@ async def create_task_tree(
         child_id = child_task.id
         child_ids.append(child_id)
 
-        # Create grandchildren for this child
-        grandchild_ids = []
-        if i < len(grandchild_statuses):
-            for j, grandchild_status in enumerate(grandchild_statuses[i]):
-                grandchild_task = Task(
-                    prompt=f"Grandchild task {i}-{j}",
-                    summary=f"Grandchild{i}-{j}",
-                    agent_type="test-agent",
-                    source=TaskSource.HUMAN,
-                    status=grandchild_status,
-                    parent_task_id=child_id,
-                    input_data={},
-                )
-                await db.insert_task(grandchild_task)
-                grandchild_id = grandchild_task.id
-                grandchild_ids.append(grandchild_id)
-
-        all_grandchild_ids.append(grandchild_ids)
-
-    return root_id, child_ids, all_grandchild_ids
+    return root_id, child_ids
 
 
 # Test Cases
 
 @pytest.mark.asyncio
-async def test_complete_tree_deletion_all_completed(memory_db: Database):
-    """Test complete tree deletion when all descendants are COMPLETED.
+async def test_mixed_status_tree_not_deleted(memory_db: Database):
+    """Test that mixed status trees are NOT deleted (P4-T4).
 
     Tree structure:
     Root (COMPLETED)
     ├── Child1 (COMPLETED)
-    │   ├── Grandchild1 (COMPLETED)
-    │   └── Grandchild2 (COMPLETED)
-    └── Child2 (COMPLETED)
-        └── Grandchild3 (COMPLETED)
+    ├── Child2 (RUNNING) ← Different status!
+    └── Child3 (COMPLETED)
 
-    Expected:
-    - All 6 tasks deleted
-    - trees_deleted=1
-    - tree_depth=2
-    - No orphans remain
+    Expected behavior:
+    - NO tasks deleted (tree preserved due to RUNNING child)
+    - trees_deleted=0
+    - partial_trees=1
+    - All tasks remain in database
     """
-    # Step 1: Create complete tree with all COMPLETED tasks
-    root_id, child_ids, grandchild_ids = await create_task_tree(
+    # Step 1: Create mixed-status tree
+    root_id, child_ids = await create_task_tree(
         memory_db,
         root_status=TaskStatus.COMPLETED,
-        child_statuses=[TaskStatus.COMPLETED, TaskStatus.COMPLETED],
-        grandchild_statuses=[
-            [TaskStatus.COMPLETED, TaskStatus.COMPLETED],  # Child1's grandchildren
-            [TaskStatus.COMPLETED],  # Child2's grandchildren
+        child_statuses=[
+            TaskStatus.COMPLETED,
+            TaskStatus.RUNNING,  # Different status - tree should NOT be deleted
+            TaskStatus.COMPLETED,
         ],
     )
 
-    # Step 2: Verify tree exists before deletion
-    all_tasks_before = await memory_db.get_task(root_id)
-    assert all_tasks_before is not None
-    assert all_tasks_before.status == TaskStatus.COMPLETED
+    # Step 2: Verify tree exists before prune attempt
+    root_before = await memory_db.get_task(root_id)
+    assert root_before is not None
+    assert root_before.status == TaskStatus.COMPLETED
 
     # Verify all children exist
-    for child_id in child_ids:
+    for i, child_id in enumerate(child_ids):
         child = await memory_db.get_task(child_id)
         assert child is not None
-        assert child.status == TaskStatus.COMPLETED
+        expected_status = [TaskStatus.COMPLETED, TaskStatus.RUNNING, TaskStatus.COMPLETED][i]
+        assert child.status == expected_status
 
-    # Verify all grandchildren exist
-    for gc_list in grandchild_ids:
-        for gc_id in gc_list:
-            gc = await memory_db.get_task(gc_id)
-            assert gc is not None
-            assert gc.status == TaskStatus.COMPLETED
-
-    # Step 3: Delete tree recursively
+    # Step 3: Attempt to prune with recursive=True, status=COMPLETED
     filters = PruneFilters(
         statuses=[TaskStatus.COMPLETED],
         dry_run=False,
@@ -158,113 +125,58 @@ async def test_complete_tree_deletion_all_completed(memory_db: Database):
         filters=filters,
     )
 
-    # Step 4: Verify result statistics
+    # Step 4: Verify NO tasks deleted
     assert isinstance(result, RecursivePruneResult)
-    assert result.deleted_tasks == 6  # 1 root + 2 children + 3 grandchildren
-    assert result.trees_deleted == 1  # 1 complete tree deleted
-    assert result.partial_trees == 0  # No partial trees
-    assert result.tree_depth == 2  # Root=0, Children=1, Grandchildren=2
+    assert result.deleted_tasks == 0, "No tasks should be deleted for mixed status tree"
+    assert result.trees_deleted == 0, "Tree should NOT be counted as deleted"
+    assert result.partial_trees == 1, "Tree should be counted as partial (skipped)"
     assert result.dry_run is False
 
-    # Verify deleted_by_depth breakdown
-    assert result.deleted_by_depth[0] == 1  # 1 root at depth 0
-    assert result.deleted_by_depth[1] == 2  # 2 children at depth 1
-    assert result.deleted_by_depth[2] == 3  # 3 grandchildren at depth 2
+    # Verify breakdown_by_status is empty (no deletions)
+    assert len(result.breakdown_by_status) == 0 or all(
+        count == 0 for count in result.breakdown_by_status.values()
+    )
 
-    # Verify breakdown_by_status
-    assert result.breakdown_by_status[TaskStatus.COMPLETED] == 6
-
-    # Step 5: Verify all tasks are deleted from database
+    # Step 5: Verify all tasks remain in database
     root_after = await memory_db.get_task(root_id)
-    assert root_after is None
+    assert root_after is not None, "Root should still exist"
+    assert root_after.status == TaskStatus.COMPLETED
 
-    for child_id in child_ids:
+    for i, child_id in enumerate(child_ids):
         child_after = await memory_db.get_task(child_id)
-        assert child_after is None
+        assert child_after is not None, f"Child {i} should still exist"
+        expected_status = [TaskStatus.COMPLETED, TaskStatus.RUNNING, TaskStatus.COMPLETED][i]
+        assert child_after.status == expected_status
 
-    for gc_list in grandchild_ids:
-        for gc_id in gc_list:
-            gc_after = await memory_db.get_task(gc_id)
-            assert gc_after is None
-
-    # Step 6: Verify no orphans remain
+    # Step 6: Verify total task count unchanged
     async with memory_db._get_connection() as conn:
         cursor = await conn.execute("SELECT COUNT(*) as count FROM tasks")
         row = await cursor.fetchone()
-        assert row["count"] == 0, "No tasks should remain in database"
+        assert row["count"] == 4, "All 4 tasks (1 root + 3 children) should remain"
 
 
 @pytest.mark.asyncio
-async def test_complete_tree_deletion_mixed_pruneable_statuses(memory_db: Database):
-    """Test complete tree deletion with mixed pruneable statuses (COMPLETED, FAILED, CANCELLED).
-
-    Tree structure:
-    Root (COMPLETED)
-    ├── Child1 (FAILED)
-    │   └── Grandchild1 (CANCELLED)
-    └── Child2 (COMPLETED)
-        └── Grandchild2 (FAILED)
+async def test_mixed_status_tree_dry_run(memory_db: Database):
+    """Test dry run mode correctly identifies mixed status tree as partial.
 
     Expected:
-    - All 5 tasks deleted
-    - trees_deleted=1
-    - Correct breakdown_by_status
+    - dry_run=True
+    - partial_trees=1
+    - deleted_tasks=0
+    - No actual deletion
     """
-    # Create tree with mixed pruneable statuses
-    root_id, child_ids, grandchild_ids = await create_task_tree(
+    # Create mixed-status tree
+    root_id, child_ids = await create_task_tree(
         memory_db,
         root_status=TaskStatus.COMPLETED,
-        child_statuses=[TaskStatus.FAILED, TaskStatus.COMPLETED],
-        grandchild_statuses=[
-            [TaskStatus.CANCELLED],  # Child1's grandchild
-            [TaskStatus.FAILED],  # Child2's grandchild
+        child_statuses=[
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,  # Different from COMPLETED filter
+            TaskStatus.COMPLETED,
         ],
     )
 
-    # Delete tree with all pruneable statuses
-    filters = PruneFilters(
-        statuses=[TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED],
-        dry_run=False,
-    )
-    result = await memory_db.delete_task_trees_recursive(
-        root_task_ids=[root_id],
-        filters=filters,
-    )
-
-    # Verify result
-    assert result.deleted_tasks == 5
-    assert result.trees_deleted == 1
-    assert result.partial_trees == 0
-    assert result.tree_depth == 2
-
-    # Verify breakdown by status
-    assert result.breakdown_by_status[TaskStatus.COMPLETED] == 2  # Root + Child2
-    assert result.breakdown_by_status[TaskStatus.FAILED] == 2  # Child1 + Grandchild2
-    assert result.breakdown_by_status[TaskStatus.CANCELLED] == 1  # Grandchild1
-
-    # Verify all deleted
-    root_after = await memory_db.get_task(root_id)
-    assert root_after is None
-
-
-@pytest.mark.asyncio
-async def test_dry_run_mode_no_deletion(memory_db: Database):
-    """Test dry run mode returns statistics without deleting tasks.
-
-    Expected:
-    - Statistics returned correctly
-    - No tasks actually deleted
-    - dry_run=True in result
-    """
-    # Create simple tree
-    root_id, child_ids, grandchild_ids = await create_task_tree(
-        memory_db,
-        root_status=TaskStatus.COMPLETED,
-        child_statuses=[TaskStatus.COMPLETED],
-        grandchild_statuses=[[TaskStatus.COMPLETED]],
-    )
-
-    # Run dry run
+    # Run dry run with status=COMPLETED
     filters = PruneFilters(
         statuses=[TaskStatus.COMPLETED],
         dry_run=True,
@@ -274,52 +186,53 @@ async def test_dry_run_mode_no_deletion(memory_db: Database):
         filters=filters,
     )
 
-    # Verify statistics returned
-    assert result.deleted_tasks == 3  # Would delete 3 tasks
-    assert result.trees_deleted == 1
-    assert result.tree_depth == 2
+    # Verify result shows partial tree
+    assert result.deleted_tasks == 0
+    assert result.trees_deleted == 0
+    assert result.partial_trees == 1
     assert result.dry_run is True
 
-    # Verify no tasks actually deleted
+    # Verify all tasks still exist (dry run doesn't delete)
     root_after = await memory_db.get_task(root_id)
-    assert root_after is not None  # Still exists
+    assert root_after is not None
 
-    child_after = await memory_db.get_task(child_ids[0])
-    assert child_after is not None  # Still exists
-
-    grandchild_after = await memory_db.get_task(grandchild_ids[0][0])
-    assert grandchild_after is not None  # Still exists
+    for child_id in child_ids:
+        child_after = await memory_db.get_task(child_id)
+        assert child_after is not None
 
 
 @pytest.mark.asyncio
-async def test_multiple_trees_deletion(memory_db: Database):
-    """Test deleting multiple complete trees in single operation.
+async def test_mixed_status_multiple_trees_some_partial(memory_db: Database):
+    """Test deleting multiple trees where some are complete and some are partial.
 
     Tree structure:
-    Tree1: Root1 (COMPLETED) → Child1 (COMPLETED)
-    Tree2: Root2 (COMPLETED) → Child2 (COMPLETED)
+    Tree1 (Complete): Root1 (COMPLETED) → All children COMPLETED
+    Tree2 (Partial): Root2 (COMPLETED) → Mixed children (COMPLETED, RUNNING)
 
     Expected:
-    - All 4 tasks deleted
-    - trees_deleted=2
+    - Tree1 deleted completely
+    - Tree2 NOT deleted (partial)
+    - trees_deleted=1
+    - partial_trees=1
     """
-    # Create first tree
-    root1_id, child1_ids, _ = await create_task_tree(
+    # Create first tree (complete - all COMPLETED)
+    root1_id, child1_ids = await create_task_tree(
         memory_db,
         root_status=TaskStatus.COMPLETED,
-        child_statuses=[TaskStatus.COMPLETED],
-        grandchild_statuses=[[]],
+        child_statuses=[TaskStatus.COMPLETED, TaskStatus.COMPLETED],
     )
 
-    # Create second tree
-    root2_id, child2_ids, _ = await create_task_tree(
+    # Create second tree (partial - mixed statuses)
+    root2_id, child2_ids = await create_task_tree(
         memory_db,
         root_status=TaskStatus.COMPLETED,
-        child_statuses=[TaskStatus.COMPLETED],
-        grandchild_statuses=[[]],
+        child_statuses=[
+            TaskStatus.COMPLETED,
+            TaskStatus.RUNNING,  # Different status
+        ],
     )
 
-    # Delete both trees
+    # Attempt to delete both trees
     filters = PruneFilters(
         statuses=[TaskStatus.COMPLETED],
         dry_run=False,
@@ -330,42 +243,54 @@ async def test_multiple_trees_deletion(memory_db: Database):
     )
 
     # Verify result
-    assert result.deleted_tasks == 4  # 2 roots + 2 children
-    assert result.trees_deleted == 2  # Both trees deleted
-    assert result.partial_trees == 0
+    assert result.deleted_tasks == 3, "Only Tree1 (3 tasks) should be deleted"
+    assert result.trees_deleted == 1, "Only Tree1 should be counted as deleted"
+    assert result.partial_trees == 1, "Tree2 should be counted as partial"
 
-    # Verify all deleted
+    # Verify Tree1 deleted
     assert await memory_db.get_task(root1_id) is None
-    assert await memory_db.get_task(root2_id) is None
-    assert await memory_db.get_task(child1_ids[0]) is None
-    assert await memory_db.get_task(child2_ids[0]) is None
+    for child_id in child1_ids:
+        assert await memory_db.get_task(child_id) is None
+
+    # Verify Tree2 still exists
+    root2_after = await memory_db.get_task(root2_id)
+    assert root2_after is not None
+    for child_id in child2_ids:
+        child_after = await memory_db.get_task(child_id)
+        assert child_after is not None
 
 
 @pytest.mark.asyncio
-async def test_partial_tree_not_deleted(memory_db: Database):
-    """Test that partial trees (with non-matching descendants) are NOT deleted.
+async def test_mixed_status_with_multiple_filter_statuses(memory_db: Database):
+    """Test mixed status tree with multiple pruneable statuses in filter.
 
     Tree structure:
     Root (COMPLETED)
     ├── Child1 (COMPLETED)
-    └── Child2 (PENDING) ← Non-pruneable status
+    ├── Child2 (FAILED)
+    └── Child3 (RUNNING) ← Not in filter
+
+    Filter: statuses=[COMPLETED, FAILED]
 
     Expected:
-    - No tasks deleted
-    - trees_deleted=0
+    - Tree NOT deleted (RUNNING child not in filter)
     - partial_trees=1
+    - deleted_tasks=0
     """
-    # Create tree with one non-pruneable child
-    root_id, child_ids, _ = await create_task_tree(
+    # Create tree with mixed statuses
+    root_id, child_ids = await create_task_tree(
         memory_db,
         root_status=TaskStatus.COMPLETED,
-        child_statuses=[TaskStatus.COMPLETED, TaskStatus.PENDING],  # PENDING not pruneable
-        grandchild_statuses=[[], []],
+        child_statuses=[
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.RUNNING,  # Not in filter - blocks deletion
+        ],
     )
 
-    # Attempt to delete (should skip due to PENDING child)
+    # Attempt to prune with COMPLETED and FAILED statuses
     filters = PruneFilters(
-        statuses=[TaskStatus.COMPLETED],
+        statuses=[TaskStatus.COMPLETED, TaskStatus.FAILED],
         dry_run=False,
     )
     result = await memory_db.delete_task_trees_recursive(
@@ -373,12 +298,12 @@ async def test_partial_tree_not_deleted(memory_db: Database):
         filters=filters,
     )
 
-    # Verify nothing deleted
+    # Verify tree NOT deleted
     assert result.deleted_tasks == 0
     assert result.trees_deleted == 0
-    assert result.partial_trees == 1  # Tree skipped
+    assert result.partial_trees == 1
 
-    # Verify all tasks still exist
+    # Verify all tasks remain
     root_after = await memory_db.get_task(root_id)
     assert root_after is not None
 
@@ -388,146 +313,19 @@ async def test_partial_tree_not_deleted(memory_db: Database):
 
 
 @pytest.mark.asyncio
-async def test_orphan_prevention(memory_db: Database):
-    """Test that recursive deletion doesn't create orphans.
-
-    Verifies that parent_task_id references are properly cleaned up
-    and no orphaned tasks remain after deletion.
-    """
-    # Create tree
-    root_id, child_ids, grandchild_ids = await create_task_tree(
-        memory_db,
-        root_status=TaskStatus.COMPLETED,
-        child_statuses=[TaskStatus.COMPLETED],
-        grandchild_statuses=[[TaskStatus.COMPLETED, TaskStatus.COMPLETED]],
-    )
-
-    # Delete tree
-    filters = PruneFilters(
-        statuses=[TaskStatus.COMPLETED],
-        dry_run=False,
-    )
-    await memory_db.delete_task_trees_recursive(
-        root_task_ids=[root_id],
-        filters=filters,
-    )
-
-    # Verify no orphans: check for tasks with non-null parent_task_id
-    # but parent doesn't exist
-    async with memory_db._get_connection() as conn:
-        cursor = await conn.execute("""
-            SELECT t1.id, t1.parent_task_id
-            FROM tasks t1
-            LEFT JOIN tasks t2 ON t1.parent_task_id = t2.id
-            WHERE t1.parent_task_id IS NOT NULL
-            AND t2.id IS NULL
-        """)
-        orphans = await cursor.fetchall()
-        assert len(orphans) == 0, f"Found orphaned tasks: {orphans}"
-
-
-@pytest.mark.asyncio
-async def test_transaction_rollback_on_error(memory_db: Database):
-    """Test that transaction rolls back on error, leaving database unchanged.
-
-    This test verifies atomicity: either all tasks deleted or none.
-    """
-    # Create tree
-    root_id, child_ids, _ = await create_task_tree(
-        memory_db,
-        root_status=TaskStatus.COMPLETED,
-        child_statuses=[TaskStatus.COMPLETED],
-        grandchild_statuses=[[]],
-    )
-
-    # Count tasks before
-    async with memory_db._get_connection() as conn:
-        cursor = await conn.execute("SELECT COUNT(*) as count FROM tasks")
-        row = await cursor.fetchone()
-        count_before = row["count"]
-
-    # Attempt deletion with invalid root_task_ids (empty list)
-    # This should raise ValueError and not affect database
-    filters = PruneFilters(
-        statuses=[TaskStatus.COMPLETED],
-        dry_run=False,
-    )
-
-    with pytest.raises(ValueError, match="root_task_ids cannot be empty"):
-        await memory_db.delete_task_trees_recursive(
-            root_task_ids=[],  # Invalid: empty list
-            filters=filters,
-        )
-
-    # Verify no tasks deleted (transaction rolled back)
-    async with memory_db._get_connection() as conn:
-        cursor = await conn.execute("SELECT COUNT(*) as count FROM tasks")
-        row = await cursor.fetchone()
-        count_after = row["count"]
-
-    assert count_after == count_before, "Task count should be unchanged after rollback"
-
-    # Verify original tasks still exist
-    root_after = await memory_db.get_task(root_id)
-    assert root_after is not None
-
-
-@pytest.mark.asyncio
-async def test_single_root_task_deletion(memory_db: Database):
-    """Test deleting a single root task with no children (edge case).
-
-    Expected:
-    - 1 task deleted
-    - trees_deleted=1
-    - tree_depth=0
-    """
-    # Create single task (no children)
-    root_task = Task(
-        prompt="Single root task",
-        summary="Root",
-        agent_type="test-agent",
-        source=TaskSource.HUMAN,
-        status=TaskStatus.COMPLETED,
-        input_data={},
-    )
-    await memory_db.insert_task(root_task)
-    root_id = root_task.id
-
-    # Delete single task
-    filters = PruneFilters(
-        statuses=[TaskStatus.COMPLETED],
-        dry_run=False,
-    )
-    result = await memory_db.delete_task_trees_recursive(
-        root_task_ids=[root_id],
-        filters=filters,
-    )
-
-    # Verify result
-    assert result.deleted_tasks == 1
-    assert result.trees_deleted == 1
-    assert result.partial_trees == 0
-    assert result.tree_depth == 0  # Single task at depth 0
-    assert result.deleted_by_depth[0] == 1
-
-    # Verify deleted
-    root_after = await memory_db.get_task(root_id)
-    assert root_after is None
-
-
-@pytest.mark.asyncio
-async def test_deep_tree_deletion(memory_db: Database):
-    """Test deleting a deep tree (depth > 2) to verify depth tracking.
+async def test_mixed_status_deep_hierarchy(memory_db: Database):
+    """Test mixed status detection works in deep hierarchies.
 
     Tree structure:
     Root (COMPLETED)
     └── Child (COMPLETED)
         └── Grandchild (COMPLETED)
-            └── Great-grandchild (COMPLETED)
+            └── Great-grandchild (PENDING) ← Deep mismatch
 
     Expected:
-    - tree_depth=3
-    - Correct deleted_by_depth breakdown
+    - Tree NOT deleted (PENDING great-grandchild)
+    - partial_trees=1
+    - deleted_tasks=0
     """
     # Create root
     root_task = Task(
@@ -567,20 +365,20 @@ async def test_deep_tree_deletion(memory_db: Database):
     await memory_db.insert_task(grandchild_task)
     grandchild_id = grandchild_task.id
 
-    # Create great-grandchild
+    # Create great-grandchild with different status
     great_grandchild_task = Task(
         prompt="Great-grandchild",
         summary="Great-grandchild",
         agent_type="test-agent",
         source=TaskSource.HUMAN,
-        status=TaskStatus.COMPLETED,
+        status=TaskStatus.PENDING,  # Different status - blocks deletion
         parent_task_id=grandchild_id,
         input_data={},
     )
     await memory_db.insert_task(great_grandchild_task)
     great_grandchild_id = great_grandchild_task.id
 
-    # Delete entire tree
+    # Attempt to delete tree
     filters = PruneFilters(
         statuses=[TaskStatus.COMPLETED],
         dry_run=False,
@@ -590,60 +388,41 @@ async def test_deep_tree_deletion(memory_db: Database):
         filters=filters,
     )
 
-    # Verify result
-    assert result.deleted_tasks == 4
-    assert result.trees_deleted == 1
-    assert result.tree_depth == 3  # Depth 0,1,2,3
+    # Verify tree NOT deleted
+    assert result.deleted_tasks == 0
+    assert result.trees_deleted == 0
+    assert result.partial_trees == 1
 
-    # Verify deleted_by_depth
-    assert result.deleted_by_depth[0] == 1  # Root
-    assert result.deleted_by_depth[1] == 1  # Child
-    assert result.deleted_by_depth[2] == 1  # Grandchild
-    assert result.deleted_by_depth[3] == 1  # Great-grandchild
-
-    # Verify all deleted
-    assert await memory_db.get_task(root_id) is None
-    assert await memory_db.get_task(child_id) is None
-    assert await memory_db.get_task(grandchild_id) is None
-    assert await memory_db.get_task(great_grandchild_id) is None
+    # Verify all tasks remain
+    assert await memory_db.get_task(root_id) is not None
+    assert await memory_db.get_task(child_id) is not None
+    assert await memory_db.get_task(grandchild_id) is not None
+    assert await memory_db.get_task(great_grandchild_id) is not None
 
 
 @pytest.mark.asyncio
-async def test_backward_compatibility_with_model_tasks(memory_db: Database):
-    """Test that recursive deletion works with tasks created using Task model.
+async def test_mixed_status_root_not_matching(memory_db: Database):
+    """Test that trees are skipped when root doesn't match filter.
 
-    Verifies that the new recursive deletion API works correctly with
-    tasks created through the standard insert_task workflow.
+    Tree structure:
+    Root (RUNNING) ← Doesn't match filter
+    └── Child (COMPLETED)
+
+    Filter: statuses=[COMPLETED]
+
+    Expected:
+    - Tree NOT deleted (root doesn't match)
+    - partial_trees=1
+    - deleted_tasks=0
     """
-    # Create tasks using Task model (standard workflow)
-    root_task = Task(
-        prompt="Standard root task",
-        summary="Root",
-        agent_type="test-agent",
-        source=TaskSource.HUMAN,
-        status=TaskStatus.COMPLETED,
-        input_data={},
+    # Create tree where root doesn't match filter
+    root_id, child_ids = await create_task_tree(
+        memory_db,
+        root_status=TaskStatus.RUNNING,  # Doesn't match COMPLETED filter
+        child_statuses=[TaskStatus.COMPLETED],
     )
-    await memory_db.insert_task(root_task)
-    root_id = root_task.id
 
-    child_task = Task(
-        prompt="Standard child task",
-        summary="Child",
-        agent_type="test-agent",
-        source=TaskSource.HUMAN,
-        status=TaskStatus.COMPLETED,
-        parent_task_id=root_id,
-        input_data={},
-    )
-    await memory_db.insert_task(child_task)
-    child_id = child_task.id
-
-    # Verify tasks exist before deletion
-    assert await memory_db.get_task(root_id) is not None
-    assert await memory_db.get_task(child_id) is not None
-
-    # Delete using recursive method
+    # Attempt to prune
     filters = PruneFilters(
         statuses=[TaskStatus.COMPLETED],
         dry_run=False,
@@ -653,10 +432,78 @@ async def test_backward_compatibility_with_model_tasks(memory_db: Database):
         filters=filters,
     )
 
-    # Verify deletion
-    assert result.deleted_tasks == 2
-    assert result.trees_deleted == 1
+    # Verify tree NOT deleted
+    assert result.deleted_tasks == 0
+    assert result.trees_deleted == 0
+    assert result.partial_trees == 1
 
-    # Verify tasks deleted
-    assert await memory_db.get_task(root_id) is None
-    assert await memory_db.get_task(child_id) is None
+    # Verify all tasks remain
+    root_after = await memory_db.get_task(root_id)
+    assert root_after is not None
+    assert root_after.status == TaskStatus.RUNNING
+
+    child_after = await memory_db.get_task(child_ids[0])
+    assert child_after is not None
+    assert child_after.status == TaskStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_backward_compatibility_mixed_status_trees(memory_db: Database):
+    """Test backward compatibility with existing mixed status trees.
+
+    Verifies that existing trees created before recursive prune implementation
+    are correctly identified as partial when they contain mixed statuses.
+    """
+    # Create tasks using direct database insert (simulating existing tasks)
+    async with memory_db._get_connection() as conn:
+        # Insert root task
+        root_id = str(uuid4())
+        await conn.execute(
+            """
+            INSERT INTO tasks (id, prompt, summary, agent_type, source, status, input_data, submitted_at, last_updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            """,
+            (root_id, "Old root", "Root", "test-agent", TaskSource.HUMAN.value, TaskStatus.COMPLETED.value, "{}"),
+        )
+
+        # Insert completed child
+        child1_id = str(uuid4())
+        await conn.execute(
+            """
+            INSERT INTO tasks (id, prompt, summary, agent_type, source, status, input_data, parent_task_id, submitted_at, last_updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            """,
+            (child1_id, "Old child 1", "Child1", "test-agent", TaskSource.HUMAN.value, TaskStatus.COMPLETED.value, "{}", root_id),
+        )
+
+        # Insert running child (different status)
+        child2_id = str(uuid4())
+        await conn.execute(
+            """
+            INSERT INTO tasks (id, prompt, summary, agent_type, source, status, input_data, parent_task_id, submitted_at, last_updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            """,
+            (child2_id, "Old child 2", "Child2", "test-agent", TaskSource.HUMAN.value, TaskStatus.RUNNING.value, "{}", root_id),
+        )
+
+        await conn.commit()
+
+    # Attempt to delete using recursive method
+    filters = PruneFilters(
+        statuses=[TaskStatus.COMPLETED],
+        dry_run=False,
+    )
+    result = await memory_db.delete_task_trees_recursive(
+        root_task_ids=[UUID(root_id)],
+        filters=filters,
+    )
+
+    # Verify tree NOT deleted (partial tree)
+    assert result.deleted_tasks == 0
+    assert result.trees_deleted == 0
+    assert result.partial_trees == 1
+
+    # Verify all tasks still exist
+    assert await memory_db.get_task(UUID(root_id)) is not None
+    assert await memory_db.get_task(UUID(child1_id)) is not None
+    assert await memory_db.get_task(UUID(child2_id)) is not None
