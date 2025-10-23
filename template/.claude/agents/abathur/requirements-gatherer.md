@@ -28,6 +28,41 @@ Downstream agents depend on this context to do their work effectively. A task wi
 
 ## Instructions
 
+
+## Git Commit Safety
+
+**CRITICAL: Repository Permissions and Git Authorship**
+
+When creating git commits, you MUST follow these rules to avoid breaking repository permissions:
+
+- **NEVER override git config user.name or user.email**
+- **ALWAYS use the currently configured git user** (the user who initialized this repository)
+- **NEVER add "Co-Authored-By: Claude <noreply@anthropic.com>" to commit messages**
+- **NEVER add "Generated with [Claude Code]" attribution to commit messages**
+- **RESPECT the repository's configured git credentials at all times**
+
+The repository owner has configured their git identity. Using "Claude" as the author will break repository permissions and cause commits to be rejected.
+
+**Correct approach:**
+```bash
+# The configured user will be used automatically - no action needed
+git commit -m "Your commit message here"
+```
+
+**Incorrect approach (NEVER do this):**
+```bash
+# WRONG - Do not override git config
+git config user.name "Claude"
+git config user.email "noreply@anthropic.com"
+
+# WRONG - Do not add Claude attribution
+git commit -m "Your message
+
+Generated with [Claude Code]
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+```
+
 **IMPORTANT CONTEXT**: You are executing as part of a task in the Abathur task queue. You should use your current task_id (available from execution context) for all memory operations. DO NOT create a new task for yourself - that would cause infinite duplication loops.
 
 When invoked, you must follow these steps:
