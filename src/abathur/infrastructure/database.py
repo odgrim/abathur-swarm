@@ -3,7 +3,6 @@
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -21,6 +20,7 @@ from abathur.domain.models import (
     TaskDependency,
     TaskSource,
     TaskStatus,
+    TreeNode,
 )
 
 if TYPE_CHECKING:
@@ -29,81 +29,12 @@ if TYPE_CHECKING:
     from abathur.services.session_service import SessionService
 
 
-@dataclass
-class TreeNode:
-    """Node in task tree discovered by WITH RECURSIVE CTE.
-
-    Represents a task in the hierarchical tree structure with its
-    position and relationships.
-
-    Attributes:
-        id: Task UUID
-        parent_id: Parent task UUID (None for root nodes)
-        status: Task status (TaskStatus enum value string)
-        depth: Distance from root in tree hierarchy (0 = root)
-    """
-    id: UUID
-    parent_id: UUID | None
-    status: str
-    depth: int
-
-    @classmethod
-    def from_row(cls, row_dict: dict[str, Any]) -> "TreeNode":
-        """Create TreeNode from database row dictionary.
-
-        Args:
-            row_dict: Dictionary with 'id', 'parent_id', 'status', 'depth' keys
-
-        Returns:
-            TreeNode instance
-
-        Raises:
-            KeyError: If required fields are missing
-            ValueError: If UUID parsing fails
-        """
-        return cls(
-            id=UUID(row_dict["id"]),
-            parent_id=UUID(row_dict["parent_id"]) if row_dict.get("parent_id") else None,
-            status=row_dict["status"],
-            depth=row_dict["depth"]
-        )
-
-
 # VACUUM threshold: only run conditional VACUUM if deleting this many tasks
 VACUUM_THRESHOLD_TASKS = 100
 
 # Auto-skip VACUUM threshold: automatically set vacuum_mode='never' for large prunes
 # Rationale: VACUUM on 10,000+ tasks can take minutes, blocking the database
 AUTO_SKIP_VACUUM_THRESHOLD = 10_000
-
-
-@dataclass
-class TreeNode:
-    """Runtime data structure representing a node in task tree during recursive operations."""
-    id: UUID
-    parent_id: UUID | None
-    status: TaskStatus
-    depth: int
-    children_ids: list[UUID] = field(default_factory=list)
-
-    @classmethod
-    def from_row(cls, row: dict) -> "TreeNode":
-        """Construct TreeNode from database query result row."""
-        return cls(
-            id=UUID(row["id"]),
-            parent_id=UUID(row["parent_id"]) if row["parent_id"] else None,
-            status=TaskStatus(row["status"]),
-            depth=row["depth"],
-            children_ids=[]  # Populated by _build_tree_structure()
-        )
-
-    def is_leaf(self) -> bool:
-        """Check if this node is a leaf (no children)."""
-        return len(self.children_ids) == 0
-
-    def matches_status(self, allowed: list[TaskStatus]) -> bool:
-        """Check if this node's status matches any of the allowed statuses."""
-        return self.status in allowed
 
 
 class PruneFilters(BaseModel):
@@ -146,11 +77,6 @@ class PruneFilters(BaseModel):
     vacuum_mode: str = Field(
         default="conditional",
         description="VACUUM strategy: 'always', 'conditional', or 'never'",
-    )
-
-    recursive: bool = Field(
-        default=False,
-        description="Enable recursive tree deletion with status checking"
     )
 
     @model_validator(mode="after")
@@ -298,36 +224,6 @@ class PruneResult(BaseModel):
         return v
 
 
-class TreeNode(BaseModel):
-    """Runtime data structure representing a task node in tree traversal.
-
-    Used by recursive tree operations to represent the hierarchical structure
-    of tasks and their relationships during traversal and deletion operations.
-    """
-
-    id: UUID = Field(description="Task identifier")
-    parent_id: UUID | None = Field(default=None, description="Parent task reference (None for root)")
-    status: TaskStatus = Field(description="Current task status")
-    depth: int = Field(ge=0, le=100, description="Depth in tree (0 for root nodes)")
-    children_ids: list[UUID] = Field(default_factory=list, description="Direct children task IDs")
-
-    def is_leaf(self) -> bool:
-        """Check if node is a leaf (no children).
-
-        Returns:
-            True if node has no children, False otherwise
-        """
-        return len(self.children_ids) == 0
-
-    def add_child(self, child_id: UUID) -> None:
-        """Add child ID to children list.
-
-        Args:
-            child_id: UUID of child task to add
-        """
-        self.children_ids.append(child_id)
-
-
 class RecursivePruneResult(PruneResult):
     """Enhanced result with tree-specific statistics.
 
@@ -382,19 +278,6 @@ class Database:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         async with self._get_connection() as conn:
-            # Verify SQLite version supports WITH RECURSIVE (3.8.3+)
-            cursor = await conn.execute("SELECT sqlite_version()")
-            version_row = await cursor.fetchone()
-            if version_row:
-                version = version_row[0]
-                # Parse version as tuple for comparison
-                version_parts = tuple(int(x) for x in version.split('.'))
-                required_parts = (3, 8, 3)
-                if version_parts < required_parts:
-                    raise RuntimeError(
-                        f"SQLite 3.8.3+ required for WITH RECURSIVE, found {version}"
-                    )
-
             # Enable WAL mode for concurrent reads
             await conn.execute("PRAGMA journal_mode=WAL")
             await conn.execute("PRAGMA synchronous=NORMAL")
@@ -2079,118 +1962,221 @@ class Database:
         filter_statuses: list[TaskStatus] | None = None,
         max_depth: int = 100,
     ) -> dict[UUID, TreeNode]:
-        """Get entire descendant tree with optional status filtering using WITH RECURSIVE.
-
-        Uses SQLite WITH RECURSIVE CTE to efficiently retrieve all descendants
-        of the given root tasks in a single query, with depth calculation and
-        cycle detection.
+        """Use WITH RECURSIVE CTE to retrieve descendant tree with optional status filtering.
 
         Args:
-            root_task_ids: Root task IDs to start tree traversal
-            filter_statuses: Optional status filter (None = return all descendants)
-            max_depth: Maximum traversal depth to prevent infinite loops (0 < max_depth <= 1000)
+            root_task_ids: Root task IDs to start traversal
+            filter_statuses: Optional status filter (None = all descendants)
+            max_depth: Maximum traversal depth to prevent infinite loops
 
         Returns:
-            Mapping of task_id to TreeNode for all descendants (including roots)
+            Mapping of task_id -> TreeNode for all descendants (including roots)
 
         Raises:
-            ValueError: If root_task_ids is empty or max_depth invalid
-            RecursionLimitError: If tree depth exceeds max_depth (indicates cycle)
+            ValueError: If root_task_ids empty or max_depth invalid
+            RuntimeError: If tree depth exceeds max_depth (cycle detected)
         """
         # Validate parameters
         if not root_task_ids:
             raise ValueError("root_task_ids cannot be empty")
-
         if max_depth <= 0 or max_depth > 1000:
-            raise ValueError(f"max_depth must be 0 < max_depth <= 1000, got {max_depth}")
+            raise ValueError("max_depth must be between 1 and 1000")
 
         async with self._get_connection() as conn:
-            # Build SQL query with WITH RECURSIVE CTE
+            # Build root_id_placeholders
             root_id_placeholders = ",".join("?" * len(root_task_ids))
 
-            # Build optional status filter
-            status_filter = ""
-            status_params: list[str] = []
-            if filter_statuses:
+            # Build status filter clause
+            status_filter_sql = ""
+            status_params = []
+            if filter_statuses is not None and len(filter_statuses) > 0:
                 status_placeholders = ",".join("?" * len(filter_statuses))
-                status_filter = f"WHERE status IN ({status_placeholders})"
-                status_params = [s.value for s in filter_statuses]
+                status_filter_sql = f"WHERE status IN ({status_placeholders})"
+                status_params = [status.value for status in filter_statuses]
 
-            sql = f"""
-            WITH RECURSIVE task_tree AS (
-                -- Base case: root tasks
+            # Build the WITH RECURSIVE CTE query
+            query = f"""
+                WITH RECURSIVE task_tree AS (
+                    -- Base case: root tasks
+                    SELECT
+                        id,
+                        parent_task_id,
+                        status,
+                        0 AS depth
+                    FROM tasks
+                    WHERE id IN ({root_id_placeholders})
+
+                    UNION ALL
+
+                    -- Recursive case: children of current level
+                    SELECT
+                        t.id,
+                        t.parent_task_id,
+                        t.status,
+                        tt.depth + 1 AS depth
+                    FROM tasks t
+                    INNER JOIN task_tree tt ON t.parent_task_id = tt.id
+                    WHERE tt.depth < ?
+                )
                 SELECT
                     id,
                     parent_task_id,
                     status,
-                    0 AS depth
-                FROM tasks
-                WHERE id IN ({root_id_placeholders})
-
-                UNION ALL
-
-                -- Recursive case: children of current level
-                SELECT
-                    t.id,
-                    t.parent_task_id,
-                    t.status,
-                    tt.depth + 1 AS depth
-                FROM tasks t
-                INNER JOIN task_tree tt ON t.parent_task_id = tt.id
-                WHERE tt.depth < ?
-            )
-            SELECT
-                id,
-                parent_task_id,
-                status,
-                depth
-            FROM task_tree
-            {status_filter}
-            ORDER BY depth ASC, id ASC
+                    depth
+                FROM task_tree
+                {status_filter_sql}
+                ORDER BY depth ASC, id ASC
             """
 
+            # Build parameters: root IDs + max_depth + optional status filters
+            params = [str(task_id) for task_id in root_task_ids]
+            params.append(max_depth)
+            params.extend(status_params)
+
             # Execute query
-            params = (
-                [str(task_id) for task_id in root_task_ids]
-                + [max_depth]
-                + status_params
-            )
-            cursor = await conn.execute(sql, tuple(params))
+            cursor = await conn.execute(query, tuple(params))
             rows = await cursor.fetchall()
 
+            # Check if we hit the max_depth limit (potential cycle)
+            if rows:
+                max_observed_depth = max(row["depth"] for row in rows)
+                if max_observed_depth >= max_depth:
+                    raise RuntimeError(
+                        f"Tree depth exceeded max_depth={max_depth}. "
+                        "This may indicate a cycle in parent_task_id relationships."
+                    )
+
             # Build TreeNode mapping
-            nodes: dict[UUID, TreeNode] = {}
+            tree_nodes: dict[UUID, TreeNode] = {}
+
+            # First pass: Create all TreeNode objects
             for row in rows:
                 task_id = UUID(row["id"])
                 parent_id = UUID(row["parent_task_id"]) if row["parent_task_id"] else None
                 status = TaskStatus(row["status"])
                 depth = row["depth"]
 
-                # Create TreeNode
-                node = TreeNode(
+                tree_nodes[task_id] = TreeNode(
                     id=task_id,
                     parent_id=parent_id,
                     status=status,
                     depth=depth,
                     children_ids=[],
                 )
-                nodes[task_id] = node
 
-            # Build children relationships
-            for node in nodes.values():
-                if node.parent_id and node.parent_id in nodes:
-                    nodes[node.parent_id].add_child(node.id)
+            # Second pass: Build children_ids lists by iterating results
+            for row in rows:
+                task_id = UUID(row["id"])
+                parent_id = UUID(row["parent_task_id"]) if row["parent_task_id"] else None
 
-            # Cycle detection: check if any node reached max_depth
-            if nodes:
-                max_observed_depth = max(node.depth for node in nodes.values())
-                if max_observed_depth >= max_depth:
-                    raise RecursionError(
-                        f"Tree depth {max_observed_depth} reached max_depth {max_depth}. "
-                        "Possible cycle detected or tree too deep."
+                if parent_id and parent_id in tree_nodes:
+                    # Add this task to parent's children_ids
+                    tree_nodes[parent_id].children_ids.append(task_id)
+
+            return tree_nodes
+
+    async def check_tree_all_match_status(
+        self,
+        root_task_ids: list[UUID],
+        allowed_statuses: list[TaskStatus]
+    ) -> dict[UUID, bool]:
+        """Check if entire tree matches deletion criteria.
+
+        For each root task, recursively checks if all descendants (including the root)
+        have statuses in the allowed_statuses list. Uses SQL WITH RECURSIVE for
+        efficient tree traversal.
+
+        Args:
+            root_task_ids: Root task IDs to check (non-empty list required)
+            allowed_statuses: Statuses matching deletion criteria (e.g., [COMPLETED, FAILED, CANCELLED])
+
+        Returns:
+            Mapping of root_task_id -> bool (True if all descendants match, False otherwise)
+
+        Raises:
+            ValueError: If root_task_ids or allowed_statuses is empty
+            DatabaseError: If SQL query fails
+
+        Performance:
+            O(n) where n = total descendants across all trees
+        """
+        # Validate parameters
+        if not root_task_ids:
+            raise ValueError("root_task_ids cannot be empty")
+        if not allowed_statuses:
+            raise ValueError("allowed_statuses cannot be empty")
+
+        # Convert statuses to values for SQL
+        status_values = [status.value for status in allowed_statuses]
+
+        result: dict[UUID, bool] = {}
+
+        async with self._get_connection() as conn:
+            # Process each root task individually
+            # Future optimization: batch multiple roots into single query
+            for root_task_id in root_task_ids:
+                root_id_str = str(root_task_id)
+
+                # Build status filter placeholders
+                status_placeholders = ",".join("?" * len(status_values))
+
+                # Count total descendants (including root) using WITH RECURSIVE
+                total_count_query = f"""
+                    WITH RECURSIVE task_tree(id, parent_task_id, status, depth) AS (
+                        -- Base case: root task
+                        SELECT id, parent_task_id, status, 0 as depth
+                        FROM tasks
+                        WHERE id = ?
+
+                        UNION ALL
+
+                        -- Recursive case: children of tasks in tree
+                        SELECT t.id, t.parent_task_id, t.status, tree.depth + 1
+                        FROM tasks t
+                        INNER JOIN task_tree tree ON t.parent_task_id = tree.id
+                        WHERE tree.depth < 100  -- Prevent infinite loops
                     )
+                    SELECT COUNT(*) as total_count
+                    FROM task_tree
+                """
 
-            return nodes
+                cursor = await conn.execute(total_count_query, (root_id_str,))
+                total_row = await cursor.fetchone()
+                total_count = total_row["total_count"] if total_row else 0
+
+                # Count descendants with allowed statuses using WITH RECURSIVE
+                matching_count_query = f"""
+                    WITH RECURSIVE task_tree(id, parent_task_id, status, depth) AS (
+                        -- Base case: root task
+                        SELECT id, parent_task_id, status, 0 as depth
+                        FROM tasks
+                        WHERE id = ?
+
+                        UNION ALL
+
+                        -- Recursive case: children of tasks in tree
+                        SELECT t.id, t.parent_task_id, t.status, tree.depth + 1
+                        FROM tasks t
+                        INNER JOIN task_tree tree ON t.parent_task_id = tree.id
+                        WHERE tree.depth < 100  -- Prevent infinite loops
+                    )
+                    SELECT COUNT(*) as matching_count
+                    FROM task_tree
+                    WHERE status IN ({status_placeholders})
+                """
+
+                cursor = await conn.execute(
+                    matching_count_query,
+                    (root_id_str, *status_values)
+                )
+                matching_row = await cursor.fetchone()
+                matching_count = matching_row["matching_count"] if matching_row else 0
+
+                # All descendants match if counts are equal and > 0
+                all_match = total_count > 0 and total_count == matching_count
+                result[root_task_id] = all_match
+
+        return result
 
     async def delete_task(self, task_id: UUID) -> bool:
         """Delete a single task by UUID.
@@ -2445,6 +2431,163 @@ class Database:
                 tuple(batch),
             )
 
+    async def delete_task_trees_recursive(
+        self,
+        root_task_ids: list[UUID],
+        filters: PruneFilters
+    ) -> RecursivePruneResult:
+        """Delete task trees in leaves-to-root order within single transaction.
+
+        Implements recursive tree deletion with validation that all descendants
+        match the status criteria before deletion. Uses topological sorting to
+        ensure leaves-to-root deletion order.
+
+        Algorithm:
+        1. BEGIN TRANSACTION
+        2. For each root_task_id:
+           - Get tree with get_task_tree_with_status(filter_statuses=filters.statuses)
+           - Check all descendants match criteria with check_tree_all_match_status
+           - If not all match: skip tree (partial_trees++)
+           - If all match: add to deletion set (trees_deleted++)
+        3. Topological sort tasks by depth (deepest first)
+        4. Group by depth level, batch delete with _delete_tasks_by_ids
+        5. Build RecursivePruneResult with statistics
+        6. COMMIT (or ROLLBACK on error/dry_run)
+
+        Args:
+            root_task_ids: Root task IDs to delete (with their trees)
+            filters: PruneFilters with status criteria and dry_run flag
+
+        Returns:
+            RecursivePruneResult with deletion statistics and tree metrics
+
+        Raises:
+            ValueError: If root_task_ids is empty
+            RuntimeError: If deletion fails or transaction error occurs
+        """
+        if not root_task_ids:
+            raise ValueError("root_task_ids cannot be empty")
+
+        # Use filters.statuses for criteria, defaulting to pruneable statuses
+        allowed_statuses = filters.statuses or [
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+        ]
+
+        async with self._get_connection() as conn:
+            # BEGIN TRANSACTION
+            await conn.execute("BEGIN TRANSACTION")
+
+            try:
+                # STEP 1: Identify which trees can be deleted (all descendants match)
+                trees_to_delete: dict[UUID, dict[UUID, TreeNode]] = {}
+                trees_deleted_count = 0
+                partial_trees_count = 0
+
+                for root_task_id in root_task_ids:
+                    # Get tree with status filtering
+                    tree = await self.get_task_tree_with_status(
+                        root_task_ids=[root_task_id],
+                        filter_statuses=allowed_statuses,
+                        max_depth=100,
+                    )
+
+                    # Check if all descendants match the status criteria
+                    match_results = await self.check_tree_all_match_status(
+                        root_task_ids=[root_task_id],
+                        allowed_statuses=allowed_statuses,
+                    )
+
+                    all_match = match_results.get(root_task_id, False)
+
+                    if all_match and tree:
+                        # All descendants match - safe to delete this tree
+                        trees_to_delete[root_task_id] = tree
+                        trees_deleted_count += 1
+                    else:
+                        # Not all descendants match - skip this tree
+                        partial_trees_count += 1
+
+                # If no trees to delete, return early
+                if not trees_to_delete:
+                    await conn.execute("ROLLBACK")
+                    return RecursivePruneResult(
+                        deleted_tasks=0,
+                        deleted_dependencies=0,
+                        reclaimed_bytes=None,
+                        dry_run=filters.dry_run,
+                        breakdown_by_status={},
+                        vacuum_auto_skipped=False,
+                        tree_depth=0,
+                        deleted_by_depth={},
+                        trees_deleted=0,
+                        partial_trees=partial_trees_count,
+                    )
+
+                # STEP 2: Flatten all trees and sort by depth (deepest first)
+                all_nodes: list[TreeNode] = []
+                max_depth = 0
+                deleted_by_depth: dict[int, int] = {}
+
+                for tree in trees_to_delete.values():
+                    for node in tree.values():
+                        all_nodes.append(node)
+                        max_depth = max(max_depth, node.depth)
+                        deleted_by_depth[node.depth] = deleted_by_depth.get(node.depth, 0) + 1
+
+                # Sort by depth (deepest first) for leaves-to-root deletion
+                all_nodes.sort(key=lambda n: n.depth, reverse=True)
+
+                # Convert nodes to task IDs for deletion
+                task_ids_to_delete = [str(node.id) for node in all_nodes]
+
+                # STEP 3: Collect status breakdown before deletion
+                status_breakdown: dict[TaskStatus, int] = {}
+                for node in all_nodes:
+                    status_breakdown[node.status] = status_breakdown.get(node.status, 0) + 1
+
+                # STEP 4: Delete tasks
+                if filters.dry_run:
+                    # Dry run: rollback without deleting
+                    await conn.execute("ROLLBACK")
+
+                    return RecursivePruneResult(
+                        deleted_tasks=len(task_ids_to_delete),
+                        deleted_dependencies=0,  # Would need to query for accurate count
+                        reclaimed_bytes=None,
+                        dry_run=True,
+                        breakdown_by_status=status_breakdown,
+                        vacuum_auto_skipped=False,
+                        tree_depth=max_depth,
+                        deleted_by_depth=deleted_by_depth,
+                        trees_deleted=trees_deleted_count,
+                        partial_trees=partial_trees_count,
+                    )
+                else:
+                    # Real deletion using unified core
+                    result = await self._delete_tasks_by_ids(
+                        conn, task_ids_to_delete, collect_stats=False
+                    )
+                    await conn.commit()
+
+                    return RecursivePruneResult(
+                        deleted_tasks=result["deleted_count"],
+                        deleted_dependencies=result["deleted_dependencies"],
+                        reclaimed_bytes=None,  # VACUUM not performed in this method
+                        dry_run=False,
+                        breakdown_by_status=status_breakdown,
+                        vacuum_auto_skipped=False,
+                        tree_depth=max_depth,
+                        deleted_by_depth=deleted_by_depth,
+                        trees_deleted=trees_deleted_count,
+                        partial_trees=partial_trees_count,
+                    )
+
+            except Exception as e:
+                await conn.execute("ROLLBACK")
+                raise RuntimeError(f"Failed to delete task trees recursively: {e}") from e
+
     async def prune_tasks(self, filters: PruneFilters) -> PruneResult:
         """Prune tasks based on age and status criteria.
 
@@ -2580,86 +2723,6 @@ class Database:
                 await conn.execute("ROLLBACK")
                 raise RuntimeError(f"Failed to prune tasks: {e}") from e
 
-    async def _discover_task_tree(
-        self,
-        conn: Connection,
-        root_task_ids: list[UUID],
-        max_depth: int = 100
-    ) -> list[TreeNode]:
-        """Execute WITH RECURSIVE CTE to discover all descendants of root tasks.
-
-        Uses SQLite's WITH RECURSIVE common table expression to efficiently
-        traverse the task hierarchy and discover all descendants of the given
-        root tasks. Returns nodes ordered by depth (deepest first) for safe
-        deletion order.
-
-        Args:
-            conn: Active database connection within transaction
-            root_task_ids: Root task IDs to start tree traversal from
-            max_depth: Maximum tree depth to prevent infinite loops (default 100)
-
-        Returns:
-            All nodes in discovered trees, ordered by depth DESC (deepest first)
-
-        Raises:
-            ValueError: If root_task_ids is empty
-            aiosqlite.DatabaseError: If SQL execution fails
-
-        Example:
-            >>> async with self._get_connection() as conn:
-            ...     nodes = await self._discover_task_tree(
-            ...         conn,
-            ...         [UUID('ebec23ad-...')],
-            ...         max_depth=50
-            ...     )
-            >>> # nodes[0] is deepest descendant
-            >>> # nodes[-1] is root task
-        """
-        if not root_task_ids:
-            raise ValueError("root_task_ids cannot be empty")
-
-        # Build parameter placeholders for IN clause
-        placeholders = ",".join("?" * len(root_task_ids))
-
-        # WITH RECURSIVE CTE query
-        # - Base case: Select root tasks with depth=0
-        # - Recursive case: Join children with parent tree, increment depth
-        # - Order by depth DESC to get leaves first (safe deletion order)
-        query = f"""
-        WITH RECURSIVE task_tree (id, parent_id, status, depth) AS (
-          SELECT id, parent_task_id, status, 0 as depth
-          FROM tasks
-          WHERE id IN ({placeholders})
-          UNION ALL
-          SELECT t.id, t.parent_task_id, t.status, tree.depth + 1
-          FROM tasks t
-          JOIN task_tree tree ON t.parent_task_id = tree.id
-          WHERE tree.depth < ?
-        )
-        SELECT * FROM task_tree
-        ORDER BY depth DESC
-        """
-
-        # Build parameters: root task IDs as strings + max_depth
-        params = [str(task_id) for task_id in root_task_ids] + [max_depth]
-
-        cursor = await conn.execute(query, params)
-        rows = await cursor.fetchall()
-
-        # Convert rows to TreeNode objects
-        nodes = []
-        for row in rows:
-            # aiosqlite.Row supports both index and name access
-            row_dict = {
-                "id": row[0],
-                "parent_id": row[1],
-                "status": row[2],
-                "depth": row[3]
-            }
-            nodes.append(TreeNode.from_row(row_dict))
-
-        return nodes
-
     def _row_to_task(self, row: aiosqlite.Row) -> Task:
         """Convert database row to Task model."""
         # Convert row to dict for easier access with fallbacks
@@ -2769,50 +2832,6 @@ class Database:
             created_at=datetime.fromisoformat(row["created_at"]),
             resolved_at=datetime.fromisoformat(row["resolved_at"]) if row["resolved_at"] else None,
         )
-
-    def _build_tree_structure(self, tree_nodes: list[Any]) -> dict[UUID, list[UUID]]:
-        """Build parent -> children adjacency list from flat tree nodes.
-
-        This helper method constructs a hierarchical tree structure from a flat
-        list of TreeNode objects. It builds an adjacency list mapping each parent
-        task ID to its list of child task IDs, and populates the children field
-        in each TreeNode object.
-
-        Args:
-            tree_nodes: Flat list of TreeNode objects with task_id, task, and
-                       parent_task_id attributes. The children field will be
-                       populated by this method.
-
-        Returns:
-            Dict mapping parent_id (UUID) to list of child IDs (list[UUID]).
-            Parent IDs with no children are not included in the dict.
-
-        Example:
-            >>> nodes = [
-            ...     TreeNode(task_id=uuid1, parent_id=None, children=[]),
-            ...     TreeNode(task_id=uuid2, parent_id=uuid1, children=[]),
-            ...     TreeNode(task_id=uuid3, parent_id=uuid1, children=[]),
-            ... ]
-            >>> adjacency = db._build_tree_structure(nodes)
-            >>> adjacency[uuid1]  # Returns [uuid2, uuid3]
-            >>> nodes[0].children  # Now contains [uuid2, uuid3]
-        """
-        # Build adjacency list mapping parent_id -> [child_ids]
-        children_map: dict[UUID, list[UUID]] = {}
-
-        for node in tree_nodes:
-            # Get parent_task_id from the task object
-            parent_id = node.task.parent_task_id
-            if parent_id is not None:
-                if parent_id not in children_map:
-                    children_map[parent_id] = []
-                children_map[parent_id].append(node.task_id)
-
-        # Populate children field in TreeNode objects
-        for node in tree_nodes:
-            node.children = children_map.get(node.task_id, [])
-
-        return children_map
 
     # Agent operations
     async def insert_agent(self, agent: Agent) -> None:
