@@ -218,8 +218,15 @@ When invoked, you must follow these steps:
 
    # For each implementation task that needs code isolation:
    task_id = generate_unique_task_id()  # e.g., "task-001-domain-model"
-   timestamp = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
-   branch_name = f"task/{task_id}/{timestamp}"
+
+   # Extract feature name from feature_branch_name (e.g., "feature/user-auth" -> "user-auth")
+   feature_name = feature_branch_name.replace('feature/', '')
+
+   # Generate timestamp without milliseconds for cleaner branch names
+   timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+
+   # New hierarchical format: feature/{feature_name}/task/{task_id}/{timestamp}
+   branch_name = f"{feature_branch_name}/task/{task_id}/{timestamp}"
    worktree_path = f".abathur/worktrees/{task_id}"
 
    # Create worktree using Bash tool - branching from the FEATURE BRANCH (not main!)
@@ -283,9 +290,9 @@ When invoked, you must follow these steps:
    **Error Handling for Worktree Creation:**
 
    1. **Branch already exists**:
-      - Use unique timestamp with microseconds in branch name
-      - Format: `task/{task_id}/{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}`
-      - The microsecond precision prevents collisions
+      - Use unique timestamp in branch name
+      - Format: `{feature_branch_name}/task/{task_id}/{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}`
+      - Example: `feature/user-auth/task/login-validation/2025-10-22-14-30-45`
 
    2. **Worktree path already exists**:
       ```python
@@ -320,7 +327,7 @@ When invoked, you must follow these steps:
    Before marking worktree creation as complete, verify ALL of these:
 
    - [ ] Worktree directory created: `.abathur/worktrees/{task_id}/`
-   - [ ] Git branch created: `task/{task_id}/{timestamp}`
+   - [ ] Git branch created: `{feature_branch_name}/task/{task_id}/{timestamp}`
    - [ ] Worktree path captured in `worktree_info[task_id]` variable
    - [ ] worktree_path will be passed to task_enqueue call (verify in code)
    - [ ] Git exit code checked (should be 0)
@@ -330,7 +337,8 @@ When invoked, you must follow these steps:
    - [ ] Validation results logged for debugging
 
    **Best practices:**
-   - Use descriptive task IDs in branch names (e.g., task/domain-models-queue/20251013-143022-123456)
+   - Use descriptive task IDs in branch names (e.g., feature/user-auth/task/login-validation/2025-10-22-14-30-45)
+   - Task branch names use hierarchical format showing feature relationship
    - ALWAYS create task branches from the feature branch (not main)
    - Store worktree info for each task to pass to implementation agents
    - Include feature_branch in worktree_info so agents know the merge target
@@ -342,7 +350,7 @@ When invoked, you must follow these steps:
    - Cleanup strategy: Worktrees can be merged and removed after task completion or left for manual review
    - ALWAYS validate worktree creation succeeded before proceeding
    - ALWAYS use absolute paths for worktree_path
-   - ALWAYS include microsecond precision in timestamps to prevent collisions
+   - Timestamps use seconds precision (no milliseconds) for cleaner branch names
 
    Example suggested_agents structure:
    ```python
@@ -900,7 +908,8 @@ When creating a task that needs isolated work:
 
 ```python
 feature_branch_name = "feature/task-queue-enhancements"
-task_branch_name = f"task/calculate-priority-function"
+timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+task_branch_name = f"{feature_branch_name}/task/calculate-priority-function/{timestamp}"
 
 # 1. Create the implementation task with task_branch
 implementation_task = task_enqueue({
@@ -1052,7 +1061,7 @@ Merge the completed work from task branch into the main feature branch.
         "dependencies": ["other_task_ids", "agent_creation_task_id"],
         "estimated_minutes": 0,
         "worktree_path": ".abathur/worktrees/task-001",
-        "branch_name": "task/task-001/20251013-143022",
+        "branch_name": "feature/descriptive-name/task/task-001/2025-10-13-14-30-22",
         "feature_branch": "feature/descriptive-name"
       }
     ],
@@ -1060,7 +1069,7 @@ Merge the completed work from task branch into the main feature branch.
       {
         "task_id": "task_001",
         "worktree_path": ".abathur/worktrees/task-001",
-        "branch_name": "task/task-001/20251013-143022",
+        "branch_name": "feature/descriptive-name/task/task-001/2025-10-13-14-30-22",
         "feature_branch": "feature/descriptive-name",
         "merge_target": "feature/descriptive-name",
         "created_at": "2025-10-13T14:30:22"
