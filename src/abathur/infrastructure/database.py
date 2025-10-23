@@ -21,6 +21,7 @@ from abathur.domain.models import (
     TaskSource,
     TaskStatus,
 )
+from abathur.tui.models import TreeNode
 
 if TYPE_CHECKING:
     from abathur.services.document_index_service import DocumentIndexService
@@ -2178,6 +2179,44 @@ class Database:
                 """,
                 tuple(batch),
             )
+
+    def _order_tasks_by_depth(self, tree_nodes: list[TreeNode]) -> list[UUID]:
+        """Order tasks for deletion in leaves-to-root order (deepest first).
+
+        Groups tasks by their depth in the tree hierarchy and returns them
+        ordered from deepest (leaves) to shallowest (roots). This ensures
+        that child tasks are always deleted before their parents, maintaining
+        referential integrity.
+
+        Args:
+            tree_nodes: Validated deletable nodes with level (depth) information
+
+        Returns:
+            Task IDs ordered deepest-to-shallowest for safe deletion
+
+        Example:
+            Given a tree:
+                Root (level=0)
+                ├── Child1 (level=1)
+                │   └── Grandchild1 (level=2)
+                └── Child2 (level=1)
+
+            Returns: [Grandchild1, Child1, Child2, Root]
+        """
+        # Group nodes by depth (using 'level' attribute from TreeNode)
+        depth_groups: dict[int, list[UUID]] = {}
+
+        for node in tree_nodes:
+            if node.level not in depth_groups:
+                depth_groups[node.level] = []
+            depth_groups[node.level].append(node.task_id)
+
+        # Order by depth descending (deepest first)
+        ordered_ids = []
+        for depth in sorted(depth_groups.keys(), reverse=True):
+            ordered_ids.extend(depth_groups[depth])
+
+        return ordered_ids
 
     async def prune_tasks(self, filters: PruneFilters) -> PruneResult:
         """Prune tasks based on age and status criteria.
