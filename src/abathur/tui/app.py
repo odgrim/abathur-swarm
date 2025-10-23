@@ -68,6 +68,7 @@ class TaskQueueTUI(App[None]):
         initial_view_mode: ViewMode = ViewMode.TREE,
         auto_refresh: bool = True,
         refresh_interval: float = 2.0,
+        use_unicode: bool = True,
         **kwargs: Any,
     ) -> None:
         """Initialize TaskQueueTUI application.
@@ -77,8 +78,10 @@ class TaskQueueTUI(App[None]):
             initial_view_mode: Initial view mode (default: TREE)
             auto_refresh: Enable auto-refresh on startup (default: True)
             refresh_interval: Auto-refresh interval in seconds (default: 2.0)
+            use_unicode: Enable unicode characters for rendering (default: True)
             **kwargs: Additional arguments passed to App base class
         """
+        self.use_unicode = use_unicode
         super().__init__(**kwargs)
 
         # Dependency injection
