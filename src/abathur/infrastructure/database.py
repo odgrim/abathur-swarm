@@ -2535,6 +2535,139 @@ class Database:
             self._memory_service = MemoryService(self)
         return self._memory_service
 
+    # Helper methods for recursive tree validation and deletion (Phase 2)
+
+    def _build_tree_structure(self, tree_nodes: list[Any]) -> dict[UUID, list[UUID]]:
+        """Build parent -> children adjacency list from flat tree nodes.
+
+        This helper method constructs a hierarchical tree structure from a flat
+        list of TreeNode objects. It builds an adjacency list mapping each parent
+        task ID to its list of child task IDs, and populates the children field
+        in each TreeNode object.
+
+        Args:
+            tree_nodes: Flat list of TreeNode objects with task_id, task, and
+                       parent_task_id attributes. The children field will be
+                       populated by this method.
+
+        Returns:
+            Dict mapping parent_id (UUID) to list of child IDs (list[UUID]).
+            Parent IDs with no children are not included in the dict.
+
+        Example:
+            >>> nodes = [
+            ...     TreeNode(task_id=uuid1, parent_id=None, children=[]),
+            ...     TreeNode(task_id=uuid2, parent_id=uuid1, children=[]),
+            ...     TreeNode(task_id=uuid3, parent_id=uuid1, children=[]),
+            ... ]
+            >>> adjacency = db._build_tree_structure(nodes)
+            >>> adjacency[uuid1]  # Returns [uuid2, uuid3]
+            >>> nodes[0].children  # Now contains [uuid2, uuid3]
+        """
+        # Build adjacency list mapping parent_id -> [child_ids]
+        children_map: dict[UUID, list[UUID]] = {}
+
+        for node in tree_nodes:
+            # Get parent_task_id from the task object
+            parent_id = node.task.parent_task_id
+            if parent_id is not None:
+                if parent_id not in children_map:
+                    children_map[parent_id] = []
+                children_map[parent_id].append(node.task_id)
+
+        # Populate children field in TreeNode objects
+        for node in tree_nodes:
+            node.children = children_map.get(node.task_id, [])
+
+        return children_map
+
+    def _validate_tree_deletability(
+        self,
+        tree: dict[UUID, Any],
+        root_id: UUID,
+        allowed_statuses: list[TaskStatus],
+    ) -> set[UUID]:
+        """Validate which tasks in tree can be deleted based on status criteria.
+
+        Implements FR003: Partial tree preservation. If any descendant doesn't match
+        the allowed statuses, the entire subtree from that point up to root is preserved.
+
+        Args:
+            tree: Dict mapping task_id to TreeNode objects
+            root_id: Root task ID to start validation from
+            allowed_statuses: List of statuses that are allowed for deletion
+
+        Returns:
+            Set of task IDs that can be safely deleted. Empty set means preserve entire tree.
+
+        Example:
+            >>> # Root COMPLETED, child RUNNING -> preserve both
+            >>> result = db._validate_tree_deletability(tree, root_id, [TaskStatus.COMPLETED])
+            >>> assert result == set()  # Empty = preserve all
+        """
+        # Check if root exists in tree
+        if root_id not in tree:
+            return set()
+
+        # Recursive validation: check all descendants
+        def validate_subtree(task_id: UUID) -> tuple[bool, set[UUID]]:
+            """Validate subtree and return (all_match, deletable_ids)."""
+            if task_id not in tree:
+                return (True, set())
+
+            node = tree[task_id]
+            task_status = node.task.status
+
+            # Check if this node matches allowed statuses
+            node_matches = task_status in allowed_statuses
+
+            # Check all children recursively
+            all_children_match = True
+            deletable_children: set[UUID] = set()
+
+            for child_id in node.children:
+                child_matches, child_deletable = validate_subtree(child_id)
+                if not child_matches:
+                    all_children_match = False
+                deletable_children.update(child_deletable)
+
+            # FR003: If this node matches AND all children match -> include in deletable set
+            if node_matches and all_children_match:
+                return (True, {task_id} | deletable_children)
+            # FR003: If this node doesn't match but some children do -> delete children only
+            elif not node_matches and deletable_children:
+                return (False, deletable_children)
+            # FR003: If this node matches but some child doesn't -> preserve entire subtree
+            elif node_matches and not all_children_match:
+                return (False, set())
+            # Neither this node nor children match
+            else:
+                return (False, set())
+
+        all_match, deletable_ids = validate_subtree(root_id)
+        return deletable_ids
+
+    def _order_tasks_by_depth(self, tasks_with_depth: list[tuple[UUID, int]]) -> list[UUID]:
+        """Order tasks by depth for deletion (deepest first).
+
+        Sorts tasks in descending depth order to ensure safe deletion (leaves before roots).
+        Tasks at the same depth level may be in any order within that level.
+
+        Args:
+            tasks_with_depth: List of (task_id, depth) tuples
+
+        Returns:
+            List of task_ids ordered by depth (deepest first)
+
+        Example:
+            >>> tasks = [(root_id, 0), (mid_id, 1), (leaf_id, 2)]
+            >>> ordered = db._order_tasks_by_depth(tasks)
+            >>> assert ordered == [leaf_id, mid_id, root_id]  # Deepest first
+        """
+        # Sort by depth descending (deepest first)
+        sorted_tasks = sorted(tasks_with_depth, key=lambda x: x[1], reverse=True)
+        return [task_id for task_id, _ in sorted_tasks]
+
     @property
     def sessions(self) -> "SessionService":
         """Get session service instance.
