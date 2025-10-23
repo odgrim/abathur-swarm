@@ -18,6 +18,8 @@ from .services.task_data_service import TaskDataService
 
 
 class TaskQueueTUI(App[None]):
+    TITLE = "Abathur Task Graph"
+
     """Main Textual TUI application for task queue visualization.
 
     This app provides an interactive terminal interface for viewing and
