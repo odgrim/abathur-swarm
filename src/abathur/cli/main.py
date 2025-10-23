@@ -1028,10 +1028,21 @@ def visualize_queue(
             )
 
             # Create TUI app
+            # Convert view_mode string to ViewMode enum
+            from abathur.tui.models import ViewMode
+            view_mode_enum = ViewMode(view_mode)
+
+            # Handle refresh_interval: use default if auto-refresh enabled
+            actual_refresh_interval = 2.0  # Default
+            if no_auto_refresh:
+                actual_refresh_interval = 0.0  # Disable
+            elif refresh_interval is not None:
+                actual_refresh_interval = refresh_interval
+
             tui_app = TaskQueueTUI(
                 task_data_service=task_data_service,
-                refresh_interval=None if no_auto_refresh else refresh_interval,
-                initial_view_mode=view_mode,
+                refresh_interval=actual_refresh_interval,
+                initial_view_mode=view_mode_enum,
                 use_unicode=not no_unicode,
             )
 
