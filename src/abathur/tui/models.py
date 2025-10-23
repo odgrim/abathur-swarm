@@ -17,7 +17,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from abathur.domain.models import Task, TaskStatus
+from abathur.domain.models import Task, TaskStatus, TaskSource
 
 
 class ViewMode(str, Enum):
@@ -31,26 +31,33 @@ class ViewMode(str, Enum):
 
 
 class FilterState(BaseModel):
-    """Encapsulates filter criteria for task list.
+    """Encapsulates filter criteria for task list with multi-criteria AND logic.
+
+    All filter criteria are ANDed together. A task must match ALL active
+    filters to be included in filtered results.
 
     Attributes:
-        status_filter: Set of TaskStatus values to include (None = all)
-        agent_type_filter: Agent type string to match (None = all)
-        feature_branch_filter: Feature branch to match (None = all)
+        status_filter: Set of TaskStatus values to include (OR within set)
+        agent_type_filter: Agent type string for substring match (None = all)
+        feature_branch_filter: Feature branch for substring match (None = all)
         text_search: Text to search in summary/prompt (None = no search)
+        source_filter: TaskSource to filter by (None = all sources)
     """
 
     status_filter: set[TaskStatus] | None = Field(
         default=None, description="Filter by task status (None = all statuses)"
     )
     agent_type_filter: str | None = Field(
-        default=None, description="Filter by agent type (None = all agents)"
+        default=None, description="Filter by agent type (case-insensitive substring, None = all agents)"
     )
     feature_branch_filter: str | None = Field(
-        default=None, description="Filter by feature branch (None = all branches)"
+        default=None, description="Filter by feature branch (case-insensitive substring, None = all branches)"
     )
     text_search: str | None = Field(
-        default=None, description="Search text in summary/prompt (None = no search)"
+        default=None, description="Search text in summary/prompt (case-insensitive, None = no search)"
+    )
+    source_filter: TaskSource | None = Field(
+        default=None, description="Filter by task source (exact match, None = all sources)"
     )
 
     model_config = ConfigDict()
@@ -66,6 +73,7 @@ class FilterState(BaseModel):
             or self.agent_type_filter is not None
             or self.feature_branch_filter is not None
             or self.text_search is not None
+            or self.source_filter is not None
         )
 
     def matches(self, task: Task) -> bool:
@@ -73,25 +81,38 @@ class FilterState(BaseModel):
 
         All active filters must match for the task to pass.
 
+        Filter semantics:
+        - status_filter: Task status must be in the set (OR within set)
+        - agent_type_filter: Case-insensitive substring match
+        - feature_branch_filter: Case-insensitive substring match
+        - text_search: Case-insensitive search in description and summary
+
         Args:
             task: Task to check against filters
 
         Returns:
             bool: True if task passes all active filters
         """
-        # Status filter
+        # Status filter: Task must be in the allowed set
         if self.status_filter is not None:
             if task.status not in self.status_filter:
                 return False
 
-        # Agent type filter
+        # Agent type filter: Case-insensitive substring match
         if self.agent_type_filter is not None:
-            if task.agent_type != self.agent_type_filter:
+            if (
+                not task.agent_type
+                or self.agent_type_filter.lower() not in task.agent_type.lower()
+            ):
                 return False
 
-        # Feature branch filter
+        # Feature branch filter: Case-insensitive substring match
         if self.feature_branch_filter is not None:
-            if task.feature_branch != self.feature_branch_filter:
+            if (
+                not task.feature_branch
+                or self.feature_branch_filter.lower()
+                not in task.feature_branch.lower()
+            ):
                 return False
 
         # Text search filter (case-insensitive, searches summary and prompt)
@@ -104,8 +125,21 @@ class FilterState(BaseModel):
             if not (summary_match or prompt_match):
                 return False
 
+        # Source filter: Exact match
+        if self.source_filter is not None:
+            if task.source != self.source_filter:
+                return False
+
         # All active filters passed
         return True
+
+    def clear(self) -> None:
+        """Clear all filter criteria."""
+        self.status_filter = None
+        self.agent_type_filter = None
+        self.feature_branch_filter = None
+        self.text_search = None
+        self.source_filter = None
 
 
 class NavigationState(BaseModel):
