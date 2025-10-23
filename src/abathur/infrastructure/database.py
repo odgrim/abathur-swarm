@@ -2638,12 +2638,12 @@ class Database:
 
             return root_task_ids
 
-    async def prune_tasks(self, filters: PruneFilters) -> PruneResult:
+    async def prune_tasks(self, filters: PruneFilters) -> PruneResult | RecursivePruneResult:
         """Prune tasks based on age and status criteria.
 
         This method handles:
         1. Task selection (via filters)
-        2. Task deletion (via unified core)
+        2. Task deletion (via unified core or recursive)
         3. Statistics collection
         4. Optional VACUUM
 
@@ -2652,16 +2652,28 @@ class Database:
         - "conditional": Only run VACUUM if deleted_tasks >= 100 (default)
         - "never": Never run VACUUM (fastest, but doesn't reclaim space)
 
+        Deletion modes:
+        - Linear (filters.recursive=False): Delete matched tasks only (default)
+        - Recursive (filters.recursive=True): Delete entire task trees
+
         Args:
             filters: PruneFilters with deletion criteria and vacuum_mode
 
         Returns:
-            PruneResult with deletion counts and reclaimed bytes (if VACUUM ran)
+            PruneResult with deletion counts (linear mode) or
+            RecursivePruneResult with tree deletion statistics (recursive mode)
 
         Raises:
             ValueError: If filters are invalid
             DatabaseError: If deletion fails
         """
+        # Conditional routing based on recursive flag
+        if filters.recursive:
+            # Recursive deletion path: find root tasks and delete entire trees
+            root_task_ids = await self._find_root_tasks_for_recursive_prune(filters)
+            return await self.delete_task_trees_recursive(root_task_ids, filters)
+
+        # Linear deletion path (existing logic unchanged)
         async with self._get_connection() as conn:
             # STEP 1: SELECT tasks to delete using filters
             where_sql, params = filters.build_where_clause()
