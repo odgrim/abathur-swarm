@@ -148,6 +148,11 @@ class PruneFilters(BaseModel):
         description="VACUUM strategy: 'always', 'conditional', or 'never'",
     )
 
+    recursive: bool = Field(
+        default=False,
+        description="Enable recursive tree deletion with status checking"
+    )
+
     @model_validator(mode="after")
     def validate_filters(self) -> "PruneFilters":
         """Ensure at least one selection criterion is specified."""
