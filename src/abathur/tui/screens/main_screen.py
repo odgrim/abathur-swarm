@@ -8,7 +8,7 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.screen import Screen
-from textual.widgets import Header, Footer, Static
+from textual.widgets import Footer, Header, Static
 
 
 class MainScreen(Screen[Any]):
@@ -31,7 +31,7 @@ class MainScreen(Screen[Any]):
         Phase 1 placeholder: Basic layout with static content.
         """
         yield Header()
-        yield Static("Task Queue Visualization - Coming Soon", id="content")
+        yield Static("Abathur Task Graph", id="content")
         yield Footer()
 
     def on_mount(self) -> None:

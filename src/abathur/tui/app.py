@@ -3,21 +3,23 @@
 This module implements the main TUI app class for Abathur task queue visualization.
 """
 
-from uuid import UUID
 from typing import Any
+from uuid import UUID
 
 from textual.app import App
 from textual.binding import Binding
 from textual.reactive import var
 from textual.timer import Timer
 
-from .models import ViewMode, FilterState
-from .screens.main_screen import MainScreen
+from .models import FilterState, ViewMode
 from .screens.filter_screen import FilterScreen
+from .screens.main_screen import MainScreen
 from .services.task_data_service import TaskDataService
 
 
 class TaskQueueTUI(App[None]):
+    TITLE = "Abathur Task Graph"
+
     """Main Textual TUI application for task queue visualization.
 
     This app provides an interactive terminal interface for viewing and
@@ -68,6 +70,7 @@ class TaskQueueTUI(App[None]):
         initial_view_mode: ViewMode = ViewMode.TREE,
         auto_refresh: bool = True,
         refresh_interval: float = 2.0,
+        use_unicode: bool = True,
         **kwargs: Any,
     ) -> None:
         """Initialize TaskQueueTUI application.
@@ -77,8 +80,10 @@ class TaskQueueTUI(App[None]):
             initial_view_mode: Initial view mode (default: TREE)
             auto_refresh: Enable auto-refresh on startup (default: True)
             refresh_interval: Auto-refresh interval in seconds (default: 2.0)
+            use_unicode: Enable unicode characters for rendering (default: True)
             **kwargs: Additional arguments passed to App base class
         """
+        self.use_unicode = use_unicode
         super().__init__(**kwargs)
 
         # Dependency injection
