@@ -1,15 +1,21 @@
-"""Textual TUI components for Abathur task queue management."""
+"""TUI (Text User Interface) module for Abathur task queue visualization."""
 
-from abathur.tui.exceptions import (
-    TUIConfigError,
-    TUIDataError,
-    TUIError,
-    TUIRenderError,
+from abathur.tui.models import (
+    CachedTaskData,
+    FeatureBranchSummary,
+    FilterState,
+    NavigationState,
+    TreeLayout,
+    TreeNode,
+    ViewMode,
 )
 
 __all__ = [
-    "TUIConfigError",
-    "TUIDataError",
-    "TUIError",
-    "TUIRenderError",
+    "CachedTaskData",
+    "FeatureBranchSummary",
+    "FilterState",
+    "NavigationState",
+    "TreeLayout",
+    "TreeNode",
+    "ViewMode",
 ]
