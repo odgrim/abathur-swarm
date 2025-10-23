@@ -262,7 +262,7 @@ class TreeRenderer:
         root_tree = RichTree("Task Queue", guide_style=guide_style)
 
         # Recursively build tree from layout
-        def add_subtree(parent_widget: RichTree, node_id: UUID):
+        def add_subtree(parent_widget: RichTree, node_id: UUID) -> None:
             """Recursively add node and its children to parent widget."""
             if node_id not in layout.nodes:
                 return

@@ -37,6 +37,13 @@ A CLI orchestration system for managing swarms of specialized Claude agents with
 - Rich CLI output with tables and progress bars
 - Resource and failure statistics
 
+**TUI Task Queue Visualizer**
+- Interactive terminal UI for task visualization
+- Multiple view modes (tree, dependency, timeline, feature branch)
+- Real-time task filtering and search
+- Hierarchical task tree rendering
+- Color-coded status indicators
+
 ---
 
 ## Requirements
@@ -206,6 +213,27 @@ abathur mcp stop <server>
 abathur mcp restart <server>
 ```
 
+### TUI Task Visualizer
+
+```bash
+# Launch interactive TUI
+abathur tui
+
+# TUI supports multiple view modes:
+# - Tree view (parent-child relationships)
+# - Dependency view (prerequisite relationships)
+# - Timeline view (chronological)
+# - Feature branch view (grouped by feature)
+# - Flat list view
+
+# Interactive features:
+# - f: Toggle filter modal
+# - /: Search tasks
+# - ↑↓: Navigate tasks
+# - Enter: Expand/collapse task details
+# - q: Quit
+```
+
 ---
 
 ## Configuration
@@ -331,6 +359,7 @@ abathur --help
 ## Documentation
 
 - **[User Guide](docs/USER_GUIDE.md)**: Comprehensive usage guide
+- **[TUI Visualizer Guide](docs/TUI_GUIDE.md)**: Interactive terminal UI documentation
 - **[API Reference](docs/API_REFERENCE.md)**: Python API documentation
 - **[Architecture](design_docs/prd_deliverables/03_ARCHITECTURE.md)**: System architecture
 - **[System Design](design_docs/prd_deliverables/04_SYSTEM_DESIGN.md)**: Algorithms and protocols
@@ -356,6 +385,7 @@ This is a working system with the following components implemented:
 - Loop Executor (iterative refinement, convergence detection, checkpointing)
 - MCP Manager (server lifecycle, health monitoring, auto-restart)
 - CLI with rich output
+- TUI Task Visualizer (interactive terminal UI, multiple view modes, filtering)
 
 ---
 
