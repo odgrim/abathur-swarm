@@ -614,8 +614,6 @@ def prune(
     limit: int | None = typer.Option(None, "--limit", help="Maximum tasks to delete", min=1),
     force: bool = typer.Option(False, "--force", help="Skip confirmation prompt"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be deleted without deleting"),
-    recursive: bool = typer.Option(False, "--recursive", help="Recursively delete task and all its descendants"),
-    preview_depth: int = typer.Option(5, "--preview-depth", help="Maximum depth to display in tree preview", min=1, max=50),
     vacuum: str = typer.Option(
         "conditional",
         "--vacuum",
