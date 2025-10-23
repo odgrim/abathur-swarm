@@ -31,7 +31,7 @@ class MainScreen(Screen[Any]):
         Phase 1 placeholder: Basic layout with static content.
         """
         yield Header()
-        yield Static("Task Queue Visualization - Coming Soon", id="content")
+        yield Static("Abathur Task Graph", id="content")
         yield Footer()
 
     def on_mount(self) -> None:
