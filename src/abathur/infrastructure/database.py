@@ -3,6 +3,7 @@
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -34,6 +35,35 @@ VACUUM_THRESHOLD_TASKS = 100
 # Auto-skip VACUUM threshold: automatically set vacuum_mode='never' for large prunes
 # Rationale: VACUUM on 10,000+ tasks can take minutes, blocking the database
 AUTO_SKIP_VACUUM_THRESHOLD = 10_000
+
+
+@dataclass
+class TreeNode:
+    """Runtime data structure representing a node in task tree during recursive operations."""
+    id: UUID
+    parent_id: UUID | None
+    status: TaskStatus
+    depth: int
+    children_ids: list[UUID] = field(default_factory=list)
+
+    @classmethod
+    def from_row(cls, row: dict) -> "TreeNode":
+        """Construct TreeNode from database query result row."""
+        return cls(
+            id=UUID(row["id"]),
+            parent_id=UUID(row["parent_id"]) if row["parent_id"] else None,
+            status=TaskStatus(row["status"]),
+            depth=row["depth"],
+            children_ids=[]  # Populated by _build_tree_structure()
+        )
+
+    def is_leaf(self) -> bool:
+        """Check if this node is a leaf (no children)."""
+        return len(self.children_ids) == 0
+
+    def matches_status(self, allowed: list[TaskStatus]) -> bool:
+        """Check if this node's status matches any of the allowed statuses."""
+        return self.status in allowed
 
 
 class PruneFilters(BaseModel):
