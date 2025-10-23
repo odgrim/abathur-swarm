@@ -401,18 +401,53 @@ def prune(
         "--vacuum",
         help="VACUUM strategy: 'always' (may be slow), 'conditional' (auto, default), or 'never' (fastest)"
     ),
+    recursive: bool = typer.Option(
+        False,
+        "--recursive",
+        "-r",
+        help="Recursively delete task and all descendants. Validates entire descendant tree "
+             "matches deletion criteria before deleting. Use --dry-run to preview what will be deleted."
+    ),
+    preview_depth: int = typer.Option(
+        5,
+        "--preview-depth",
+        min=1,
+        max=50,
+        help="Maximum depth to display in tree preview when using --recursive (default: 5). "
+             "Deeper levels show '...' indicator."
+    ),
 ) -> None:
     """Delete tasks by ID or status.
 
+    By default, deletes only tasks directly matching the criteria.
+    Use --recursive to delete entire task trees.
+
     Examples:
+        # Delete single task (non-recursive)
         abathur task prune ebec23ad
+
+        # Delete multiple tasks
         abathur task prune ebec23ad-1234-5678-90ab-cdef12345678 fbec23ad-5678-1234-90ab-cdef12345678
+
+        # Delete by status (non-recursive)
         abathur task prune --status completed
         abathur task prune --status failed --force
         abathur task prune --status pending --dry-run
+
+        # Delete by time
         abathur task prune --older-than 30d
         abathur task prune --older-than 30d --vacuum=always
         abathur task prune --older-than 30d --vacuum=never
+
+        # Recursive deletion (entire task tree)
+        abathur task prune --task-id ebec23ad --recursive
+        abathur task prune --status completed --recursive
+
+        # Preview recursive deletion
+        abathur task prune --task-id ebec23ad --recursive --dry-run
+
+        # Custom preview depth
+        abathur task prune --status completed --recursive --preview-depth 10
     """
     from abathur.domain.models import TaskStatus
 
@@ -448,6 +483,14 @@ def prune(
             "  - Task IDs only\n"
             "  - Time-based filters only (--older-than or --before)\n"
             "  - Status only (--status)"
+        )
+
+    # Validate incompatible option combinations
+    if recursive and limit:
+        raise typer.BadParameter(
+            "Cannot use --recursive with --limit.\n"
+            "Recursive deletion operates on entire task trees, making limit semantics unclear.\n"
+            "Remove --limit to proceed with recursive deletion."
         )
 
     # Validate status enum value
@@ -508,7 +551,8 @@ def prune(
                         statuses=[task_status],
                         limit=limit,
                         dry_run=dry_run,
-                        vacuum_mode=vacuum
+                        vacuum_mode=vacuum,
+                        recursive=recursive
                     )
                 else:
                     # No status specified - use default (COMPLETED, FAILED, CANCELLED)
@@ -517,7 +561,8 @@ def prune(
                         before_date=before_date,
                         limit=limit,
                         dry_run=dry_run,
-                        vacuum_mode=vacuum
+                        vacuum_mode=vacuum,
+                        recursive=recursive
                     )
             except ValidationError as e:
                 raise typer.BadParameter(f"Invalid filter parameters: {e}") from None
@@ -851,7 +896,11 @@ def prune(
         )
 
         try:
-            filters = PruneFilters(task_ids=selected_task_ids, vacuum_mode=vacuum)
+            filters = PruneFilters(
+                task_ids=selected_task_ids,
+                vacuum_mode=vacuum,
+                recursive=recursive
+            )
 
             if show_vacuum_progress:
                 # Use progress indicator for operations that will VACUUM
