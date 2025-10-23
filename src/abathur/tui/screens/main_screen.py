@@ -47,7 +47,7 @@ class MainScreen(Screen[Any]):
         # Placeholder - will fetch and update task data
         pass
 
-    def apply_filter(self, filter_state: dict) -> None:  # type: ignore[type-arg]
+    def apply_filter(self, filter_state: object) -> None:
         """Apply filter to displayed data.
 
         Args:

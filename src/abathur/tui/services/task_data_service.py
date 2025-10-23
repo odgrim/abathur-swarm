@@ -5,7 +5,12 @@ Full implementation with caching, TTL, and auto-refresh will be
 completed in subsequent phases.
 """
 
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from abathur.infrastructure.database import Database
+    from abathur.services.task_queue_service import TaskQueueService
+    from abathur.services.dependency_resolver import DependencyResolver
 
 
 class TaskDataService:
@@ -30,12 +35,22 @@ class TaskDataService:
         - DependencyResolver: For dependency graph computation
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        database: "Database",
+        task_queue_service: "TaskQueueService",
+        dependency_resolver: "DependencyResolver",
+    ) -> None:
         """Initialize TaskDataService.
 
-        Phase 1 placeholder constructor.
-        Full implementation will accept Database, TaskQueueService, etc.
+        Args:
+            database: Database instance for task persistence
+            task_queue_service: TaskQueueService for queue operations
+            dependency_resolver: DependencyResolver for dependency graph computation
         """
+        self._database = database
+        self._task_queue_service = task_queue_service
+        self._dependency_resolver = dependency_resolver
         self._refresh_callback: Callable[[], None] | None = None
         self._refresh_timer: Any = None
 
