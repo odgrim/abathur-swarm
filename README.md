@@ -37,12 +37,12 @@ A CLI orchestration system for managing swarms of specialized Claude agents with
 - Rich CLI output with tables and progress bars
 - Resource and failure statistics
 
-**TUI Task Queue Visualizer**
-- Interactive terminal UI for task visualization
-- Multiple view modes (tree, dependency, timeline, feature branch)
-- Real-time task filtering and search
-- Hierarchical task tree rendering
+**Task Tree Visualization**
+- Hierarchical task tree rendering in CLI
 - Color-coded status indicators
+- Unicode/ASCII box-drawing support
+- Parent-child task relationships
+- Priority-based sorting
 
 ---
 
@@ -193,6 +193,7 @@ Abathur follows **Clean Architecture** principles with clear layer separation:
 ```bash
 abathur task submit <template> [--input-file FILE] [--priority 0-10]
 abathur task list [--status STATUS] [--limit N]
+abathur task list --tree         # Show tasks as hierarchical tree
 abathur task show <task-id>
 abathur task status              # Show task queue statistics
 abathur task cancel <task-id>
@@ -227,25 +228,22 @@ abathur mcp stop <server>
 abathur mcp restart <server>
 ```
 
-### TUI Task Visualizer
+### Task Tree Visualization
 
 ```bash
-# Launch interactive TUI
-abathur tui
+# Show tasks as hierarchical tree
+abathur task list --tree
 
-# TUI supports multiple view modes:
-# - Tree view (parent-child relationships)
-# - Dependency view (prerequisite relationships)
-# - Timeline view (chronological)
-# - Feature branch view (grouped by feature)
-# - Flat list view
+# Filter by status
+abathur task list --tree --status pending
+abathur task list --tree --status running
 
-# Interactive features:
-# - f: Toggle filter modal
-# - /: Search tasks
-# - ↑↓: Navigate tasks
-# - Enter: Expand/collapse task details
-# - q: Quit
+# Combine with other filters
+abathur task list --tree --status pending --limit 20
+
+# Feature branch task overview
+abathur feature-branch summary <branch-name>
+abathur feature-branch list
 ```
 
 ---
@@ -372,7 +370,6 @@ abathur --help
 ## Documentation
 
 - **[User Guide](docs/USER_GUIDE.md)**: Comprehensive usage guide
-- **[TUI Visualizer Guide](docs/TUI_GUIDE.md)**: Interactive terminal UI documentation
 - **[API Reference](docs/API_REFERENCE.md)**: Python API documentation
 - **[Architecture](design_docs/prd_deliverables/03_ARCHITECTURE.md)**: System architecture
 - **[System Design](design_docs/prd_deliverables/04_SYSTEM_DESIGN.md)**: Algorithms and protocols
@@ -397,8 +394,7 @@ This is a working system with the following components implemented:
 - Resource Monitor (CPU/memory tracking, limits)
 - Loop Executor (iterative refinement, convergence detection, checkpointing)
 - MCP Manager (server lifecycle, health monitoring, auto-restart)
-- CLI with rich output
-- TUI Task Visualizer (interactive terminal UI, multiple view modes, filtering)
+- CLI with rich output and tree visualization
 
 ---
 
