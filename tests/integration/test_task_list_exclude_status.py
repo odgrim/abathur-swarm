@@ -12,7 +12,6 @@ This test validates Phase 3 (Integration Testing) for CLI --exclude-status imple
 
 import asyncio
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from abathur.cli.main import app
@@ -23,7 +22,6 @@ from abathur.services.priority_calculator import PriorityCalculator
 from abathur.services.task_queue_service import TaskQueueService
 from typer.testing import CliRunner
 
-
 # Fixtures
 
 
@@ -33,7 +31,9 @@ def cli_runner() -> CliRunner:
     return CliRunner()
 
 
-def _setup_test_database_sync(db_path: Path, task_statuses: list[tuple[str, TaskStatus]]) -> dict[TaskStatus, str]:
+def _setup_test_database_sync(
+    db_path: Path, task_statuses: list[tuple[str, TaskStatus]]
+) -> dict[TaskStatus, str]:
     """Helper to populate test database with tasks in various statuses.
 
     Args:
@@ -43,6 +43,7 @@ def _setup_test_database_sync(db_path: Path, task_statuses: list[tuple[str, Task
     Returns:
         Dictionary mapping TaskStatus to task_id
     """
+
     async def setup():
         # Initialize database
         db = Database(db_path)
@@ -147,7 +148,9 @@ def test_exclude_completed_tasks_integration(
     )
 
     # Assert 1: CLI exits successfully
-    assert result.exit_code == 0, f"CLI exited with error (code {result.exit_code}): {result.stdout}"
+    assert (
+        result.exit_code == 0
+    ), f"CLI exited with error (code {result.exit_code}): {result.stdout}"
 
     # Assert 2: Output does NOT contain completed tasks
     completed_id_1 = task_map[TaskStatus.COMPLETED][:8]  # First 8 chars for display
@@ -166,7 +169,7 @@ def test_exclude_completed_tasks_integration(
 
     # Assert 5: Output should NOT contain "completed" status
     # Check for "completed" as a status value (not in descriptions)
-    output_lines = result.stdout.split('\n')
+    output_lines = result.stdout.split("\n")
     for line in output_lines:
         # Skip lines that are task descriptions
         if "Completed task" in line:
@@ -177,7 +180,9 @@ def test_exclude_completed_tasks_integration(
             # Status is typically 5th column (after ID, Summary, Agent Type, Priority)
             if len(parts) > 5:
                 status_col = parts[5]
-                assert "completed" not in status_col.lower(), "Status column should not show 'completed'"
+                assert (
+                    "completed" not in status_col.lower()
+                ), "Status column should not show 'completed'"
 
 
 def test_exclude_failed_tasks_integration(
@@ -209,7 +214,9 @@ def test_exclude_failed_tasks_integration(
     )
 
     # Assert 1: CLI exits successfully
-    assert result.exit_code == 0, f"CLI exited with error (code {result.exit_code}): {result.stdout}"
+    assert (
+        result.exit_code == 0
+    ), f"CLI exited with error (code {result.exit_code}): {result.stdout}"
 
     # Assert 2: Output excludes failed tasks
     failed_id = task_map[TaskStatus.FAILED][:8]
@@ -254,20 +261,24 @@ def test_exclude_with_limit_integration(
     )
 
     # Assert 1: CLI exits successfully
-    assert result.exit_code == 0, f"CLI exited with error (code {result.exit_code}): {result.stdout}"
+    assert (
+        result.exit_code == 0
+    ), f"CLI exited with error (code {result.exit_code}): {result.stdout}"
 
     # Assert 2: Count task IDs in output (only 3 unique tasks should appear)
     # The table uses multi-line cells, so we count unique task IDs instead of rows
     import re
+
     # Extract 8-character task IDs (format: 8 hex chars)
-    task_ids = re.findall(r'│\s+([0-9a-f]{8})\s+│', result.stdout)
+    task_ids = re.findall(r"│\s+([0-9a-f]{8})\s+│", result.stdout)
 
     # Should have exactly 3 unique task IDs
     assert len(task_ids) == 3, f"Expected 3 tasks in output, got {len(task_ids)}: {task_ids}"
 
     # Assert 3: All shown tasks are non-completed (should be pending)
-    assert "completed" not in result.stdout.lower() or "Completed task" in result.stdout, \
-        "Output should not contain 'completed' status (descriptions are ok)"
+    assert (
+        "completed" not in result.stdout.lower() or "Completed task" in result.stdout
+    ), "Output should not contain 'completed' status (descriptions are ok)"
     assert "pending" in result.stdout.lower(), "Output should contain pending tasks"
 
 
@@ -317,18 +328,21 @@ def test_exclude_all_status_values(
         )
 
         # Assert: CLI exits successfully
-        assert result.exit_code == 0, \
-            f"CLI failed when excluding '{exclude_status}' (code {result.exit_code}): {result.stdout}"
+        assert (
+            result.exit_code == 0
+        ), f"CLI failed when excluding '{exclude_status}' (code {result.exit_code}): {result.stdout}"
 
         # Assert: Excluded task does not appear
-        assert excluded_desc not in result.stdout, \
-            f"Excluded task '{excluded_desc}' should not appear when excluding '{exclude_status}'"
+        assert (
+            excluded_desc not in result.stdout
+        ), f"Excluded task '{excluded_desc}' should not appear when excluding '{exclude_status}'"
 
         # Assert: At least some included tasks appear
         # (We check at least one to verify filter is working)
         included_found = any(desc in result.stdout for desc in included_descs)
-        assert included_found, \
-            f"At least one included task should appear when excluding '{exclude_status}'"
+        assert (
+            included_found
+        ), f"At least one included task should appear when excluding '{exclude_status}'"
 
 
 def test_rich_table_format_unchanged(
@@ -378,7 +392,8 @@ def test_rich_table_format_unchanged(
     # Assert 5: Verify table rows are formatted correctly
     # Check that rows contain task data separated by │
     task_rows = [
-        line for line in result.stdout.split('\n')
+        line
+        for line in result.stdout.split("\n")
         if "│" in line and "ID" not in line and "─" not in line and len(line.strip()) > 0
     ]
 
@@ -389,7 +404,9 @@ def test_rich_table_format_unchanged(
     for row in task_rows:
         # Count column separators (should be 7 for 6 columns: │ col │ col │ col │ col │ col │ col │)
         separator_count = row.count("│")
-        assert separator_count >= 6, f"Row should have at least 6 column separators, got {separator_count}"
+        assert (
+            separator_count >= 6
+        ), f"Row should have at least 6 column separators, got {separator_count}"
 
 
 def test_exclude_status_invalid_value_error(
@@ -419,8 +436,9 @@ def test_exclude_status_invalid_value_error(
     assert result.exit_code != 0, "CLI should exit with error for invalid status"
 
     # Assert 2: Error output mentions invalid value
-    assert "invalid_status" in result.stdout or "invalid_status" in str(result.exception), \
-        "Error should mention the invalid status value"
+    assert "invalid_status" in result.stdout or "invalid_status" in str(
+        result.exception
+    ), "Error should mention the invalid status value"
 
     # Note: Exact error format depends on validation implementation in CLI
     # This test verifies that invalid values are rejected
@@ -464,7 +482,8 @@ def test_backward_compatibility_no_exclude_status(
 
     # Assert 3: Count task IDs to verify all 3 tasks are present
     import re
-    task_ids = re.findall(r'│\s+([0-9a-f]{8})\s+│', result.stdout)
+
+    task_ids = re.findall(r"│\s+([0-9a-f]{8})\s+│", result.stdout)
     assert len(task_ids) == 3, f"Expected 3 tasks in output, got {len(task_ids)}"
 
 
@@ -510,4 +529,6 @@ def test_exclude_status_with_status_filter_combined(
     if result.exit_code == 0:
         assert "Ready task" in result.stdout, "Ready tasks should appear with --status ready"
         assert "Completed task" not in result.stdout, "Completed task should be excluded"
-        assert "Running task" not in result.stdout, "Running task should be excluded by --status filter"
+        assert (
+            "Running task" not in result.stdout
+        ), "Running task should be excluded by --status filter"
