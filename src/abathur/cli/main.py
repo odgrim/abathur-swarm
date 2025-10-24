@@ -17,13 +17,13 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
+from rich.tree import Tree
 
 from abathur import __version__
 from abathur.cli.utils import parse_duration_to_days
 from abathur.domain.models import TaskStatus
 from abathur.infrastructure.database import PruneFilters
 from abathur.tui.models import TreeNode
-from abathur.tui.rendering.tree_renderer import TreeRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,35 @@ async def _resolve_task_id(task_id_prefix: str, services: dict[str, Any]) -> UUI
         raise typer.Exit(1)
 
     return matches[0].id
+
+
+# Helper to render tree preview for recursive deletion
+def _render_tree_preview(tasks: list[Any], max_depth: int = 5) -> None:
+    """Render hierarchical tree preview of tasks to be deleted.
+
+    Args:
+        tasks: List of Task objects to preview
+        max_depth: Maximum depth to display in tree
+    """
+    from abathur.tui.rendering.tree_renderer import TreeRenderer
+
+    # Build task hierarchy
+    task_map = {task.id: task for task in tasks}
+    root_tasks = [task for task in tasks if task.parent_task_id is None]
+
+    # Create tree renderer
+    renderer = TreeRenderer()
+
+    # Compute layout
+    dependency_graph: dict[UUID, list[UUID]] = {}  # Empty for now, used by renderer
+    layout = renderer.compute_layout(tasks, dependency_graph)
+
+    # Render tree with depth limit
+    tree = renderer.render_tree(layout, use_unicode=TreeRenderer.supports_unicode())
+
+    console.print("\n[bold cyan]Tasks to Delete (Tree View)[/bold cyan]")
+    console.print(tree)
+    console.print(f"\n[dim]Showing {len(tasks)} tasks (max depth: {max_depth})[/dim]")
 
 
 # Helper to get database and services
@@ -230,114 +259,15 @@ def _get_status_symbol(status: TaskStatus) -> str:
     return symbol_map.get(status, "•")
 
 
-def _build_tree_string(
-    nodes: list[TreeNode],
-    node_map: dict[UUID, TreeNode],
-    max_depth: int,
-    use_unicode: bool
-) -> list[Text]:
-    """Build tree structure as list of Rich Text objects with box-drawing characters.
-
-    Performs recursive depth-first traversal to build tree visualization with
-    proper connector characters and vertical line placement based on ancestor chain.
-
-    Args:
-        nodes: Root nodes to visualize (already filtered to roots)
-        node_map: Mapping of task IDs to TreeNode objects (for resolving children)
-        max_depth: Maximum tree depth to display (shows "..." beyond limit)
-        use_unicode: If True, use Unicode box-drawing (├── │ └──), else ASCII (|-- | `--)
-
-    Returns:
-        List of Rich Text objects, one per line, with prefix + connector + label
-
-    Example:
-        >>> nodes = [root_node1, root_node2]
-        >>> node_map = {n.task_id: n for n in all_nodes}
-        >>> lines = _build_tree_string(nodes, node_map, max_depth=3, use_unicode=True)
-        >>> for line in lines:
-        ...     console.print(line)
-        ├── ✓ Task 1 (completed)
-        │   └── ○ Subtask 1.1 (pending)
-        └── ● Task 2 (running)
-    """
-    lines: list[Text] = []
-
-    # Define connectors based on Unicode support
-    if use_unicode:
-        connectors = {
-            'mid': '├── ',      # U+251C U+2500 U+2500 (mid child connector)
-            'last': '└── ',     # U+2514 U+2500 U+2500 (last child connector)
-            'vert': '│   '      # U+2502 (vertical line + 3 spaces)
-        }
-    else:
-        connectors = {
-            'mid': '|-- ',      # ASCII mid child connector
-            'last': '`-- ',     # ASCII last child connector
-            'vert': '|   '      # ASCII vertical line + 3 spaces
-        }
-
-    def build_node(node: TreeNode, prefix: str, is_last: bool, depth: int) -> None:
-        """Recursively build tree lines with depth tracking.
-
-        Args:
-            node: Current node to render
-            prefix: Accumulated prefix from ancestor chain
-            is_last: True if this is the last child of its parent
-            depth: Current depth in tree (0-based)
-        """
-        # Check depth limit
-        if depth >= max_depth:
-            truncation_line = Text(prefix, style="")
-            truncation_line.append("... (more items)", style="dim italic")
-            lines.append(truncation_line)
-            return
-
-        # Build line: prefix + connector + label
-        connector = connectors['last'] if is_last else connectors['mid']
-        line = Text(prefix + connector, style="")
-        line.append(_format_node_label(node))
-        lines.append(line)
-
-        # Build prefix for children based on whether this node is last
-        # If this is the last child, use spaces (no vertical line)
-        # If not last, use vertical line to show parent chain
-        child_prefix = prefix + ('    ' if is_last else connectors['vert'])
-
-        # Get and sort children by priority (highest first)
-        children = [
-            node_map[child_id]
-            for child_id in node.children
-            if child_id in node_map
-        ]
-        children.sort(
-            key=lambda n: n.task.calculated_priority,
-            reverse=True
-        )
-
-        # Recurse for children
-        for i, child in enumerate(children):
-            is_last_child = (i == len(children) - 1)
-            build_node(child, child_prefix, is_last_child, depth + 1)
-
-    # Build tree from root nodes
-    for i, root_node in enumerate(nodes):
-        is_last_root = (i == len(nodes) - 1)
-        build_node(root_node, "", is_last_root, 0)
-
-    return lines
-
-
 def _render_tree_preview(
     tree_nodes: list[TreeNode],
     max_depth: int = 5,
     console: Console | None = None,
 ) -> None:
-    """Render hierarchical tree structure with box-drawing characters.
+    """Render hierarchical tree structure using Rich Tree widget.
 
     Displays task hierarchy with color-coded status, truncating at max_depth
-    to prevent overwhelming output for large trees. Uses Unix tree command
-    format with box-drawing characters (├── │ └──) for Unicode terminals
-    or ASCII alternatives (|-- | `--) for non-Unicode terminals.
+    to prevent overwhelming output for large trees.
 
     Args:
         tree_nodes: Nodes to visualize (from _discover_task_tree)
@@ -363,9 +293,6 @@ def _render_tree_preview(
         console.print("[yellow]No tasks to display[/yellow]")
         return
 
-    # Detect Unicode support
-    use_unicode = TreeRenderer.supports_unicode()
-
     # Build node map and identify roots
     node_map = {node.task_id: node for node in tree_nodes}
     root_nodes = [
@@ -373,13 +300,62 @@ def _render_tree_preview(
         if node.task.parent_task_id is None or node.task.parent_task_id not in node_map
     ]
 
-    # Print title
-    console.print(Text(f"Task Tree ({len(tree_nodes)} tasks)", style="bold cyan"))
+    # Create root tree with title
+    root_tree = Tree(
+        Text(f"Task Tree ({len(tree_nodes)} tasks)", style="bold cyan"),
+        guide_style="dim"  # Dim connecting lines
+    )
 
-    # Build and print tree using box-drawing characters
-    lines = _build_tree_string(root_nodes, node_map, max_depth, use_unicode)
-    for line in lines:
-        console.print(line)
+    def add_subtree(
+        parent_widget: Tree,
+        node: TreeNode,
+        current_depth: int
+    ) -> None:
+        """Recursively add nodes to tree widget with depth truncation.
+
+        Edge cases handled:
+        - Deep hierarchies: Truncates at max_depth with single "..." indicator
+        - Wide trees: Handles many siblings correctly
+        - Mixed depth: Each branch truncates independently
+        """
+
+        # Create node label with color coding and status symbol
+        label = _format_node_label(node)
+
+        # Add node to parent
+        subtree = parent_widget.add(label)
+
+        # Get and sort children by priority (highest first)
+        children = [
+            node_map[child_id]
+            for child_id in node.children
+            if child_id in node_map
+        ]
+        children.sort(
+            key=lambda n: n.task.calculated_priority,
+            reverse=True
+        )
+
+        # Check depth limit BEFORE recursing into children
+        # This ensures we show at most max_depth levels
+        if current_depth >= max_depth - 1:
+            # Only show truncation indicator if there are children
+            if children:
+                subtree.add(
+                    Text("... (more items)", style="dim italic")
+                )
+            return
+
+        # Add children recursively
+        for child in children:
+            add_subtree(subtree, child, current_depth + 1)
+
+    # Build tree from root nodes
+    for root_node in root_nodes:
+        add_subtree(root_tree, root_node, 0)
+
+    # Render to console
+    console.print(root_tree)
 
 
 def _format_node_label(node: TreeNode) -> Text:
