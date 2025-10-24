@@ -264,10 +264,12 @@ def _render_tree_preview(
     max_depth: int = 5,
     console: Console | None = None,
 ) -> None:
-    """Render hierarchical tree structure using Rich Tree widget.
+    """Render hierarchical tree structure with box-drawing characters.
 
     Displays task hierarchy with color-coded status, truncating at max_depth
-    to prevent overwhelming output for large trees.
+    to prevent overwhelming output for large trees. Uses Unix tree command
+    format with box-drawing characters (├── │ └──) for Unicode terminals
+    or ASCII alternatives (|-- | `--) for non-Unicode terminals.
 
     Args:
         tree_nodes: Nodes to visualize (from _discover_task_tree)
@@ -293,60 +295,17 @@ def _render_tree_preview(
         console.print("[yellow]No tasks to display[/yellow]")
         return
 
-    # Build node map and identify roots
-    node_map = {node.task_id: node for node in tree_nodes}
-    root_nodes = [
-        node for node in tree_nodes
-        if node.task.parent_task_id is None or node.task.parent_task_id not in node_map
-    ]
+    # Detect Unicode support
+    from abathur.tui.rendering.tree_renderer import TreeRenderer
+    use_unicode = TreeRenderer.supports_unicode()
 
-    # Create root tree with title
-    root_tree = Tree(
-        Text(f"Task Tree ({len(tree_nodes)} tasks)", style="bold cyan"),
-        guide_style="dim"  # Dim connecting lines
-    )
+    # Print title
+    console.print(Text(f"Task Tree ({len(tree_nodes)} tasks)", style="bold cyan"))
 
-    def add_subtree(
-        parent_widget: Tree,
-        node: TreeNode,
-        current_depth: int
-    ) -> None:
-        """Recursively add nodes to tree widget with depth truncation."""
-
-        # Check depth limit
-        if current_depth >= max_depth:
-            parent_widget.add(
-                Text("... (more items)", style="dim italic")
-            )
-            return
-
-        # Create node label with color coding and status symbol
-        label = _format_node_label(node)
-
-        # Add node to parent
-        subtree = parent_widget.add(label)
-
-        # Get and sort children by priority (highest first)
-        children = [
-            node_map[child_id]
-            for child_id in node.children
-            if child_id in node_map
-        ]
-        children.sort(
-            key=lambda n: n.task.calculated_priority,
-            reverse=True
-        )
-
-        # Add children recursively
-        for child in children:
-            add_subtree(subtree, child, current_depth + 1)
-
-    # Build tree from root nodes
-    for root_node in root_nodes:
-        add_subtree(root_tree, root_node, 0)
-
-    # Render to console
-    console.print(root_tree)
+    # Build and print tree using box-drawing characters
+    lines = _build_tree_string(tree_nodes, max_depth, use_unicode)
+    for line in lines:
+        console.print(line)
 
 
 def _format_node_label(node: TreeNode) -> Text:
