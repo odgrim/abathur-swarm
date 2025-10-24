@@ -82,8 +82,8 @@ def format_task_line(task: Task) -> Text:
     id_prefix = str(task.id)[:8]
 
     # Get summary with fallback to prompt
-    summary = task.summary if task.summary is not None else task.prompt
-    if summary is None:
+    summary = task.summary if task.summary else task.prompt
+    if not summary:  # Handle None or empty string
         summary = "Untitled Task"
 
     # Truncate summary to 60 chars
