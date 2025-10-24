@@ -19,6 +19,7 @@ from rich.table import Table
 from rich.text import Text
 
 from abathur import __version__
+from abathur.cli.tree_formatter import format_tree, supports_unicode
 from abathur.cli.utils import parse_duration_to_days
 from abathur.domain.models import TaskStatus
 from abathur.infrastructure.database import PruneFilters
@@ -372,6 +373,10 @@ def list_tasks(
     status: str | None = typer.Option(None, help="Filter by status"),
     exclude_status: str | None = typer.Option(None, help="Exclude tasks with this status"),
     limit: int = typer.Option(100, help="Maximum number of tasks"),
+    tree: bool = typer.Option(False, "--tree", help="Display as tree view (default: table)"),
+    unicode_override: bool | None = typer.Option(
+        None, "--unicode/--ascii", help="Force Unicode or ASCII box-drawing"
+    ),
 ) -> None:
     """List tasks in the queue."""
 
@@ -405,6 +410,14 @@ def list_tasks(
             status=task_status, exclude_status=task_exclude_status, limit=limit
         )
 
+        # Tree view rendering
+        if tree:
+            use_unicode = unicode_override if unicode_override is not None else supports_unicode()
+            tree_widget, tree_console = format_tree(tasks, use_unicode=use_unicode)
+            tree_console.print(tree_widget)
+            return
+
+        # Table view rendering (default)
         table = Table(title="Tasks")
         table.add_column("ID", style="cyan", no_wrap=True)
         table.add_column("Summary", style="magenta")
