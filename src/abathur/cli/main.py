@@ -446,14 +446,13 @@ def _render_tree_preview(
         node: TreeNode,
         current_depth: int
     ) -> None:
-        """Recursively add nodes to tree widget with depth truncation."""
+        """Recursively add nodes to tree widget with depth truncation.
 
-        # Check depth limit
-        if current_depth >= max_depth:
-            parent_widget.add(
-                Text("... (more items)", style="dim italic")
-            )
-            return
+        Edge cases handled:
+        - Deep hierarchies: Truncates at max_depth with single "..." indicator
+        - Wide trees: Handles many siblings correctly
+        - Mixed depth: Each branch truncates independently
+        """
 
         # Create node label with color coding and status symbol
         label = _format_node_label(node)
@@ -471,6 +470,16 @@ def _render_tree_preview(
             key=lambda n: n.task.calculated_priority,
             reverse=True
         )
+
+        # Check depth limit BEFORE recursing into children
+        # This ensures we show at most max_depth levels
+        if current_depth >= max_depth - 1:
+            # Only show truncation indicator if there are children
+            if children:
+                subtree.add(
+                    Text("... (more items)", style="dim italic")
+                )
+            return
 
         # Add children recursively
         for child in children:
