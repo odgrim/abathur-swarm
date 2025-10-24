@@ -150,17 +150,25 @@ class TaskCoordinator:
         """
         return await self.database.get_task(task_id)
 
-    async def list_tasks(self, status: TaskStatus | None = None, limit: int = 100) -> list[Task]:
+    async def list_tasks(
+        self,
+        status: TaskStatus | None = None,
+        exclude_status: TaskStatus | None = None,
+        limit: int = 100,
+    ) -> list[Task]:
         """List tasks with optional status filter.
 
         Args:
             status: Filter by status (if None, return all)
+            exclude_status: Exclude tasks with this status (if None, no exclusion)
             limit: Maximum number of tasks to return
 
         Returns:
             List of tasks
         """
-        return await self.database.list_tasks(status=status, limit=limit)
+        return await self.database.list_tasks(
+            status=status, exclude_status=exclude_status, limit=limit
+        )
 
     async def retry_task(self, task_id: UUID) -> bool:
         """Retry a failed or cancelled task.
