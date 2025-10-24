@@ -578,8 +578,6 @@ class TemplateManager:
                     version = parts[1] if len(parts) > 1 else "unknown"
 
                     # Synchronously load template (blocking is fine for listing)
-                    import asyncio
-
                     loop = asyncio.new_event_loop()
                     template = loop.run_until_complete(self._load_template(template_dir, version))
                     loop.close()

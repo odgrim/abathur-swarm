@@ -1342,7 +1342,6 @@ def start_swarm(
         if max_agents != 10:  # 10 is the default value
             services["swarm_orchestrator"].max_concurrent_agents = max_agents
             # Also update the semaphore to match new limit
-            import asyncio
             services["swarm_orchestrator"].semaphore = asyncio.Semaphore(max_agents)
 
         # Update poll interval if specified
