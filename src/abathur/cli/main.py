@@ -243,13 +243,13 @@ def _get_status_symbol(status: TaskStatus) -> str:
         Unicode status symbol character
     """
     symbol_map = {
-        TaskStatus.PENDING: "○",      # Empty circle
-        TaskStatus.BLOCKED: "⊗",      # Circled X
-        TaskStatus.READY: "◎",        # Double circle
-        TaskStatus.RUNNING: "◉",      # Filled circle
-        TaskStatus.COMPLETED: "✓",    # Check mark
-        TaskStatus.FAILED: "✗",       # X mark
-        TaskStatus.CANCELLED: "⊘",    # Circle with slash
+        TaskStatus.PENDING: "○",  # Empty circle
+        TaskStatus.BLOCKED: "⊗",  # Circled X
+        TaskStatus.READY: "◎",  # Double circle
+        TaskStatus.RUNNING: "◉",  # Filled circle
+        TaskStatus.COMPLETED: "✓",  # Check mark
+        TaskStatus.FAILED: "✗",  # X mark
+        TaskStatus.CANCELLED: "⊘",  # Circle with slash
     }
     return symbol_map.get(status, "•")
 
@@ -502,11 +502,7 @@ def task_show(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> N
                     else (child.summary or "-")
                 )
                 # Add row: 8-char ID prefix, truncated summary, status
-                child_table.add_row(
-                    str(child.id)[:8],
-                    summary_preview,
-                    child.status.value
-                )
+                child_table.add_row(str(child.id)[:8], summary_preview, child.status.value)
 
             console.print(child_table)
 
@@ -563,7 +559,10 @@ def retry(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> None:
 @task_app.command("update")
 def update_task(
     task_id: str = typer.Argument(..., help="Task ID or prefix"),
-    status: str | None = typer.Option(None, help="New status (pending|blocked|ready|running|completed|failed|cancelled)"),
+    status: str
+    | None = typer.Option(
+        None, help="New status (pending|blocked|ready|running|completed|failed|cancelled)"
+    ),
     priority: int | None = typer.Option(None, help="New priority (0-10)", min=0, max=10),
     agent_type: str | None = typer.Option(None, help="New agent type"),
     dry_run: bool = typer.Option(False, help="Preview changes without applying"),
@@ -643,7 +642,9 @@ def update_task(
 
         if dry_run:
             console.print("\n[blue]Dry-run mode - no changes will be made[/blue]")
-            console.print(f"[dim]Would update {len(updated_fields)} field(s): {', '.join(updated_fields)}[/dim]")
+            console.print(
+                f"[dim]Would update {len(updated_fields)} field(s): {', '.join(updated_fields)}[/dim]"
+            )
             return
 
         # Apply updates
@@ -659,7 +660,7 @@ def update_task(
                     now = datetime.now(timezone.utc).isoformat()
                     await conn.execute(
                         "UPDATE tasks SET priority = ?, last_updated_at = ? WHERE id = ?",
-                        (priority, now, str(resolved_id))
+                        (priority, now, str(resolved_id)),
                     )
                     await conn.commit()
                 # Log audit
@@ -676,7 +677,7 @@ def update_task(
                     now = datetime.now(timezone.utc).isoformat()
                     await conn.execute(
                         "UPDATE tasks SET agent_type = ?, last_updated_at = ? WHERE id = ?",
-                        (agent_type, now, str(resolved_id))
+                        (agent_type, now, str(resolved_id)),
                     )
                     await conn.commit()
                 # Log audit
@@ -688,7 +689,9 @@ def update_task(
                 )
 
             console.print(f"\n[green]✓[/green] Task {task_id} updated successfully")
-            console.print(f"[dim]Updated {len(updated_fields)} field(s): {', '.join(updated_fields)}[/dim]")
+            console.print(
+                f"[dim]Updated {len(updated_fields)} field(s): {', '.join(updated_fields)}[/dim]"
+            )
 
         except Exception as e:
             console.print(f"\n[red]Error:[/red] Failed to update task")
@@ -701,23 +704,34 @@ def update_task(
 @task_app.command("prune")
 def prune(
     task_ids: list[str] = typer.Argument(None, help="Task IDs or prefixes to delete"),
-    status: str | None = typer.Option(None, "--status", help="Delete all tasks with this status (pending|blocked|ready|running|completed|failed|cancelled)"),
-    older_than: str | None = typer.Option(None, "--older-than", help="Delete tasks older than duration (e.g., 30d, 2w, 6m, 1y)"),
-    before: str | None = typer.Option(None, "--before", help="Delete tasks before date (ISO 8601: YYYY-MM-DD)"),
+    status: str
+    | None = typer.Option(
+        None,
+        "--status",
+        help="Delete all tasks with this status (pending|blocked|ready|running|completed|failed|cancelled)",
+    ),
+    older_than: str
+    | None = typer.Option(
+        None, "--older-than", help="Delete tasks older than duration (e.g., 30d, 2w, 6m, 1y)"
+    ),
+    before: str
+    | None = typer.Option(None, "--before", help="Delete tasks before date (ISO 8601: YYYY-MM-DD)"),
     limit: int | None = typer.Option(None, "--limit", help="Maximum tasks to delete", min=1),
     force: bool = typer.Option(False, "--force", help="Skip confirmation prompt"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be deleted without deleting"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be deleted without deleting"
+    ),
     vacuum: str = typer.Option(
         "conditional",
         "--vacuum",
-        help="VACUUM strategy: 'always' (may be slow), 'conditional' (auto, default), or 'never' (fastest)"
+        help="VACUUM strategy: 'always' (may be slow), 'conditional' (auto, default), or 'never' (fastest)",
     ),
     recursive: bool = typer.Option(
         False,
         "--recursive",
         "-r",
         help="Recursively delete task and all descendants. Validates entire descendant tree "
-             "matches deletion criteria before deleting. Use --dry-run to preview what will be deleted."
+        "matches deletion criteria before deleting. Use --dry-run to preview what will be deleted.",
     ),
     preview_depth: int = typer.Option(
         5,
@@ -725,7 +739,7 @@ def prune(
         min=1,
         max=50,
         help="Maximum depth to display in tree preview when using --recursive (default: 5). "
-             "Deeper levels show '...' indicator."
+        "Deeper levels show '...' indicator.",
     ),
 ) -> None:
     """Delete tasks by ID or status.
@@ -764,11 +778,7 @@ def prune(
 
     # Parameter validation (fail fast - before async)
     # Mutual exclusion: task_ids XOR time-based filters XOR status
-    filter_count = sum([
-        bool(task_ids),
-        bool(older_than or before),
-        bool(status)
-    ])
+    filter_count = sum([bool(task_ids), bool(older_than or before), bool(status)])
 
     if filter_count == 0:
         raise typer.BadParameter(
@@ -863,7 +873,7 @@ def prune(
                         limit=limit,
                         dry_run=dry_run,
                         vacuum_mode=vacuum,
-                        recursive=recursive
+                        recursive=recursive,
                     )
                 else:
                     # No status specified - use default (COMPLETED, FAILED, CANCELLED)
@@ -873,7 +883,7 @@ def prune(
                         limit=limit,
                         dry_run=dry_run,
                         vacuum_mode=vacuum,
-                        recursive=recursive
+                        recursive=recursive,
                     )
             except ValidationError as e:
                 raise typer.BadParameter(f"Invalid filter parameters: {e}") from None
@@ -922,7 +932,9 @@ def prune(
                 blocked_table.add_column("Child Summary", style="magenta")
 
                 for child in child_tasks:
-                    parent_id_str = str(child.parent_task_id)[:8] if child.parent_task_id else "unknown"
+                    parent_id_str = (
+                        str(child.parent_task_id)[:8] if child.parent_task_id else "unknown"
+                    )
                     child_id_str = str(child.id)[:8]
                     summary_preview = (
                         (child.summary[:40] + "...")
@@ -936,14 +948,16 @@ def prune(
                     )
 
                 console.print(blocked_table)
-                console.print("\n[yellow]Delete child tasks first before deleting parent tasks.[/yellow]")
+                console.print(
+                    "\n[yellow]Delete child tasks first before deleting parent tasks.[/yellow]"
+                )
                 return
 
             # Component 2: Preview Display (~25 lines)
             # Fetch full Task objects for preview
             tasks_to_delete = []
             for task_id in preview_task_ids:
-                task = await services['task_coordinator'].get_task(task_id)
+                task = await services["task_coordinator"].get_task(task_id)
                 if task:
                     tasks_to_delete.append(task)
 
@@ -977,14 +991,18 @@ def prune(
 
                 console.print("\n[blue]Dry-run mode - no changes will be made[/blue]")
                 if recursive:
-                    console.print(f"[dim]Would delete {len(tasks_to_delete)} task(s) in recursive mode[/dim]")
+                    console.print(
+                        f"[dim]Would delete {len(tasks_to_delete)} task(s) in recursive mode[/dim]"
+                    )
                 else:
                     console.print(f"[dim]Would delete {len(tasks_to_delete)} task(s)[/dim]")
                 return
 
             # Component 4: Confirmation Prompt (~10 lines)
             if not force:
-                console.print(f"\n[yellow]About to permanently delete {len(tasks_to_delete)} task(s)[/yellow]")
+                console.print(
+                    f"\n[yellow]About to permanently delete {len(tasks_to_delete)} task(s)[/yellow]"
+                )
                 confirmed = typer.confirm("Are you sure you want to continue?")
                 if not confirmed:
                     console.print("[dim]Operation cancelled[/dim]")
@@ -994,9 +1012,8 @@ def prune(
             console.print("[blue]Deleting tasks...[/blue]")
 
             # Show progress indicator for VACUUM if expected to run
-            show_vacuum_progress = (
-                filters.vacuum_mode == "always" or
-                (filters.vacuum_mode == "conditional" and len(preview_task_ids) >= 100)
+            show_vacuum_progress = filters.vacuum_mode == "always" or (
+                filters.vacuum_mode == "conditional" and len(preview_task_ids) >= 100
             )
 
             try:
@@ -1008,8 +1025,7 @@ def prune(
                         console=console,
                     ) as progress:
                         task_desc = progress.add_task(
-                            description="Deleting tasks and optimizing database...",
-                            total=None
+                            description="Deleting tasks and optimizing database...", total=None
                         )
                         result = await services["database"].prune_tasks(filters)
                 else:
@@ -1064,9 +1080,13 @@ def prune(
             # Component 6: PruneResult Display (~25 lines)
             # Display result summary
             if recursive:
-                console.print(f"\n[green]✓[/green] Successfully deleted {result.deleted_tasks} task(s) in recursive mode")
+                console.print(
+                    f"\n[green]✓[/green] Successfully deleted {result.deleted_tasks} task(s) in recursive mode"
+                )
             else:
-                console.print(f"\n[green]✓[/green] Successfully deleted {result.deleted_tasks} task(s)")
+                console.print(
+                    f"\n[green]✓[/green] Successfully deleted {result.deleted_tasks} task(s)"
+                )
 
             # Display breakdown by status
             if result.breakdown_by_status:
@@ -1082,20 +1102,30 @@ def prune(
             # Display VACUUM information
             if result.vacuum_auto_skipped:
                 # Auto-skipped for large prune operation
-                console.print(f"\n[yellow]⚠[/yellow]  VACUUM automatically skipped (deleting {result.deleted_tasks} tasks)")
-                console.print("[dim]Large prune operations (>10,000 tasks) skip VACUUM to avoid long database locks.[/dim]")
-                console.print("[dim]Run 'abathur task prune --older-than 0d --vacuum=always' to manually VACUUM if needed.[/dim]")
+                console.print(
+                    f"\n[yellow]⚠[/yellow]  VACUUM automatically skipped (deleting {result.deleted_tasks} tasks)"
+                )
+                console.print(
+                    "[dim]Large prune operations (>10,000 tasks) skip VACUUM to avoid long database locks.[/dim]"
+                )
+                console.print(
+                    "[dim]Run 'abathur task prune --older-than 0d --vacuum=always' to manually VACUUM if needed.[/dim]"
+                )
             elif result.reclaimed_bytes is not None:
                 reclaimed_mb = result.reclaimed_bytes / (1024 * 1024)
                 console.print(f"\n[green]VACUUM completed: {reclaimed_mb:.2f} MB reclaimed[/green]")
             elif filters.vacuum_mode == "never":
                 console.print("\n[dim]VACUUM skipped (--vacuum=never)[/dim]")
             elif filters.vacuum_mode == "conditional" and result.deleted_tasks < 100:
-                console.print(f"\n[dim]VACUUM skipped (conditional mode, only {result.deleted_tasks} tasks deleted, threshold is 100)[/dim]")
+                console.print(
+                    f"\n[dim]VACUUM skipped (conditional mode, only {result.deleted_tasks} tasks deleted, threshold is 100)[/dim]"
+                )
 
             # Display dependency count
             if result.deleted_dependencies:
-                console.print(f"[cyan]Deleted {result.deleted_dependencies} task dependencies[/cyan]")
+                console.print(
+                    f"[cyan]Deleted {result.deleted_dependencies} task dependencies[/cyan]"
+                )
 
             return
 
@@ -1167,7 +1197,9 @@ def prune(
                 )
 
             console.print(blocked_table)
-            console.print("\n[yellow]Delete child tasks first before deleting parent tasks.[/yellow]")
+            console.print(
+                "\n[yellow]Delete child tasks first before deleting parent tasks.[/yellow]"
+            )
             return
 
         # Display preview table
@@ -1200,14 +1232,18 @@ def prune(
 
             console.print("\n[blue]Dry-run mode - no changes will be made[/blue]")
             if recursive:
-                console.print(f"[dim]Would delete {len(tasks_to_delete)} task(s) in recursive mode[/dim]")
+                console.print(
+                    f"[dim]Would delete {len(tasks_to_delete)} task(s) in recursive mode[/dim]"
+                )
             else:
                 console.print(f"[dim]Would delete {len(tasks_to_delete)} task(s)[/dim]")
             return
 
         # Confirmation prompt (unless --force)
         if not force:
-            console.print(f"\n[yellow]About to permanently delete {len(tasks_to_delete)} task(s)[/yellow]")
+            console.print(
+                f"\n[yellow]About to permanently delete {len(tasks_to_delete)} task(s)[/yellow]"
+            )
             confirmed = typer.confirm("Are you sure you want to continue?")
             if not confirmed:
                 console.print("[dim]Operation cancelled[/dim]")
@@ -1218,16 +1254,13 @@ def prune(
 
         # Show progress indicator for VACUUM if expected to run
         # Note: Don't show for large operations (>10,000) since VACUUM will be auto-skipped
-        show_vacuum_progress = (
-            len(selected_task_ids) < 10_000 and  # Auto-skip threshold
-            (vacuum == "always" or (vacuum == "conditional" and len(selected_task_ids) >= 100))
+        show_vacuum_progress = len(selected_task_ids) < 10_000 and (  # Auto-skip threshold
+            vacuum == "always" or (vacuum == "conditional" and len(selected_task_ids) >= 100)
         )
 
         try:
             filters = PruneFilters(
-                task_ids=selected_task_ids,
-                vacuum_mode=vacuum,
-                recursive=recursive
+                task_ids=selected_task_ids, vacuum_mode=vacuum, recursive=recursive
             )
 
             if show_vacuum_progress:
@@ -1238,8 +1271,7 @@ def prune(
                     console=console,
                 ) as progress:
                     task_desc = progress.add_task(
-                        description="Deleting tasks and optimizing database...",
-                        total=None
+                        description="Deleting tasks and optimizing database...", total=None
                     )
                     result = await services["database"].prune_tasks(filters)
             else:
@@ -1290,13 +1322,9 @@ def prune(
 
         # Display results
         if recursive:
-            console.print(
-                f"[green]✓[/green] Deleted {deleted_count} task(s) in recursive mode"
-            )
+            console.print(f"[green]✓[/green] Deleted {deleted_count} task(s) in recursive mode")
         else:
-            console.print(
-                f"[green]✓[/green] Deleted {deleted_count} task(s)"
-            )
+            console.print(f"[green]✓[/green] Deleted {deleted_count} task(s)")
 
         # Show breakdown if available
         if result.breakdown_by_status:
@@ -1311,9 +1339,15 @@ def prune(
 
         # Display VACUUM auto-skip warning if applicable
         if result.vacuum_auto_skipped:
-            console.print(f"\n[yellow]⚠[/yellow]  VACUUM automatically skipped (deleting {result.deleted_tasks} tasks)")
-            console.print("[dim]Large prune operations (>10,000 tasks) skip VACUUM to avoid long database locks.[/dim]")
-            console.print("[dim]Run 'VACUUM;' manually in SQLite CLI if you need to reclaim disk space.[/dim]")
+            console.print(
+                f"\n[yellow]⚠[/yellow]  VACUUM automatically skipped (deleting {result.deleted_tasks} tasks)"
+            )
+            console.print(
+                "[dim]Large prune operations (>10,000 tasks) skip VACUUM to avoid long database locks.[/dim]"
+            )
+            console.print(
+                "[dim]Run 'VACUUM;' manually in SQLite CLI if you need to reclaim disk space.[/dim]"
+            )
 
         # Display VACUUM information
         if result.reclaimed_bytes is not None:
@@ -1322,7 +1356,9 @@ def prune(
         elif vacuum == "never":
             console.print("\n[dim]VACUUM skipped (--vacuum=never)[/dim]")
         elif vacuum == "conditional" and result.deleted_tasks < 100:
-            console.print(f"\n[dim]VACUUM skipped (conditional mode, only {result.deleted_tasks} tasks deleted, threshold is 100)[/dim]")
+            console.print(
+                f"\n[dim]VACUUM skipped (conditional mode, only {result.deleted_tasks} tasks deleted, threshold is 100)[/dim]"
+            )
 
     asyncio.run(_prune())
 
@@ -1373,10 +1409,18 @@ def task_status(watch: bool = typer.Option(False, help="Watch mode (live updates
 
 @task_app.command("visualize")
 def visualize_queue(
-    refresh_interval: float = typer.Option(2.0, "--refresh-interval", help="Auto-refresh interval in seconds"),
+    refresh_interval: float = typer.Option(
+        2.0, "--refresh-interval", help="Auto-refresh interval in seconds"
+    ),
     no_auto_refresh: bool = typer.Option(False, "--no-auto-refresh", help="Disable auto-refresh"),
-    view_mode: str = typer.Option("tree", "--view-mode", help="Initial view mode (tree, dependency, timeline, feature-branch, flat-list)"),
-    no_unicode: bool = typer.Option(False, "--no-unicode", help="Use ASCII instead of Unicode box-drawing"),
+    view_mode: str = typer.Option(
+        "tree",
+        "--view-mode",
+        help="Initial view mode (tree, dependency, timeline, feature-branch, flat-list)",
+    ),
+    no_unicode: bool = typer.Option(
+        False, "--no-unicode", help="Use ASCII instead of Unicode box-drawing"
+    ),
 ) -> None:
     """Launch the Abathur Task Graph TUI.
 
@@ -1395,7 +1439,9 @@ def visualize_queue(
         except ImportError as e:
             console.print(f"[red]Error:[/red] TUI components not yet implemented")
             console.print(f"[dim]Missing: {e}[/dim]")
-            console.print("[yellow]The TUI is still under development. Use 'abathur task list' for now.[/yellow]")
+            console.print(
+                "[yellow]The TUI is still under development. Use 'abathur task list' for now.[/yellow]"
+            )
             raise typer.Exit(1)
 
         try:
@@ -1412,6 +1458,7 @@ def visualize_queue(
             # Create TUI app
             # Convert view_mode string to ViewMode enum
             from abathur.tui.models import ViewMode
+
             view_mode_enum = ViewMode(view_mode)
 
             # Handle refresh_interval: use default if auto-refresh enabled
@@ -1925,7 +1972,8 @@ app.add_typer(mem_app, name="mem")
 @mem_app.command("list")
 def mem_list(
     namespace: str | None = typer.Option(None, help="Filter by namespace prefix"),
-    memory_type: str | None = typer.Option(None, help="Filter by memory type (semantic, episodic, procedural)"),
+    memory_type: str
+    | None = typer.Option(None, help="Filter by memory type (semantic, episodic, procedural)"),
     created_by: str | None = typer.Option(None, help="Filter by creator (agent or session ID)"),
     limit: int = typer.Option(100, help="Maximum number of entries"),
 ) -> None:
@@ -1952,7 +2000,9 @@ def mem_list(
 
         if memory_type:
             if memory_type not in ["semantic", "episodic", "procedural"]:
-                console.print(f"[red]Error:[/red] Invalid memory type '{memory_type}'. Valid values: semantic, episodic, procedural")
+                console.print(
+                    f"[red]Error:[/red] Invalid memory type '{memory_type}'. Valid values: semantic, episodic, procedural"
+                )
                 raise typer.Exit(1)
             conditions.append("memory_type = ?")
             params.append(memory_type)
@@ -1988,15 +2038,9 @@ def mem_list(
         for row in rows:
             # Truncate long values for display
             namespace_display = (
-                (row["namespace"][:35] + "...")
-                if len(row["namespace"]) > 35
-                else row["namespace"]
+                (row["namespace"][:35] + "...") if len(row["namespace"]) > 35 else row["namespace"]
             )
-            key_display = (
-                (row["key"][:20] + "...")
-                if len(row["key"]) > 20
-                else row["key"]
-            )
+            key_display = (row["key"][:20] + "...") if len(row["key"]) > 20 else row["key"]
             created_by_display = (
                 (row["created_by"][:20] + "...")
                 if row["created_by"] and len(row["created_by"]) > 20
@@ -2009,7 +2053,9 @@ def mem_list(
                 key_display,
                 row["memory_type"],
                 created_by_display,
-                datetime.fromisoformat(row["updated_at"]).strftime("%Y-%m-%d %H:%M") if row["updated_at"] else "-",
+                datetime.fromisoformat(row["updated_at"]).strftime("%Y-%m-%d %H:%M")
+                if row["updated_at"]
+                else "-",
             )
 
         console.print(table)
@@ -2105,9 +2151,14 @@ def mem_show(
 @mem_app.command("prune")
 def mem_prune(
     namespace: str | None = typer.Option(None, help="Delete by namespace prefix"),
-    memory_type: str | None = typer.Option(None, help="Delete by memory type (semantic, episodic, procedural)"),
-    older_than: str | None = typer.Option(None, help="Delete entries older than duration (e.g., 30d, 2w, 6m, 1y)"),
-    task_status: str | None = typer.Option(None, help="Delete memories for tasks with status (completed, failed, cancelled)"),
+    memory_type: str
+    | None = typer.Option(None, help="Delete by memory type (semantic, episodic, procedural)"),
+    older_than: str
+    | None = typer.Option(None, help="Delete entries older than duration (e.g., 30d, 2w, 6m, 1y)"),
+    task_status: str
+    | None = typer.Option(
+        None, help="Delete memories for tasks with status (completed, failed, cancelled)"
+    ),
     dry_run: bool = typer.Option(False, help="Preview what would be deleted without deleting"),
     force: bool = typer.Option(False, help="Skip confirmation prompt"),
     limit: int | None = typer.Option(None, help="Maximum entries to delete"),
@@ -2132,7 +2183,9 @@ def mem_prune(
 
         # Validate memory_type if provided
         if memory_type and memory_type not in ["semantic", "episodic", "procedural"]:
-            console.print(f"[red]Error:[/red] Invalid memory type '{memory_type}'. Valid values: semantic, episodic, procedural")
+            console.print(
+                f"[red]Error:[/red] Invalid memory type '{memory_type}'. Valid values: semantic, episodic, procedural"
+            )
             raise typer.Exit(1)
 
         # Validate task_status if provided
@@ -2142,7 +2195,9 @@ def mem_prune(
                 task_status_enum = TaskStatus(task_status)
             except ValueError:
                 valid_values = ", ".join([s.value for s in TaskStatus])
-                console.print(f"[red]Error:[/red] Invalid status '{task_status}'. Valid values: {valid_values}")
+                console.print(
+                    f"[red]Error:[/red] Invalid status '{task_status}'. Valid values: {valid_values}"
+                )
                 raise typer.Exit(1)
 
         # Parse --older-than duration
@@ -2171,20 +2226,24 @@ def mem_prune(
             params.append(memory_type)
 
         if older_than_days:
-            cutoff_date = datetime.now(timezone.utc) - __import__('datetime').timedelta(days=older_than_days)
+            cutoff_date = datetime.now(timezone.utc) - __import__("datetime").timedelta(
+                days=older_than_days
+            )
             conditions.append("updated_at < ?")
             params.append(cutoff_date.isoformat())
 
         if task_status_enum:
             # Need to join with tasks table to filter by task status
             # Assuming namespace pattern is task:{task_id}:*
-            conditions.append("""
+            conditions.append(
+                """
                 EXISTS (
                     SELECT 1 FROM tasks t
                     WHERE 'task:' || t.id || ':' = SUBSTR(memory_entries.namespace, 1, LENGTH('task:' || t.id || ':'))
                     AND t.status = ?
                 )
-            """)
+            """
+            )
             params.append(task_status_enum.value)
 
         where_clause = " AND ".join(conditions)
@@ -2217,22 +2276,18 @@ def mem_prune(
 
         for row in rows:
             namespace_display = (
-                (row["namespace"][:40] + "...")
-                if len(row["namespace"]) > 40
-                else row["namespace"]
+                (row["namespace"][:40] + "...") if len(row["namespace"]) > 40 else row["namespace"]
             )
-            key_display = (
-                (row["key"][:25] + "...")
-                if len(row["key"]) > 25
-                else row["key"]
-            )
+            key_display = (row["key"][:25] + "...") if len(row["key"]) > 25 else row["key"]
 
             table.add_row(
                 str(row["id"])[:8],
                 namespace_display,
                 key_display,
                 row["memory_type"],
-                datetime.fromisoformat(row["updated_at"]).strftime("%Y-%m-%d %H:%M") if row["updated_at"] else "-",
+                datetime.fromisoformat(row["updated_at"]).strftime("%Y-%m-%d %H:%M")
+                if row["updated_at"]
+                else "-",
             )
 
         console.print(table)
@@ -2245,7 +2300,9 @@ def mem_prune(
 
         # Confirmation prompt (unless --force)
         if not force:
-            console.print(f"\n[yellow]About to permanently delete {len(rows)} memory entries[/yellow]")
+            console.print(
+                f"\n[yellow]About to permanently delete {len(rows)} memory entries[/yellow]"
+            )
             confirmed = typer.confirm("Are you sure you want to continue?")
             if not confirmed:
                 console.print("[dim]Operation cancelled[/dim]")
