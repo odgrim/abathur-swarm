@@ -560,6 +560,144 @@ def retry(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> None:
     asyncio.run(_retry())
 
 
+@task_app.command("update")
+def update_task(
+    task_id: str = typer.Argument(..., help="Task ID or prefix"),
+    status: str | None = typer.Option(None, help="New status (pending|blocked|ready|running|completed|failed|cancelled)"),
+    priority: int | None = typer.Option(None, help="New priority (0-10)", min=0, max=10),
+    agent_type: str | None = typer.Option(None, help="New agent type"),
+    dry_run: bool = typer.Option(False, help="Preview changes without applying"),
+) -> None:
+    """Update task attributes.
+
+    Examples:
+        abathur task update abc123 --status ready
+        abathur task update abc123 --status completed --priority 10
+        abathur task update abc123 --agent-type requirements-gatherer --dry-run
+        abathur task update abc123 --priority 8
+    """
+
+    async def _update() -> None:
+        from abathur.domain.models import TaskStatus
+
+        services = await _get_services()
+        resolved_id = await _resolve_task_id(task_id, services)
+
+        # Validate at least one field is being updated
+        if not any([status, priority is not None, agent_type]):
+            console.print("[red]Error:[/red] At least one field must be specified")
+            console.print("Use --status, --priority, or --agent-type")
+            raise typer.Exit(1)
+
+        # Get current task
+        task = await services["task_coordinator"].get_task(resolved_id)
+        if not task:
+            console.print(f"[red]Error:[/red] Task {task_id} not found")
+            raise typer.Exit(1)
+
+        # Validate status if provided
+        new_status = None
+        if status:
+            try:
+                new_status = TaskStatus(status)
+            except ValueError:
+                valid_values = ", ".join([s.value for s in TaskStatus])
+                console.print(f"[red]Error:[/red] Invalid status '{status}'")
+                console.print(f"Valid values: {valid_values}")
+                raise typer.Exit(1)
+
+        # Validate agent type change (only for PENDING/READY tasks)
+        # Use new_status if being updated, otherwise use current status
+        effective_status = new_status if new_status else task.status
+        if agent_type and effective_status not in [TaskStatus.PENDING, TaskStatus.READY]:
+            console.print(
+                f"[red]Error:[/red] Cannot update agent type for task in {effective_status.value} status"
+            )
+            console.print("Agent type can only be changed for PENDING or READY tasks")
+            raise typer.Exit(1)
+
+        # Display preview
+        console.print(f"\n[bold]Task {resolved_id}[/bold]")
+        console.print(f"Summary: {task.summary or 'No summary'}\n")
+
+        table = Table(title="Proposed Changes")
+        table.add_column("Field", style="cyan")
+        table.add_column("Current", style="yellow")
+        table.add_column("New", style="green")
+
+        updated_fields = []
+
+        if new_status:
+            table.add_row("Status", task.status.value, new_status.value)
+            updated_fields.append("status")
+
+        if priority is not None:
+            table.add_row("Priority", str(task.priority), str(priority))
+            updated_fields.append("priority")
+
+        if agent_type:
+            table.add_row("Agent Type", task.agent_type, agent_type)
+            updated_fields.append("agent_type")
+
+        console.print(table)
+
+        if dry_run:
+            console.print("\n[blue]Dry-run mode - no changes will be made[/blue]")
+            console.print(f"[dim]Would update {len(updated_fields)} field(s): {', '.join(updated_fields)}[/dim]")
+            return
+
+        # Apply updates
+        try:
+            from datetime import datetime, timezone
+
+            if new_status:
+                await services["task_coordinator"].update_task_status(resolved_id, new_status)
+
+            if priority is not None:
+                # Update priority directly in database
+                async with services["database"]._get_connection() as conn:
+                    now = datetime.now(timezone.utc).isoformat()
+                    await conn.execute(
+                        "UPDATE tasks SET priority = ?, last_updated_at = ? WHERE id = ?",
+                        (priority, now, str(resolved_id))
+                    )
+                    await conn.commit()
+                # Log audit
+                await services["database"].log_audit(
+                    task_id=resolved_id,
+                    action_type="task_priority_updated",
+                    action_data={"old_priority": task.priority, "new_priority": priority},
+                    result="success",
+                )
+
+            if agent_type:
+                # Update agent type directly in database
+                async with services["database"]._get_connection() as conn:
+                    now = datetime.now(timezone.utc).isoformat()
+                    await conn.execute(
+                        "UPDATE tasks SET agent_type = ?, last_updated_at = ? WHERE id = ?",
+                        (agent_type, now, str(resolved_id))
+                    )
+                    await conn.commit()
+                # Log audit
+                await services["database"].log_audit(
+                    task_id=resolved_id,
+                    action_type="task_agent_type_updated",
+                    action_data={"old_agent_type": task.agent_type, "new_agent_type": agent_type},
+                    result="success",
+                )
+
+            console.print(f"\n[green]✓[/green] Task {task_id} updated successfully")
+            console.print(f"[dim]Updated {len(updated_fields)} field(s): {', '.join(updated_fields)}[/dim]")
+
+        except Exception as e:
+            console.print(f"\n[red]Error:[/red] Failed to update task")
+            console.print(f"[dim]{e}[/dim]")
+            raise typer.Exit(1)
+
+    asyncio.run(_update())
+
+
 @task_app.command("prune")
 def prune(
     task_ids: list[str] = typer.Argument(None, help="Task IDs or prefixes to delete"),
