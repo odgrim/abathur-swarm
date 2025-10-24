@@ -504,12 +504,38 @@ git worktree remove .abathur/old-feature
 
 ### Running Tests in Worktree
 
+**IMPORTANT:** When running tests in a worktree, you MUST use PYTHONPATH override to ensure Python loads code from the worktree, not the main repository.
+
 ```bash
-# After setting up worktree, use pytest skill
+# WRONG (loads code from main repo):
 cd .abathur/feature-new-api
 source venv/bin/activate
-pytest -n auto tests/unit/  # Runs in isolated environment
+pytest tests/ -v
+
+# CORRECT (loads code from worktree):
+cd .abathur/feature-new-api
+source venv/bin/activate
+PYTHONPATH=$(pwd)/src:$PYTHONPATH pytest tests/ -v
+
+# With parallel execution:
+PYTHONPATH=$(pwd)/src:$PYTHONPATH pytest -n auto tests/unit/
+
+# With coverage:
+PYTHONPATH=$(pwd)/src:$PYTHONPATH pytest tests/ --cov=src --cov-report=term-missing
 ```
+
+**Why PYTHONPATH is Required:**
+
+By default, `poetry run pytest` loads the `abathur` package from the main repository installation, NOT from the worktree's modified code. This causes tests to fail even if your implementation is correct in the worktree.
+
+**Verify Python loads from worktree:**
+
+```bash
+# Should show worktree path, not main repo path
+PYTHONPATH=$(pwd)/src:$PYTHONPATH python -c "import abathur.cli.main; import inspect; print(inspect.getfile(abathur.cli.main))"
+```
+
+See `/Users/odgrim/dev/home/agentics/abathur/docs/WORKTREE_TESTING_GUIDE.md` for detailed troubleshooting.
 
 ### Git Operations in Worktree
 
