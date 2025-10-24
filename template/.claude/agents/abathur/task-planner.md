@@ -1005,8 +1005,8 @@ When breaking down a feature into multiple tasks:
 
 1. **Naming Convention**
    - Use descriptive, kebab-case branch names
-   - Prefix with `feature/`, `bugfix/`, or `refactor/`
-   - Examples: `feature/authentication-system`, `bugfix/task-timeout-handling`
+   - ALWAYS use `feature/` prefix (no `bugfix/`, `refactor/`, or other prefixes)
+   - Examples: `feature/authentication-system`, `feature/task-timeout-handling`
 
 2. **Granularity**
    - Feature branch = logical feature unit (not too broad, not too narrow)
@@ -1063,7 +1063,7 @@ When creating a task that needs isolated work:
 ```python
 feature_branch_name = "feature/task-queue-enhancements"
 timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
-task_branch_name = f"{feature_branch_name}/task/calculate-priority-function/{timestamp}"
+task_branch_name = f"{feature_branch_name}/task/calculate-priority/{timestamp}"
 
 # 1. Create the implementation task with task_branch
 implementation_task = task_enqueue({
@@ -1075,7 +1075,7 @@ that computes task priority based on deadline, dependencies, and base priority.
 
 ## Branch Information
 - Feature Branch: feature/task-queue-enhancements
-- Task Branch: task/calculate-priority-function
+- Task Branch: feature/task-queue-enhancements/task/calculate-priority/2025-10-23-14-30-00
 - This task has an isolated branch - work will be committed here first
 
 ## Implementation Requirements
@@ -1084,7 +1084,7 @@ that computes task priority based on deadline, dependencies, and base priority.
 ## Deliverables
 1. Function implementation
 2. Unit tests
-3. Committed to task branch: task/calculate-priority-function
+3. Committed to task branch: feature/task-queue-enhancements/task/calculate-priority/2025-10-23-14-30-00
 """,
     "feature_branch": feature_branch_name,  # Parent feature
     "task_branch": task_branch_name,        # Individual task branch
@@ -1095,14 +1095,14 @@ that computes task priority based on deadline, dependencies, and base priority.
 # 2. Create follow-up merge task to integrate into feature branch
 merge_task = task_enqueue({
     "description": """
-# Merge task/calculate-priority-function into feature/task-queue-enhancements
+# Merge feature/task-queue-enhancements/task/calculate-priority/{timestamp} into feature/task-queue-enhancements
 
 Merge the completed work from task branch into the main feature branch.
 
 ## Steps
 1. Verify all tests pass on task branch
 2. Checkout feature branch: feature/task-queue-enhancements
-3. Merge task branch: git merge task/calculate-priority-function
+3. Merge task branch: git merge feature/task-queue-enhancements/task/calculate-priority/{timestamp}
 4. Resolve any conflicts
 5. Run full test suite
 6. Push to feature branch
@@ -1127,14 +1127,14 @@ Merge the completed work from task branch into the main feature branch.
 | **Lifetime** | Until feature complete | Until merged to feature branch |
 | **Merge Target** | Main branch | Feature branch |
 | **Usage** | All tasks for feature | Specific isolated work |
-| **Example** | `feature/task-queue-enhancements` | `task/calculate-priority-function` |
+| **Example** | `feature/task-queue-enhancements` | `feature/task-queue-enhancements/task/calculate-priority/2025-10-23-14-30-00` |
 
 ### Best Practices
 
 1. **Naming Convention for Task Branches**
-   - Format: `task/descriptive-name`
-   - Keep names short and focused
-   - Examples: `task/add-validation`, `task/refactor-parser`
+   - Format: `feature/{feature-name}/task/{task-name}/{YYYY-MM-DD-HH-MM-SS}`
+   - Task branches are hierarchical under their parent feature
+   - Examples: `feature/user-auth/task/add-validation/2025-10-23-14-30-00`, `feature/memory-service/task/parser-logic/2025-10-23-15-45-30`
 
 2. **Always Create Merge Tasks**
    - After creating a task with `task_branch`, create a follow-up merge task
@@ -1152,9 +1152,11 @@ Merge the completed work from task branch into the main feature branch.
    # All tasks share the same feature_branch for tracking
    feature_branch = "feature/memory-service"
 
-   # Some tasks need isolated work (get task_branch)
-   task_branch_for_task_1 = "task/implement-memory-store"
-   task_branch_for_task_2 = "task/add-memory-search"
+   # Some tasks need isolated work (get task_branch with timestamp)
+   timestamp_1 = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+   timestamp_2 = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+   task_branch_for_task_1 = f"{feature_branch}/task/implement-memory-store/{timestamp_1}"
+   task_branch_for_task_2 = f"{feature_branch}/task/add-memory-search/{timestamp_2}"
 
    # Create tasks with appropriate branches
    task1 = task_enqueue({
@@ -1173,14 +1175,14 @@ Merge the completed work from task branch into the main feature branch.
 
    # Create merge tasks
    merge1 = task_enqueue({
-       "description": "Merge task/implement-memory-store into feature/memory-service",
+       "description": f"Merge {task_branch_for_task_1} into feature/memory-service",
        "feature_branch": feature_branch,
        "task_branch": None,  # No isolated branch for merges
        "prerequisites": [task1['task_id']],
    })
 
    merge2 = task_enqueue({
-       "description": "Merge task/add-memory-search into feature/memory-service",
+       "description": f"Merge {task_branch_for_task_2} into feature/memory-service",
        "feature_branch": feature_branch,
        "task_branch": None,
        "prerequisites": [task2['task_id']],

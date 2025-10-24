@@ -48,7 +48,7 @@ All worktrees are created in the `.abathur/` directory with the following struct
   - Eventually merges to `main`
 
 - **Task Worktrees** (`.abathur/worktrees/`): Created by `task-planner` for individual tasks
-  - Branch: `task/task-id/timestamp`
+  - Branch: `feature/{feature-name}/task/{task-name}/{YYYY-MM-DD-HH-MM-SS}`
   - Purpose: Isolated work for a single atomic task
   - Merges into the feature branch (not main)
   - Enables parallel task execution without conflicts
@@ -82,10 +82,10 @@ Creates a task-specific worktree that branches from a feature branch:
 ```bash
 # Create task worktree from feature branch
 FEATURE_BRANCH="feature/task-queue-enhancements"
-TASK_ID="task-001-domain-model"
-TIMESTAMP=$(date +%Y%m%d-%H%M%S-%N)
-TASK_BRANCH="task/$TASK_ID/$TIMESTAMP"
-WORKTREE_PATH=".abathur/worktrees/$TASK_ID"
+TASK_NAME="domain-model"
+TIMESTAMP=$(date +%Y-%m-%d-%H-%M-%S)
+TASK_BRANCH="$FEATURE_BRANCH/task/$TASK_NAME/$TIMESTAMP"
+WORKTREE_PATH=".abathur/worktrees/$TASK_NAME"
 
 # Ensure .abathur/worktrees directory exists
 mkdir -p .abathur/worktrees
@@ -203,8 +203,8 @@ pytest -n auto tests/unit/  # Run tests to verify setup
 ### Working on a Bug Fix
 
 ```bash
-# Create bugfix worktree
-BRANCH_NAME="bugfix/memory-leak"
+# Create feature worktree for bug fix (use feature/ prefix)
+BRANCH_NAME="feature/memory-leak-fix"
 WORKTREE_PATH=".abathur/${BRANCH_NAME//\//-}"
 
 git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH"
@@ -466,8 +466,8 @@ git worktree list
 ## Best Practices
 
 1. **Naming Convention**: Use descriptive branch names that translate to clear directory names
-   - `feature/user-auth` → `.abathur/feature-user-auth`
-   - `bugfix/memory-leak` → `.abathur/bugfix-memory-leak`
+   - Feature branches: `feature/user-auth` → `.abathur/features/user-auth`
+   - Task branches: `feature/user-auth/task/add-validation/2025-10-23-14-30-00` → `.abathur/worktrees/add-validation`
 
 2. **Always Create Virtualenv**: Each worktree should have its own `venv/` for true isolation
 
