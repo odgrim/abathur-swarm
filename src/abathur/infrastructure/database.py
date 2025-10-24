@@ -1719,6 +1719,7 @@ class Database:
     async def list_tasks(
         self,
         status: TaskStatus | None = None,
+        exclude_status: TaskStatus | None = None,
         limit: int = 100,
         source: TaskSource | None = None,
         agent_type: str | None = None,
@@ -1728,6 +1729,7 @@ class Database:
 
         Args:
             status: Filter by task status
+            exclude_status: Exclude tasks with this status from results
             limit: Maximum number of tasks to return
             source: Filter by task source
             agent_type: Filter by agent type
@@ -1744,6 +1746,10 @@ class Database:
             if status:
                 where_clauses.append("status = ?")
                 params.append(status.value)
+
+            if exclude_status:
+                where_clauses.append("status != ?")
+                params.append(exclude_status.value)
 
             if source:
                 where_clauses.append("source = ?")
