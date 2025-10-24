@@ -23,6 +23,7 @@ Coverage:
 
 import asyncio
 import tempfile
+from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,12 +36,11 @@ from abathur.services.priority_calculator import PriorityCalculator
 from abathur.services.task_queue_service import TaskQueueService
 from typer.testing import CliRunner
 
-
 # Fixtures
 
 
 @pytest.fixture
-def temp_db_path_sync() -> Path:
+def temp_db_path_sync() -> Generator[Path, None, None]:
     """Create temporary database file for CLI testing (synchronous)."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = Path(f.name)
@@ -57,7 +57,7 @@ def temp_db_path_sync() -> Path:
         shm_path.unlink()
 
 
-def _setup_test_database(db_path: Path, num_tasks: int = 20) -> dict:
+def _setup_test_database(db_path: Path, num_tasks: int = 20) -> dict[TaskStatus, int]:
     """Helper to populate database synchronously with test tasks.
 
     Creates tasks with various statuses:
@@ -67,7 +67,7 @@ def _setup_test_database(db_path: Path, num_tasks: int = 20) -> dict:
     - 5 failed tasks
 
     Returns:
-        dict: Task counts by status for verification
+        dict[TaskStatus, int]: Task counts by status for verification
     """
 
     async def setup():
@@ -126,11 +126,11 @@ def cli_runner() -> CliRunner:
 
 
 @pytest.fixture
-def populated_test_db(temp_db_path_sync: Path) -> tuple[Path, dict]:
+def populated_test_db(temp_db_path_sync: Path) -> tuple[Path, dict[TaskStatus, int]]:
     """Create and populate test database with 20 tasks.
 
     Returns:
-        tuple: (database path, task counts by status)
+        tuple[Path, dict[TaskStatus, int]]: (database path, task counts by status)
     """
     task_counts = _setup_test_database(temp_db_path_sync, num_tasks=20)
     return temp_db_path_sync, task_counts
@@ -139,7 +139,7 @@ def populated_test_db(temp_db_path_sync: Path) -> tuple[Path, dict]:
 # Backward Compatibility Tests
 
 
-def test_list_tasks_no_flags(cli_runner: CliRunner, populated_test_db: tuple[Path, dict]):
+def test_list_tasks_no_flags(cli_runner: CliRunner, populated_test_db: tuple[Path, dict[TaskStatus, int]]):
     """TEST-BC-01: Verify 'abathur task list' (no flags) works unchanged.
 
     Critical backward compatibility test:
@@ -157,7 +157,6 @@ def test_list_tasks_no_flags(cli_runner: CliRunner, populated_test_db: tuple[Pat
     """
     # Arrange
     db_path, task_counts = populated_test_db
-    total_tasks = sum(task_counts.values())
 
     # Mock ConfigManager to use test database
     with patch(
@@ -191,7 +190,7 @@ def test_list_tasks_no_flags(cli_runner: CliRunner, populated_test_db: tuple[Pat
     assert ("Backward compat test task" in result.stdout or "User Prompt" in result.stdout)
 
 
-def test_list_tasks_status_flag(cli_runner: CliRunner, populated_test_db: tuple[Path, dict]):
+def test_list_tasks_status_flag(cli_runner: CliRunner, populated_test_db: tuple[Path, dict[TaskStatus, int]]):
     """TEST-BC-02: Verify '--status' flag still works (not affected by new --exclude-status).
 
     Critical backward compatibility test:
@@ -239,7 +238,7 @@ def test_list_tasks_status_flag(cli_runner: CliRunner, populated_test_db: tuple[
     # If we see "ready" or "failed", it should only be in task descriptions, not status column
 
 
-def test_list_tasks_limit_flag(cli_runner: CliRunner, populated_test_db: tuple[Path, dict]):
+def test_list_tasks_limit_flag(cli_runner: CliRunner, populated_test_db: tuple[Path, dict[TaskStatus, int]]):
     """TEST-BC-03: Verify '--limit' flag still works.
 
     Critical backward compatibility test:
@@ -287,7 +286,7 @@ def test_list_tasks_limit_flag(cli_runner: CliRunner, populated_test_db: tuple[P
     assert len(task_rows) <= limit, f"Expected at most {limit} tasks with limit={limit}, found {len(task_rows)}"
 
 
-def test_list_tasks_status_and_limit(cli_runner: CliRunner, populated_test_db: tuple[Path, dict]):
+def test_list_tasks_status_and_limit(cli_runner: CliRunner, populated_test_db: tuple[Path, dict[TaskStatus, int]]):
     """TEST-BC-04: Verify combined '--status' and '--limit' flags still work.
 
     Critical backward compatibility test:
@@ -307,7 +306,6 @@ def test_list_tasks_status_and_limit(cli_runner: CliRunner, populated_test_db: t
     db_path, task_counts = populated_test_db
     limit = 3
     expected_status = "ready"  # Use "ready" since that's the default status for new tasks
-    expected_max_count = min(limit, task_counts[TaskStatus.READY])
 
     # Mock ConfigManager to use test database
     with patch(
@@ -346,7 +344,7 @@ def test_list_tasks_status_and_limit(cli_runner: CliRunner, populated_test_db: t
 # Additional Verification Tests
 
 
-def test_backward_compatibility_no_new_errors(cli_runner: CliRunner, populated_test_db: tuple[Path, dict]):
+def test_backward_compatibility_no_new_errors(cli_runner: CliRunner, populated_test_db: tuple[Path, dict[TaskStatus, int]]):
     """Verify no new errors introduced in existing CLI commands.
 
     Regression test:
@@ -390,7 +388,7 @@ def test_backward_compatibility_no_new_errors(cli_runner: CliRunner, populated_t
             assert "ID" in result.stdout, f"{description} missing table headers"
 
 
-def test_existing_functionality_preserved(cli_runner: CliRunner, populated_test_db: tuple[Path, dict]):
+def test_existing_functionality_preserved(cli_runner: CliRunner, populated_test_db: tuple[Path, dict[TaskStatus, int]]):
     """Comprehensive backward compatibility verification.
 
     Verifies:
