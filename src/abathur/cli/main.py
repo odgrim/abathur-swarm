@@ -513,53 +513,6 @@ def task_show(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> N
     asyncio.run(_status())
 
 
-@task_app.command("cancel")
-def cancel(
-    task_id: str = typer.Argument(..., help="Task ID or prefix"),
-    force: bool = typer.Option(False, help="Force cancel running tasks"),
-) -> None:
-    """Cancel a pending/running task.
-
-    Use --force to cancel running tasks. Without --force, only pending tasks can be cancelled.
-    """
-
-    async def _cancel() -> None:
-        services = await _get_services()
-        resolved_id = await _resolve_task_id(task_id, services)
-
-        success = await services["task_coordinator"].cancel_task(resolved_id, force=force)
-
-        if success:
-            console.print(f"[green]✓[/green] Task {task_id} cancelled")
-        else:
-            if not force:
-                console.print(
-                    f"[red]Error:[/red] Failed to cancel task {task_id}. "
-                    "Use --force to cancel running tasks."
-                )
-            else:
-                console.print(f"[red]Error:[/red] Failed to cancel task {task_id}")
-
-    asyncio.run(_cancel())
-
-
-@task_app.command("retry")
-def retry(task_id: str = typer.Argument(..., help="Task ID or prefix")) -> None:
-    """Retry a failed or cancelled task."""
-
-    async def _retry() -> None:
-        services = await _get_services()
-        resolved_id = await _resolve_task_id(task_id, services)
-        success = await services["task_coordinator"].retry_task(resolved_id)
-
-        if success:
-            console.print(f"[green]✓[/green] Task {task_id} queued for retry")
-        else:
-            console.print(f"[red]Error:[/red] Failed to retry task {task_id}")
-
-    asyncio.run(_retry())
-
-
 @task_app.command("update")
 def update_task(
     task_id: str = typer.Argument(..., help="Task ID or prefix"),
