@@ -424,6 +424,7 @@ def submit(
 @task_app.command("list")
 def list_tasks(
     status: str | None = typer.Option(None, help="Filter by status"),
+    exclude_status: str | None = typer.Option(None, help="Exclude tasks with this status"),
     limit: int = typer.Option(100, help="Maximum number of tasks"),
 ) -> None:
     """List tasks in the queue."""
@@ -432,8 +433,24 @@ def list_tasks(
         services = await _get_services()
         from abathur.domain.models import TaskStatus
 
-        task_status = TaskStatus(status) if status else None
-        tasks = await services["task_coordinator"].list_tasks(task_status, limit)
+        # Validate status values before calling service
+        try:
+            task_status = TaskStatus(status) if status else None
+        except ValueError:
+            valid_values = ", ".join([s.value for s in TaskStatus])
+            raise typer.BadParameter(
+                f"Invalid status value: {status}. Valid values are: {valid_values}"
+            )
+
+        try:
+            exclude_task_status = TaskStatus(exclude_status) if exclude_status else None
+        except ValueError:
+            valid_values = ", ".join([s.value for s in TaskStatus])
+            raise typer.BadParameter(
+                f"Invalid status value: {exclude_status}. Valid values are: {valid_values}"
+            )
+
+        tasks = await services["task_coordinator"].list_tasks(task_status, limit, exclude_status=exclude_task_status)
 
         table = Table(title="Tasks")
         table.add_column("ID", style="cyan", no_wrap=True)
