@@ -258,7 +258,8 @@ class TreeRenderer:
         # Configure box-drawing style
         # Rich Tree uses Unicode by default if supported
         # The use_unicode parameter is currently ignored as Rich handles this automatically
-        # Future enhancement: support forced ASCII mode via Console configuration
+        # Note: ASCII mode should be controlled by Console(legacy_windows=True) parameter
+        # guide_style only accepts Rich style names like "tree.line", not "ascii"
         guide_style = "tree.line"
 
         # Create root tree with title
