@@ -88,23 +88,21 @@ done
 
 **Application Layer Changes:**
 
-The application layer methods `cancel_task()` and `retry_task()` have been removed from `TaskCoordinator`. Use `update_task_status()` instead:
+The application layer methods `cancel_task()` and `retry_task()` still exist in `TaskCoordinator` but are **deprecated**. The recommended approach is to use the unified `update_task_status()` method:
 
-**Before:**
+**Deprecated Approach (Still Works):**
 ```python
 from abathur.application import TaskCoordinator
 from uuid import UUID
 
 task_id = UUID("abc-123-def-456")
 
-# Old method (removed)
+# Deprecated: These methods still exist but may be removed in future versions
 success = await task_coordinator.cancel_task(task_id)
-
-# Old method (removed)
 success = await task_coordinator.retry_task(task_id)
 ```
 
-**After:**
+**Recommended Approach:**
 ```python
 from abathur.application import TaskCoordinator
 from abathur.domain.models import TaskStatus
@@ -112,7 +110,7 @@ from uuid import UUID
 
 task_id = UUID("abc-123-def-456")
 
-# New unified method
+# Recommended: Use unified method for all status updates
 await task_coordinator.update_task_status(
     task_id=task_id,
     new_status=TaskStatus.CANCELLED,
@@ -125,6 +123,8 @@ await task_coordinator.update_task_status(
     new_status=TaskStatus.PENDING
 )
 ```
+
+**Why Migrate?** The deprecated methods are thin wrappers around `update_task_status()`. They internally call `update_task_status()` (see `src/abathur/application/task_coordinator.py:101` for `cancel_task()` and `src/abathur/application/task_coordinator.py:173` for `retry_task()`). Using `update_task_status()` directly provides more flexibility and aligns with the unified approach across all API layers.
 
 **Service Layer (Preserved):**
 
@@ -179,19 +179,19 @@ abathur task show abc123
 
 ### Q: What about programmatic API usage?
 
-**A:** Use `coordinator.update_task_status()` instead of `coordinator.cancel_task()` or `coordinator.retry_task()` at the application layer. The service layer `cancel_task()` method (`services.task_service.cancel_task()`) is preserved for MCP server usage and handles cascading cancellations.
+**A:** The recommended approach is to use `coordinator.update_task_status()` at the application layer. While `coordinator.cancel_task()` and `coordinator.retry_task()` are still available, they are deprecated and may be removed in future versions. The service layer `cancel_task()` method (`services.task_service.cancel_task()`) is preserved for MCP server usage and handles cascading cancellations.
 
 **API Layers:**
 - **CLI Layer**: `abathur task update --status cancelled`
-- **Application Layer**: `coordinator.update_task_status(task_id, TaskStatus.CANCELLED)` (REMOVED: `coordinator.cancel_task()`)
-- **Service Layer**: `task_service.cancel_task(task_id, cascade=True)` (PRESERVED for MCP/cascading)
+- **Application Layer**: `coordinator.update_task_status(task_id, TaskStatus.CANCELLED)` *(Recommended)* | `coordinator.cancel_task(task_id)` *(Deprecated)*
+- **Service Layer**: `task_service.cancel_task(task_id, cascade=True)` *(Preserved for MCP/cascading)*
 
 ### Q: Are there any breaking changes?
 
 **A:** Yes, the following are breaking changes:
 
 1. **CLI Commands**: `abathur task cancel` and `abathur task retry` commands are removed
-2. **Application Layer**: `TaskCoordinator.cancel_task()` and `TaskCoordinator.retry_task()` methods are removed
+2. **Application Layer**: `TaskCoordinator.cancel_task()` and `TaskCoordinator.retry_task()` methods are **deprecated** but still available (will be removed in a future version)
 3. **Service Layer**: `TaskService.cancel_task()` method is **preserved** (no breaking change)
 
 ### Q: Can I still cancel running tasks?
@@ -355,12 +355,12 @@ The dry run shows proposed changes without modifying the database.
 The following code locations are relevant for understanding the implementation:
 
 ### CLI Layer
-- Command Definition: `src/abathur/cli/main.py:563` (`update_task` command)
+- Command Definition: `src/abathur/cli/main.py:564` (`update_task` command)
 - Task ID Resolution: `src/abathur/cli/main.py:40` (`_resolve_task_id` helper)
 
 ### Application Layer
-- Update Method: `src/abathur/application/task_coordinator.py:145` (`update_task_status`)
-- Removed Methods: `cancel_task()` and `retry_task()` (deleted in Phase 1)
+- Update Method: `src/abathur/application/task_coordinator.py:82` (`update_task_status`)
+- Deprecated Methods: `src/abathur/application/task_coordinator.py:101` (`cancel_task`) and `src/abathur/application/task_coordinator.py:173` (`retry_task`) - still available but deprecated
 
 ### Service Layer
 - Cancel Service: `src/abathur/services/task_service.py` (`cancel_task` method - **preserved**)
@@ -376,14 +376,20 @@ The following code locations are relevant for understanding the implementation:
 
 Use this checklist to ensure complete migration:
 
-- [ ] **Search Codebase**: Find all usages of `cancel_task()` and `retry_task()`
+- [ ] **Search Codebase**: Find all usages of deprecated `cancel_task()` and `retry_task()` methods
   ```bash
-  grep -r "cancel_task\|retry_task" --include="*.py" .
+  # Find application layer usage (should be migrated)
+  grep -r "coordinator\.cancel_task\|coordinator\.retry_task" --include="*.py" .
+
+  # Service layer usage is OK (preserved for cascading)
+  grep -r "task_service\.cancel_task" --include="*.py" .
   ```
 
 - [ ] **Update CLI Scripts**: Replace `abathur task cancel` with `abathur task update --status cancelled`
 
-- [ ] **Update Python Code**: Replace application layer method calls with `update_task_status()`
+- [ ] **Update Python Code**: Replace deprecated application layer method calls with `update_task_status()`
+  - Note: `cancel_task()` and `retry_task()` still work but are deprecated
+  - Migrate to `update_task_status()` for future compatibility
 
 - [ ] **Remove Force Flags**: Remove all `--force` flags from cancel commands
 
