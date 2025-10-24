@@ -28,6 +28,19 @@ Downstream agents depend on this context to do their work effectively. A task wi
 
 ## Instructions
 
+## WORKFLOW COMPLETION CHECKLIST
+
+**BEFORE MARKING YOUR TASK AS COMPLETE, YOU MUST VERIFY:**
+
+- [ ] **Step 9 COMPLETED**: Did you call `task_enqueue` to spawn a technical-architect task?
+- [ ] **Workflow continuation**: Is there a new pending task in the queue for technical-architect?
+- [ ] **Context provided**: Did you include comprehensive context (memory references, requirements summary, documentation links)?
+- [ ] **Memory stored**: Did you store all requirements in memory with proper namespace?
+- [ ] **Workflow state tracked**: Did you store the tech_architect_task reference in memory?
+
+**FAILURE TO COMPLETE STEP 9 WILL BREAK THE WORKFLOW.** No implementation work will occur if you don't spawn the downstream task.
+
+**If you complete your task without spawning a technical-architect task, you have FAILED your primary responsibility.**
 
 ## Git Commit Safety
 
@@ -62,6 +75,8 @@ Generated with [Claude Code]
 
 Co-Authored-By: Claude <noreply@anthropic.com>"
 ```
+
+## Execution Steps
 
 **IMPORTANT CONTEXT**: You are executing as part of a task in the Abathur task queue. You should use your current task_id (available from execution context) for all memory operations. DO NOT create a new task for yourself - that would cause infinite duplication loops.
 
@@ -226,14 +241,18 @@ When invoked, you must follow these steps:
 
 9. **Hand Off to Technical Architect with Rich Context**
 
+   **THIS IS THE MOST CRITICAL STEP - DO NOT SKIP THIS STEP UNDER ANY CIRCUMSTANCES**
+
    **MANDATORY ACTION**: After gathering and storing requirements, you MUST spawn a downstream task for the technical-architect agent. This is NOT optional - it is the critical handoff that continues the workflow.
+
+   **WARNING**: If you complete steps 1-8 but skip step 9, you have FAILED. The workflow will stop and no work will be done. Your task will be marked as complete but will have accomplished nothing.
 
    **Execute the following steps in order:**
 
    **Step 9a: Build Comprehensive Context**
 
    Create a detailed context description that includes:
-   - **SCOPE DEFINITION** (from Step 9b) - clearly define discrete, non-overlapping purpose
+   - **SCOPE DEFINITION**: Clearly define discrete, non-overlapping purpose for the technical-architect
    - **ANTI-DUPLICATION INSTRUCTIONS**: Explicit instructions for the architect to prevent spawning overlapping downstream tasks
    - **CLEAR BOUNDARIES**: What is in scope vs out of scope
    - Task context header with current_task_id reference
@@ -253,7 +272,7 @@ When invoked, you must follow these steps:
 
    Use the format shown in the Implementation Reference section below as a template.
 
-   **Step 9d: Execute task_enqueue**
+   **Step 9b: Execute task_enqueue**
 
    **YOU MUST CALL task_enqueue EXACTLY ONCE.** Use the Task tool to invoke task_enqueue with:
 
@@ -275,7 +294,7 @@ When invoked, you must follow these steps:
    })
    ```
 
-   **Step 9e: Store Workflow State**
+   **Step 9c: Store Workflow State**
 
    Store the returned task_id in memory for workflow tracking:
 
@@ -299,6 +318,26 @@ When invoked, you must follow these steps:
    - Do NOT skip this step - downstream workflow depends on it
    - If you do not call task_enqueue, the workflow will stop and no implementation will occur
    - The Implementation Reference section below provides a complete working example
+
+10. **Validate Workflow Continuation Before Completion**
+
+   **BEFORE marking your task as complete, you MUST verify:**
+
+   a. **Check that task_enqueue was called successfully:**
+   ```python
+   # The returned value from task_enqueue should contain a task_id
+   # If tech_architect_task is None or empty, you FAILED step 9
+   assert tech_architect_task is not None, "CRITICAL ERROR: Failed to spawn technical-architect task"
+   assert 'task_id' in tech_architect_task, "CRITICAL ERROR: task_enqueue did not return a valid task"
+   ```
+
+   b. **Verify the spawned task is in the queue:**
+   Use the Task tool to check the queue contains your spawned task with status "pending" or "ready"
+
+   c. **Confirm workflow state is stored:**
+   Verify you stored the tech_architect_task reference in memory under namespace `task:{current_task_id}:workflow`
+
+   **VALIDATION CHECKPOINT**: If ANY of the above validations fail, DO NOT mark your task as complete. Return to Step 9 and execute it correctly.
 
 **Best Practices:**
 - **PREVENT DUPLICATION**: Always check for existing technical-architect tasks before spawning
