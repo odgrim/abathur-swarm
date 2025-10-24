@@ -295,6 +295,33 @@ When invoked, you must follow these steps:
 
        print(f"Created feature worktree: {worktree_path} (branch: {feature_branch_name})")
 
+       # Create isolated virtualenv in feature worktree
+       print(f"Creating isolated virtualenv in feature worktree...")
+       venv_result = Bash(
+           command=f'python3 -m venv "{worktree_path}/venv"',
+           description=f"Create isolated virtualenv in feature worktree"
+       )
+
+       if venv_result.exit_code != 0:
+           raise Exception(f"Failed to create virtualenv in feature worktree: {venv_result.stderr}")
+
+       print(f"✓ Virtualenv created at: {worktree_path}/venv")
+
+       # Install dependencies in the isolated virtualenv
+       print(f"Installing dependencies in feature worktree virtualenv...")
+       install_result = Bash(
+           command=f'cd "{worktree_path}" && source venv/bin/activate && pip install --upgrade pip && poetry install',
+           description=f"Install dependencies in feature worktree virtualenv",
+           timeout=300000  # 5 minutes for dependency installation
+       )
+
+       if install_result.exit_code == 0:
+           print(f"✓ Dependencies installed in feature worktree virtualenv")
+       else:
+           print(f"⚠ WARNING: Dependency installation failed (exit code {install_result.exit_code})")
+           print(f"Error output: {install_result.stderr}")
+           print(f"Task-planner will need to handle dependency installation")
+
    # Get absolute path for worktree
    worktree_path_absolute = os.path.abspath(worktree_path)
 
