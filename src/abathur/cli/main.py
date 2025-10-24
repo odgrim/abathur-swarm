@@ -17,7 +17,6 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
-from rich.tree import Tree
 
 from abathur import __version__
 from abathur.cli.utils import parse_duration_to_days
@@ -94,10 +93,6 @@ def _render_tree_preview(tasks: list[Any], max_depth: int = 5) -> None:
         max_depth: Maximum depth to display in tree
     """
     from abathur.tui.rendering.tree_renderer import TreeRenderer
-
-    # Build task hierarchy
-    task_map = {task.id: task for task in tasks}
-    root_tasks = [task for task in tasks if task.parent_task_id is None]
 
     # Create tree renderer
     renderer = TreeRenderer()
@@ -257,55 +252,6 @@ def _get_status_symbol(status: TaskStatus) -> str:
         TaskStatus.CANCELLED: "⊘",    # Circle with slash
     }
     return symbol_map.get(status, "•")
-
-
-def _render_tree_preview(
-    tree_nodes: list[TreeNode],
-    max_depth: int = 5,
-    console: Console | None = None,
-) -> None:
-    """Render hierarchical tree structure with box-drawing characters.
-
-    Displays task hierarchy with color-coded status, truncating at max_depth
-    to prevent overwhelming output for large trees. Uses Unix tree command
-    format with box-drawing characters (├── │ └──) for Unicode terminals
-    or ASCII alternatives (|-- | `--) for non-Unicode terminals.
-
-    Args:
-        tree_nodes: Nodes to visualize (from _discover_task_tree)
-        max_depth: Maximum tree depth to display (default 5, shows "..." beyond)
-        console: Rich console for output (uses global console if None)
-
-    Example:
-        >>> nodes = await database._discover_task_tree(conn, [root_id])
-        >>> _render_tree_preview(nodes, max_depth=3, console=console)
-
-    Output format:
-        Task Tree (3 tasks)
-        ├── ✓ Implement feature X (completed)
-        │   ├── ✓ Write unit tests (completed)
-        │   └── ✓ Update documentation (completed)
-        └── ○ Follow-up task Y (pending)
-    """
-    if console is None:
-        # Use global console instance
-        console = globals()["console"]
-
-    if not tree_nodes:
-        console.print("[yellow]No tasks to display[/yellow]")
-        return
-
-    # Detect Unicode support
-    from abathur.tui.rendering.tree_renderer import TreeRenderer
-    use_unicode = TreeRenderer.supports_unicode()
-
-    # Print title
-    console.print(Text(f"Task Tree ({len(tree_nodes)} tasks)", style="bold cyan"))
-
-    # Build and print tree using box-drawing characters
-    lines = _build_tree_string(tree_nodes, max_depth, use_unicode)
-    for line in lines:
-        console.print(line)
 
 
 def _format_node_label(node: TreeNode) -> Text:

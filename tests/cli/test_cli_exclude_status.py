@@ -28,13 +28,12 @@ Expected State After CLI Implementation:
 - Invalid values should show clear error messages
 """
 
-import pytest
-from typer.testing import CliRunner
-from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from unittest.mock import AsyncMock, patch
 
+import pytest
 from abathur.cli.main import app
-from abathur.domain.models import Task, TaskStatus, TaskSource
+from abathur.domain.models import TaskStatus
+from typer.testing import CliRunner
 
 # Initialize CliRunner
 runner = CliRunner()
