@@ -161,6 +161,234 @@ class TestDatabaseTaskOperations:
         assert retrieved_child.parent_task_id == parent_task.id
 
     @pytest.mark.asyncio
+    async def test_list_tasks_exclude_status_completed(self, database: Database) -> None:
+        """Test listing tasks with exclude_status filter for COMPLETED tasks.
+
+        Create tasks with various statuses (pending, completed, running)
+        and verify that completed tasks are excluded while others are included.
+        """
+        # Arrange - create tasks with different statuses
+        task1 = Task(prompt="Task 1", summary="Pending task", priority=5)
+        task2 = Task(prompt="Task 2", summary="Completed task", priority=7)
+        task3 = Task(prompt="Task 3", summary="Running task", priority=3)
+        task4 = Task(prompt="Task 4", summary="Another completed task", priority=9)
+
+        await database.insert_task(task1)
+        await database.insert_task(task2)
+        await database.insert_task(task3)
+        await database.insert_task(task4)
+
+        # Update task2 and task4 to completed
+        await database.update_task_status(task2.id, TaskStatus.COMPLETED)
+        await database.update_task_status(task4.id, TaskStatus.COMPLETED)
+
+        # Update task3 to running
+        await database.update_task_status(task3.id, TaskStatus.RUNNING)
+
+        # Act - list tasks excluding completed
+        tasks = await database.list_tasks(exclude_status=TaskStatus.COMPLETED)
+
+        # Assert - completed tasks excluded, others included
+        assert len(tasks) == 2
+        task_ids = {task.id for task in tasks}
+        assert task1.id in task_ids  # Pending included
+        assert task3.id in task_ids  # Running included
+        assert task2.id not in task_ids  # Completed excluded
+        assert task4.id not in task_ids  # Completed excluded
+
+        # Verify all non-completed statuses
+        for task in tasks:
+            assert task.status != TaskStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_list_tasks_exclude_status_all_enum_values(self, database: Database) -> None:
+        """Test exclude_status works correctly for each TaskStatus enum value.
+
+        Test each status exclusion individually to verify the filter works
+        for all enum values: PENDING, BLOCKED, READY, RUNNING, COMPLETED, FAILED, CANCELLED.
+        """
+        # Arrange - create tasks with all possible statuses
+        task_pending = Task(prompt="Pending", summary="Pending", priority=1)
+        task_blocked = Task(prompt="Blocked", summary="Blocked", priority=2)
+        task_ready = Task(prompt="Ready", summary="Ready", priority=3)
+        task_running = Task(prompt="Running", summary="Running", priority=4)
+        task_completed = Task(prompt="Completed", summary="Completed", priority=5)
+        task_failed = Task(prompt="Failed", summary="Failed", priority=6)
+        task_cancelled = Task(prompt="Cancelled", summary="Cancelled", priority=7)
+
+        await database.insert_task(task_pending)
+        await database.insert_task(task_blocked)
+        await database.insert_task(task_ready)
+        await database.insert_task(task_running)
+        await database.insert_task(task_completed)
+        await database.insert_task(task_failed)
+        await database.insert_task(task_cancelled)
+
+        # Update tasks to their respective statuses
+        await database.update_task_status(task_blocked.id, TaskStatus.BLOCKED)
+        await database.update_task_status(task_ready.id, TaskStatus.READY)
+        await database.update_task_status(task_running.id, TaskStatus.RUNNING)
+        await database.update_task_status(task_completed.id, TaskStatus.COMPLETED)
+        await database.update_task_status(task_failed.id, TaskStatus.FAILED, error_message="Test error")
+        await database.update_task_status(task_cancelled.id, TaskStatus.CANCELLED)
+
+        # Act & Assert - test each status exclusion
+
+        # Test 1: Exclude PENDING
+        tasks = await database.list_tasks(exclude_status=TaskStatus.PENDING)
+        assert len(tasks) == 6
+        assert task_pending.id not in {t.id for t in tasks}
+
+        # Test 2: Exclude BLOCKED
+        tasks = await database.list_tasks(exclude_status=TaskStatus.BLOCKED)
+        assert len(tasks) == 6
+        assert task_blocked.id not in {t.id for t in tasks}
+
+        # Test 3: Exclude READY
+        tasks = await database.list_tasks(exclude_status=TaskStatus.READY)
+        assert len(tasks) == 6
+        assert task_ready.id not in {t.id for t in tasks}
+
+        # Test 4: Exclude RUNNING
+        tasks = await database.list_tasks(exclude_status=TaskStatus.RUNNING)
+        assert len(tasks) == 6
+        assert task_running.id not in {t.id for t in tasks}
+
+        # Test 5: Exclude COMPLETED
+        tasks = await database.list_tasks(exclude_status=TaskStatus.COMPLETED)
+        assert len(tasks) == 6
+        assert task_completed.id not in {t.id for t in tasks}
+
+        # Test 6: Exclude FAILED
+        tasks = await database.list_tasks(exclude_status=TaskStatus.FAILED)
+        assert len(tasks) == 6
+        assert task_failed.id not in {t.id for t in tasks}
+
+        # Test 7: Exclude CANCELLED
+        tasks = await database.list_tasks(exclude_status=TaskStatus.CANCELLED)
+        assert len(tasks) == 6
+        assert task_cancelled.id not in {t.id for t in tasks}
+
+    @pytest.mark.asyncio
+    async def test_list_tasks_exclude_status_none(self, database: Database) -> None:
+        """Test list_tasks with exclude_status=None does not exclude any tasks.
+
+        Verify that passing None for exclude_status parameter returns all tasks,
+        consistent with the default behavior.
+        """
+        # Arrange - create tasks with different statuses
+        task1 = Task(prompt="Task 1", summary="Pending", priority=5)
+        task2 = Task(prompt="Task 2", summary="Completed", priority=7)
+        task3 = Task(prompt="Task 3", summary="Running", priority=3)
+
+        await database.insert_task(task1)
+        await database.insert_task(task2)
+        await database.insert_task(task3)
+
+        await database.update_task_status(task2.id, TaskStatus.COMPLETED)
+        await database.update_task_status(task3.id, TaskStatus.RUNNING)
+
+        # Act - list tasks with exclude_status=None
+        tasks = await database.list_tasks(exclude_status=None)
+
+        # Assert - all tasks returned
+        assert len(tasks) == 3
+        task_ids = {task.id for task in tasks}
+        assert task1.id in task_ids
+        assert task2.id in task_ids
+        assert task3.id in task_ids
+
+    @pytest.mark.asyncio
+    async def test_list_tasks_exclude_status_with_other_filters(self, database: Database) -> None:
+        """Test exclude_status combines correctly with other filters.
+
+        Verify that exclude_status works together with source, agent_type,
+        and feature_branch filters, applying all filters correctly.
+        """
+        from abathur.domain.models import TaskSource
+
+        # Arrange - create tasks with various attributes
+        task1 = Task(
+            prompt="Task 1",
+            summary="Human pending",
+            source=TaskSource.HUMAN,
+            agent_type="requirements-gatherer",
+            feature_branch="feature-1",
+            priority=5,
+        )
+        task2 = Task(
+            prompt="Task 2",
+            summary="Human completed",
+            source=TaskSource.HUMAN,
+            agent_type="requirements-gatherer",
+            feature_branch="feature-1",
+            priority=7,
+        )
+        task3 = Task(
+            prompt="Task 3",
+            summary="Agent pending",
+            source=TaskSource.AGENT_PLANNER,
+            agent_type="task-planner",
+            feature_branch="feature-1",
+            priority=3,
+        )
+        task4 = Task(
+            prompt="Task 4",
+            summary="Human completed different branch",
+            source=TaskSource.HUMAN,
+            agent_type="requirements-gatherer",
+            feature_branch="feature-2",
+            priority=9,
+        )
+
+        await database.insert_task(task1)
+        await database.insert_task(task2)
+        await database.insert_task(task3)
+        await database.insert_task(task4)
+
+        # Update task2 and task4 to completed
+        await database.update_task_status(task2.id, TaskStatus.COMPLETED)
+        await database.update_task_status(task4.id, TaskStatus.COMPLETED)
+
+        # Act & Assert - test filter combinations
+
+        # Test 1: exclude_status + source filter
+        tasks = await database.list_tasks(
+            exclude_status=TaskStatus.COMPLETED,
+            source=TaskSource.HUMAN
+        )
+        assert len(tasks) == 1
+        assert tasks[0].id == task1.id  # Only human non-completed task
+
+        # Test 2: exclude_status + agent_type filter
+        tasks = await database.list_tasks(
+            exclude_status=TaskStatus.COMPLETED,
+            agent_type="requirements-gatherer"
+        )
+        assert len(tasks) == 1
+        assert tasks[0].id == task1.id  # Only requirements-gatherer non-completed
+
+        # Test 3: exclude_status + feature_branch filter
+        tasks = await database.list_tasks(
+            exclude_status=TaskStatus.COMPLETED,
+            feature_branch="feature-1"
+        )
+        assert len(tasks) == 2
+        task_ids = {t.id for t in tasks}
+        assert task1.id in task_ids  # Human pending on feature-1
+        assert task3.id in task_ids  # Agent pending on feature-1
+
+        # Test 4: exclude_status + all filters combined
+        tasks = await database.list_tasks(
+            exclude_status=TaskStatus.COMPLETED,
+            source=TaskSource.HUMAN,
+            agent_type="requirements-gatherer",
+            feature_branch="feature-1"
+        )
+        assert len(tasks) == 1
+        assert tasks[0].id == task1.id  # Only task matching all criteria
+
+    @pytest.mark.asyncio
     async def test_delete_task_by_id_success(self, database: Database) -> None:
         """Test successful deletion of a task by ID."""
         task = Task(prompt="Task to delete", summary="Delete test task")
