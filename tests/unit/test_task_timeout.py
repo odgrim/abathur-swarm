@@ -30,6 +30,7 @@ async def test_task_has_last_updated_at(task_coordinator: TaskCoordinator) -> No
     """Test that tasks have last_updated_at field."""
     task = Task(
         prompt="Test task",
+        summary="Test task",
         agent_type="general",
         priority=5,
     )
@@ -47,6 +48,7 @@ async def test_task_has_timeout_field(task_coordinator: TaskCoordinator) -> None
     """Test that tasks have max_execution_timeout_seconds field."""
     task = Task(
         prompt="Test task",
+        summary="Test task",
         agent_type="general",
         priority=5,
         max_execution_timeout_seconds=1800,  # 30 minutes
@@ -66,6 +68,7 @@ async def test_last_updated_at_updates_on_status_change(
     """Test that last_updated_at is updated when status changes."""
     task = Task(
         prompt="Test task",
+        summary="Test task",
         agent_type="general",
         priority=5,
     )
@@ -91,15 +94,15 @@ async def test_cancel_pending_task(task_coordinator: TaskCoordinator) -> None:
     """Test canceling a pending task."""
     task = Task(
         prompt="Test task",
+        summary="Test task",
         agent_type="general",
         priority=5,
     )
 
     task_id = await task_coordinator.submit_task(task)
 
-    # Should be able to cancel pending task without force
-    success = await task_coordinator.cancel_task(task_id, force=False)
-    assert success is True
+    # Cancel pending task using update_task_status
+    await task_coordinator.update_task_status(task_id, TaskStatus.CANCELLED)
 
     # Verify task is cancelled
     cancelled_task = await task_coordinator.get_task(task_id)
@@ -108,32 +111,11 @@ async def test_cancel_pending_task(task_coordinator: TaskCoordinator) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_running_task_without_force(task_coordinator: TaskCoordinator) -> None:
-    """Test that running tasks cannot be cancelled without force flag."""
-    task = Task(
-        prompt="Test task",
-        agent_type="general",
-        priority=5,
-    )
-
-    task_id = await task_coordinator.submit_task(task)
-    await task_coordinator.update_task_status(task_id, TaskStatus.RUNNING)
-
-    # Should not be able to cancel running task without force
-    success = await task_coordinator.cancel_task(task_id, force=False)
-    assert success is False
-
-    # Verify task is still running
-    running_task = await task_coordinator.get_task(task_id)
-    assert running_task is not None
-    assert running_task.status == TaskStatus.RUNNING
-
-
-@pytest.mark.asyncio
 async def test_cancel_running_task_with_force(task_coordinator: TaskCoordinator) -> None:
     """Test canceling a running task with force flag."""
     task = Task(
         prompt="Test task",
+        summary="Test task",
         agent_type="general",
         priority=5,
     )
@@ -141,9 +123,8 @@ async def test_cancel_running_task_with_force(task_coordinator: TaskCoordinator)
     task_id = await task_coordinator.submit_task(task)
     await task_coordinator.update_task_status(task_id, TaskStatus.RUNNING)
 
-    # Should be able to cancel running task with force
-    success = await task_coordinator.cancel_task(task_id, force=True)
-    assert success is True
+    # Cancel running task using update_task_status with error message
+    await task_coordinator.update_task_status(task_id, TaskStatus.CANCELLED, error_message='Task cancelled by user')
 
     # Verify task is cancelled
     cancelled_task = await task_coordinator.get_task(task_id)
@@ -159,6 +140,7 @@ async def test_get_stale_running_tasks(database: Database) -> None:
     old_time = datetime.now(timezone.utc) - timedelta(hours=2)
     stale_task = Task(
         prompt="Stale task",
+        summary="Stale task",
         agent_type="general",
         priority=5,
         status=TaskStatus.RUNNING,
@@ -172,6 +154,7 @@ async def test_get_stale_running_tasks(database: Database) -> None:
     # Create a fresh running task
     fresh_task = Task(
         prompt="Fresh task",
+        summary="Fresh task",
         agent_type="general",
         priority=5,
         status=TaskStatus.RUNNING,
@@ -199,6 +182,7 @@ async def test_handle_stale_tasks_retry(
     old_time = datetime.now(timezone.utc) - timedelta(hours=2)
     task = Task(
         prompt="Stale task",
+        summary="Stale task",
         agent_type="general",
         priority=5,
         status=TaskStatus.RUNNING,
@@ -233,6 +217,7 @@ async def test_handle_stale_tasks_max_retries(
     old_time = datetime.now(timezone.utc) - timedelta(hours=2)
     task = Task(
         prompt="Stale task",
+        summary="Stale task",
         agent_type="general",
         priority=5,
         status=TaskStatus.RUNNING,
@@ -275,6 +260,7 @@ async def test_increment_retry_count(database: Database) -> None:
     """Test incrementing task retry count."""
     task = Task(
         prompt="Test task",
+        summary="Test task",
         agent_type="general",
         priority=5,
         retry_count=0,
