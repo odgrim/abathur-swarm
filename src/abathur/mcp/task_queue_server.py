@@ -185,6 +185,19 @@ class AbathurTaskQueueServer:
                                 ],
                                 "description": "Filter by task status",
                             },
+                            "exclude_status": {
+                                "type": "string",
+                                "enum": [
+                                    "pending",
+                                    "blocked",
+                                    "ready",
+                                    "running",
+                                    "completed",
+                                    "failed",
+                                    "cancelled",
+                                ],
+                                "description": "Exclude tasks with this status from results",
+                            },
                             "limit": {
                                 "type": "integer",
                                 "minimum": 1,
@@ -562,6 +575,7 @@ class AbathurTaskQueueServer:
         """Handle task_list tool invocation."""
         # Optional filters
         status_filter = arguments.get("status")
+        exclude_status_filter = arguments.get("exclude_status")
         limit = arguments.get("limit", 50)
         source_filter = arguments.get("source")
         agent_type_filter = arguments.get("agent_type")
@@ -576,6 +590,13 @@ class AbathurTaskQueueServer:
 
         if limit > 500:
             return {"error": "ValidationError", "message": f"limit cannot exceed 500, got {limit}"}
+
+        # Validate mutual exclusivity of status and exclude_status
+        if status_filter and exclude_status_filter:
+            return {
+                "error": "ValidationError",
+                "message": "Cannot use both status and exclude_status parameters",
+            }
 
         # Validate status enum
         if status_filter:
@@ -594,6 +615,23 @@ class AbathurTaskQueueServer:
                     "message": f"Invalid status: {status_filter}. Must be one of {valid_statuses}",
                 }
 
+        # Validate exclude_status enum
+        if exclude_status_filter:
+            valid_statuses = [
+                "pending",
+                "blocked",
+                "ready",
+                "running",
+                "completed",
+                "failed",
+                "cancelled",
+            ]
+            if exclude_status_filter not in valid_statuses:
+                return {
+                    "error": "ValidationError",
+                    "message": f"Invalid exclude_status: {exclude_status_filter}. Must be one of {valid_statuses}",
+                }
+
         # Validate source enum
         if source_filter:
             valid_sources = ["human", "agent_requirements", "agent_planner", "agent_implementation"]
@@ -610,6 +648,8 @@ class AbathurTaskQueueServer:
             filters: dict[str, Any] = {}
             if status_filter:
                 filters["status"] = TaskStatus(status_filter)
+            if exclude_status_filter:
+                filters["exclude_status"] = TaskStatus(exclude_status_filter)
             if source_filter:
                 filters["source"] = TaskSource(source_filter)
             if agent_type_filter:
