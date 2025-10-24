@@ -1,0 +1,715 @@
+{
+  "execution_status": {
+    "status": "SUCCESS",
+    "agent_name": "technical-requirements-specialist",
+    "completed_at": "2025-10-23T22:46:00Z"
+  },
+
+  "technical_specifications": {
+    "architecture": {
+      "overview": "The task update CLI command follows Abathur's layered architecture (CLI → Validation → Service → Infrastructure → Persistence). Implementation uses the Command Pattern with a vertical slice approach, implementing validation, service methods, and database operations to support atomic task attribute updates. The design emphasizes safety through comprehensive validation (status transitions, circular dependencies, agent existence) before any database writes.",
+      "components": [
+        {
+          "name": "CLI Command Handler",
+          "layer": "Presentation (CLI)",
+          "file": "src/abathur/cli/main.py",
+          "estimated_lines": "~150-200",
+          "responsibility": "Parse command arguments, invoke validation, call service layer, format output",
+          "interfaces": ["Typer framework", "Rich console", "TaskCoordinator", "UpdateRequestModel"],
+          "dependencies": ["TaskCoordinator", "UpdateRequestModel", "StatusTransitionValidator"]
+        },
+        {
+          "name": "Update Request Model",
+          "layer": "Domain",
+          "file": "src/abathur/domain/models.py (new)",
+          "estimated_lines": "~30-40",
+          "responsibility": "Pydantic model representing multi-field update request with validation",
+          "interfaces": ["Pydantic BaseModel"],
+          "dependencies": []
+        },
+        {
+          "name": "Status Transition Validator",
+          "layer": "Domain/Service",
+          "file": "src/abathur/services/status_validator.py (new)",
+          "estimated_lines": "~80-100",
+          "responsibility": "Validate status transitions using ALLOWED_TRANSITIONS state machine",
+          "interfaces": ["Standalone validator class"],
+          "dependencies": ["TaskStatus enum"]
+        },
+        {
+          "name": "Task Coordinator Update Methods",
+          "layer": "Application",
+          "file": "src/abathur/application/task_coordinator.py",
+          "estimated_lines": "~50-70 (new methods)",
+          "responsibility": "Orchestrate validation, call database update, trigger side effects (priority recalc)",
+          "interfaces": ["Database", "DependencyResolver", "PriorityCalculator", "StatusTransitionValidator"],
+          "dependencies": ["Database", "StatusTransitionValidator", "DependencyResolver", "PriorityCalculator"]
+        },
+        {
+          "name": "Database Update Methods",
+          "layer": "Infrastructure",
+          "file": "src/abathur/infrastructure/database.py",
+          "estimated_lines": "~100-150 (new methods)",
+          "responsibility": "Execute atomic database transactions for task updates, handle dependency updates",
+          "interfaces": ["aiosqlite", "Task model"],
+          "dependencies": []
+        }
+      ],
+      "patterns": [
+        "Command Pattern: CLI command encapsulates multi-field update operation",
+        "Transaction Script: Atomic multi-field updates in single database transaction",
+        "State Machine: Status transition validation using explicit transition matrix",
+        "Validation Pipeline: Typer → Pydantic → Custom validators → Database constraints",
+        "Fail-Fast Validation: All validation before any database writes",
+        "Rollback on Error: Database transaction rollback on any validation failure"
+      ],
+      "diagrams": {
+        "update_flow": "CLI parse args → Validate status transition → Validate dependencies → Build UpdateRequest → TaskCoordinator.update_task() → Database transaction → Audit log → Priority recalc (if needed) → Success/error response",
+        "validation_layers": "Layer 1: Typer type validation → Layer 2: Pydantic model validation → Layer 3: Business logic validation → Layer 4: Database constraints",
+        "atomic_transaction": "BEGIN TRANSACTION → Validate all fields → Update task record → Update dependencies (if changed) → Log audit → COMMIT (or ROLLBACK on error)"
+      }
+    },
+
+    "data_models": [
+      {
+        "entity": "UpdateRequest",
+        "purpose": "Encapsulate multi-field update request with validation",
+        "schema": {
+          "task_id": {"type": "UUID", "required": true},
+          "status": {"type": "TaskStatus | None", "optional": true},
+          "priority": {"type": "int | None", "optional": true, "constraints": "0-10"},
+          "agent_type": {"type": "str | None", "optional": true},
+          "dependencies": {"type": "list[UUID] | None", "optional": true}
+        },
+        "validation": {
+          "at_least_one_field": "Must update at least one field (status, priority, agent_type, or dependencies)",
+          "priority_range": "If priority specified, must be 0-10",
+          "status_enum": "If status specified, must be valid TaskStatus enum value"
+        },
+        "file_location": "src/abathur/domain/models.py (add to existing file)"
+      },
+      {
+        "entity": "UpdateResult",
+        "purpose": "Return type for update operations with detailed results",
+        "schema": {
+          "success": {"type": "bool"},
+          "task_id": {"type": "UUID"},
+          "updated_fields": {"type": "list[str]", "description": "List of fields that were updated"},
+          "affected_tasks": {"type": "int", "description": "Number of dependent tasks affected by priority recalc"},
+          "error_message": {"type": "str | None"}
+        },
+        "file_location": "src/abathur/domain/models.py (add to existing file)"
+      },
+      {
+        "entity": "StatusTransitionError",
+        "purpose": "Custom exception for invalid status transitions",
+        "schema": {
+          "current_status": {"type": "TaskStatus"},
+          "requested_status": {"type": "TaskStatus"},
+          "allowed_transitions": {"type": "list[TaskStatus]"}
+        },
+        "file_location": "src/abathur/domain/models.py or src/abathur/services/status_validator.py"
+      }
+    ],
+
+    "apis": [
+      {
+        "endpoint": "abathur task update",
+        "method": "CLI command",
+        "purpose": "Update task attributes after creation",
+        "signature": "task update <task-id> [--status STATUS] [--priority PRIORITY] [--agent-type AGENT_TYPE] [--dependencies UUID1,UUID2] [--dry-run]",
+        "flags": {
+          "--status": {
+            "type": "str (TaskStatus enum)",
+            "optional": true,
+            "validation": "Must be valid TaskStatus, transition must be allowed",
+            "example": "--status ready"
+          },
+          "--priority": {
+            "type": "int",
+            "optional": true,
+            "validation": "Must be 0-10",
+            "example": "--priority 8"
+          },
+          "--agent-type": {
+            "type": "str",
+            "optional": true,
+            "validation": "Task must be PENDING or READY, agent must exist",
+            "example": "--agent-type python-backend-specialist"
+          },
+          "--dependencies": {
+            "type": "str (comma-separated UUIDs)",
+            "optional": true,
+            "validation": "All UUIDs must exist, no circular dependencies",
+            "example": "--dependencies abc123,def456"
+          },
+          "--dry-run": {
+            "type": "bool flag",
+            "optional": true,
+            "description": "Preview changes without applying",
+            "example": "--dry-run"
+          }
+        },
+        "response": {
+          "success": "✓ Task {task_id} updated successfully\n  Updated: status, priority\n  Affected dependent tasks: 3",
+          "error": "Error: Invalid status transition from running to pending\nAllowed transitions from running: completed, failed, cancelled"
+        },
+        "examples": [
+          "abathur task update abc123 --status ready",
+          "abathur task update abc123 --status completed --priority 10",
+          "abathur task update abc123 --dependencies def456,ghi789",
+          "abathur task update abc123 --agent-type requirements-gatherer --dry-run"
+        ]
+      }
+    ],
+
+    "technical_decisions": [
+      {
+        "decision": "Use explicit ALLOWED_TRANSITIONS state machine for status validation",
+        "rationale": "Prevents invalid task lifecycle transitions that could corrupt task queue state. Explicit matrix makes validation logic transparent and testable.",
+        "alternatives_considered": [
+          "Free-form status updates - rejected: too dangerous, allows invalid states",
+          "Status update policies per role - rejected: over-engineering for single-user CLI"
+        ],
+        "tradeoffs": {
+          "pros": [
+            "Clear, testable validation logic",
+            "Prevents data corruption from invalid transitions",
+            "Easy to extend with new transitions",
+            "Self-documenting state machine"
+          ],
+          "cons": [
+            "Rigid - requires code change to add new transitions",
+            "May frustrate users who want to force invalid transitions (mitigated by clear error messages)"
+          ]
+        },
+        "implementation": "Dictionary mapping TaskStatus → set[TaskStatus] of allowed next states. Validator checks current_status in ALLOWED_TRANSITIONS[requested_status]."
+      },
+      {
+        "decision": "Atomic multi-field updates via single database transaction",
+        "rationale": "Ensures consistency - either all fields update or none do. Prevents partial updates that could leave tasks in inconsistent state.",
+        "tradeoffs": {
+          "pros": [
+            "Atomicity guarantees - no partial updates",
+            "Rollback on validation failure",
+            "Simpler error handling",
+            "Database-level consistency"
+          ],
+          "cons": [
+            "Single transaction holds lock longer (acceptable for CLI use case)",
+            "Slightly more complex transaction code"
+          ]
+        },
+        "implementation": "BEGIN TRANSACTION → Validate all → UPDATE task SET ... → UPDATE task_dependencies ... → Audit log → COMMIT"
+      },
+      {
+        "decision": "Validate BEFORE database writes (fail-fast approach)",
+        "rationale": "Minimizes database contention and rollback overhead. Catches errors earlier in the pipeline for better user experience.",
+        "validation_order": [
+          "1. Typer type validation (flags, data types)",
+          "2. Pydantic UpdateRequest validation (at least one field, ranges)",
+          "3. Business logic validation (status transitions, circular deps, agent exists)",
+          "4. Database write (inside transaction)",
+          "5. Database constraints (foreign keys, NOT NULL)"
+        ],
+        "tradeoffs": {
+          "pros": [
+            "Fast failure - users get errors immediately",
+            "Reduces database load (no wasted transactions)",
+            "Clear separation of validation layers",
+            "Better error messages (can detect root cause before DB)"
+          ],
+          "cons": [
+            "More validation code to maintain",
+            "Slight code duplication (validation logic + DB constraints)"
+          ]
+        }
+      },
+      {
+        "decision": "Dependency updates replace existing dependencies (not append)",
+        "rationale": "Clear semantics - --dependencies specifies COMPLETE dependency list, not delta. Avoids ambiguity about add vs replace.",
+        "alternatives_considered": [
+          "--add-dependencies / --remove-dependencies flags - rejected: too complex for initial implementation"
+        ],
+        "tradeoffs": {
+          "pros": [
+            "Clear, unambiguous behavior",
+            "Simpler implementation",
+            "Consistent with other CLI tools"
+          ],
+          "cons": [
+            "Requires specifying full list to add one dependency",
+            "Could add --add-dependencies in future if needed"
+          ]
+        },
+        "implementation": "DELETE FROM task_dependencies WHERE dependent_task_id = ? → INSERT INTO task_dependencies ... (all new deps)"
+      },
+      {
+        "decision": "Priority recalculation triggers automatically on priority update",
+        "rationale": "Maintains consistency of calculated_priority across dependency graph. Users expect downstream tasks to reflect priority changes.",
+        "tradeoffs": {
+          "pros": [
+            "Automatic consistency - no manual recalc needed",
+            "Transparent to user",
+            "Uses existing PriorityCalculator (already optimized <5ms)"
+          ],
+          "cons": [
+            "Slightly longer update latency (acceptable - still <500ms NFR)",
+            "Could affect many tasks in large graphs (mitigated by fast algorithm)"
+          ]
+        },
+        "implementation": "After priority update: await priority_calculator.recalculate_priority(task_id) → returns list of affected task IDs → show count in success message"
+      },
+      {
+        "decision": "Agent type updates only allowed for PENDING/READY tasks",
+        "rationale": "Safety - prevents changing agent type for already-running or completed tasks, which could cause confusion about which agent produced results.",
+        "tradeoffs": {
+          "pros": [
+            "Clear ownership - agent type matches executor",
+            "Prevents confusion in audit trail",
+            "Fails safely for invalid states"
+          ],
+          "cons": [
+            "Cannot fix agent type for RUNNING tasks (acceptable - rare edge case)",
+            "Must cancel task first to change agent type (acceptable workflow)"
+          ]
+        },
+        "error_message": "Cannot update agent type for task in {status} status. Agent type can only be changed for PENDING or READY tasks."
+      }
+    ]
+  },
+
+  "implementation_plan": {
+    "phases": [
+      {
+        "phase_name": "Phase 1: Domain Models and Validation",
+        "objectives": [
+          "Create data models for update operations",
+          "Implement status transition validator",
+          "Write unit tests for validation logic"
+        ],
+        "tasks": [
+          {
+            "task_id": "001",
+            "name": "Create StatusTransitionValidator with ALLOWED_TRANSITIONS matrix",
+            "estimated_effort": "1-2 hours",
+            "files": ["src/abathur/services/status_validator.py (new)"],
+            "tests": ["Unit tests for all status transitions (7 states × average 2-3 transitions = ~20 test cases)"]
+          },
+          {
+            "task_id": "002",
+            "name": "Create UpdateRequest Pydantic model",
+            "estimated_effort": "30-45 minutes",
+            "files": ["src/abathur/domain/models.py (append)"],
+            "tests": ["Unit tests for Pydantic validation (at least one field, priority range)"]
+          },
+          {
+            "task_id": "003",
+            "name": "Create UpdateResult and StatusTransitionError models",
+            "estimated_effort": "30 minutes",
+            "files": ["src/abathur/domain/models.py (append)"],
+            "tests": ["Unit tests for model construction"]
+          }
+        ],
+        "dependencies": [],
+        "estimated_duration": "2-3 hours total"
+      },
+      {
+        "phase_name": "Phase 2: Database Layer",
+        "objectives": [
+          "Implement atomic update transaction",
+          "Handle dependency updates",
+          "Add audit logging"
+        ],
+        "tasks": [
+          {
+            "task_id": "004",
+            "name": "Implement Database.update_task_fields() method",
+            "estimated_effort": "2-3 hours",
+            "description": "Atomic transaction updating status, priority, agent_type with audit logging",
+            "files": ["src/abathur/infrastructure/database.py"],
+            "tests": ["Integration tests for single-field and multi-field updates"]
+          },
+          {
+            "task_id": "005",
+            "name": "Implement Database.update_task_dependencies() method",
+            "estimated_effort": "1-2 hours",
+            "description": "Replace dependencies (DELETE old + INSERT new) in transaction",
+            "files": ["src/abathur/infrastructure/database.py"],
+            "tests": ["Integration tests for dependency updates, circular dependency detection"]
+          },
+          {
+            "task_id": "006",
+            "name": "Implement Database.get_task_for_update() method",
+            "estimated_effort": "30 minutes",
+            "description": "Get task with SELECT ... FOR UPDATE lock for safe concurrent updates",
+            "files": ["src/abathur/infrastructure/database.py"],
+            "tests": ["Concurrency tests verifying lock behavior"]
+          }
+        ],
+        "dependencies": ["Phase 1"],
+        "estimated_duration": "3-5 hours total"
+      },
+      {
+        "phase_name": "Phase 3: Service Layer Integration",
+        "objectives": [
+          "Orchestrate validation and database updates",
+          "Trigger priority recalculation",
+          "Implement dry-run preview"
+        ],
+        "tasks": [
+          {
+            "task_id": "007",
+            "name": "Implement TaskCoordinator.update_task() orchestration method",
+            "estimated_effort": "2-3 hours",
+            "description": "Validate → Update → Trigger side effects → Return result",
+            "files": ["src/abathur/application/task_coordinator.py"],
+            "tests": ["Integration tests for full update flow with all validation scenarios"]
+          },
+          {
+            "task_id": "008",
+            "name": "Implement TaskCoordinator.preview_update() for dry-run mode",
+            "estimated_effort": "1 hour",
+            "description": "Run validation without database writes, return preview",
+            "files": ["src/abathur/application/task_coordinator.py"],
+            "tests": ["Integration tests verifying no database writes occur"]
+          }
+        ],
+        "dependencies": ["Phase 1", "Phase 2"],
+        "estimated_duration": "3-4 hours total"
+      },
+      {
+        "phase_name": "Phase 4: CLI Implementation",
+        "objectives": [
+          "Implement CLI command with all flags",
+          "Format output using Rich",
+          "Handle error display"
+        ],
+        "tasks": [
+          {
+            "task_id": "009",
+            "name": "Implement task update CLI command skeleton",
+            "estimated_effort": "1-2 hours",
+            "description": "Typer command with all flags, argument parsing, basic structure",
+            "files": ["src/abathur/cli/main.py"],
+            "tests": ["CLI tests for flag parsing"]
+          },
+          {
+            "task_id": "010",
+            "name": "Implement CLI command logic (validation → service → formatting)",
+            "estimated_effort": "2-3 hours",
+            "description": "Call TaskCoordinator, handle UpdateResult, format Rich output",
+            "files": ["src/abathur/cli/main.py"],
+            "tests": ["E2E CLI tests for success and error paths"]
+          },
+          {
+            "task_id": "011",
+            "name": "Implement error formatting with Rich console",
+            "estimated_effort": "1 hour",
+            "description": "Format StatusTransitionError, validation errors, etc. with colors",
+            "files": ["src/abathur/cli/main.py"],
+            "tests": ["E2E tests for error message display"]
+          },
+          {
+            "task_id": "012",
+            "name": "Add help text and usage examples",
+            "estimated_effort": "30 minutes",
+            "description": "Comprehensive help text with examples for all flags",
+            "files": ["src/abathur/cli/main.py"],
+            "tests": ["Manual testing of --help output"]
+          }
+        ],
+        "dependencies": ["Phase 3"],
+        "estimated_duration": "4-6 hours total"
+      },
+      {
+        "phase_name": "Phase 5: Comprehensive Testing",
+        "objectives": [
+          "Write E2E tests for all scenarios",
+          "Write performance tests",
+          "Validate NFRs"
+        ],
+        "tasks": [
+          {
+            "task_id": "013",
+            "name": "Write E2E tests for single-field updates",
+            "estimated_effort": "2 hours",
+            "description": "Test status, priority, agent-type, dependencies updates individually",
+            "files": ["tests/e2e/test_task_update_cli.py"],
+            "test_count": "~10-15 test cases"
+          },
+          {
+            "task_id": "014",
+            "name": "Write E2E tests for multi-field updates",
+            "estimated_effort": "1 hour",
+            "description": "Test atomic multi-field updates and rollback on error",
+            "files": ["tests/e2e/test_task_update_cli.py"],
+            "test_count": "~5 test cases"
+          },
+          {
+            "task_id": "015",
+            "name": "Write E2E tests for error paths",
+            "estimated_effort": "2 hours",
+            "description": "Test all validation failures (invalid transitions, circular deps, etc.)",
+            "files": ["tests/e2e/test_task_update_cli.py"],
+            "test_count": "~15-20 test cases"
+          },
+          {
+            "task_id": "016",
+            "name": "Write E2E tests for dry-run mode",
+            "estimated_effort": "30 minutes",
+            "description": "Verify dry-run shows preview without database writes",
+            "files": ["tests/e2e/test_task_update_cli.py"],
+            "test_count": "~3 test cases"
+          },
+          {
+            "task_id": "017",
+            "name": "Write performance tests (pytest-benchmark)",
+            "estimated_effort": "1-2 hours",
+            "description": "Benchmark single-field (<100ms) and multi-field (<500ms) updates",
+            "files": ["tests/performance/test_update_performance.py"],
+            "test_count": "~5 benchmark tests"
+          }
+        ],
+        "dependencies": ["Phase 4"],
+        "estimated_duration": "6-8 hours total"
+      },
+      {
+        "phase_name": "Phase 6: Documentation and User Guide",
+        "objectives": [
+          "Write user-facing documentation",
+          "Add code docstrings",
+          "Update CHANGELOG"
+        ],
+        "tasks": [
+          {
+            "task_id": "018",
+            "name": "Write user guide for task update command",
+            "estimated_effort": "1 hour",
+            "description": "Comprehensive guide with examples, common scenarios, troubleshooting",
+            "files": ["docs/user-guide/task-update.md"],
+            "content": "Usage examples, status transition guide, error troubleshooting"
+          },
+          {
+            "task_id": "019",
+            "name": "Add comprehensive docstrings to all new code",
+            "estimated_effort": "1 hour",
+            "description": "Google-style docstrings for all public methods",
+            "files": ["All files in phases 1-4"],
+            "standards": "Google Python Style Guide"
+          },
+          {
+            "task_id": "020",
+            "name": "Update CHANGELOG.md",
+            "estimated_effort": "15 minutes",
+            "description": "Add entry for task update feature under Unreleased section",
+            "files": ["CHANGELOG.md"]
+          }
+        ],
+        "dependencies": ["Phase 5"],
+        "estimated_duration": "2-3 hours total"
+      }
+    ],
+
+    "total_estimated_effort": "20-29 hours (2.5-4 days for single developer)",
+
+    "testing_strategy": {
+      "unit_tests": {
+        "scope": "Domain models, validators, individual functions",
+        "framework": "pytest",
+        "coverage_target": "100% for validation logic",
+        "estimated_test_count": "~40-50 unit tests",
+        "key_test_areas": [
+          "StatusTransitionValidator - all transitions (valid and invalid)",
+          "UpdateRequest Pydantic validation",
+          "Error model construction",
+          "Validation helper functions"
+        ]
+      },
+      "integration_tests": {
+        "scope": "Database operations, service layer orchestration",
+        "framework": "pytest with pytest-asyncio",
+        "coverage_target": "90%+",
+        "estimated_test_count": "~30-40 integration tests",
+        "key_test_areas": [
+          "Database update transactions (single and multi-field)",
+          "Dependency updates with circular detection",
+          "Priority recalculation triggers",
+          "Atomic rollback on validation failure",
+          "Concurrent update handling (locks)"
+        ]
+      },
+      "e2e_tests": {
+        "scope": "CLI command execution end-to-end",
+        "framework": "pytest with CLI invocation",
+        "coverage_target": "All user-facing scenarios",
+        "estimated_test_count": "~40-50 E2E tests",
+        "key_test_areas": [
+          "Single-field updates (status, priority, agent-type, dependencies)",
+          "Multi-field atomic updates",
+          "Error paths (all validation failures)",
+          "Dry-run mode (no side effects)",
+          "Help text display",
+          "Task ID prefix resolution"
+        ]
+      },
+      "performance_tests": {
+        "scope": "Update latency validation (NFR001)",
+        "framework": "pytest-benchmark",
+        "targets": {
+          "single_field_update": "<100ms",
+          "multi_field_update": "<500ms",
+          "priority_recalc_100_tasks": "<50ms"
+        },
+        "estimated_test_count": "~5 benchmark tests"
+      }
+    },
+
+    "deployment_plan": {
+      "prerequisites": [
+        "All tests passing (unit, integration, E2E, performance)",
+        "Code review completed",
+        "Documentation complete"
+      ],
+      "steps": [
+        "1. Merge feature branch into main",
+        "2. Tag release (e.g., v0.3.0)",
+        "3. Deploy to production (no database migration needed)",
+        "4. Announce feature to users",
+        "5. Monitor for validation errors in logs"
+      ],
+      "rollback_strategy": "Feature is additive (no schema changes), rollback only requires reverting code. No database rollback needed.",
+      "monitoring": [
+        "Track usage: abathur task update command invocations",
+        "Track validation errors: StatusTransitionError, CircularDependencyError",
+        "Track update latency: single-field vs multi-field",
+        "Track dry-run usage: preview mode adoption"
+      ]
+    }
+  },
+
+  "suggested_agent_specializations": {
+    "status_validator": {
+      "suggested_agent_type": "python-state-machine-specialist",
+      "expertise": "Python state machine implementation with transition validation",
+      "responsibilities": [
+        "Implement StatusTransitionValidator class",
+        "Define ALLOWED_TRANSITIONS matrix",
+        "Write unit tests for all transitions"
+      ],
+      "tools_needed": ["Read", "Write", "Bash"],
+      "task_types": ["status transition validator", "state machine validation"]
+    },
+    "pydantic_models": {
+      "suggested_agent_type": "python-pydantic-model-specialist",
+      "expertise": "Pydantic V2 model creation with custom validators",
+      "responsibilities": [
+        "Create UpdateRequest model",
+        "Create UpdateResult model",
+        "Add Pydantic field validators"
+      ],
+      "tools_needed": ["Read", "Write", "Edit", "Bash"],
+      "task_types": ["Pydantic model creation", "field validation"]
+    },
+    "database_layer": {
+      "suggested_agent_type": "python-database-specialist",
+      "expertise": "Python async database operations with aiosqlite and transactions",
+      "responsibilities": [
+        "Implement update_task_fields() method",
+        "Implement update_task_dependencies() method",
+        "Write integration tests for database transactions"
+      ],
+      "tools_needed": ["Read", "Write", "Edit", "Bash"],
+      "task_types": ["database CRUD operations", "transaction implementation"]
+    },
+    "service_orchestration": {
+      "suggested_agent_type": "python-service-layer-specialist",
+      "expertise": "Service layer orchestration with business logic coordination",
+      "responsibilities": [
+        "Implement TaskCoordinator.update_task()",
+        "Implement dry-run preview",
+        "Coordinate validation and side effects"
+      ],
+      "tools_needed": ["Read", "Write", "Edit", "Bash"],
+      "task_types": ["service layer methods", "orchestration logic"]
+    },
+    "cli_implementation": {
+      "suggested_agent_type": "python-cli-specialist",
+      "expertise": "Python CLI with Typer and Rich formatting",
+      "responsibilities": [
+        "Implement task update CLI command",
+        "Format Rich console output",
+        "Handle error display"
+      ],
+      "tools_needed": ["Read", "Write", "Edit", "Bash"],
+      "task_types": ["Typer CLI commands", "Rich formatting"]
+    },
+    "testing": {
+      "suggested_agent_type": "python-testing-specialist",
+      "expertise": "Comprehensive Python testing with pytest",
+      "responsibilities": [
+        "Write unit tests",
+        "Write integration tests",
+        "Write E2E CLI tests",
+        "Write performance tests"
+      ],
+      "tools_needed": ["Read", "Write", "Bash"],
+      "task_types": ["pytest tests", "pytest-benchmark", "pytest-asyncio"]
+    }
+  },
+
+  "research_findings": [
+    {
+      "topic": "State Machine Best Practices (2025)",
+      "findings": "Modern state machine patterns emphasize explicit transition matrices, fail-fast validation, and comprehensive testing. Transition matrices should be data-driven (not hardcoded switch statements) for maintainability.",
+      "sources": ["Martin Fowler - Domain-Driven Design", "Finite State Machines in Python"],
+      "application": "ALLOWED_TRANSITIONS dictionary provides clear, testable state machine. Validator checks transitions before database writes."
+    },
+    {
+      "topic": "Atomic Database Transactions for Multi-Field Updates",
+      "findings": "Best practice: validate all fields BEFORE starting transaction. Use SELECT ... FOR UPDATE for concurrent safety. Rollback on ANY validation failure.",
+      "sources": ["PostgreSQL Best Practices", "SQLite Transaction Best Practices"],
+      "application": "All validation completes before BEGIN TRANSACTION. UPDATE uses WHERE clauses to verify state hasn't changed. ROLLBACK on error."
+    },
+    {
+      "topic": "CLI UX Best Practices (2025)",
+      "findings": "Modern CLIs provide rich error messages, dry-run modes, and colored output. Fail-fast with clear error messages. Show preview of changes before applying.",
+      "sources": ["Typer Documentation", "Click CLI Best Practices", "Rich Console Patterns"],
+      "application": "Rich formatting for errors. Dry-run mode shows preview. Clear error messages with suggested fixes (e.g., 'Allowed transitions: ...')."
+    }
+  ],
+
+  "orchestration_context": {
+    "next_recommended_action": "Create feature branch as git worktree and spawn task-planner(s) for implementation",
+    "ready_for_implementation": true,
+    "tech_spec_task_id": "unknown",
+    "task_planning_strategy": "SINGLE task-planner (work is cohesive, ~20 tasks, tightly coupled)",
+    "decomposition_rationale": "All work is related to single CLI command. Total estimated 20 tasks (6 phases × ~3-4 tasks each). Tightly coupled - changes across layers must coordinate. Single task-planner appropriate.",
+    "feature_branch": "feature/task-update-cli",
+    "feature_branch_created": false,
+    "memory_references": {
+      "technical_specs_location": "design_docs/task-update-cli/TECHNICAL_SPECIFICATIONS.json",
+      "requirements_location": "design_docs/task-update-cli/REQUIREMENTS.json"
+    },
+    "context_provided": {
+      "requirements_document": true,
+      "technical_specifications": true,
+      "architecture_overview": true,
+      "implementation_phases": true,
+      "suggested_agent_specializations": true,
+      "testing_strategy": true,
+      "deployment_plan": true
+    },
+    "blockers": [],
+    "risks": [
+      {
+        "risk": "Status transition violations",
+        "mitigation": "Comprehensive validation matrix + extensive testing"
+      },
+      {
+        "risk": "Partial updates due to transaction failure",
+        "mitigation": "Atomic transactions with rollback"
+      }
+    ]
+  }
+}
