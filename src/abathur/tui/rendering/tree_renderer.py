@@ -256,7 +256,10 @@ class TreeRenderer:
             >>> console.print(tree)
         """
         # Configure box-drawing style
-        guide_style = "tree.line" if use_unicode else "ascii"
+        # Rich Tree uses Unicode by default if supported
+        # The use_unicode parameter is currently ignored as Rich handles this automatically
+        # Future enhancement: support forced ASCII mode via Console configuration
+        guide_style = "tree.line"
 
         # Create root tree with title
         root_tree = RichTree("Task Queue", guide_style=guide_style)
