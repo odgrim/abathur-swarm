@@ -194,9 +194,17 @@ class MockAbathurTaskQueueServer:
         """Handle task_list tool invocation."""
         # Optional filters
         status_filter = arguments.get("status")
+        exclude_status_filter = arguments.get("exclude_status")
         limit = arguments.get("limit", 50)
         source_filter = arguments.get("source")
         agent_type_filter = arguments.get("agent_type")
+
+        # Validate mutual exclusivity of status and exclude_status
+        if status_filter and exclude_status_filter:
+            return {
+                "error": "ValidationError",
+                "message": "Cannot use both status and exclude_status parameters",
+            }
 
         # Validate limit
         if not isinstance(limit, int) or limit < 1:
@@ -208,21 +216,30 @@ class MockAbathurTaskQueueServer:
         if limit > 500:
             return {"error": "ValidationError", "message": f"limit cannot exceed 500, got {limit}"}
 
+        valid_statuses = [
+            "pending",
+            "blocked",
+            "ready",
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
+        ]
+
         # Validate status enum
         if status_filter:
-            valid_statuses = [
-                "pending",
-                "blocked",
-                "ready",
-                "running",
-                "completed",
-                "failed",
-                "cancelled",
-            ]
             if status_filter not in valid_statuses:
                 return {
                     "error": "ValidationError",
                     "message": f"Invalid status: {status_filter}. Must be one of {valid_statuses}",
+                }
+
+        # Validate exclude_status enum
+        if exclude_status_filter:
+            if exclude_status_filter not in valid_statuses:
+                return {
+                    "error": "ValidationError",
+                    "message": f"Invalid exclude_status: {exclude_status_filter}. Must be one of {valid_statuses}",
                 }
 
         # Validate source enum
@@ -240,6 +257,8 @@ class MockAbathurTaskQueueServer:
             filters: dict[str, TaskStatus | TaskSource | str] = {}
             if status_filter:
                 filters["status"] = TaskStatus(status_filter)
+            if exclude_status_filter:
+                filters["exclude_status"] = TaskStatus(exclude_status_filter)
             if source_filter:
                 filters["source"] = TaskSource(source_filter)
             if agent_type_filter:
@@ -923,6 +942,147 @@ async def test_task_list_empty_result(mock_server, mock_db) -> None:
 
     assert "error" not in result
     assert result["tasks"] == []
+
+
+@pytest.mark.asyncio
+async def test_task_list_mutual_exclusivity_validation(mock_server, mock_db) -> None:
+    """Test mutual exclusivity validation rejects both status and exclude_status.
+
+    When both status and exclude_status parameters are provided,
+    the handler should return a ValidationError with a clear message.
+    """
+    mock_server.db = mock_db
+
+    # Arrange - provide both status and exclude_status
+    arguments = {
+        "status": "pending",
+        "exclude_status": "completed"
+    }
+
+    # Act
+    result = await mock_server._handle_task_list(arguments)
+
+    # Assert - mutual exclusivity validation error
+    assert result["error"] == "ValidationError"
+    assert "Cannot use both status and exclude_status parameters" in result["message"]
+
+    # Verify database.list_tasks was NOT called (failed validation before DB call)
+    mock_db.list_tasks.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_task_list_exclude_status_valid_enum(mock_server, mock_db) -> None:
+    """Test task list accepts valid exclude_status enum value.
+
+    When exclude_status is provided with a valid TaskStatus enum value,
+    the request should be accepted and processed correctly.
+    """
+    ready_task = Task(
+        id=uuid4(),
+        prompt="Ready task",
+        status=TaskStatus.READY,
+        source=TaskSource.HUMAN,
+        calculated_priority=7.0,
+        submitted_at=datetime.now(timezone.utc),
+        last_updated_at=datetime.now(timezone.utc),
+    )
+    pending_task = Task(
+        id=uuid4(),
+        prompt="Pending task",
+        status=TaskStatus.PENDING,
+        source=TaskSource.HUMAN,
+        calculated_priority=5.0,
+        submitted_at=datetime.now(timezone.utc),
+        last_updated_at=datetime.now(timezone.utc),
+    )
+
+    mock_server.db = mock_db
+    mock_db.list_tasks.return_value = [ready_task, pending_task]
+
+    # Arrange - valid exclude_status parameter
+    arguments = {"exclude_status": "completed"}
+
+    # Act
+    result = await mock_server._handle_task_list(arguments)
+
+    # Assert - request accepted, no error
+    assert "error" not in result
+    assert len(result["tasks"]) == 2
+    assert result["tasks"][0]["status"] == "ready"
+    assert result["tasks"][1]["status"] == "pending"
+
+    # Verify exclude_status was passed to database.list_tasks()
+    mock_db.list_tasks.assert_called_once()
+    call_kwargs = mock_db.list_tasks.call_args.kwargs
+    assert "exclude_status" in call_kwargs
+    assert call_kwargs["exclude_status"] == TaskStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_task_list_exclude_status_invalid_enum(mock_server, mock_db) -> None:
+    """Test task list rejects invalid exclude_status enum value.
+
+    When exclude_status is provided with an invalid value,
+    the handler should return a ValidationError with clear error message.
+    """
+    mock_server.db = mock_db
+
+    # Arrange - invalid exclude_status value
+    arguments = {"exclude_status": "invalid_status"}
+
+    # Act
+    result = await mock_server._handle_task_list(arguments)
+
+    # Assert - validation error
+    assert result["error"] == "ValidationError"
+    assert "Invalid exclude_status" in result["message"]
+    assert "invalid_status" in result["message"]
+
+    # Verify database.list_tasks was NOT called (failed validation)
+    mock_db.list_tasks.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_task_list_exclude_status_parameter_extraction(mock_server, mock_db) -> None:
+    """Test exclude_status is correctly extracted and passed to database.
+
+    Verify that the exclude_status parameter is correctly extracted from
+    arguments and converted to TaskStatus enum before being passed to
+    database.list_tasks().
+    """
+    mock_server.db = mock_db
+    mock_db.list_tasks.return_value = []
+
+    # Test all valid exclude_status enum values
+    valid_statuses = [
+        ("pending", TaskStatus.PENDING),
+        ("blocked", TaskStatus.BLOCKED),
+        ("ready", TaskStatus.READY),
+        ("running", TaskStatus.RUNNING),
+        ("completed", TaskStatus.COMPLETED),
+        ("failed", TaskStatus.FAILED),
+        ("cancelled", TaskStatus.CANCELLED),
+    ]
+
+    for status_str, status_enum in valid_statuses:
+        # Reset mock
+        mock_db.list_tasks.reset_mock()
+
+        # Arrange
+        arguments = {"exclude_status": status_str}
+
+        # Act
+        result = await mock_server._handle_task_list(arguments)
+
+        # Assert - no error
+        assert "error" not in result, f"Failed for exclude_status={status_str}"
+
+        # Verify correct enum conversion
+        mock_db.list_tasks.assert_called_once()
+        call_kwargs = mock_db.list_tasks.call_args.kwargs
+        assert call_kwargs["exclude_status"] == status_enum, (
+            f"Expected {status_enum}, got {call_kwargs.get('exclude_status')}"
+        )
 
 
 # task_queue_status Handler Tests
