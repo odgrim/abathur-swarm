@@ -153,6 +153,14 @@ When invoked, you must follow these phases sequentially:
    # Check for uncommitted changes
    git status --porcelain
 
+   # Activate worktree's isolated virtualenv
+   if [ -d "venv" ]; then
+       source venv/bin/activate
+       echo "✓ Virtualenv activated for worktree"
+   else
+       echo "⚠ WARNING: No virtualenv found in worktree - tests may use wrong environment"
+   fi
+
    # Run tests in worktree
    pytest tests/ -v --tb=short
    ```

@@ -248,6 +248,37 @@ When invoked, you must follow these steps:
        else:
            print(f"✗ ERROR: Worktree directory not found at: {worktree_path}")
            raise Exception(f"Worktree creation failed - directory missing: {worktree_path}")
+
+       # 🚨 CRITICAL: Create isolated virtualenv in worktree
+       # This prevents dependency conflicts across worktrees
+       print(f"Creating isolated virtualenv in {worktree_path}...")
+       venv_result = Bash(
+           command=f'python3 -m venv "{worktree_path}/venv"',
+           description=f"Create isolated virtualenv in worktree {task_id}"
+       )
+
+       if venv_result.exit_code == 0:
+           print(f"✓ Virtualenv created at: {worktree_path}/venv")
+
+           # Install dependencies in the isolated virtualenv
+           print(f"Installing dependencies in worktree virtualenv...")
+           install_result = Bash(
+               command=f'cd "{worktree_path}" && source venv/bin/activate && pip install --upgrade pip && poetry install',
+               description=f"Install dependencies in worktree {task_id} virtualenv",
+               timeout=300000  # 5 minutes for dependency installation
+           )
+
+           if install_result.exit_code == 0:
+               print(f"✓ Dependencies installed in worktree virtualenv")
+           else:
+               print(f"⚠ WARNING: Dependency installation failed (exit code {install_result.exit_code})")
+               print(f"Error output: {install_result.stderr}")
+               print(f"Implementation agent will need to install dependencies manually")
+       else:
+           print(f"✗ ERROR: Virtualenv creation failed (exit code {venv_result.exit_code})")
+           print(f"Error output: {venv_result.stderr}")
+           raise Exception(f"Failed to create virtualenv for worktree {task_id}")
+
    else:
        print(f"✗ ERROR: git worktree add failed with exit code {result.exit_code}")
        print(f"Error output: {result.stderr}")
