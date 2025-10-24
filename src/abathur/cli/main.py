@@ -22,7 +22,6 @@ from abathur import __version__
 from abathur.cli.utils import parse_duration_to_days
 from abathur.domain.models import TaskStatus
 from abathur.infrastructure.database import PruneFilters
-from abathur.tui.models import TreeNode
 
 logger = logging.getLogger(__name__)
 
@@ -90,23 +89,16 @@ def _render_tree_preview(tasks: list[Any], max_depth: int = 5) -> None:
 
     Args:
         tasks: List of Task objects to preview
-        max_depth: Maximum depth to display in tree
+        max_depth: Maximum depth to display in tree (currently unused, tree shows all levels)
     """
-    from abathur.tui.rendering.tree_renderer import TreeRenderer
+    from abathur.cli.tree_formatter import format_tree, supports_unicode
 
-    # Create tree renderer
-    renderer = TreeRenderer()
-
-    # Compute layout
-    dependency_graph: dict[UUID, list[UUID]] = {}  # Empty for now, used by renderer
-    layout = renderer.compute_layout(tasks, dependency_graph)
-
-    # Render tree with depth limit
-    tree = renderer.render_tree(layout, use_unicode=TreeRenderer.supports_unicode())
+    # Build and render tree using TreeFormatter
+    tree = format_tree(tasks, use_unicode=supports_unicode())
 
     console.print("\n[bold cyan]Tasks to Delete (Tree View)[/bold cyan]")
     console.print(tree)
-    console.print(f"\n[dim]Showing {len(tasks)} tasks (max depth: {max_depth})[/dim]")
+    console.print(f"\n[dim]Showing {len(tasks)} tasks[/dim]")
 
 
 # Helper to get database and services
@@ -201,98 +193,7 @@ async def _get_services() -> dict[str, Any]:
 
 
 # ===== Tree Visualization Helpers =====
-def _get_status_color(status: TaskStatus) -> str:
-    """Get Rich color name for task status.
-
-    Uses semantic colors for accessibility:
-    - Green tones: Success, completion, ready
-    - Red tones: Failure, errors
-    - Yellow/Orange: Warnings, blocked
-    - Blue/Cyan: Information, pending
-    - Magenta: Active, running
-    - Dim/Gray: Cancelled, inactive
-
-    Args:
-        status: TaskStatus enum value
-
-    Returns:
-        Rich color name string (e.g., "green", "red", "blue")
-    """
-    color_map = {
-        TaskStatus.PENDING: "blue",
-        TaskStatus.BLOCKED: "yellow",
-        TaskStatus.READY: "cyan",
-        TaskStatus.RUNNING: "magenta",
-        TaskStatus.COMPLETED: "green",
-        TaskStatus.FAILED: "red",
-        TaskStatus.CANCELLED: "dim",
-    }
-    return color_map.get(status, "white")
-
-
-def _get_status_symbol(status: TaskStatus) -> str:
-    """Get Unicode symbol for task status.
-
-    Provides visual indicator in addition to color for accessibility.
-    Supports users with color blindness or limited color terminals.
-
-    Args:
-        status: TaskStatus enum value
-
-    Returns:
-        Unicode status symbol character
-    """
-    symbol_map = {
-        TaskStatus.PENDING: "○",      # Empty circle
-        TaskStatus.BLOCKED: "⊗",      # Circled X
-        TaskStatus.READY: "◎",        # Double circle
-        TaskStatus.RUNNING: "◉",      # Filled circle
-        TaskStatus.COMPLETED: "✓",    # Check mark
-        TaskStatus.FAILED: "✗",       # X mark
-        TaskStatus.CANCELLED: "⊘",    # Circle with slash
-    }
-    return symbol_map.get(status, "•")
-
-
-def _format_node_label(node: TreeNode) -> Text:
-    """Format tree node with color-coded status and summary.
-
-    Returns Rich Text object with styling based on task status.
-
-    Args:
-        node: TreeNode to format
-
-    Returns:
-        Rich Text with status symbol, summary, and metadata
-    """
-    # Get status color and symbol
-    status_color = _get_status_color(node.task.status)
-    status_symbol = _get_status_symbol(node.task.status)
-
-    # Truncate summary to 40 chars
-    summary = node.task.summary[:40] if node.task.summary else "No summary"
-    if node.task.summary and len(node.task.summary) > 40:
-        summary += "..."
-
-    # Get task ID prefix (first 8 chars)
-    task_id_prefix = str(node.task.id)[:8]
-
-    # Create styled text
-    text = Text()
-
-    # Add status symbol
-    text.append(f"{status_symbol} ", style=status_color)
-
-    # Add summary
-    text.append(summary, style=status_color)
-
-    # Add status label in parentheses
-    text.append(f" ({node.task.status.value})", style="dim")
-
-    # Add task ID prefix
-    text.append(f" [{task_id_prefix}]", style="dim cyan")
-
-    return text
+# Tree visualization now handled by tree_formatter module
 
 
 # ===== Version =====
@@ -1372,74 +1273,22 @@ def task_status(watch: bool = typer.Option(False, help="Watch mode (live updates
 
 
 @task_app.command("visualize")
-def visualize_queue(
-    refresh_interval: float = typer.Option(2.0, "--refresh-interval", help="Auto-refresh interval in seconds"),
-    no_auto_refresh: bool = typer.Option(False, "--no-auto-refresh", help="Disable auto-refresh"),
-    view_mode: str = typer.Option("tree", "--view-mode", help="Initial view mode (tree, dependency, timeline, feature-branch, flat-list)"),
-    no_unicode: bool = typer.Option(False, "--no-unicode", help="Use ASCII instead of Unicode box-drawing"),
-) -> None:
-    """Launch the Abathur Task Graph TUI.
+def visualize_queue() -> None:
+    """[DEPRECATED] The TUI has been removed. Use 'abathur task list --tree' instead.
+
+    The interactive TUI has been replaced with a simpler tree view in the list command.
 
     Examples:
-        abathur task visualize                              # Launch with defaults (tree view, auto-refresh)
-        abathur task visualize --no-auto-refresh            # Launch without auto-refresh
-        abathur task visualize --view-mode dependency       # Start with dependency view
-        abathur task visualize --refresh-interval 5.0       # Refresh every 5 seconds
-        abathur task visualize --no-unicode                 # Use ASCII box-drawing
+        abathur task list --tree                    # Show tasks as a tree
+        abathur task list --tree --status pending   # Show pending tasks as a tree
+        abathur feature-branch summary <branch>     # View feature branch progress
     """
-
-    async def _visualize() -> None:
-        try:
-            from abathur.tui.app import TaskQueueTUI
-            from abathur.tui.services.task_data_service import TaskDataService
-        except ImportError as e:
-            console.print(f"[red]Error:[/red] TUI components not yet implemented")
-            console.print(f"[dim]Missing: {e}[/dim]")
-            console.print("[yellow]The TUI is still under development. Use 'abathur task list' for now.[/yellow]")
-            raise typer.Exit(1)
-
-        try:
-            # Initialize services using existing helper
-            services = await _get_services()
-
-            # Create TaskDataService
-            task_data_service = TaskDataService(
-                database=services["database"],
-                task_queue_service=services["task_queue_service"],
-                dependency_resolver=services["task_queue_service"].dependency_resolver,
-            )
-
-            # Create TUI app
-            # Convert view_mode string to ViewMode enum
-            from abathur.tui.models import ViewMode
-            view_mode_enum = ViewMode(view_mode)
-
-            # Handle refresh_interval: use default if auto-refresh enabled
-            actual_refresh_interval = 2.0  # Default
-            if no_auto_refresh:
-                actual_refresh_interval = 0.0  # Disable
-            elif refresh_interval is not None:
-                actual_refresh_interval = refresh_interval
-
-            tui_app = TaskQueueTUI(
-                task_data_service=task_data_service,
-                refresh_interval=actual_refresh_interval,
-                initial_view_mode=view_mode_enum,
-                use_unicode=not no_unicode,
-            )
-
-            # Run TUI
-            await tui_app.run_async()
-
-        except Exception as e:
-            console.print(f"[red]Error:[/red] Failed to launch TUI: {e}")
-            logger.exception("TUI launch failed")
-            raise typer.Exit(1)
-
-    try:
-        asyncio.run(_visualize())
-    except KeyboardInterrupt:
-        console.print("\n[yellow]TUI closed[/yellow]")
+    console.print("[yellow]The TUI has been deprecated and removed.[/yellow]")
+    console.print("\nUse the following commands instead:")
+    console.print("  [cyan]abathur task list --tree[/cyan]                    # Show tasks as a tree")
+    console.print("  [cyan]abathur task list --tree --status pending[/cyan]   # Show pending tasks as a tree")
+    console.print("  [cyan]abathur feature-branch summary <branch>[/cyan]     # View feature branch progress")
+    raise typer.Exit(0)
 
 
 # ===== Swarm Commands =====
