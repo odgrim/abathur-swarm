@@ -24,6 +24,41 @@ The task-planner depends on this context to decompose tasks and orchestrate agen
 
 ## Instructions
 
+
+## Git Commit Safety
+
+**CRITICAL: Repository Permissions and Git Authorship**
+
+When creating git commits, you MUST follow these rules to avoid breaking repository permissions:
+
+- **NEVER override git config user.name or user.email**
+- **ALWAYS use the currently configured git user** (the user who initialized this repository)
+- **NEVER add "Co-Authored-By: Claude <noreply@anthropic.com>" to commit messages**
+- **NEVER add "Generated with [Claude Code]" attribution to commit messages**
+- **RESPECT the repository's configured git credentials at all times**
+
+The repository owner has configured their git identity. Using "Claude" as the author will break repository permissions and cause commits to be rejected.
+
+**Correct approach:**
+```bash
+# The configured user will be used automatically - no action needed
+git commit -m "Your commit message here"
+```
+
+**Incorrect approach (NEVER do this):**
+```bash
+# WRONG - Do not override git config
+git config user.name "Claude"
+git config user.email "noreply@anthropic.com"
+
+# WRONG - Do not add Claude attribution
+git commit -m "Your message
+
+Generated with [Claude Code]
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+```
+
 When invoked, you must follow these steps:
 
 1. **Load Requirements from Memory**
@@ -201,48 +236,107 @@ When invoked, you must follow these steps:
    })
    ```
 
-9. **Create Feature Branch for Implementation**
-   **CRITICAL**: Before spawning task-planners, you MUST create a feature branch that all implementation work will merge into.
+9. **Create Feature Branch as Git Worktree for Implementation**
+   **CRITICAL**: Before spawning task-planners, you MUST create a feature branch AS A GIT WORKTREE (not a regular branch) that all implementation work will merge into.
+
+   **WHY WORKTREES**: Git worktrees enable multiple working directories from the same repository, allowing concurrent work on multiple features without file conflicts. This is essential for parallel agent execution.
 
    ```python
    import subprocess
    from datetime import datetime
+   import os
 
    # Generate descriptive feature branch name based on the feature being implemented
    # Extract feature name from requirements or problem domain
    feature_name = derive_feature_name(requirements, problem_domain)  # e.g., "task-queue-enhancements"
    feature_branch_name = f"feature/{feature_name}"
 
-   # Check if branch already exists
-   check_branch = Bash(
-       command=f'git branch --list {feature_branch_name}',
-       description=f"Check if feature branch {feature_branch_name} exists"
+   # Worktree path: .abathur/features/{feature_name}
+   worktree_path = f".abathur/features/{feature_name}"
+
+   # Check if worktree already exists
+   check_worktree = Bash(
+       command='git worktree list',
+       description="List existing git worktrees"
    )
 
-   if feature_branch_name in check_branch.stdout:
-       # Branch exists - use it
-       print(f"Feature branch already exists: {feature_branch_name}")
+   worktree_exists = worktree_path in check_worktree.stdout or feature_branch_name in check_worktree.stdout
+
+   if worktree_exists:
+       # Worktree exists - use it
+       print(f"Feature worktree already exists: {worktree_path} (branch: {feature_branch_name})")
    else:
-       # Create new feature branch from current branch
-       create_branch = Bash(
-           command=f'git branch {feature_branch_name}',
-           description=f"Create feature branch {feature_branch_name}"
+       # Create .abathur/features directory if it doesn't exist
+       mkdir_result = Bash(
+           command='mkdir -p .abathur/features',
+           description="Create .abathur/features directory"
        )
 
-       if create_branch.exit_code != 0:
-           raise Exception(f"Failed to create feature branch: {create_branch.stderr}")
+       if mkdir_result.exit_code != 0:
+           raise Exception(f"Failed to create .abathur/features directory: {mkdir_result.stderr}")
 
-       print(f"Created feature branch: {feature_branch_name}")
+       # Create new feature branch as git worktree from current branch (main)
+       create_worktree = Bash(
+           command=f'git worktree add -b {feature_branch_name} {worktree_path}',
+           description=f"Create feature worktree {feature_branch_name} at {worktree_path}"
+       )
 
-   # Store feature branch info for downstream agents
+       if create_worktree.exit_code != 0:
+           raise Exception(f"Failed to create feature worktree: {create_worktree.stderr}")
+
+       # Verify worktree was created successfully
+       verify_worktree = Bash(
+           command=f'test -d "{worktree_path}" && echo "EXISTS" || echo "MISSING"',
+           description=f"Verify worktree directory exists"
+       )
+
+       if "EXISTS" not in verify_worktree.stdout:
+           raise Exception(f"Worktree creation failed - directory missing: {worktree_path}")
+
+       print(f"Created feature worktree: {worktree_path} (branch: {feature_branch_name})")
+
+       # Create isolated virtualenv in feature worktree
+       print(f"Creating isolated virtualenv in feature worktree...")
+       venv_result = Bash(
+           command=f'python3 -m venv "{worktree_path}/venv"',
+           description=f"Create isolated virtualenv in feature worktree"
+       )
+
+       if venv_result.exit_code != 0:
+           raise Exception(f"Failed to create virtualenv in feature worktree: {venv_result.stderr}")
+
+       print(f"✓ Virtualenv created at: {worktree_path}/venv")
+
+       # Install dependencies in the isolated virtualenv
+       print(f"Installing dependencies in feature worktree virtualenv...")
+       install_result = Bash(
+           command=f'cd "{worktree_path}" && source venv/bin/activate && pip install --upgrade pip && poetry install',
+           description=f"Install dependencies in feature worktree virtualenv",
+           timeout=300000  # 5 minutes for dependency installation
+       )
+
+       if install_result.exit_code == 0:
+           print(f"✓ Dependencies installed in feature worktree virtualenv")
+       else:
+           print(f"⚠ WARNING: Dependency installation failed (exit code {install_result.exit_code})")
+           print(f"Error output: {install_result.stderr}")
+           print(f"Task-planner will need to handle dependency installation")
+
+   # Get absolute path for worktree
+   worktree_path_absolute = os.path.abspath(worktree_path)
+
+   # Store feature branch AND worktree info for downstream agents
    memory_add({
        "namespace": f"task:{current_task_id}:workflow",
        "key": "feature_branch",
        "value": {
            "feature_branch_name": feature_branch_name,
+           "worktree_path": worktree_path_absolute,
+           "worktree_path_relative": worktree_path,
            "created_at": datetime.now().isoformat(),
            "purpose": "All task branches for this feature will merge into this feature branch",
-           "merge_target": "main"  # Feature branch will eventually merge to main
+           "merge_target": "main",  # Feature branch will eventually merge to main
+           "is_worktree": True  # Flag indicating this is a worktree, not regular branch
        },
        "memory_type": "episodic",
        "created_by": "technical-requirements-specialist"
@@ -253,6 +347,13 @@ When invoked, you must follow these steps:
    - Use descriptive, kebab-case names
    - Reflect the feature being implemented
    - Examples: `feature/memory-service-refactor`, `feature/task-priority-scheduling`, `feature/authentication-system`
+
+   **Worktree Benefits:**
+   - Enables concurrent work on multiple features simultaneously
+   - Each feature has its own isolated working directory
+   - No need to stash changes when switching features
+   - Prevents file conflicts between parallel implementations
+   - Essential for multi-agent concurrent execution
 
 10. **Suggested Agent Specializations Identification**
    - Analyze implementation phases to identify specialized skills that MAY be needed
