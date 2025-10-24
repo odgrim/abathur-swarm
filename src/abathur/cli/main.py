@@ -259,6 +259,141 @@ def _get_status_symbol(status: TaskStatus) -> str:
     return symbol_map.get(status, "•")
 
 
+def _build_tree_string(
+    nodes: list[TreeNode],
+    max_depth: int,
+    use_unicode: bool
+) -> list[Text]:
+    """Build tree structure as list of Rich Text objects with box-drawing characters.
+
+    Constructs tree visualization using manual string building with proper connectors
+    and vertical lines, similar to Unix 'tree' command format.
+
+    Args:
+        nodes: List of TreeNode objects to render (typically root nodes)
+        max_depth: Maximum depth to display (shows "..." beyond limit)
+        use_unicode: Whether to use Unicode box-drawing chars (├── └── │) or ASCII (|-- `-- |)
+
+    Returns:
+        List of Rich Text objects, one per line, with proper indentation and colors
+
+    Algorithm:
+        1. Recursive depth-first traversal with prefix tracking
+        2. Track ancestor chain to determine vertical line (│) placement
+        3. Choose connector based on is_last_child:
+           - Unicode: ├── (mid) vs └── (last)
+           - ASCII: |-- (mid) vs `-- (last)
+        4. Build vertical lines based on parent chain:
+           - Unicode: │    (parent has siblings)
+           - ASCII: |    (parent has siblings)
+           - Spaces:        (parent is last child)
+        5. Combine prefix + connector + colored label from _format_node_label()
+
+    Example output (Unicode mode):
+        ├── ✓ Task 1 (completed) [abc12345]
+        │   ├── ○ Subtask 1.1 (pending) [def67890]
+        │   └── ✓ Subtask 1.2 (completed) [ghi13579]
+        └── ○ Task 2 (pending) [jkl24680]
+
+    Example output (ASCII mode):
+        |-- * Task 1 (completed) [abc12345]
+        |   |-- o Subtask 1.1 (pending) [def67890]
+        |   `-- * Subtask 1.2 (completed) [ghi13579]
+        `-- o Task 2 (pending) [jkl24680]
+    """
+    lines: list[Text] = []
+
+    # Define character sets for Unicode and ASCII modes
+    if use_unicode:
+        connectors = {
+            'mid': '├── ',      # U+251C U+2500 U+2500
+            'last': '└── ',     # U+2514 U+2500 U+2500
+            'vert': '│   ',     # U+2502 + 3 spaces
+        }
+    else:
+        connectors = {
+            'mid': '|-- ',      # Pipe dash dash
+            'last': '`-- ',     # Backtick dash dash
+            'vert': '|   ',     # Pipe + 3 spaces
+        }
+
+    # Build node map for efficient child lookup
+    # The caller (_render_tree_preview) passes ALL nodes in the tree,
+    # so we can look up children by their task_id
+    node_map = {node.task_id: node for node in nodes}
+
+    def build_node(
+        node: TreeNode,
+        prefix: str,
+        is_last: bool,
+        depth: int
+    ) -> None:
+        """Recursively build tree lines for a node and its descendants.
+
+        Args:
+            node: TreeNode to render
+            prefix: Accumulated prefix string from ancestors (vertical lines and spaces)
+            is_last: Whether this node is the last child of its parent
+            depth: Current depth in tree (0 = root level)
+        """
+        # Check depth limit - show truncation indicator
+        if depth >= max_depth:
+            truncation_line = Text(prefix + '... (more items)', style='dim italic')
+            lines.append(truncation_line)
+            return
+
+        # Build line: prefix + connector + label
+        connector = connectors['last'] if is_last else connectors['mid']
+        line = Text(prefix + connector)
+
+        # Append colored label from existing helper
+        label = _format_node_label(node)
+        line.append(label)
+
+        lines.append(line)
+
+        # Recurse for children
+        # If this node is the last child, use spaces for child prefix
+        # Otherwise, use vertical line to connect siblings
+        child_prefix = prefix + ('    ' if is_last else connectors['vert'])
+
+        # Get children TreeNode objects by looking up IDs in node_map
+        # Children is a list of UUIDs that need to be resolved
+        if node.children:
+            child_nodes = [
+                node_map[child_id]
+                for child_id in node.children
+                if child_id in node_map
+            ]
+
+            # Sort children by priority (highest first) to match existing behavior
+            child_nodes.sort(
+                key=lambda n: n.task.calculated_priority,
+                reverse=True
+            )
+
+            # Process each child
+            for i, child_node in enumerate(child_nodes):
+                # Check if this is the last child
+                is_last_child = (i == len(child_nodes) - 1)
+
+                # Recursively build this child's tree
+                build_node(child_node, child_prefix, is_last_child, depth + 1)
+
+    # Identify root nodes (nodes with no parent or parent not in tree)
+    root_nodes = [
+        node for node in nodes
+        if node.task.parent_task_id is None or node.task.parent_task_id not in node_map
+    ]
+
+    # Process root nodes
+    for i, root_node in enumerate(root_nodes):
+        is_last_root = (i == len(root_nodes) - 1)
+        build_node(root_node, '', is_last_root, 0)
+
+    return lines
+
+
 def _render_tree_preview(
     tree_nodes: list[TreeNode],
     max_depth: int = 5,
