@@ -40,9 +40,9 @@ if not worktree_path or not task_branch or not feature_branch:
     raise Exception("Missing required validation context: worktree_path, task_branch, or feature_branch")
 ```
 
-### Step 2: Navigate to Worktree
+### Step 2: Navigate to Worktree and Activate Virtualenv
 
-Change to the worktree directory to run validation:
+Change to the worktree directory and activate its isolated Python environment:
 
 ```bash
 # Navigate to worktree
@@ -59,6 +59,38 @@ git status --porcelain
 - Report error: "Worktree has uncommitted changes - implementation task did not commit work"
 - Enqueue remediation task asking implementation agent to commit changes
 - Exit validation
+
+**Step 2a: Activate Worktree's Virtualenv**
+
+**CRITICAL**: You MUST activate the worktree's isolated virtualenv before running any tests to prevent environment pollution:
+
+```bash
+# Check if virtualenv exists in worktree
+if [ -d "{worktree_path}/venv" ]; then
+    # Activate worktree-specific virtualenv
+    source {worktree_path}/venv/bin/activate
+
+    # Verify we're using worktree's Python
+    which python
+    which pytest
+else
+    # Virtualenv missing - report error
+    echo "ERROR: Virtualenv not found at {worktree_path}/venv"
+    echo "Implementation agent did not create isolated virtualenv"
+    exit 1
+fi
+```
+
+**If virtualenv is missing:**
+- Report error: "Worktree missing isolated virtualenv at {worktree_path}/venv"
+- Enqueue remediation task asking implementation agent to create virtualenv
+- Exit validation
+
+**Why this is critical:**
+- Without virtualenv activation, tests run in the wrong Python environment
+- Dependencies from main worktree pollute test execution
+- Tests may pass/fail incorrectly due to wrong package versions
+- Causes dependency conflicts across worktrees
 
 ### Step 3: Run Comprehensive Test Suite
 
