@@ -396,7 +396,7 @@ def list_tasks(
                 f"Invalid status value: {exclude_status}. Valid values are: {valid_values}"
             )
 
-        tasks = await services["task_coordinator"].list_tasks(task_status, limit, exclude_status=exclude_task_status)
+        tasks = await services["task_coordinator"].list_tasks(status=task_status, limit=limit, exclude_status=exclude_task_status)
 
         table = Table(title="Tasks")
         table.add_column("ID", style="cyan", no_wrap=True)
