@@ -433,7 +433,7 @@ def list_tasks(
         from abathur.domain.models import TaskStatus
 
         task_status = TaskStatus(status) if status else None
-        tasks = await services["task_coordinator"].list_tasks(task_status, limit)
+        tasks = await services["task_coordinator"].list_tasks(status=task_status, limit=limit)
 
         table = Table(title="Tasks")
         table.add_column("ID", style="cyan", no_wrap=True)
