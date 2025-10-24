@@ -351,8 +351,6 @@ class ClaudeClient:
         Returns:
             True if API key is valid, False otherwise
         """
-        import asyncio
-
         logger.warning(
             "validate_api_key_deprecated",
             message="validate_api_key() is deprecated, use validate_authentication() instead",
