@@ -17,7 +17,6 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
-from rich.tree import Tree
 
 from abathur import __version__
 from abathur.cli.utils import parse_duration_to_days
@@ -94,10 +93,6 @@ def _render_tree_preview(tasks: list[Any], max_depth: int = 5) -> None:
         max_depth: Maximum depth to display in tree
     """
     from abathur.tui.rendering.tree_renderer import TreeRenderer
-
-    # Build task hierarchy
-    task_map = {task.id: task for task in tasks}
-    root_tasks = [task for task in tasks if task.parent_task_id is None]
 
     # Create tree renderer
     renderer = TreeRenderer()
@@ -259,55 +254,6 @@ def _get_status_symbol(status: TaskStatus) -> str:
     return symbol_map.get(status, "•")
 
 
-def _render_tree_preview(
-    tree_nodes: list[TreeNode],
-    max_depth: int = 5,
-    console: Console | None = None,
-) -> None:
-    """Render hierarchical tree structure with box-drawing characters.
-
-    Displays task hierarchy with color-coded status, truncating at max_depth
-    to prevent overwhelming output for large trees. Uses Unix tree command
-    format with box-drawing characters (├── │ └──) for Unicode terminals
-    or ASCII alternatives (|-- | `--) for non-Unicode terminals.
-
-    Args:
-        tree_nodes: Nodes to visualize (from _discover_task_tree)
-        max_depth: Maximum tree depth to display (default 5, shows "..." beyond)
-        console: Rich console for output (uses global console if None)
-
-    Example:
-        >>> nodes = await database._discover_task_tree(conn, [root_id])
-        >>> _render_tree_preview(nodes, max_depth=3, console=console)
-
-    Output format:
-        Task Tree (3 tasks)
-        ├── ✓ Implement feature X (completed)
-        │   ├── ✓ Write unit tests (completed)
-        │   └── ✓ Update documentation (completed)
-        └── ○ Follow-up task Y (pending)
-    """
-    if console is None:
-        # Use global console instance
-        console = globals()["console"]
-
-    if not tree_nodes:
-        console.print("[yellow]No tasks to display[/yellow]")
-        return
-
-    # Detect Unicode support
-    from abathur.tui.rendering.tree_renderer import TreeRenderer
-    use_unicode = TreeRenderer.supports_unicode()
-
-    # Print title
-    console.print(Text(f"Task Tree ({len(tree_nodes)} tasks)", style="bold cyan"))
-
-    # Build and print tree using box-drawing characters
-    lines = _build_tree_string(tree_nodes, max_depth, use_unicode)
-    for line in lines:
-        console.print(line)
-
-
 def _format_node_label(node: TreeNode) -> Text:
     """Format tree node with color-coded status and summary.
 
@@ -424,8 +370,8 @@ def submit(
 @task_app.command("list")
 def list_tasks(
     status: str | None = typer.Option(None, help="Filter by status"),
-    limit: int = typer.Option(100, help="Maximum number of tasks"),
     exclude_status: str | None = typer.Option(None, help="Exclude tasks with this status"),
+    limit: int = typer.Option(100, help="Maximum number of tasks"),
 ) -> None:
     """List tasks in the queue."""
 
@@ -433,21 +379,24 @@ def list_tasks(
         services = await _get_services()
         from abathur.domain.models import TaskStatus
 
-        task_status = TaskStatus(status) if status else None
+        # Validate status values before calling service
+        try:
+            task_status = TaskStatus(status) if status else None
+        except ValueError:
+            valid_values = ", ".join([s.value for s in TaskStatus])
+            raise typer.BadParameter(
+                f"Invalid status value: {status}. Valid values are: {valid_values}"
+            )
 
-        task_exclude_status = None
-        if exclude_status:
-            try:
-                task_exclude_status = TaskStatus(exclude_status)
-            except ValueError:
-                valid_values = ", ".join([s.value for s in TaskStatus])
-                raise typer.BadParameter(
-                    f"Invalid exclude_status '{exclude_status}'. Valid values: {valid_values}"
-                ) from None
+        try:
+            exclude_task_status = TaskStatus(exclude_status) if exclude_status else None
+        except ValueError:
+            valid_values = ", ".join([s.value for s in TaskStatus])
+            raise typer.BadParameter(
+                f"Invalid status value: {exclude_status}. Valid values are: {valid_values}"
+            )
 
-        tasks = await services["task_coordinator"].list_tasks(
-            task_status, exclude_status=task_exclude_status, limit=limit
-        )
+        tasks = await services["task_coordinator"].list_tasks(status=task_status, limit=limit, exclude_status=exclude_task_status)
 
         table = Table(title="Tasks")
         table.add_column("ID", style="cyan", no_wrap=True)
