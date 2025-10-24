@@ -1,0 +1,409 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.10.19, pytest-7.4.4, pluggy-1.6.0
+benchmark: 4.0.0 (defaults: timer=time.perf_counter disable_gc=False min_rounds=5 min_time=0.000005 max_time=1.0 calibration_precision=10 warmup=False warmup_iterations=100000)
+rootdir: /Users/odgrim/dev/home/agentics/abathur/.abathur/worktrees/phase4-verification
+configfile: pyproject.toml
+plugins: repeat-0.9.4, anyio-4.11.0, xdist-3.8.0, cov-4.1.0, asyncio-0.21.2, benchmark-4.0.0
+asyncio: mode=auto
+collected 151 items
+
+tests/unit/cli/test_task_show_children.py .FF.F..                        [  4%]
+tests/unit/services/test_database_validation.py .....................    [ 18%]
+tests/unit/services/test_document_index_service.py ..................... [ 32%]
+..........                                                               [ 39%]
+tests/unit/services/test_memory_service.py .................             [ 50%]
+tests/unit/services/test_session_service.py ........................     [ 66%]
+tests/unit/mcp/test_serialize_task_complete.py ......                    [ 70%]
+tests/unit/mcp/test_task_queue_server.py ............................... [ 90%]
+..............                                                           [100%]
+
+=================================== FAILURES ===================================
+_______________ TestTaskShowChildTasks.test_task_show_one_child ________________
+
+self = <tests.unit.cli.test_task_show_children.TestTaskShowChildTasks object at 0x10bfc1930>
+database = <abathur.infrastructure.database.Database object at 0x10cca4d00>
+
+    def test_task_show_one_child(self, database):
+        """Test task with 1 child -> table with 1 row displayed.
+    
+        Scenario: Task with 1 child
+        Expected: Child Tasks section with 1-row table, proper formatting
+        """
+        # Arrange: Create parent with 1 child
+        from abathur.application import TaskCoordinator
+    
+        coordinator = TaskCoordinator(database)
+    
+        async def create_parent_with_child():
+            # Create parent
+            parent_task = Task(
+                prompt="Parent task with one child",
+                summary="Parent task",
+                agent_type="test-agent",
+                source=TaskSource.HUMAN,
+                status=TaskStatus.RUNNING,
+            )
+            parent_id = await coordinator.submit_task(parent_task)
+    
+            # Create child
+            child_task = Task(
+                prompt="Child task prompt",
+                summary="Test child task",
+                agent_type="test-agent",
+                source=TaskSource.AGENT_PLANNER,
+                status=TaskStatus.PENDING,
+                parent_task_id=parent_id,
+            )
+            child_id = await coordinator.submit_task(child_task)
+    
+            return parent_id, child_id
+    
+        parent_id, child_id = asyncio.run(create_parent_with_child())
+        parent_id_str = str(parent_id)
+        child_id_prefix = str(child_id)[:8]
+    
+        # Act: Run task show command
+        result = runner.invoke(app, ["task", "show", parent_id_str])
+    
+        # Assert: Child section displayed with 1 row
+        assert result.exit_code == 0
+        assert "Child Tasks:" in result.stdout
+        # Table should have columns: ID, Summary, Status
+        assert child_id_prefix in result.stdout
+        assert "Test child task" in result.stdout
+>       assert "pending" in result.stdout
+E       AssertionError: assert 'pending' in 'Task d368b501-a6ab-45f6-b302-f140b46f3bde\nSummary: Parent task\nPrompt: Parent task with one child\nAgent Type: test...━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━┩\n│ 463cd2b5 │ Test child task │ ready  │\n└──────────┴─────────────────┴────────┘\n'
+E        +  where 'Task d368b501-a6ab-45f6-b302-f140b46f3bde\nSummary: Parent task\nPrompt: Parent task with one child\nAgent Type: test...━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━┩\n│ 463cd2b5 │ Test child task │ ready  │\n└──────────┴─────────────────┴────────┘\n' = <Result okay>.stdout
+
+tests/unit/cli/test_task_show_children.py:120: AssertionError
+___________ TestTaskShowChildTasks.test_task_show_multiple_children ____________
+
+self = <tests.unit.cli.test_task_show_children.TestTaskShowChildTasks object at 0x10bfc1b10>
+database = <abathur.infrastructure.database.Database object at 0x10f1309a0>
+
+    def test_task_show_multiple_children(self, database):
+        """Test task with 5 children -> table with 5 rows.
+    
+        Scenario: Task with 5 children
+        Expected: Child Tasks section with 5-row table, all columns aligned
+        """
+        # Arrange: Create parent with 5 children
+        from abathur.application import TaskCoordinator
+    
+        coordinator = TaskCoordinator(database)
+    
+        async def create_parent_with_multiple_children():
+            # Create parent
+            parent_task = Task(
+                prompt="Parent task with multiple children",
+                summary="Parent with 5 children",
+                agent_type="test-agent",
+                source=TaskSource.HUMAN,
+                status=TaskStatus.RUNNING,
+            )
+            parent_id = await coordinator.submit_task(parent_task)
+    
+            # Create 5 children with different statuses
+            child_summaries = [
+                "First child task",
+                "Second child task",
+                "Third child task",
+                "Fourth child task",
+                "Fifth child task",
+            ]
+            statuses = [
+                TaskStatus.PENDING,
+                TaskStatus.RUNNING,
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.BLOCKED,
+            ]
+    
+            child_ids = []
+            for summary, status in zip(child_summaries, statuses):
+                child_task = Task(
+                    prompt=f"Child task: {summary}",
+                    summary=summary,
+                    agent_type="test-agent",
+                    source=TaskSource.AGENT_PLANNER,
+                    status=status,
+                    parent_task_id=parent_id,
+                )
+                child_id = await coordinator.submit_task(child_task)
+                child_ids.append(child_id)
+    
+            return parent_id, child_ids
+    
+        parent_id, child_ids = asyncio.run(create_parent_with_multiple_children())
+        parent_id_str = str(parent_id)
+    
+        # Act: Run task show command
+        result = runner.invoke(app, ["task", "show", parent_id_str])
+    
+        # Assert: Child section displayed with 5 rows
+        assert result.exit_code == 0
+        assert "Child Tasks:" in result.stdout
+    
+        # Verify all 5 children are present
+        for child_id in child_ids:
+            child_id_prefix = str(child_id)[:8]
+            assert child_id_prefix in result.stdout
+    
+        # Verify summaries
+        assert "First child task" in result.stdout
+        assert "Second child task" in result.stdout
+        assert "Third child task" in result.stdout
+        assert "Fourth child task" in result.stdout
+        assert "Fifth child task" in result.stdout
+    
+        # Verify statuses
+>       assert "pending" in result.stdout
+E       AssertionError: assert 'pending' in 'Task af67d126-b955-45bb-8dbd-398a37695d62\nSummary: Parent with 5 children\nPrompt: Parent task with multiple childre...child task │ failed    │\n│ bfee515f │ Fifth child task  │ blocked   │\n└──────────┴───────────────────┴───────────┘\n'
+E        +  where 'Task af67d126-b955-45bb-8dbd-398a37695d62\nSummary: Parent with 5 children\nPrompt: Parent task with multiple childre...child task │ failed    │\n│ bfee515f │ Fifth child task  │ blocked   │\n└──────────┴───────────────────┴───────────┘\n' = <Result okay>.stdout
+
+tests/unit/cli/test_task_show_children.py:198: AssertionError
+_________ TestTaskShowChildTasks.test_task_show_child_missing_summary __________
+
+self = <abathur.application.task_coordinator.TaskCoordinator object at 0x10cca7d00>
+task = Task(id=UUID('0fb927c4-20ae-409a-b7fe-a81a31c21a0d'), summary=None, prompt='Child with no summary', agent_type='test-a...e=None, estimated_duration_seconds=None, dependency_depth=0, feature_branch=None, task_branch=None, worktree_path=None)
+
+    async def submit_task(self, task: Task) -> UUID:
+        """Submit a new task to the queue.
+    
+        Automatically sets task status to READY if it has no dependencies,
+        aligning with TaskQueueService behavior.
+    
+        Args:
+            task: Task to submit
+    
+        Returns:
+            Task ID
+    
+        Raises:
+            RuntimeError: If submission fails
+        """
+        try:
+            # Auto-transition PENDING → READY if no dependencies
+            # This aligns with TaskQueueService.enqueue_task() behavior
+            if task.status == TaskStatus.PENDING and not task.dependencies:
+                task.status = TaskStatus.READY
+                logger.debug(
+                    "task_auto_transitioned_to_ready",
+                    task_id=str(task.id),
+                    reason="no_dependencies",
+                )
+    
+>           await self.database.insert_task(task)
+
+src/abathur/application/task_coordinator.py:49: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/abathur/infrastructure/database.py:1625: in insert_task
+    await conn.execute(
+venv/lib/python3.10/site-packages/aiosqlite/core.py:190: in execute
+    cursor = await self._execute(self._conn.execute, sql, parameters)
+venv/lib/python3.10/site-packages/aiosqlite/core.py:133: in _execute
+    return await future
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Connection(Thread-42, started 13825585152)>
+
+    def run(self) -> None:
+        """
+        Execute function calls on a separate thread.
+    
+        :meta private:
+        """
+        while True:
+            # Continues running until all queue items are processed,
+            # even after connection is closed (so we can finalize all
+            # futures)
+            try:
+                future, function = self._tx.get(timeout=0.1)
+            except Empty:
+                if self._running:
+                    continue
+                break
+            try:
+                LOG.debug("executing %s", function)
+>               result = function()
+E               sqlite3.IntegrityError: NOT NULL constraint failed: tasks.summary
+
+venv/lib/python3.10/site-packages/aiosqlite/core.py:106: IntegrityError
+
+The above exception was the direct cause of the following exception:
+
+self = <tests.unit.cli.test_task_show_children.TestTaskShowChildTasks object at 0x10bfc1960>
+database = <abathur.infrastructure.database.Database object at 0x10ccbba30>
+
+    def test_task_show_child_missing_summary(self, database):
+        """Test child with summary=None -> displays '-'.
+    
+        Scenario: Child with summary=None
+        Expected: Summary column shows '-'
+        """
+        # Arrange: Create parent with child that has no summary
+        from abathur.application import TaskCoordinator
+    
+        coordinator = TaskCoordinator(database)
+    
+        async def create_parent_with_no_summary_child():
+            # Create parent
+            parent_task = Task(
+                prompt="Parent task",
+                summary="Parent",
+                agent_type="test-agent",
+                source=TaskSource.HUMAN,
+                status=TaskStatus.RUNNING,
+            )
+            parent_id = await coordinator.submit_task(parent_task)
+    
+            # Create child with summary=None
+            child_task = Task(
+                prompt="Child with no summary",
+                summary=None,  # Explicitly set to None
+                agent_type="test-agent",
+                source=TaskSource.AGENT_PLANNER,
+                status=TaskStatus.PENDING,
+                parent_task_id=parent_id,
+            )
+            child_id = await coordinator.submit_task(child_task)
+    
+            return parent_id, child_id
+    
+>       parent_id, child_id = asyncio.run(create_parent_with_no_summary_child())
+
+tests/unit/cli/test_task_show_children.py:298: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/Users/odgrim/.local/share/mise/installs/python/3.10.19/lib/python3.10/asyncio/runners.py:44: in run
+    return loop.run_until_complete(main)
+/Users/odgrim/.local/share/mise/installs/python/3.10.19/lib/python3.10/asyncio/base_events.py:649: in run_until_complete
+    return future.result()
+tests/unit/cli/test_task_show_children.py:294: in create_parent_with_no_summary_child
+    child_id = await coordinator.submit_task(child_task)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <abathur.application.task_coordinator.TaskCoordinator object at 0x10cca7d00>
+task = Task(id=UUID('0fb927c4-20ae-409a-b7fe-a81a31c21a0d'), summary=None, prompt='Child with no summary', agent_type='test-a...e=None, estimated_duration_seconds=None, dependency_depth=0, feature_branch=None, task_branch=None, worktree_path=None)
+
+    async def submit_task(self, task: Task) -> UUID:
+        """Submit a new task to the queue.
+    
+        Automatically sets task status to READY if it has no dependencies,
+        aligning with TaskQueueService behavior.
+    
+        Args:
+            task: Task to submit
+    
+        Returns:
+            Task ID
+    
+        Raises:
+            RuntimeError: If submission fails
+        """
+        try:
+            # Auto-transition PENDING → READY if no dependencies
+            # This aligns with TaskQueueService.enqueue_task() behavior
+            if task.status == TaskStatus.PENDING and not task.dependencies:
+                task.status = TaskStatus.READY
+                logger.debug(
+                    "task_auto_transitioned_to_ready",
+                    task_id=str(task.id),
+                    reason="no_dependencies",
+                )
+    
+            await self.database.insert_task(task)
+            await self.database.log_audit(
+                task_id=task.id,
+                action_type="task_submitted",
+                action_data={
+                    "agent_type": task.agent_type,
+                    "priority": task.priority,
+                    "status": task.status.value,
+                },
+                result="success",
+            )
+            logger.info(
+                "task_submitted",
+                task_id=str(task.id),
+                agent_type=task.agent_type,
+                status=task.status.value,
+            )
+            return task.id
+        except Exception as e:
+            logger.error("task_submit_failed", error=str(e))
+>           raise RuntimeError(f"Failed to submit task: {e}") from e
+E           RuntimeError: Failed to submit task: NOT NULL constraint failed: tasks.summary
+
+src/abathur/application/task_coordinator.py:69: RuntimeError
+------------------------------ Captured log call -------------------------------
+ERROR    abathur.application.task_coordinator:task_coordinator.py:68 {'error': 'NOT NULL constraint failed: tasks.summary', 'event': 'task_submit_failed', 'logger': 'abathur.application.task_coordinator', 'level': 'error', 'timestamp': '2025-10-24T21:07:57.364161Z'}
+
+--------- coverage: platform darwin, python 3.10.19-final-0 ----------
+Name                                               Stmts   Miss   Cover   Missing
+---------------------------------------------------------------------------------
+src/abathur/__init__.py                                1      0 100.00%
+src/abathur/__main__.py                                3      3   0.00%   3-6
+src/abathur/application/__init__.py                   10      0 100.00%
+src/abathur/application/agent_executor.py             84     65  22.62%   48-158, 186-226, 238-252, 265-272
+src/abathur/application/agent_pool.py                111     81  27.03%   46-55, 66-90, 98-120, 128-129, 133-135, 139-145, 149-157, 161-172, 180-184, 196-206, 214, 222
+src/abathur/application/claude_client.py             108     82  24.07%   27-29, 62-75, 101-116, 130-133, 160-257, 285-311, 322-344, 354-358, 374-392
+src/abathur/application/loop_executor.py             174    102  41.38%   59-60, 76-77, 139-252, 270-304, 314-344, 355-356, 372, 397-399, 424-439, 455-476, 494-513, 528-534, 553-567, 578-587
+src/abathur/application/mcp_manager.py               172    122  29.07%   63-64, 84-152, 163-198, 206-212, 220-229, 240-244, 252-254, 258-264, 268-276, 280-307, 318-344, 352, 364, 376-406, 410-414
+src/abathur/application/resource_monitor.py           95     60  36.84%   58-60, 64-70, 74-83, 94-120, 129-155, 170-195, 203-214, 236-237
+src/abathur/application/swarm_orchestrator.py        101     75  25.74%   95-210, 221-283, 294-298, 306, 317-327, 331-333
+src/abathur/application/task_coordinator.py           48     22  54.17%   77-80, 92-99, 128, 142-188
+src/abathur/application/template_manager.py          296    258  12.84%   37, 68-145, 157-185, 203-279, 295-351, 371-470, 481-485, 498-528, 544-561, 569-591, 599, 607-618
+src/abathur/cli/__init__.py                            2      0 100.00%
+src/abathur/cli/main.py                             1095    937  14.43%   58-84, 95-109, 151-152, 158-159, 221-230, 245-254, 269-295, 302, 334-367, 378-434, 449-450, 463, 465, 476, 482-483, 485, 533-651, 716-1280, 1287-1300, 1307-1324, 1344-1395, 1425-1506, 1513-1522, 1534-1570, 1586-1635, 1649-1674, 1688-1718, 1733-1807, 1828-1870, 1895-1973, 1988-2055, 2077-2224, 2270-2382, 2388-2395, 2399
+src/abathur/cli/utils.py                              21     13  38.10%   73-104
+src/abathur/domain/__init__.py                         2      0 100.00%
+src/abathur/domain/models.py                         118      2  98.31%   116, 119
+src/abathur/domain/ports/__init__.py                   0      0 100.00%
+src/abathur/domain/ports/auth_provider.py             18      5  72.22%   31, 51, 64, 74, 85
+src/abathur/infrastructure/__init__.py                 6      0 100.00%
+src/abathur/infrastructure/api_key_auth.py            20     10  50.00%   31-39, 49, 62, 70, 78, 86
+src/abathur/infrastructure/claude_cli_auth.py         54     32  40.74%   37, 55, 69, 77, 124-201
+src/abathur/infrastructure/config.py                 127     42  66.93%   121, 129, 134, 139, 150-151, 155-161, 177-186, 206, 212-214, 219-223, 238-248, 252-254
+src/abathur/infrastructure/database.py               922    600  34.92%   56, 66, 70, 123-141, 147-159, 165-168, 186-221, 277-282, 325, 329, 351, 467-553, 557-596, 602-610, 614-665, 669-677, 681-689, 693-701, 705-738, 750-756, 770-778, 790-903, 917-937, 951-959, 971-1069, 1084-1128, 1262-1263, 1675-1692, 1700-1705, 1717, 1741-1778, 1782-1801, 1809-1821, 1832-1889, 1927, 1940-1953, 1973-1991, 2023, 2062-2158, 2186-2261, 2272-2278, 2292-2298, 2312-2318, 2351-2411, 2446-2508, 2550-2671, 2689-2721, 2747-2759, 2791-2906, 2943-2986, 3101-3122, 3126-3137, 3142-3154, 3158-3166, 3203-3207, 3239-3253, 3280-3319, 3339-3340, 3349-3353, 3362-3366
+src/abathur/infrastructure/database_validator.py     201    187   6.97%   14-15, 34-65, 69-120, 124-141, 145-162, 166-209, 213-250, 254-296, 302-365
+src/abathur/infrastructure/exceptions.py              20     11  45.00%   25-26, 30-32, 48, 76-83
+src/abathur/infrastructure/logger.py                  25      0 100.00%
+src/abathur/infrastructure/mcp_config.py              60     18  70.00%   61-62, 85-91, 104-106, 123, 127-128, 131, 145-155
+src/abathur/mcp/__init__.py                            2      2   0.00%   3-5
+src/abathur/mcp/memory_server.py                      90     90   0.00%   3-456
+src/abathur/mcp/server_manager.py                     56     56   0.00%   3-123
+src/abathur/mcp/task_queue_server.py                 298    298   0.00%   3-881
+src/abathur/mcp/task_queue_server_manager.py         123    123   0.00%   3-261
+src/abathur/services/__init__.py                       7      0 100.00%
+src/abathur/services/dependency_resolver.py          177    150  15.25%   85-159, 178-203, 224-276, 291-295, 309-324, 340-351, 362-368, 384-428, 436-439, 450-459, 474-494
+src/abathur/services/document_index_service.py       159     16  89.94%   85, 119-121, 194-196, 230-232, 258-260, 395-397
+src/abathur/services/embedding_service.py             32     13  59.38%   55, 77-82, 94-99
+src/abathur/services/memory_service.py               108      9  91.67%   114-116, 297-299, 446-448
+src/abathur/services/priority_calculator.py          102     78  23.53%   90, 125-167, 190-215, 238-244, 274-306, 332-347, 367-377
+src/abathur/services/session_service.py              102      7  93.14%   71-73, 256-258, 284
+src/abathur/services/task_queue_service.py           266    230  13.53%   119, 173-354, 380-420, 447-528, 555-608, 632-677, 706-795, 821-853, 866-877, 888-899, 912-941, 952-966, 978-983
+src/abathur/tui/__init__.py                            0      0 100.00%
+src/abathur/tui/app.py                                76     76   0.00%   6-275
+src/abathur/tui/exceptions.py                         27     27   0.00%   14-181
+src/abathur/tui/models.py                             90     54  40.00%   84-110, 125-145, 189, 214-250, 254-258
+src/abathur/tui/rendering/__init__.py                  2      2   0.00%   3-9
+src/abathur/tui/rendering/tree_renderer.py            89     89   0.00%   7-330
+src/abathur/tui/screens/__init__.py                    2      2   0.00%   3-5
+src/abathur/tui/screens/filter_screen.py              93     93   0.00%   11-273
+src/abathur/tui/screens/main_screen.py                15     15   0.00%   7-59
+src/abathur/tui/services/__init__.py                   0      0 100.00%
+src/abathur/tui/services/task_data_service.py         16     16   0.00%   8-92
+src/abathur/tui/view_modes/__init__.py                 0      0 100.00%
+src/abathur/tui/widgets/__init__.py                    4      4   0.00%   3-7
+src/abathur/tui/widgets/stats_header.py               55     55   0.00%   9-197
+src/abathur/tui/widgets/task_detail.py               161    161   0.00%   12-499
+src/abathur/tui/widgets/task_tree.py                 168    168   0.00%   11-420
+---------------------------------------------------------------------------------
+TOTAL                                               6214   4561  26.60%
+Coverage HTML written to dir htmlcov
+
+=========================== short test summary info ============================
+FAILED tests/unit/cli/test_task_show_children.py::TestTaskShowChildTasks::test_task_show_one_child
+FAILED tests/unit/cli/test_task_show_children.py::TestTaskShowChildTasks::test_task_show_multiple_children
+FAILED tests/unit/cli/test_task_show_children.py::TestTaskShowChildTasks::test_task_show_child_missing_summary
+======================== 3 failed, 148 passed in 3.63s =========================
