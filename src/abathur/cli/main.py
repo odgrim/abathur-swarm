@@ -379,24 +379,31 @@ def list_tasks(
         services = await _get_services()
         from abathur.domain.models import TaskStatus
 
-        # Validate status values before calling service
-        try:
-            task_status = TaskStatus(status) if status else None
-        except ValueError:
-            valid_values = ", ".join([s.value for s in TaskStatus])
-            raise typer.BadParameter(
-                f"Invalid status value: {status}. Valid values are: {valid_values}"
-            )
+        # Validate and convert status
+        task_status = None
+        if status:
+            try:
+                task_status = TaskStatus(status)
+            except ValueError:
+                valid_values = ", ".join([s.value for s in TaskStatus])
+                raise typer.BadParameter(
+                    f"Invalid status '{status}'. Valid values: {valid_values}"
+                ) from None
 
-        try:
-            exclude_task_status = TaskStatus(exclude_status) if exclude_status else None
-        except ValueError:
-            valid_values = ", ".join([s.value for s in TaskStatus])
-            raise typer.BadParameter(
-                f"Invalid status value: {exclude_status}. Valid values are: {valid_values}"
-            )
+        # Validate and convert exclude_status
+        task_exclude_status = None
+        if exclude_status:
+            try:
+                task_exclude_status = TaskStatus(exclude_status)
+            except ValueError:
+                valid_values = ", ".join([s.value for s in TaskStatus])
+                raise typer.BadParameter(
+                    f"Invalid exclude_status '{exclude_status}'. Valid values: {valid_values}"
+                ) from None
 
-        tasks = await services["task_coordinator"].list_tasks(status=task_status, limit=limit, exclude_status=exclude_task_status)
+        tasks = await services["task_coordinator"].list_tasks(
+            status=task_status, exclude_status=task_exclude_status, limit=limit
+        )
 
         table = Table(title="Tasks")
         table.add_column("ID", style="cyan", no_wrap=True)
