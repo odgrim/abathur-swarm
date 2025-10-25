@@ -12,7 +12,6 @@ Key test coverage:
 - All existing prune functionality preserved
 """
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
