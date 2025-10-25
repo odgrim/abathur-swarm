@@ -15,12 +15,9 @@ except ImportError:
     print("ERROR: mcp package not installed. Run: pip install mcp", file=sys.stderr)
     sys.exit(1)
 
-# Add abathur to path (must be before abathur imports)
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-# Import abathur modules (after path setup)
-from abathur.infrastructure.database import Database  # noqa: E402
-from abathur.infrastructure.logger import get_logger  # noqa: E402
+# Import abathur modules using package-relative imports
+from ..infrastructure.database import Database
+from ..infrastructure.logger import get_logger
 
 logger = get_logger(__name__)
 

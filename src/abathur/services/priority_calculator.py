@@ -13,19 +13,19 @@ Performance targets:
 - Batch calculation (100 tasks): <50ms
 """
 
-import logging
 import math
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 from abathur.domain.models import Task, TaskSource, TaskStatus
+from abathur.infrastructure.logger import get_logger
 
 if TYPE_CHECKING:
     from abathur.infrastructure.database import Database
     from abathur.services.dependency_resolver import DependencyResolver
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class PriorityCalculator:

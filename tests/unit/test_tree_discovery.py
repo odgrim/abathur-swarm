@@ -8,7 +8,7 @@ Tests individual components in isolation:
 """
 
 import pytest
-from uuid import UUID, uuid4
+from uuid import uuid4
 from pathlib import Path
 from collections.abc import AsyncGenerator
 

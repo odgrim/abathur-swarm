@@ -17,7 +17,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 from abathur.application import TaskCoordinator
