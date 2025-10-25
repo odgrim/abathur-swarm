@@ -314,8 +314,8 @@ def list_tasks(
         # Tree view rendering
         if tree:
             use_unicode = unicode_override if unicode_override is not None else supports_unicode()
-            tree_widget, tree_console = format_tree(tasks, use_unicode=use_unicode)
-            tree_console.print(tree_widget)
+            tree_widget = format_tree(tasks, use_unicode=use_unicode)
+            console.print(tree_widget)
             return
 
         # Table view rendering (default)
@@ -1286,22 +1286,23 @@ def task_status(watch: bool = typer.Option(False, help="Watch mode (live updates
 
 
 @task_app.command("visualize")
-def visualize_queue() -> None:
-    """[DEPRECATED] The TUI has been removed. Use 'abathur task list --tree' instead.
+def visualize_queue(
+    status: str | None = typer.Option(None, help="Filter by status"),
+    unicode_override: bool | None = typer.Option(
+        None, "--unicode/--ascii", help="Force Unicode or ASCII box-drawing"
+    ),
+) -> None:
+    """Display tasks in tree view.
 
-    The interactive TUI has been replaced with a simpler tree view in the list command.
+    Shows tasks in a hierarchical tree structure based on parent-child relationships.
 
     Examples:
-        abathur task list --tree                    # Show tasks as a tree
-        abathur task list --tree --status pending   # Show pending tasks as a tree
-        abathur feature-branch summary <branch>     # View feature branch progress
+        abathur task visualize                    # Show all tasks as a tree
+        abathur task visualize --status pending   # Show pending tasks as a tree
+        abathur task visualize --ascii            # Force ASCII box-drawing characters
     """
-    console.print("[yellow]The TUI has been deprecated and removed.[/yellow]")
-    console.print("\nUse the following commands instead:")
-    console.print("  [cyan]abathur task list --tree[/cyan]                    # Show tasks as a tree")
-    console.print("  [cyan]abathur task list --tree --status pending[/cyan]   # Show pending tasks as a tree")
-    console.print("  [cyan]abathur feature-branch summary <branch>[/cyan]     # View feature branch progress")
-    raise typer.Exit(0)
+    # Delegate to list command with --tree flag
+    list_tasks(status=status, exclude_status=None, limit=100, tree=True, unicode_override=unicode_override)
 
 
 # ===== Swarm Commands =====
