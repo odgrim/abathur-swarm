@@ -16,12 +16,10 @@ from pydantic import ValidationError
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
-from rich.text import Text
 
 from abathur import __version__
-from abathur.cli.tree_formatter import format_lineage_tree, format_tree, supports_unicode
+from abathur.cli.tree_formatter import format_tree, supports_unicode
 from abathur.cli.utils import parse_duration_to_days
-from abathur.domain.models import TaskStatus
 from abathur.infrastructure.database import PruneFilters
 
 logger = logging.getLogger(__name__)
@@ -904,7 +902,7 @@ def prune(
                         TextColumn("[progress.description]{task.description}"),
                         console=console,
                     ) as progress:
-                        task_desc = progress.add_task(
+                        progress.add_task(
                             description="Deleting tasks and optimizing database...", total=None
                         )
                         result = await services["database"].prune_tasks(filters)
@@ -1150,7 +1148,7 @@ def prune(
                     TextColumn("[progress.description]{task.description}"),
                     console=console,
                 ) as progress:
-                    task_desc = progress.add_task(
+                    progress.add_task(
                         description="Deleting tasks and optimizing database...", total=None
                     )
                     result = await services["database"].prune_tasks(filters)
@@ -1285,25 +1283,6 @@ def task_status(watch: bool = typer.Option(False, help="Watch mode (live updates
         console.print(f"Total tasks: {pending + running + completed + failed}")
 
     asyncio.run(_status())
-
-
-@task_app.command("visualize")
-def visualize_queue() -> None:
-    """[DEPRECATED] The TUI has been removed. Use 'abathur task list --tree' instead.
-
-    The interactive TUI has been replaced with a simpler tree view in the list command.
-
-    Examples:
-        abathur task list --tree                    # Show tasks as a tree
-        abathur task list --tree --status pending   # Show pending tasks as a tree
-        abathur feature-branch summary <branch>     # View feature branch progress
-    """
-    console.print("[yellow]The TUI has been deprecated and removed.[/yellow]")
-    console.print("\nUse the following commands instead:")
-    console.print("  [cyan]abathur task list --tree[/cyan]                    # Show tasks as a tree")
-    console.print("  [cyan]abathur task list --tree --status pending[/cyan]   # Show pending tasks as a tree")
-    console.print("  [cyan]abathur feature-branch summary <branch>[/cyan]     # View feature branch progress")
-    raise typer.Exit(0)
 
 
 # ===== Swarm Commands =====

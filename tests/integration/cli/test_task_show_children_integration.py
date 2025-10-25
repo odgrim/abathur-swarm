@@ -14,11 +14,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
-from uuid import uuid4
 
 import pytest
 from abathur.cli.main import app
-from abathur.domain.models import Task, TaskSource, TaskStatus
+from abathur.domain.models import TaskSource
 from abathur.infrastructure.database import Database
 from abathur.services.dependency_resolver import DependencyResolver
 from abathur.services.priority_calculator import PriorityCalculator

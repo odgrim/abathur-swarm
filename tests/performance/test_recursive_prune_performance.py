@@ -13,9 +13,7 @@ Uses pytest-benchmark for reliable measurements and memory_profiler for memory a
 import asyncio
 import os
 import time
-from datetime import datetime, timezone
 from pathlib import Path
-from statistics import mean, median
 from typing import AsyncGenerator
 from uuid import uuid4
 

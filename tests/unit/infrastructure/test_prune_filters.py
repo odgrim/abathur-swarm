@@ -2,7 +2,6 @@
 
 from datetime import datetime, timezone
 
-import pytest
 
 from abathur.domain.models import TaskStatus
 from abathur.infrastructure.database import PruneFilters

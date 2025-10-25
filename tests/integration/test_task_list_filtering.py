@@ -15,7 +15,6 @@ Coverage:
 - Backward compatibility verification
 """
 
-import asyncio
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from pathlib import Path
