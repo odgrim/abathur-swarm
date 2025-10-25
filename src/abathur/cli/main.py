@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import logging
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -23,8 +22,9 @@ from abathur.cli.tree_formatter import format_lineage_tree, format_tree, support
 from abathur.cli.utils import parse_duration_to_days
 from abathur.domain.models import TaskStatus
 from abathur.infrastructure.database import PruneFilters
+from abathur.infrastructure.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Initialize Typer app
 app = typer.Typer(

@@ -7,18 +7,18 @@ This module implements graph algorithms for dependency resolution including:
 - Graph caching with TTL for performance optimization
 """
 
-import logging
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 from abathur.domain.models import TaskStatus
+from abathur.infrastructure.logger import get_logger
 
 if TYPE_CHECKING:
     from abathur.infrastructure.database import Database
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class CircularDependencyError(Exception):
