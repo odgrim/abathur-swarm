@@ -9,9 +9,8 @@ Tests individual components in isolation:
 """
 
 import os
-import sys
 from unittest.mock import patch
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 from rich.text import Text

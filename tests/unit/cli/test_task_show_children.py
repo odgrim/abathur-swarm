@@ -8,7 +8,6 @@ Tests the child task display feature:
 
 import asyncio
 from pathlib import Path
-from uuid import UUID, uuid4
 
 import pytest
 from typer.testing import CliRunner
@@ -377,7 +376,6 @@ class TestTaskShowChildTasks:
         """
         # Arrange: Create parent with children submitted in specific order
         from abathur.application import TaskCoordinator
-        import time
 
         coordinator = TaskCoordinator(database)
 

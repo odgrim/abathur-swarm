@@ -4,11 +4,10 @@ This module tests the progress indicator behavior during VACUUM operations
 to ensure user feedback is provided for long-running database optimizations.
 """
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -54,7 +53,6 @@ async def test_vacuum_progress_indicator_shown_for_always_mode() -> None:
             mock_progress.return_value.__exit__ = MagicMock(return_value=False)
 
             # Import after patching
-            from abathur.cli.main import _get_services
 
             # Simulate prune with vacuum_mode='always'
             filters = PruneFilters(task_ids=task_ids, vacuum_mode="always")
