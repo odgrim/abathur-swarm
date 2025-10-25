@@ -19,7 +19,7 @@ from rich.table import Table
 from rich.text import Text
 
 from abathur import __version__
-from abathur.cli.tree_formatter import format_tree, supports_unicode
+from abathur.cli.tree_formatter import format_lineage_tree, format_tree, supports_unicode
 from abathur.cli.utils import parse_duration_to_days
 from abathur.domain.models import TaskStatus
 from abathur.infrastructure.database import PruneFilters
@@ -274,7 +274,8 @@ def list_tasks(
     status: str | None = typer.Option(None, help="Filter by status"),
     exclude_status: str | None = typer.Option(None, help="Exclude tasks with this status"),
     limit: int = typer.Option(100, help="Maximum number of tasks"),
-    tree: bool = typer.Option(False, "--tree", help="Display as tree view (default: table)"),
+    deps: bool = typer.Option(False, "--deps", help="Display as dependency tree (default: table)"),
+    lineage: bool = typer.Option(False, "--lineage", help="Display as lineage tree showing task spawning relationships"),
     unicode_override: bool | None = typer.Option(
         None, "--unicode/--ascii", help="Force Unicode or ASCII box-drawing"
     ),
@@ -311,11 +312,23 @@ def list_tasks(
             status=task_status, exclude_status=task_exclude_status, limit=limit
         )
 
-        # Tree view rendering
-        if tree:
+        # Validate mutually exclusive options
+        if deps and lineage:
+            raise typer.BadParameter("Cannot use both --deps and --lineage at the same time")
+
+        # Dependency tree view rendering
+        if deps:
             use_unicode = unicode_override if unicode_override is not None else supports_unicode()
-            tree_widget, tree_console = format_tree(tasks, use_unicode=use_unicode)
-            tree_console.print(tree_widget)
+            tree_widget = format_tree(tasks, use_unicode=use_unicode)
+            console.print(tree_widget)
+            return
+
+        # Lineage tree view rendering
+        if lineage:
+            from abathur.cli.tree_formatter import format_lineage_tree
+            use_unicode = unicode_override if unicode_override is not None else supports_unicode()
+            tree_widget = format_lineage_tree(tasks, use_unicode=use_unicode)
+            console.print(tree_widget)
             return
 
         # Table view rendering (default)
