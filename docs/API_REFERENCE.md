@@ -23,12 +23,58 @@ task = await task_coordinator.get_task(task_id)
 # List tasks
 tasks = await task_coordinator.list_tasks(TaskStatus.PENDING, limit=100)
 
-# Cancel task
-success = await task_coordinator.cancel_task(task_id)
-
-# Retry task
-success = await task_coordinator.retry_task(task_id)
+# Update task status
+await task_coordinator.update_task_status(task_id, TaskStatus.CANCELLED)
+await task_coordinator.update_task_status(task_id, TaskStatus.PENDING)
 ```
+
+#### Task Status Management
+
+The `update_task_status()` method provides a unified way to update task status.
+
+**Cancelling Tasks:**
+
+```python
+# Cancel a pending or running task
+await task_coordinator.update_task_status(
+    task_id=task_id,
+    new_status=TaskStatus.CANCELLED,
+    error_message="Task cancelled by user"  # Optional
+)
+```
+
+**Retrying Failed Tasks:**
+
+```python
+# Reset a failed task to pending status for retry
+failed_task_id = UUID("abc-123-def-456")
+await task_coordinator.update_task_status(
+    task_id=failed_task_id,
+    new_status=TaskStatus.PENDING
+)
+```
+
+**Marking Tasks as Ready:**
+
+```python
+# Transition a blocked task to ready state
+await task_coordinator.update_task_status(
+    task_id=blocked_task_id,
+    new_status=TaskStatus.READY
+)
+```
+
+**Status Transition Rules:**
+
+- `PENDING` → `READY`, `RUNNING`, `CANCELLED`
+- `READY` → `RUNNING`, `CANCELLED`
+- `RUNNING` → `COMPLETED`, `FAILED`, `CANCELLED`
+- `BLOCKED` → `READY`, `CANCELLED`
+- `FAILED` → `PENDING` (for retry), `CANCELLED`
+- `COMPLETED` → *(terminal state, no transitions)*
+- `CANCELLED` → *(terminal state, no transitions)*
+
+See `src/abathur/application/task_coordinator.py:145` for implementation details.
 
 ### Swarm Orchestrator
 

@@ -1,0 +1,22 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.10.19, pytest-7.4.4, pluggy-1.6.0
+benchmark: 4.0.0 (defaults: timer=time.perf_counter disable_gc=False min_rounds=5 min_time=0.000005 max_time=1.0 calibration_precision=10 warmup=False warmup_iterations=100000)
+rootdir: /Users/odgrim/dev/home/agentics/abathur/.abathur/worktrees/phase4-verification
+configfile: pyproject.toml
+testpaths: tests
+plugins: repeat-0.9.4, anyio-4.11.0, xdist-3.8.0, cov-4.1.0, asyncio-0.21.2, benchmark-4.0.0
+asyncio: mode=auto
+collected 1193 items
+
+tests/test_mcp_server.py ........                                        [  0%]
+tests/test_tree_renderer_colors.py ...............                       [  1%]
+tests/benchmarks/test_vacuum_performance.py .....                        [  2%]
+tests/cli/test_cli_exclude_status.py ............                        [  3%]
+tests/infrastructure/test_database.py ...FFFFFF                          [  4%]
+tests/integration/test_backward_compatibility_exclude_status.py ......   [  4%]
+tests/integration/test_cli_exception_handling.py FF.F.                   [  5%]
+tests/integration/test_cli_max_agents_flag.py ....                       [  5%]
+tests/integration/test_cli_mem_show.py ........                          [  6%]
+tests/integration/test_cli_prune.py ................................     [  8%]
+tests/integration/test_cli_prune_recursive.py FFFFFFFF                   [  9%]
+tests/integration/test_cli_task_limit.py .

@@ -1,0 +1,95 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.10.19, pytest-7.4.4, pluggy-1.6.0
+benchmark: 4.0.0 (defaults: timer=time.perf_counter disable_gc=False min_rounds=5 min_time=0.000005 max_time=1.0 calibration_precision=10 warmup=False warmup_iterations=100000)
+rootdir: /Users/odgrim/dev/home/agentics/abathur/.abathur/worktrees/phase4-verification
+configfile: pyproject.toml
+testpaths: tests
+plugins: repeat-0.9.4, anyio-4.11.0, xdist-3.8.0, cov-4.1.0, asyncio-0.21.2, benchmark-4.0.0
+asyncio: mode=auto
+collected 1193 items / 1 error
+
+==================================== ERRORS ====================================
+____________ ERROR collecting tests/unit/cli/test_tree_rendering.py ____________
+ImportError while importing test module '/Users/odgrim/dev/home/agentics/abathur/.abathur/worktrees/phase4-verification/tests/unit/cli/test_tree_rendering.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/Users/odgrim/.local/share/mise/installs/python/3.10.19/lib/python3.10/importlib/__init__.py:126: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+tests/unit/cli/test_tree_rendering.py:14: in <module>
+    from abathur.cli.main import _build_tree_string, _format_node_label
+E   ImportError: cannot import name '_build_tree_string' from 'abathur.cli.main' (/Users/odgrim/dev/home/agentics/abathur/.abathur/worktrees/phase4-verification/src/abathur/cli/main.py)
+=============================== warnings summary ===============================
+tests/tui/test_task_tree_widget.py:129
+  /Users/odgrim/dev/home/agentics/abathur/.abathur/worktrees/phase4-verification/tests/tui/test_task_tree_widget.py:129: PytestCollectionWarning: cannot collect test class 'TestApp' because it has a __init__ constructor (from: tests/tui/test_task_tree_widget.py)
+    class TestApp(App[None]):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+
+--------- coverage: platform darwin, python 3.10.19-final-0 ----------
+Name                                               Stmts   Miss   Cover   Missing
+---------------------------------------------------------------------------------
+src/abathur/__init__.py                                1      0 100.00%
+src/abathur/__main__.py                                3      3   0.00%   3-6
+src/abathur/application/__init__.py                   10      0 100.00%
+src/abathur/application/agent_executor.py             84     68  19.05%   35-37, 48-158, 186-226, 238-252, 265-272
+src/abathur/application/agent_pool.py                111     81  27.03%   46-55, 66-90, 98-120, 128-129, 133-135, 139-145, 149-157, 161-172, 180-184, 196-206, 214, 222
+src/abathur/application/claude_client.py             108     91  15.74%   27-29, 60-93, 101-116, 130-133, 160-257, 285-311, 322-344, 354-358, 374-392
+src/abathur/application/loop_executor.py             174    105  39.66%   59-60, 76-77, 109-111, 139-252, 270-304, 314-344, 355-356, 372, 397-399, 424-439, 455-476, 494-513, 528-534, 553-567, 578-587
+src/abathur/application/mcp_manager.py               172    131  23.84%   48-51, 55-70, 84-152, 163-198, 206-212, 220-229, 240-244, 252-254, 258-264, 268-276, 280-307, 318-344, 352, 364, 376-406, 410-414
+src/abathur/application/resource_monitor.py           95     66  30.53%   49-54, 58-60, 64-70, 74-83, 94-120, 129-155, 170-195, 203-214, 236-237
+src/abathur/application/swarm_orchestrator.py        101     85  15.84%   35-44, 95-210, 221-283, 294-298, 306, 317-327, 331-333
+src/abathur/application/task_coordinator.py           78     63  19.23%   21, 38-69, 77-80, 92-99, 111-140, 151, 169, 182-205, 217-263
+src/abathur/application/template_manager.py          296    261  11.82%   37, 50-52, 68-145, 157-185, 203-279, 295-351, 371-470, 481-485, 498-528, 544-561, 569-591, 599, 607-618
+src/abathur/cli/__init__.py                            2      0 100.00%
+src/abathur/cli/main.py                             1117   1029   7.88%   53-84, 95-109, 115-188, 221-230, 245-254, 269-295, 302, 334-367, 378-434, 441-513, 526-543, 550-560, 580-698, 763-1327, 1334-1347, 1354-1371, 1391-1442, 1472-1553, 1560-1569, 1581-1617, 1633-1682, 1696-1721, 1735-1765, 1780-1854, 1875-1917, 1942-2020, 2035-2102, 2124-2271, 2317-2429, 2435-2442, 2446
+src/abathur/cli/utils.py                              21     13  38.10%   73-104
+src/abathur/domain/__init__.py                         2      0 100.00%
+src/abathur/domain/models.py                         118      8  93.22%   110-120
+src/abathur/domain/ports/__init__.py                   0      0 100.00%
+src/abathur/domain/ports/auth_provider.py             18      5  72.22%   31, 51, 64, 74, 85
+src/abathur/infrastructure/__init__.py                 6      0 100.00%
+src/abathur/infrastructure/api_key_auth.py            20     10  50.00%   31-39, 49, 62, 70, 78, 86
+src/abathur/infrastructure/claude_cli_auth.py         54     54   0.00%   3-201
+src/abathur/infrastructure/config.py                 127     70  44.88%   104-105, 120-146, 150-151, 155-161, 166-188, 205-225, 238-248, 252-254, 258-260
+src/abathur/infrastructure/database.py               922    794  13.88%   56, 66, 70, 123-141, 147-159, 165-168, 186-221, 277-282, 325, 329, 341-346, 350-371, 379-382, 392-407, 415-418, 430-433, 441-446, 454-1128, 1133-1139, 1144-1228, 1248-1263, 1272-1398, 1420-1613, 1624-1669, 1675-1692, 1700-1705, 1709-1717, 1741-1778, 1782-1801, 1809-1821, 1832-1889, 1927, 1940-1953, 1973-1991, 2022-2039, 2062-2158, 2186-2261, 2272-2278, 2292-2298, 2312-2318, 2351-2411, 2446-2508, 2550-2671, 2689-2721, 2747-2759, 2791-2906, 2943-2986, 2991-2993, 3041-3058, 3062-3072, 3076-3085, 3089, 3101-3122, 3126-3137, 3142-3154, 3158-3166, 3178-3193, 3203-3207, 3239-3253, 3280-3319, 3339-3340, 3349-3353, 3362-3366
+src/abathur/infrastructure/database_validator.py     201    187   6.97%   14-15, 34-65, 69-120, 124-141, 145-162, 166-209, 213-250, 254-296, 302-365
+src/abathur/infrastructure/exceptions.py              20     11  45.00%   25-26, 30-32, 48, 76-83
+src/abathur/infrastructure/logger.py                  25     16  36.00%   20-85
+src/abathur/infrastructure/mcp_config.py              60     42  30.00%   32, 48-62, 73-106, 117-133, 145-155
+src/abathur/mcp/__init__.py                            2      0 100.00%
+src/abathur/mcp/memory_server.py                      90     71  21.11%   14-16, 43-48, 54-420, 425-432, 439-452, 456
+src/abathur/mcp/server_manager.py                     56     56   0.00%   3-123
+src/abathur/mcp/task_queue_server.py                 298    262  12.08%   16-18, 60-68, 73-367, 379-543, 547-572, 577-665, 669-683, 687-713, 717-748, 752-764, 768-774, 778-795, 799, 841-857, 864-877, 881
+src/abathur/mcp/task_queue_server_manager.py         123    123   0.00%   3-261
+src/abathur/services/__init__.py                       7      0 100.00%
+src/abathur/services/dependency_resolver.py          177    155  12.43%   53-59, 85-159, 178-203, 224-276, 291-295, 309-324, 340-351, 362-368, 384-428, 436-439, 450-459, 474-494
+src/abathur/services/document_index_service.py       159    139  12.58%   23, 57-88, 107-121, 136-149, 160-171, 182-196, 208-232, 244-260, 276-295, 310-329, 361-397, 421-458, 485-498, 522-542, 556-574
+src/abathur/services/embedding_service.py             32     25  21.88%   21-22, 42-60, 77-82, 94-99
+src/abathur/services/memory_service.py               108     95  12.04%   23, 63-116, 136-167, 201-248, 268-299, 323-355, 367-376, 396-415, 430-448
+src/abathur/services/priority_calculator.py          102     87  14.71%   80-96, 125-167, 190-215, 238-244, 274-306, 332-347, 367-377
+src/abathur/services/session_service.py              102     89  12.75%   25, 56-73, 90-103, 118-144, 182-216, 231-258, 266, 282-286, 299-323
+src/abathur/services/task_queue_service.py           266    234  12.03%   110-114, 119, 173-354, 380-420, 447-528, 555-608, 632-677, 706-795, 821-853, 866-877, 888-899, 912-941, 952-966, 978-983
+src/abathur/tui/__init__.py                            0      0 100.00%
+src/abathur/tui/app.py                                76     76   0.00%   6-275
+src/abathur/tui/exceptions.py                         27     27   0.00%   14-181
+src/abathur/tui/models.py                             90     54  40.00%   84-110, 125-145, 189, 214-250, 254-258
+src/abathur/tui/rendering/__init__.py                  2      0 100.00%
+src/abathur/tui/rendering/tree_renderer.py            89     71  20.22%   52, 83-95, 118-127, 139-152, 184-230, 259-301, 316-330
+src/abathur/tui/screens/__init__.py                    2      0 100.00%
+src/abathur/tui/screens/filter_screen.py              93     72  22.58%   35-36, 122-123, 127-196, 200-202, 206, 211-223, 228-236, 240-245, 254-273
+src/abathur/tui/screens/main_screen.py                15     15   0.00%   7-59
+src/abathur/tui/services/__init__.py                   0      0 100.00%
+src/abathur/tui/services/task_data_service.py         16     16   0.00%   8-92
+src/abathur/tui/view_modes/__init__.py                 0      0 100.00%
+src/abathur/tui/widgets/__init__.py                    4      0 100.00%
+src/abathur/tui/widgets/stats_header.py               55     36  34.55%   68, 79-80, 90-91, 103-104, 125-186, 194-197
+src/abathur/tui/widgets/task_detail.py               161    125  22.36%   101-108, 119-122, 130-132, 140-141, 161-241, 256-261, 272, 283-285, 297-301, 312-314, 325-334, 345-352, 363, 374-376, 387-397, 408-423, 434-440, 451-453, 464-467, 478-479, 497-499
+src/abathur/tui/widgets/task_tree.py                 168    129  23.21%   90, 107, 129-141, 155-157, 172-184, 201-220, 239-265, 273-277, 284-288, 293-308, 312-332, 336-358, 362-384, 389-393, 398-409, 417-420
+---------------------------------------------------------------------------------
+TOTAL                                               6266   5150  17.81%
+Coverage HTML written to dir htmlcov
+
+=========================== short test summary info ============================
+ERROR tests/unit/cli/test_tree_rendering.py
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+========================= 1 warning, 1 error in 5.40s ==========================
