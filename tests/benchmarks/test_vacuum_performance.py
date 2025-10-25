@@ -12,7 +12,6 @@ Performance Targets:
 - Large DB (<300 seconds / 5 minutes)
 """
 
-import asyncio
 import json
 import time
 from collections.abc import AsyncGenerator

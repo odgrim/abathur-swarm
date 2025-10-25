@@ -23,8 +23,7 @@ tasks are merged, the error messages will be more specific.
 import asyncio
 import sqlite3
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
-from uuid import uuid4
+from unittest.mock import patch
 
 import aiosqlite
 import pytest
