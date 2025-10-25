@@ -21,7 +21,6 @@ Performance targets:
 """
 
 import json
-import logging
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -34,13 +33,14 @@ from abathur.domain.models import (
     TaskStatus,
 )
 from abathur.infrastructure.database import Database
+from abathur.infrastructure.logger import get_logger
 from abathur.services.dependency_resolver import (
     CircularDependencyError,
     DependencyResolver,
 )
 from abathur.services.priority_calculator import PriorityCalculator
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class TaskQueueError(Exception):
