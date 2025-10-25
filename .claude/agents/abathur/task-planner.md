@@ -512,9 +512,10 @@ After creating the agent file, verify:
    3. Add the agent-creation task ID to prerequisites if the agent had to be created
    4. Use the exact hyperspecialized agent name (either existing or newly created)
    5. **🚨 Include worktree information for implementation tasks (from step 5) 🚨**
-   6. Provide comprehensive task context
+   6. **🚨 Set parent_task_id to YOUR current task ID to track lineage (which task spawned which) 🚨**
+   7. Provide comprehensive task context
 
-   This ensures implementation tasks wait for their required agents to be created first and work in isolated worktrees.
+   This ensures implementation tasks wait for their required agents to be created first, work in isolated worktrees, and track lineage relationships.
 
    **BAD Example (DO NOT DO THIS):**
    ```python
@@ -614,6 +615,10 @@ Required methods:
        # Agent had to be created - add agent-creation task as prerequisite
        prerequisites.append(agent_creation_task_ids["domain_models"])
 
+   # Get your current task ID to use as parent_task_id
+   # This creates the lineage tracking (spawning relationship)
+   current_task_id = get_current_task_id()  # Your task ID as the parent
+
    task_enqueue({
        "description": task_description,
        "source": "task-planner",
@@ -621,6 +626,7 @@ Required methods:
        "agent_type": domain_agent_type,  # ✅ Hyperspecialized agent!
        "estimated_duration_seconds": 1200,
        "prerequisite_task_ids": prerequisites,  # ✅ Includes agent-creation if needed!
+       "parent_task_id": current_task_id,  # ✅ CRITICAL: Record who spawned this task (lineage)!
        "input_data": {
            "worktree_path": worktree_info[task_id]['worktree_path'],
            "branch_name": worktree_info[task_id]['branch_name']

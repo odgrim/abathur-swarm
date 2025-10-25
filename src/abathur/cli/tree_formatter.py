@@ -103,10 +103,15 @@ def format_task_line(task: Task) -> Text:
     return text
 
 
-def format_tree(tasks: list[Task], use_unicode: bool = True) -> RichTree:
+def format_lineage_tree(tasks: list[Task], use_unicode: bool = True) -> RichTree:
     """Build hierarchical tree from task list using parent_task_id relationships.
 
-    O(n) algorithm: Build task_map → group by parent_task_id → recursively build tree.
+    O(n) algorithm: Build task_map → build children map → recursively build tree.
+
+    Tree displays lineage (spawning) relationships: tasks appear nested under their parent.
+    For example, if Task A spawned Task B, the tree shows:
+        Task A (parent)
+        └── Task B (child)
 
     Args:
         tasks: List of Task objects to render
@@ -115,17 +120,14 @@ def format_tree(tasks: list[Task], use_unicode: bool = True) -> RichTree:
     Returns:
         Rich Tree ready for console.print()
 
-    Edge cases: Empty list → 'No tasks found', orphaned tasks → root level,
+    Edge cases: Empty list → 'No tasks found', tasks without parent → root level,
     circular refs → break cycles with visited set.
     """
     # Configure box-drawing style
-    # Note: Rich Tree auto-detects terminal Unicode support.
-    # The use_unicode parameter is primarily for documentation and consistency.
-    # The guide_style controls the color of connecting lines.
     guide_style = "tree.line" if use_unicode else "dim"
 
     # Create root tree
-    root_tree = RichTree("Task Queue", guide_style=guide_style)
+    root_tree = RichTree("Task Queue (Lineage)", guide_style=guide_style)
 
     # Handle empty task list
     if not tasks:
@@ -135,15 +137,17 @@ def format_tree(tasks: list[Task], use_unicode: bool = True) -> RichTree:
     # Build task_map for O(1) lookup
     task_map: Dict[UUID, Task] = {task.id: task for task in tasks}
 
-    # Group tasks by parent_task_id for efficient tree construction
-    children_map: Dict[UUID | None, list[Task]] = defaultdict(list)
+    # Build children map: which tasks were spawned by each task
+    # children_map[task_id] = list of tasks spawned by task_id
+    children_map: Dict[UUID, list[Task]] = defaultdict(list)
     for task in tasks:
-        children_map[task.parent_task_id].append(task)
+        if task.parent_task_id and task.parent_task_id in task_map:
+            children_map[task.parent_task_id].append(task)
 
     # Sort children by priority (highest first)
-    for child_list in children_map.values():
+    for children_list in children_map.values():
         priority_attr = lambda t: getattr(t, 'calculated_priority', t.priority)
-        child_list.sort(key=priority_attr, reverse=True)
+        children_list.sort(key=priority_attr, reverse=True)
 
     # Track visited nodes to prevent infinite loops from circular references
     visited: set[UUID] = set()
@@ -164,25 +168,127 @@ def format_tree(tasks: list[Task], use_unicode: bool = True) -> RichTree:
         label = format_task_line(task)
         subtree = parent_widget.add(label)
 
-        # Add children if they exist
+        # Add children (tasks spawned by this task)
         if task.id in children_map:
-            for child in children_map[task.id]:
-                add_subtree(subtree, child)
+            for child_task in children_map[task.id]:
+                add_subtree(subtree, child_task)
 
-    # Build tree from root tasks (parent_task_id=None)
-    root_tasks = children_map[None]
+    # Find root tasks: tasks with no parent_task_id or parent not in our list
+    root_tasks = [
+        task for task in tasks
+        if not task.parent_task_id or task.parent_task_id not in task_map
+    ]
+
+    # Sort root tasks by priority (highest first)
+    priority_attr = lambda t: getattr(t, 'calculated_priority', t.priority)
+    root_tasks.sort(key=priority_attr, reverse=True)
 
     if not root_tasks:
-        # All tasks have parent_task_id set - find orphaned tasks
-        # (tasks whose parent_task_id doesn't exist in task_map)
-        for task in tasks:
-            if task.parent_task_id is not None and task.parent_task_id not in task_map:
-                # Orphaned task - add to root level
+        # All tasks have parents - might be circular references or missing parents
+        # Just show all tasks at root level
+        root_tree.add(Text("All tasks have parent tasks - showing flat list", style="dim yellow"))
+        for task in sorted(tasks, key=priority_attr, reverse=True):
+            if task.id not in visited:
                 add_subtree(root_tree, task)
+    else:
+        # Normal case: add all root tasks
+        for root_task in root_tasks:
+            add_subtree(root_tree, root_task)
 
-        # If still no tasks added, all tasks reference valid parents but no roots
-        if not visited:
-            root_tree.add(Text("No root tasks found (all tasks have parent_task_id set)", style="dim yellow"))
+    return root_tree
+
+
+def format_tree(tasks: list[Task], use_unicode: bool = True) -> RichTree:
+    """Build hierarchical tree from task list using dependency relationships.
+
+    O(n) algorithm: Build task_map → build reverse dependency map → recursively build tree.
+
+    Tree displays dependency ordering: tasks appear nested under the tasks that depend on them.
+    For example, if Task A depends on Task B, the tree shows:
+        Task A
+        └── Task B (dependency)
+
+    Args:
+        tasks: List of Task objects to render
+        use_unicode: Use Unicode box-drawing (│ ├ └ ─) vs ASCII (| + - \\)
+
+    Returns:
+        Rich Tree ready for console.print()
+
+    Edge cases: Empty list → 'No tasks found', tasks without dependencies → root level,
+    circular refs → break cycles with visited set.
+    """
+    # Configure box-drawing style
+    # Note: Rich Tree auto-detects terminal Unicode support.
+    # The use_unicode parameter is primarily for documentation and consistency.
+    # The guide_style controls the color of connecting lines.
+    guide_style = "tree.line" if use_unicode else "dim"
+
+    # Create root tree
+    root_tree = RichTree("Task Queue (Dependencies)", guide_style=guide_style)
+
+    # Handle empty task list
+    if not tasks:
+        root_tree.add(Text("No tasks found", style="dim"))
+        return root_tree
+
+    # Build task_map for O(1) lookup
+    task_map: Dict[UUID, Task] = {task.id: task for task in tasks}
+
+    # Build reverse dependency map: which tasks depend on each task
+    # dependents_map[task_id] = list of tasks that depend on task_id
+    dependents_map: Dict[UUID, list[Task]] = defaultdict(list)
+    for task in tasks:
+        for dep_id in task.dependencies:
+            # Only add if the dependency exists in our task list
+            if dep_id in task_map:
+                dependents_map[dep_id].append(task)
+
+    # Sort dependents by priority (highest first)
+    for dependent_list in dependents_map.values():
+        priority_attr = lambda t: getattr(t, 'calculated_priority', t.priority)
+        dependent_list.sort(key=priority_attr, reverse=True)
+
+    # Track visited nodes to prevent infinite loops from circular references
+    visited: set[UUID] = set()
+
+    def add_subtree(parent_widget: RichTree, task: Task) -> None:
+        """Recursively add task and its dependencies to parent widget.
+
+        Handles circular reference detection via visited set.
+        """
+        # Check for circular reference
+        if task.id in visited:
+            # Break cycle - don't recurse further
+            return
+
+        visited.add(task.id)
+
+        # Format task line and add to parent widget
+        label = format_task_line(task)
+        subtree = parent_widget.add(label)
+
+        # Add dependencies (tasks that this task depends on)
+        for dep_id in task.dependencies:
+            if dep_id in task_map:
+                dep_task = task_map[dep_id]
+                add_subtree(subtree, dep_task)
+
+    # Find root tasks: tasks that no other task depends on
+    tasks_depended_on = set(dependents_map.keys())
+    root_tasks = [task for task in tasks if task.id not in tasks_depended_on]
+
+    # Sort root tasks by priority (highest first)
+    priority_attr = lambda t: getattr(t, 'calculated_priority', t.priority)
+    root_tasks.sort(key=priority_attr, reverse=True)
+
+    if not root_tasks:
+        # All tasks are depended on by other tasks - might be circular dependencies
+        # Just show all tasks at root level
+        root_tree.add(Text("All tasks have dependencies - showing flat list", style="dim yellow"))
+        for task in sorted(tasks, key=priority_attr, reverse=True):
+            if task.id not in visited:
+                add_subtree(root_tree, task)
     else:
         # Normal case: add all root tasks
         for root_task in root_tasks:

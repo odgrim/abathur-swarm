@@ -113,7 +113,7 @@ class AbathurTaskQueueServer:
                             },
                             "parent_task_id": {
                                 "type": "string",
-                                "description": "Parent task ID for hierarchical tasks",
+                                "description": "Parent task ID tracking which task spawned this one (lineage/spawning relationship, different from dependencies)",
                             },
                             "deadline": {
                                 "type": "string",
