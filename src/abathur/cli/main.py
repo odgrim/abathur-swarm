@@ -196,6 +196,17 @@ async def _get_services() -> dict[str, Any]:
 # Tree visualization now handled by tree_formatter module
 
 
+# ===== Import and Register Command Modules =====
+# Import command modules after _get_services is defined to avoid circular imports
+from abathur.cli.db_commands import db_app
+from abathur.cli.mcp_commands import mcp_app
+from abathur.cli.swarm_commands import swarm_app
+
+app.add_typer(db_app, name="db")
+app.add_typer(mcp_app, name="mcp")
+app.add_typer(swarm_app, name="swarm")
+
+
 # ===== Version =====
 @app.command()
 def version() -> None:
@@ -1286,6 +1297,25 @@ def task_status(watch: bool = typer.Option(False, help="Watch mode (live updates
     asyncio.run(_status())
 
 
+@task_app.command("visualize")
+def visualize_queue() -> None:
+    """[DEPRECATED] The TUI has been removed. Use 'abathur task list --tree' instead.
+
+    The interactive TUI has been replaced with a simpler tree view in the list command.
+
+    Examples:
+        abathur task list --tree                    # Show tasks as a tree
+        abathur task list --tree --status pending   # Show pending tasks as a tree
+        abathur feature-branch summary <branch>     # View feature branch progress
+    """
+    console.print("[yellow]The TUI has been deprecated and removed.[/yellow]")
+    console.print("\nUse the following commands instead:")
+    console.print("  [cyan]abathur task list --tree[/cyan]                    # Show tasks as a tree")
+    console.print("  [cyan]abathur task list --tree --status pending[/cyan]   # Show pending tasks as a tree")
+    console.print("  [cyan]abathur feature-branch summary <branch>[/cyan]     # View feature branch progress")
+    raise typer.Exit(0)
+
+
 # ===== Swarm Commands =====
 swarm_app = typer.Typer(help="Agent swarm management", no_args_is_help=True)
 app.add_typer(swarm_app, name="swarm")
@@ -1765,6 +1795,7 @@ def loop_start(
 app.add_typer(mem_app, name="mem")
 
 
+<<<<<<< HEAD
 # ===== Database Commands =====
 @app.command()
 def init(
