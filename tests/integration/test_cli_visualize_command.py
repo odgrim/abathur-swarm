@@ -7,9 +7,7 @@ Tests:
 - Graceful shutdown on KeyboardInterrupt
 """
 
-import asyncio
 import subprocess
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

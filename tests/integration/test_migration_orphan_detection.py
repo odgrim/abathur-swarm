@@ -8,13 +8,12 @@ Tests complete end-to-end workflows:
 - Idempotency with orphans present
 """
 
-import asyncio
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from abathur.domain.models import Task, TaskStatus
+from abathur.domain.models import Task
 from abathur.infrastructure.database import Database
 
 

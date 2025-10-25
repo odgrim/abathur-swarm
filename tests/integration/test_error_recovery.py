@@ -16,14 +16,13 @@ Tests complete end-to-end workflows for error recovery scenarios:
 - Database recovery after interrupted operations
 """
 
-import asyncio
 import sqlite3
 import tempfile
 from collections.abc import AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import aiosqlite
 import pytest
