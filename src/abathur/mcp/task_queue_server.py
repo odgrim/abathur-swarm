@@ -17,21 +17,18 @@ except ImportError:
     print("ERROR: mcp package not installed. Run: pip install mcp", file=sys.stderr)
     sys.exit(1)
 
-# Add abathur to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# Import abathur modules using package-relative imports
+from pydantic import ValidationError
 
-# Import abathur modules
-from pydantic import ValidationError  # noqa: E402
-
-from abathur.domain.models import TaskSource, TaskStatus  # noqa: E402
-from abathur.infrastructure.database import Database  # noqa: E402
-from abathur.infrastructure.logger import get_logger  # noqa: E402
-from abathur.services.dependency_resolver import (  # noqa: E402
+from ..domain.models import TaskSource, TaskStatus
+from ..infrastructure.database import Database
+from ..infrastructure.logger import get_logger
+from ..services.dependency_resolver import (
     CircularDependencyError,
     DependencyResolver,
 )
-from abathur.services.priority_calculator import PriorityCalculator  # noqa: E402
-from abathur.services.task_queue_service import (  # noqa: E402
+from ..services.priority_calculator import PriorityCalculator
+from ..services.task_queue_service import (
     TaskNotFoundError,
     TaskQueueError,
     TaskQueueService,
