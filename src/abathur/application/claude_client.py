@@ -343,20 +343,6 @@ class ClaudeClient:
             )
             return False
 
-    def validate_api_key(self) -> bool:
-        """Validate API key by making a test request.
-
-        Deprecated: Use validate_authentication() instead.
-
-        Returns:
-            True if API key is valid, False otherwise
-        """
-        logger.warning(
-            "validate_api_key_deprecated",
-            message="validate_api_key() is deprecated, use validate_authentication() instead",
-        )
-        return asyncio.run(self.validate_authentication())
-
     async def batch_execute(
         self,
         tasks: list[dict[str, str]],
