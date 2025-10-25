@@ -1,0 +1,14 @@
+src/abathur/services/task_queue_service.py:    async def cancel_task(self, task_id: UUID) -> list[UUID]:
+tests/unit/test_task_timeout.py:    success = await task_coordinator.cancel_task(task_id, force=False)
+tests/unit/test_task_timeout.py:    success = await task_coordinator.cancel_task(task_id, force=False)
+tests/unit/test_task_timeout.py:    success = await task_coordinator.cancel_task(task_id, force=True)
+src/abathur/mcp/task_queue_server.py:            cancelled_ids = await self._task_queue_service.cancel_task(task_id)
+tests/performance/test_task_queue_mcp_performance.py:async def test_cancel_task_with_dependents_latency(
+tests/performance/test_task_queue_mcp_performance.py:    await task_queue_service.cancel_task(root_task.id)
+tests/unit/mcp/test_task_queue_server.py:            cancelled_ids = await self.task_queue_service.cancel_task(task_id)  # type: ignore[attr-defined]
+tests/unit/mcp/test_task_queue_server.py:    mock_task_queue_service.cancel_task.return_value = [task_id]
+tests/unit/mcp/test_task_queue_server.py:    mock_task_queue_service.cancel_task.return_value = [task_id, dependent1, dependent2]
+tests/unit/mcp/test_task_queue_server.py:    mock_task_queue_service.cancel_task.side_effect = TaskNotFoundError(f"Task {task_id} not found")
+tests/integration/mcp/test_task_queue_mcp_integration.py:async def test_cancel_task_cascades_to_dependents(
+tests/integration/mcp/test_task_queue_mcp_integration.py:    cancelled_ids = await task_queue_service.cancel_task(task_a.id)
+tests/integration/mcp/test_task_queue_mcp_integration.py:        await task_queue_service.cancel_task(nonexistent_id)

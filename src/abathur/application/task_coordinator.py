@@ -98,47 +98,6 @@ class TaskCoordinator:
         )
         logger.info("task_status_updated", task_id=str(task_id), status=status.value)
 
-    async def cancel_task(self, task_id: UUID, force: bool = False) -> bool:
-        """Cancel a pending or running task.
-
-        Args:
-            task_id: Task ID to cancel
-            force: If True, allow canceling RUNNING tasks (default: False)
-
-        Returns:
-            True if cancelled, False if task not found or already completed
-        """
-        task = await self.database.get_task(task_id)
-        if not task:
-            logger.warning("task_not_found", task_id=str(task_id))
-            return False
-
-        # Allow canceling pending tasks always, running tasks only with force=True
-        if task.status == TaskStatus.PENDING:
-            await self.update_task_status(task_id, TaskStatus.CANCELLED)
-            return True
-        elif task.status == TaskStatus.RUNNING and force:
-            await self.update_task_status(
-                task_id, TaskStatus.CANCELLED, error_message="Task cancelled by user"
-            )
-            logger.info("running_task_cancelled", task_id=str(task_id))
-            return True
-        elif task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
-            logger.warning(
-                "task_already_terminated",
-                task_id=str(task_id),
-                status=task.status.value,
-            )
-            return False
-        else:
-            logger.warning(
-                "task_cannot_cancel",
-                task_id=str(task_id),
-                status=task.status.value,
-                force=force,
-            )
-            return False
-
     async def get_task(self, task_id: UUID) -> Task | None:
         """Get task by ID.
 
@@ -169,40 +128,6 @@ class TaskCoordinator:
         return await self.database.list_tasks(
             status=status, exclude_status=exclude_status, limit=limit
         )
-
-    async def retry_task(self, task_id: UUID) -> bool:
-        """Retry a failed or cancelled task.
-
-        Args:
-            task_id: Task ID to retry
-
-        Returns:
-            True if task was reset to pending, False otherwise
-        """
-        task = await self.database.get_task(task_id)
-        if not task:
-            return False
-
-        if task.status not in (TaskStatus.FAILED, TaskStatus.CANCELLED):
-            logger.warning(
-                "task_cannot_retry",
-                task_id=str(task_id),
-                status=task.status.value,
-            )
-            return False
-
-        if task.retry_count >= task.max_retries:
-            logger.warning(
-                "task_max_retries_exceeded",
-                task_id=str(task_id),
-                retry_count=task.retry_count,
-            )
-            return False
-
-        # Reset to pending for retry
-        await self.update_task_status(task_id, TaskStatus.PENDING)
-        logger.info("task_retry_scheduled", task_id=str(task_id))
-        return True
 
     async def handle_stale_tasks(self) -> list[UUID]:
         """Detect and handle stale running tasks that have exceeded their timeout.
