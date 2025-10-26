@@ -4,7 +4,8 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::domain::models::{Agent, AgentStatus};
-use crate::domain::ports::{AgentRepository, DatabaseError};
+use crate::domain::ports::AgentRepository;
+use crate::infrastructure::database::DatabaseError;
 
 /// SQLite implementation of AgentRepository using sqlx
 ///
