@@ -16,9 +16,9 @@ pub enum AgentStatus {
 impl fmt::Display for AgentStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AgentStatus::Idle => write!(f, "idle"),
-            AgentStatus::Busy => write!(f, "busy"),
-            AgentStatus::Terminated => write!(f, "terminated"),
+            Self::Idle => write!(f, "idle"),
+            Self::Busy => write!(f, "busy"),
+            Self::Terminated => write!(f, "terminated"),
         }
     }
 }
@@ -28,10 +28,10 @@ impl FromStr for AgentStatus {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "idle" => Ok(AgentStatus::Idle),
-            "busy" => Ok(AgentStatus::Busy),
-            "terminated" => Ok(AgentStatus::Terminated),
-            _ => Err(anyhow::anyhow!("Invalid agent status: {}", s)),
+            "idle" => Ok(Self::Idle),
+            "busy" => Ok(Self::Busy),
+            "terminated" => Ok(Self::Terminated),
+            _ => Err(anyhow::anyhow!("Invalid agent status: {s}")),
         }
     }
 }

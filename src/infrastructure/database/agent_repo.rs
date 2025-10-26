@@ -7,10 +7,10 @@ use crate::domain::models::{Agent, AgentStatus};
 use crate::domain::ports::AgentRepository;
 use crate::infrastructure::database::DatabaseError;
 
-/// SQLite implementation of AgentRepository using sqlx
+/// `SQLite` implementation of `AgentRepository` using sqlx
 ///
 /// Provides persistent storage for agents with compile-time verified queries.
-/// Uses SQLite with WAL mode for better concurrency.
+/// Uses `SQLite` with WAL mode for better concurrency.
 pub struct AgentRepositoryImpl {
     pool: SqlitePool,
 }
@@ -35,8 +35,8 @@ impl AgentRepositoryImpl {
     /// Create a new agent repository instance
     ///
     /// # Arguments
-    /// * `pool` - SQLite connection pool
-    pub fn new(pool: SqlitePool) -> Self {
+    /// * `pool` - `SQLite` connection pool
+    pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
@@ -44,7 +44,7 @@ impl AgentRepositoryImpl {
     fn parse_agent_row(row: AgentRowData) -> Result<Agent, DatabaseError> {
         Ok(Agent {
             id: Uuid::parse_str(&row.id)
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {}", e)))?,
+                .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {e}")))?,
             agent_type: row.agent_type,
             status: row
                 .status
@@ -55,21 +55,21 @@ impl AgentRepositoryImpl {
                 .as_ref()
                 .map(|s| Uuid::parse_str(s))
                 .transpose()
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {}", e)))?,
+                .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {e}")))?,
             heartbeat_at: DateTime::parse_from_rfc3339(&row.heartbeat_at)
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
+                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
                 .with_timezone(&Utc),
             memory_usage_bytes: row.memory_usage_bytes as u64,
             cpu_usage_percent: row.cpu_usage_percent,
             created_at: DateTime::parse_from_rfc3339(&row.created_at)
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
+                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
                 .with_timezone(&Utc),
             terminated_at: row
                 .terminated_at
                 .as_ref()
                 .map(|s| DateTime::parse_from_rfc3339(s))
                 .transpose()
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
+                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
                 .map(|dt| dt.with_timezone(&Utc)),
         })
     }
@@ -189,49 +189,46 @@ impl AgentRepository for AgentRepositoryImpl {
              FROM agents",
         );
 
-        let agents = match status {
-            Some(s) => {
-                query.push_str(" WHERE status = ? ORDER BY created_at DESC");
-                let status_str = s.to_string();
-                sqlx::query_as::<
-                    _,
-                    (
-                        String,
-                        String,
-                        String,
-                        Option<String>,
-                        String,
-                        i64,
-                        f64,
-                        String,
-                        Option<String>,
-                    ),
-                >(&query)
-                .bind(status_str)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(DatabaseError::QueryFailed)?
-            }
-            None => {
-                query.push_str(" ORDER BY created_at DESC");
-                sqlx::query_as::<
-                    _,
-                    (
-                        String,
-                        String,
-                        String,
-                        Option<String>,
-                        String,
-                        i64,
-                        f64,
-                        String,
-                        Option<String>,
-                    ),
-                >(&query)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(DatabaseError::QueryFailed)?
-            }
+        let agents = if let Some(s) = status {
+            query.push_str(" WHERE status = ? ORDER BY created_at DESC");
+            let status_str = s.to_string();
+            sqlx::query_as::<
+                _,
+                (
+                    String,
+                    String,
+                    String,
+                    Option<String>,
+                    String,
+                    i64,
+                    f64,
+                    String,
+                    Option<String>,
+                ),
+            >(&query)
+            .bind(status_str)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::QueryFailed)?
+        } else {
+            query.push_str(" ORDER BY created_at DESC");
+            sqlx::query_as::<
+                _,
+                (
+                    String,
+                    String,
+                    String,
+                    Option<String>,
+                    String,
+                    i64,
+                    f64,
+                    String,
+                    Option<String>,
+                ),
+            >(&query)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DatabaseError::QueryFailed)?
         };
 
         // Map rows to Agent structs

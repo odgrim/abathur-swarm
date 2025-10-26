@@ -2,6 +2,7 @@ use crate::domain::models::Config;
 use crate::domain::ports::{ClaudeClient, ClaudeError, ClaudeRequest, McpClient, McpError};
 use anyhow::Result;
 use serde_json::Value;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -33,7 +34,7 @@ pub struct ExecutionContext {
 
 impl ExecutionContext {
     /// Create a new execution context
-    pub fn new(
+    pub const fn new(
         agent_id: Uuid,
         task_id: Uuid,
         agent_type: String,
@@ -51,6 +52,7 @@ impl ExecutionContext {
     }
 
     /// Set input data for the task
+    #[must_use]
     pub fn with_input_data(mut self, input_data: Value) -> Self {
         self.input_data = Some(input_data);
         self
@@ -61,10 +63,7 @@ impl ExecutionContext {
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutionError {
     #[error("Timeout executing task {task_id} after {timeout_secs}s")]
-    Timeout {
-        task_id: Uuid,
-        timeout_secs: u64,
-    },
+    Timeout { task_id: Uuid, timeout_secs: u64 },
 
     #[error("Claude API error for task {task_id}: {source}")]
     ClaudeError {
@@ -106,14 +105,14 @@ pub struct AgentExecutor {
     claude_client: Arc<dyn ClaudeClient>,
     /// MCP client for tool invocations
     ///
-    /// Reserved for future MCP tool integration. Currently, the execute_inner
+    /// Reserved for future MCP tool integration. Currently, the `execute_inner`
     /// method has a TODO (line 290) to implement MCP tool call parsing and execution.
     #[allow(dead_code)]
     mcp_client: Arc<dyn McpClient>,
 }
 
 impl AgentExecutor {
-    /// Create a new AgentExecutor
+    /// Create a new `AgentExecutor`
     ///
     /// # Arguments
     /// * `claude_client` - Client for Claude API interactions
@@ -168,6 +167,7 @@ impl AgentExecutor {
     /// let timeout = Duration::from_secs(600); // 10 minutes
     /// let result = executor.execute_with_timeout(ctx, timeout).await?;
     /// ```
+    #[allow(clippy::option_if_let_else)]
     pub async fn execute_with_timeout(
         &self,
         ctx: ExecutionContext,
@@ -187,7 +187,7 @@ impl AgentExecutor {
     /// Execute a task with retry logic
     ///
     /// Retries transient errors using exponential backoff.
-    /// Non-retryable errors (InvalidApiKey, InvalidArguments) fail immediately.
+    /// Non-retryable errors (`InvalidApiKey`, `InvalidArguments`) fail immediately.
     ///
     /// # Arguments
     /// * `ctx` - Execution context with retry configuration
@@ -217,7 +217,9 @@ impl AgentExecutor {
                     if attempt < max_retries {
                         // Calculate exponential backoff: initial * 2^attempt, capped at max
                         let backoff_ms = initial_backoff.as_millis() * (2_u128.pow(attempt));
-                        let backoff = Duration::from_millis(backoff_ms.min(max_backoff.as_millis()) as u64);
+                        #[allow(clippy::cast_possible_truncation)]
+                        let backoff =
+                            Duration::from_millis(backoff_ms.min(max_backoff.as_millis()) as u64);
 
                         tracing::warn!(
                             task_id = %ctx.task_id,
@@ -264,7 +266,7 @@ impl AgentExecutor {
         );
 
         // Build prompt for Claude
-        let prompt = self.build_prompt(&ctx);
+        let prompt = Self::build_prompt(&ctx);
 
         // Execute Claude API request
         let request = ClaudeRequest {
@@ -298,14 +300,14 @@ impl AgentExecutor {
     }
 
     /// Build prompt for Claude based on execution context
-    fn build_prompt(&self, ctx: &ExecutionContext) -> String {
+    fn build_prompt(ctx: &ExecutionContext) -> String {
         let mut prompt = format!(
             "You are a {} agent.\n\nTask: {}\n",
             ctx.agent_type, ctx.description
         );
 
         if let Some(input_data) = &ctx.input_data {
-            prompt.push_str(&format!("\nInput Data:\n{}\n", input_data));
+            let _ = write!(prompt, "\nInput Data:\n{input_data}\n");
         }
 
         prompt
@@ -314,17 +316,17 @@ impl AgentExecutor {
     /// Check if an error is retryable
     ///
     /// Retryable errors:
-    /// - RateLimitExceeded
-    /// - NetworkError
-    /// - ConnectionError
+    /// - `RateLimitExceeded`
+    /// - `NetworkError`
+    /// - `ConnectionError`
     /// - Timeout
     ///
     /// Non-retryable errors:
-    /// - InvalidApiKey
-    /// - InvalidArguments
-    /// - ServerNotFound
-    /// - ToolNotFound
-    fn is_retryable_error(err: &ExecutionError) -> bool {
+    /// - `InvalidApiKey`
+    /// - `InvalidArguments`
+    /// - `ServerNotFound`
+    /// - `ToolNotFound`
+    const fn is_retryable_error(err: &ExecutionError) -> bool {
         match err {
             ExecutionError::ClaudeError { source, .. } => matches!(
                 source,
@@ -345,8 +347,8 @@ impl AgentExecutor {
 mod tests {
     use super::*;
     use crate::domain::ports::{
-        ClaudeClient, ClaudeError, ClaudeRequest, ClaudeResponse,
-        McpClient, McpError, McpToolRequest, McpToolResponse,
+        ClaudeClient, ClaudeError, ClaudeRequest, ClaudeResponse, McpClient, McpError,
+        McpToolRequest, McpToolResponse,
     };
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicU32, Ordering};

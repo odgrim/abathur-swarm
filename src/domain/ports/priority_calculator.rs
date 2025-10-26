@@ -51,7 +51,7 @@ pub trait PriorityCalculator: Send + Sync {
     ///
     /// # Returns
     ///
-    /// * `Ok(Vec<(Uuid, f64)>)` - List of (task_id, new_priority) tuples
+    /// * `Ok(Vec<(Uuid, f64)>)` - List of (`task_id`, `new_priority`) tuples
     /// * `Err` - If calculation fails
     async fn recalculate_priorities(&self, tasks: &[Task]) -> Result<Vec<(uuid::Uuid, f64)>>;
 }

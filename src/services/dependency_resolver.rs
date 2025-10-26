@@ -26,8 +26,8 @@ use uuid::Uuid;
 pub struct DependencyResolver;
 
 impl DependencyResolver {
-    /// Create a new DependencyResolver instance
-    pub fn new() -> Self {
+    /// Create a new `DependencyResolver` instance
+    pub const fn new() -> Self {
         Self
     }
 
@@ -53,7 +53,7 @@ impl DependencyResolver {
     pub fn resolve(&self, tasks: &[Task]) -> Result<Vec<Task>> {
         // First check for cycles
         if let Some(cycle) = self.detect_cycle(tasks) {
-            return Err(anyhow!("Circular dependency detected: {:?}", cycle))
+            return Err(anyhow!("Circular dependency detected: {cycle:?}"))
                 .context("Failed to resolve task dependencies");
         }
 

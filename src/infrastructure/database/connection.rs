@@ -7,7 +7,7 @@ use std::time::Duration;
 
 /// Database connection pool manager
 ///
-/// Manages SQLite connection pool with WAL mode enabled for better concurrency.
+/// Manages `SQLite` connection pool with WAL mode enabled for better concurrency.
 /// Handles connection lifecycle, migrations, and configuration.
 pub struct DatabaseConnection {
     pool: SqlitePool,
@@ -17,7 +17,7 @@ impl DatabaseConnection {
     /// Create a new database connection pool with WAL mode enabled
     ///
     /// # Arguments
-    /// * `database_url` - SQLite database URL (e.g., "sqlite:.abathur/abathur.db")
+    /// * `database_url` - `SQLite` database URL (e.g., "sqlite:.abathur/abathur.db")
     ///
     /// # Configuration
     /// - Journal mode: WAL (Write-Ahead Logging)
@@ -76,7 +76,7 @@ impl DatabaseConnection {
     /// Get a reference to the connection pool
     ///
     /// Use this to pass the pool to repository implementations.
-    pub fn pool(&self) -> &SqlitePool {
+    pub const fn pool(&self) -> &SqlitePool {
         &self.pool
     }
 

@@ -6,7 +6,7 @@ use uuid::Uuid;
 /// Port for task queue operations following hexagonal architecture
 ///
 /// Defines the interface for task storage and retrieval operations.
-/// Implementations can use SQLite, PostgreSQL, or in-memory storage.
+/// Implementations can use `SQLite`, `PostgreSQL`, or in-memory storage.
 ///
 /// # Examples
 ///

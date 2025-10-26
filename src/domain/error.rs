@@ -31,10 +31,7 @@ pub enum TaskError {
 
     /// Invalid status transition attempted
     #[error("Invalid status transition from {from:?} to {to:?}")]
-    InvalidStatusTransition {
-        from: String,
-        to: String,
-    },
+    InvalidStatusTransition { from: String, to: String },
 
     /// Task is blocked by unresolved dependencies
     #[error("Task is blocked by {0} unresolved dependencies")]
@@ -43,12 +40,10 @@ pub enum TaskError {
 
 impl TaskError {
     /// Returns true if this error represents a permanent failure (should not retry)
-    pub fn is_permanent(&self) -> bool {
+    pub const fn is_permanent(&self) -> bool {
         matches!(
             self,
-            TaskError::MaxRetriesExceeded
-                | TaskError::CircularDependency
-                | TaskError::InvalidPriority(_)
+            Self::MaxRetriesExceeded | Self::CircularDependency | Self::InvalidPriority(_)
         )
     }
 
@@ -92,11 +87,8 @@ pub enum DatabaseError {
 
 impl DatabaseError {
     /// Returns true if this error is transient and could succeed on retry
-    pub fn is_transient(&self) -> bool {
-        matches!(
-            self,
-            DatabaseError::ConnectionFailed(_) | DatabaseError::TransactionFailed(_)
-        )
+    pub const fn is_transient(&self) -> bool {
+        matches!(self, Self::ConnectionFailed(_) | Self::TransactionFailed(_))
     }
 }
 
@@ -134,22 +126,19 @@ pub enum ClaudeApiError {
 
 impl ClaudeApiError {
     /// Returns true if this error is transient and should be retried
-    pub fn is_transient(&self) -> bool {
+    pub const fn is_transient(&self) -> bool {
         match self {
-            ClaudeApiError::RateLimitExceeded
-            | ClaudeApiError::Timeout(_)
-            | ClaudeApiError::RequestFailed(_) => true,
-            ClaudeApiError::ApiError { status, .. } => *status >= 500,
+            Self::RateLimitExceeded | Self::Timeout(_) | Self::RequestFailed(_) => true,
+            Self::ApiError { status, .. } => *status >= 500,
             _ => false,
         }
     }
 
     /// Returns true if this error is permanent and should not be retried
-    pub fn is_permanent(&self) -> bool {
+    pub const fn is_permanent(&self) -> bool {
         match self {
-            ClaudeApiError::AuthenticationFailed(_)
-            | ClaudeApiError::TokenLimitExceeded { .. } => true,
-            ClaudeApiError::ApiError { status, .. } => *status == 400 || *status == 401,
+            Self::AuthenticationFailed(_) | Self::TokenLimitExceeded { .. } => true,
+            Self::ApiError { status, .. } => *status == 400 || *status == 401,
             _ => false,
         }
     }
@@ -189,12 +178,10 @@ pub enum McpError {
 
 impl McpError {
     /// Returns true if this error is transient and could succeed on retry
-    pub fn is_transient(&self) -> bool {
+    pub const fn is_transient(&self) -> bool {
         matches!(
             self,
-            McpError::ServerCrashed
-                | McpError::HealthCheckFailed(_)
-                | McpError::ToolCallFailed(_)
+            Self::ServerCrashed | Self::HealthCheckFailed(_) | Self::ToolCallFailed(_)
         )
     }
 }
@@ -299,22 +286,26 @@ mod tests {
     fn test_claude_api_error_is_transient() {
         assert!(ClaudeApiError::RateLimitExceeded.is_transient());
         assert!(ClaudeApiError::Timeout(30).is_transient());
-        assert!(ClaudeApiError::ApiError {
-            status: 500,
-            message: "error".to_string()
-        }
-        .is_transient());
+        assert!(
+            ClaudeApiError::ApiError {
+                status: 500,
+                message: "error".to_string()
+            }
+            .is_transient()
+        );
         assert!(!ClaudeApiError::AuthenticationFailed("invalid key".to_string()).is_transient());
     }
 
     #[test]
     fn test_claude_api_error_is_permanent() {
         assert!(ClaudeApiError::AuthenticationFailed("invalid key".to_string()).is_permanent());
-        assert!(ClaudeApiError::TokenLimitExceeded {
-            requested: 10000,
-            limit: 8000
-        }
-        .is_permanent());
+        assert!(
+            ClaudeApiError::TokenLimitExceeded {
+                requested: 10000,
+                limit: 8000
+            }
+            .is_permanent()
+        );
         assert!(!ClaudeApiError::RateLimitExceeded.is_permanent());
     }
 
@@ -343,7 +334,10 @@ mod tests {
     #[test]
     fn test_config_error_display() {
         let err = ConfigError::FileNotFound("/path/to/config.yaml".to_string());
-        assert_eq!(err.to_string(), "Config file not found: /path/to/config.yaml");
+        assert_eq!(
+            err.to_string(),
+            "Config file not found: /path/to/config.yaml"
+        );
 
         let err = ConfigError::InvalidValue {
             field: "priority".to_string(),

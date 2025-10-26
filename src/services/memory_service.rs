@@ -41,10 +41,10 @@ pub struct MemoryService {
 }
 
 impl MemoryService {
-    /// Create a new MemoryService with the given repository
+    /// Create a new `MemoryService` with the given repository
     ///
     /// # Arguments
-    /// * `repo` - Arc-wrapped trait object implementing MemoryRepository
+    /// * `repo` - Arc-wrapped trait object implementing `MemoryRepository`
     pub fn new(repo: Arc<dyn MemoryRepository>) -> Self {
         Self { repo }
     }
@@ -68,7 +68,10 @@ impl MemoryService {
     #[instrument(skip(self, memory), fields(namespace = %memory.namespace, key = %memory.key), err)]
     pub async fn add(&self, memory: Memory) -> Result<i64> {
         // Validate memory doesn't already exist
-        if let Some(existing) = self.repo.get(&memory.namespace, &memory.key).await
+        if let Some(existing) = self
+            .repo
+            .get(&memory.namespace, &memory.key)
+            .await
             .context("Failed to check for existing memory")?
         {
             if existing.is_active() {
@@ -206,18 +209,15 @@ impl MemoryService {
         updated_by: &str,
     ) -> Result<u32> {
         // Verify memory exists and is active
-        let existing = self.repo
+        let existing = self
+            .repo
             .get(namespace, key)
             .await
             .context("Failed to check existing memory")?
-            .ok_or_else(|| anyhow!("Memory not found at {}:{}", namespace, key))?;
+            .ok_or_else(|| anyhow!("Memory not found at {namespace}:{key}"))?;
 
         if !existing.is_active() {
-            return Err(anyhow!(
-                "Cannot update deleted memory at {}:{}",
-                namespace,
-                key
-            ));
+            return Err(anyhow!("Cannot update deleted memory at {namespace}:{key}"));
         }
 
         // Update via repository (creates new version)
@@ -230,7 +230,7 @@ impl MemoryService {
     /// Soft delete a memory
     ///
     /// Marks the memory as deleted without physically removing it from storage.
-    /// Deleted memories won't appear in get() or search() results.
+    /// Deleted memories won't appear in `get()` or `search()` results.
     ///
     /// # Arguments
     /// * `namespace` - The hierarchical namespace
@@ -251,7 +251,7 @@ impl MemoryService {
             .get(namespace, key)
             .await
             .context("Failed to check existing memory")?
-            .ok_or_else(|| anyhow!("Memory not found at {}:{}", namespace, key))?;
+            .ok_or_else(|| anyhow!("Memory not found at {namespace}:{key}"))?;
 
         // Soft delete
         self.repo
@@ -362,10 +362,7 @@ mod tests {
             .returning(|_, _| Ok(None));
 
         // Expect insert to succeed
-        mock_repo
-            .expect_insert()
-            .times(1)
-            .returning(|_| Ok(42));
+        mock_repo.expect_insert().times(1).returning(|_| Ok(42));
 
         let service = MemoryService::new(Arc::new(mock_repo));
         let result = service.add(memory).await;
@@ -445,11 +442,7 @@ mod tests {
 
         mock_repo
             .expect_search()
-            .with(
-                eq("test:namespace"),
-                eq(Some(MemoryType::Semantic)),
-                eq(50),
-            )
+            .with(eq("test:namespace"), eq(Some(MemoryType::Semantic)), eq(50))
             .times(1)
             .returning(move |_, _, _| Ok(vec![memory1.clone(), memory2.clone()]));
 

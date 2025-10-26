@@ -9,13 +9,13 @@ use super::errors::DatabaseError;
 use crate::domain::models::{Session, SessionEvent};
 use crate::domain::ports::SessionRepository;
 
-/// SQLite implementation of SessionRepository
+/// `SQLite` implementation of `SessionRepository`
 pub struct SessionRepositoryImpl {
     pool: SqlitePool,
 }
 
 impl SessionRepositoryImpl {
-    pub fn new(pool: SqlitePool) -> Self {
+    pub const fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 }

@@ -17,9 +17,9 @@ pub enum MemoryType {
 impl std::fmt::Display for MemoryType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MemoryType::Semantic => write!(f, "semantic"),
-            MemoryType::Episodic => write!(f, "episodic"),
-            MemoryType::Procedural => write!(f, "procedural"),
+            Self::Semantic => write!(f, "semantic"),
+            Self::Episodic => write!(f, "episodic"),
+            Self::Procedural => write!(f, "procedural"),
         }
     }
 }
@@ -29,10 +29,10 @@ impl std::str::FromStr for MemoryType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "semantic" => Ok(MemoryType::Semantic),
-            "episodic" => Ok(MemoryType::Episodic),
-            "procedural" => Ok(MemoryType::Procedural),
-            _ => Err(format!("Invalid memory type: {}", s)),
+            "semantic" => Ok(Self::Semantic),
+            "episodic" => Ok(Self::Episodic),
+            "procedural" => Ok(Self::Procedural),
+            _ => Err(format!("Invalid memory type: {s}")),
         }
     }
 }
@@ -129,7 +129,7 @@ impl Memory {
     }
 
     /// Check if memory is active (not deleted)
-    pub fn is_active(&self) -> bool {
+    pub const fn is_active(&self) -> bool {
         !self.is_deleted
     }
 
@@ -153,9 +153,18 @@ mod tests {
 
     #[test]
     fn test_memory_type_from_str() {
-        assert_eq!("semantic".parse::<MemoryType>().unwrap(), MemoryType::Semantic);
-        assert_eq!("EPISODIC".parse::<MemoryType>().unwrap(), MemoryType::Episodic);
-        assert_eq!("Procedural".parse::<MemoryType>().unwrap(), MemoryType::Procedural);
+        assert_eq!(
+            "semantic".parse::<MemoryType>().unwrap(),
+            MemoryType::Semantic
+        );
+        assert_eq!(
+            "EPISODIC".parse::<MemoryType>().unwrap(),
+            MemoryType::Episodic
+        );
+        assert_eq!(
+            "Procedural".parse::<MemoryType>().unwrap(),
+            MemoryType::Procedural
+        );
         assert!("invalid".parse::<MemoryType>().is_err());
     }
 
@@ -188,10 +197,7 @@ mod tests {
             "user1".to_string(),
         );
 
-        let updated = original.with_new_version(
-            json!({"data": "new"}),
-            "user2".to_string(),
-        );
+        let updated = original.with_new_version(json!({"data": "new"}), "user2".to_string());
 
         assert_eq!(updated.namespace, original.namespace);
         assert_eq!(updated.key, original.key);

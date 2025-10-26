@@ -4,7 +4,9 @@ pub mod infrastructure;
 pub mod services;
 
 // Re-export commonly used types for convenience
-pub use application::{ConvergenceStrategy, LoopExecutor, LoopState, TaskCoordinator, TaskStatusUpdate};
+pub use application::{
+    ConvergenceStrategy, LoopExecutor, LoopState, TaskCoordinator, TaskStatusUpdate,
+};
 pub use domain::models::{
     Agent, AgentStatus, Config, DatabaseConfig, LoggingConfig, McpServerConfig, Memory, MemoryType,
     RateLimitConfig, ResourceLimitsConfig, RetryConfig,

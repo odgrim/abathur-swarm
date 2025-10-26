@@ -42,7 +42,8 @@ pub trait MemoryRepository: Send + Sync {
     /// * `Ok(Some(Memory))` - The specific version if found
     /// * `Ok(None)` - If not found
     /// * `Err(_)` - If query fails
-    async fn get_version(&self, namespace: &str, key: &str, version: u32) -> Result<Option<Memory>>;
+    async fn get_version(&self, namespace: &str, key: &str, version: u32)
+    -> Result<Option<Memory>>;
 
     /// Search memories by namespace prefix and optional type filter
     ///
@@ -100,11 +101,8 @@ pub trait MemoryRepository: Send + Sync {
     /// # Returns
     /// * `Ok(usize)` - Count of matching memories (excluding deleted)
     /// * `Err(_)` - If query fails
-    async fn count(
-        &self,
-        namespace_prefix: &str,
-        memory_type: Option<MemoryType>,
-    ) -> Result<usize>;
+    async fn count(&self, namespace_prefix: &str, memory_type: Option<MemoryType>)
+    -> Result<usize>;
 
     /// List all versions of a memory
     ///

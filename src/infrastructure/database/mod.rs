@@ -1,6 +1,6 @@
 //! Database infrastructure layer
 //!
-//! This module provides SQLite database connectivity with:
+//! This module provides `SQLite` database connectivity with:
 //! - Connection pooling with sqlx
 //! - WAL mode for concurrent access
 //! - Automatic migrations

@@ -17,10 +17,10 @@ pub struct TaskStatusUpdate {
 
 /// Coordinates task lifecycle, dependency resolution, and priority scheduling
 ///
-/// The TaskCoordinator is the central orchestration component that:
-/// - Resolves task dependencies using the DependencyResolver
-/// - Calculates and updates task priorities using the PriorityCalculator
-/// - Manages task status transitions through the TaskQueueService
+/// The `TaskCoordinator` is the central orchestration component that:
+/// - Resolves task dependencies using the `DependencyResolver`
+/// - Calculates and updates task priorities using the `PriorityCalculator`
+/// - Manages task status transitions through the `TaskQueueService`
 /// - Triggers dependent tasks when prerequisites complete
 /// - Handles task failures and cascading effects
 ///
@@ -59,7 +59,7 @@ pub struct TaskCoordinator {
 }
 
 impl TaskCoordinator {
-    /// Create a new TaskCoordinator with dependency injection
+    /// Create a new `TaskCoordinator` with dependency injection
     ///
     /// # Arguments
     ///
@@ -69,7 +69,7 @@ impl TaskCoordinator {
     ///
     /// # Returns
     ///
-    /// A new TaskCoordinator instance with a status update channel (buffer size: 1000)
+    /// A new `TaskCoordinator` instance with a status update channel (buffer size: 1000)
     pub fn new(
         task_queue: Arc<dyn TaskQueueService>,
         dependency_resolver: Arc<DependencyResolver>,
@@ -98,7 +98,7 @@ impl TaskCoordinator {
     ///
     /// This should be called once to start the background status monitoring task.
     /// Returns None if the receiver has already been taken.
-    pub fn take_status_receiver(&mut self) -> Option<mpsc::Receiver<TaskStatusUpdate>> {
+    pub const fn take_status_receiver(&mut self) -> Option<mpsc::Receiver<TaskStatusUpdate>> {
         self.status_rx.take()
     }
 
@@ -281,7 +281,10 @@ impl TaskCoordinator {
     /// * `Err` - If task not found or database error
     #[instrument(skip(self), fields(task_id = %task_id, error = %error_message))]
     pub async fn handle_task_failure(&self, task_id: Uuid, error_message: String) -> Result<()> {
-        error!("Handling task failure for task {}: {}", task_id, error_message);
+        error!(
+            "Handling task failure for task {}: {}",
+            task_id, error_message
+        );
 
         // Mark task as failed
         self.task_queue
@@ -344,7 +347,7 @@ impl TaskCoordinator {
                 .task_queue
                 .get_task(dep_id)
                 .await
-                .context(format!("Failed to get dependency task {}", dep_id))?;
+                .context(format!("Failed to get dependency task {dep_id}"))?;
 
             if dep_task.status != TaskStatus::Completed {
                 return Ok(false);
@@ -476,11 +479,7 @@ mod tests {
         }
     }
 
-    fn create_test_task(
-        id: &str,
-        status: TaskStatus,
-        dependencies: Option<Vec<&str>>,
-    ) -> Task {
+    fn create_test_task(id: &str, status: TaskStatus, dependencies: Option<Vec<&str>>) -> Task {
         let task_id = Uuid::parse_str(id).unwrap();
         let deps = dependencies.map(|d| d.iter().map(|&s| Uuid::parse_str(s).unwrap()).collect());
 
@@ -523,11 +522,8 @@ mod tests {
         let dependency_resolver = Arc::new(DependencyResolver::new());
         let priority_calc = Arc::new(MockPriorityCalculator);
 
-        let coordinator = TaskCoordinator::new(
-            task_queue.clone(),
-            dependency_resolver,
-            priority_calc,
-        );
+        let coordinator =
+            TaskCoordinator::new(task_queue.clone(), dependency_resolver, priority_calc);
 
         let task_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let task = create_test_task(
@@ -555,11 +551,8 @@ mod tests {
         let dependency_resolver = Arc::new(DependencyResolver::new());
         let priority_calc = Arc::new(MockPriorityCalculator);
 
-        let coordinator = TaskCoordinator::new(
-            task_queue.clone(),
-            dependency_resolver,
-            priority_calc,
-        );
+        let coordinator =
+            TaskCoordinator::new(task_queue.clone(), dependency_resolver, priority_calc);
 
         let id1 = "00000000-0000-0000-0000-000000000001";
         let id2 = "00000000-0000-0000-0000-000000000002";
@@ -589,11 +582,8 @@ mod tests {
         let dependency_resolver = Arc::new(DependencyResolver::new());
         let priority_calc = Arc::new(MockPriorityCalculator);
 
-        let coordinator = TaskCoordinator::new(
-            task_queue.clone(),
-            dependency_resolver,
-            priority_calc,
-        );
+        let coordinator =
+            TaskCoordinator::new(task_queue.clone(), dependency_resolver, priority_calc);
 
         let id1 = "00000000-0000-0000-0000-000000000001";
         let id2 = "00000000-0000-0000-0000-000000000002";
@@ -620,11 +610,8 @@ mod tests {
         let dependency_resolver = Arc::new(DependencyResolver::new());
         let priority_calc = Arc::new(MockPriorityCalculator);
 
-        let coordinator = TaskCoordinator::new(
-            task_queue.clone(),
-            dependency_resolver,
-            priority_calc,
-        );
+        let coordinator =
+            TaskCoordinator::new(task_queue.clone(), dependency_resolver, priority_calc);
 
         let id1 = "00000000-0000-0000-0000-000000000001";
         let id2 = "00000000-0000-0000-0000-000000000002";
@@ -656,11 +643,8 @@ mod tests {
         let dependency_resolver = Arc::new(DependencyResolver::new());
         let priority_calc = Arc::new(MockPriorityCalculator);
 
-        let coordinator = TaskCoordinator::new(
-            task_queue.clone(),
-            dependency_resolver,
-            priority_calc,
-        );
+        let coordinator =
+            TaskCoordinator::new(task_queue.clone(), dependency_resolver, priority_calc);
 
         let task_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let task = create_test_task(

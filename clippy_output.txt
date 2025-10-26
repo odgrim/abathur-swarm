@@ -1,0 +1,1986 @@
+    Checking abathur v0.1.0 (/Users/odgrim/dev/home/agentics/abathur/.abathur/features/rust-rewrite)
+error: long literal lacking separators
+   --> src/domain/models/config.rs:179:5
+    |
+179 |     300000
+    |     ^^^^^^ help: consider: `300_000`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unreadable_literal
+    = note: `-D clippy::unreadable-literal` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unreadable_literal)]`
+
+error: this could be a `const fn`
+  --> src/application/agent_executor.rs:36:5
+   |
+36 | /     pub fn new(
+37 | |         agent_id: Uuid,
+38 | |         task_id: Uuid,
+39 | |         agent_type: String,
+...  |
+51 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+   = note: `-D clippy::missing-const-for-fn` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::missing_const_for_fn)]`
+help: make the function `const`
+   |
+36 |     pub const fn new(
+   |         +++++
+
+error: missing `#[must_use]` attribute on a method returning `Self`
+  --> src/application/agent_executor.rs:54:5
+   |
+54 | /     pub fn with_input_data(mut self, input_data: Value) -> Self {
+55 | |         self.input_data = Some(input_data);
+56 | |         self
+57 | |     }
+   | |_____^
+   |
+   = help: consider adding the `#[must_use]` attribute to the method or directly to the `Self` type
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#return_self_not_must_use
+   = note: `-D clippy::return-self-not-must-use` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::return_self_not_must_use)]`
+
+error: item in documentation is missing backticks
+   --> src/application/agent_executor.rs:109:66
+    |
+109 |     /// Reserved for future MCP tool integration. Currently, the execute_inner
+    |                                                                  ^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+    = note: `-D clippy::doc-markdown` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::doc_markdown)]`
+help: try
+    |
+109 -     /// Reserved for future MCP tool integration. Currently, the execute_inner
+109 +     /// Reserved for future MCP tool integration. Currently, the `execute_inner`
+    |
+
+error: item in documentation is missing backticks
+   --> src/application/agent_executor.rs:116:22
+    |
+116 |     /// Create a new AgentExecutor
+    |                      ^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+116 -     /// Create a new AgentExecutor
+116 +     /// Create a new `AgentExecutor`
+    |
+
+error: use Option::map_or instead of an if let/else
+   --> src/application/agent_executor.rs:178:9
+    |
+178 | /         match timeout(timeout_duration, self.execute_with_retry(ctx)).await {
+179 | |             Ok(result) => result,
+180 | |             Err(_) => Err(ExecutionError::Timeout {
+181 | |                 task_id,
+182 | |                 timeout_secs: timeout_duration.as_secs(),
+183 | |             }),
+184 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#option_if_let_else
+    = note: `-D clippy::option-if-let-else` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::option_if_let_else)]`
+help: try
+    |
+178 ~         (timeout(timeout_duration, self.execute_with_retry(ctx)).await).map_or(Err(ExecutionError::Timeout {
+179 +                 task_id,
+180 +                 timeout_secs: timeout_duration.as_secs(),
+181 +             }), |result| result)
+    |
+
+error: item in documentation is missing backticks
+   --> src/application/agent_executor.rs:190:31
+    |
+190 |     /// Non-retryable errors (InvalidApiKey, InvalidArguments) fail immediately.
+    |                               ^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+190 -     /// Non-retryable errors (InvalidApiKey, InvalidArguments) fail immediately.
+190 +     /// Non-retryable errors (`InvalidApiKey`, InvalidArguments) fail immediately.
+    |
+
+error: item in documentation is missing backticks
+   --> src/application/agent_executor.rs:190:46
+    |
+190 |     /// Non-retryable errors (InvalidApiKey, InvalidArguments) fail immediately.
+    |                                              ^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+190 -     /// Non-retryable errors (InvalidApiKey, InvalidArguments) fail immediately.
+190 +     /// Non-retryable errors (InvalidApiKey, `InvalidArguments`) fail immediately.
+    |
+
+error: casting `u128` to `u64` may truncate the value
+   --> src/application/agent_executor.rs:220:61
+    |
+220 |                         let backoff = Duration::from_millis(backoff_ms.min(max_backoff.as_millis()) as u64);
+    |                                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: if this is intentional allow the lint with `#[allow(clippy::cast_possible_truncation)]` ...
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_truncation
+    = note: `-D clippy::cast-possible-truncation` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::cast_possible_truncation)]`
+help: ... or use `try_from` and handle the error accordingly
+    |
+220 -                         let backoff = Duration::from_millis(backoff_ms.min(max_backoff.as_millis()) as u64);
+220 +                         let backoff = Duration::from_millis(u64::try_from(backoff_ms.min(max_backoff.as_millis())));
+    |
+
+error: unused `self` argument
+   --> src/application/agent_executor.rs:301:21
+    |
+301 |     fn build_prompt(&self, ctx: &ExecutionContext) -> String {
+    |                     ^^^^^
+    |
+    = help: consider refactoring to an associated function
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_self
+    = note: `-D clippy::unused-self` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unused_self)]`
+
+error: `format!(..)` appended to existing `String`
+   --> src/application/agent_executor.rs:308:13
+    |
+308 |             prompt.push_str(&format!("\nInput Data:\n{}\n", input_data));
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using `write!` to avoid the extra allocation
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#format_push_string
+    = note: `-D clippy::format-push-string` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::format_push_string)]`
+
+error: variables can be used directly in the `format!` string
+   --> src/application/agent_executor.rs:308:30
+    |
+308 |             prompt.push_str(&format!("\nInput Data:\n{}\n", input_data));
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+    = note: `-D clippy::uninlined-format-args` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::uninlined_format_args)]`
+help: change this to
+    |
+308 -             prompt.push_str(&format!("\nInput Data:\n{}\n", input_data));
+308 +             prompt.push_str(&format!("\nInput Data:\n{input_data}\n"));
+    |
+
+error: item in documentation is missing backticks
+   --> src/application/agent_executor.rs:317:11
+    |
+317 |     /// - RateLimitExceeded
+    |           ^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+317 -     /// - RateLimitExceeded
+317 +     /// - `RateLimitExceeded`
+    |
+
+error: item in documentation is missing backticks
+   --> src/application/agent_executor.rs:318:11
+    |
+318 |     /// - NetworkError
+    |           ^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+318 -     /// - NetworkError
+318 +     /// - `NetworkError`
+    |
+
+error: item in documentation is missing backticks
+   --> src/application/agent_executor.rs:319:11
+    |
+319 |     /// - ConnectionError
+    |           ^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+319 -     /// - ConnectionError
+319 +     /// - `ConnectionError`
+    |
+
+error: item in documentation is missing backticks
+   --> src/application/agent_executor.rs:323:11
+    |
+323 |     /// - InvalidApiKey
+    |           ^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+323 -     /// - InvalidApiKey
+323 +     /// - `InvalidApiKey`
+    |
+
+error: item in documentation is missing backticks
+   --> src/application/agent_executor.rs:324:11
+    |
+324 |     /// - InvalidArguments
+    |           ^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+324 -     /// - InvalidArguments
+324 +     /// - `InvalidArguments`
+    |
+
+error: item in documentation is missing backticks
+   --> src/application/agent_executor.rs:325:11
+    |
+325 |     /// - ServerNotFound
+    |           ^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+325 -     /// - ServerNotFound
+325 +     /// - `ServerNotFound`
+    |
+
+error: item in documentation is missing backticks
+   --> src/application/agent_executor.rs:326:11
+    |
+326 |     /// - ToolNotFound
+    |           ^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+326 -     /// - ToolNotFound
+326 +     /// - `ToolNotFound`
+    |
+
+error: this could be a `const fn`
+   --> src/application/agent_executor.rs:327:5
+    |
+327 | /     fn is_retryable_error(err: &ExecutionError) -> bool {
+328 | |         match err {
+329 | |             ExecutionError::ClaudeError { source, .. } => matches!(
+330 | |                 source,
+...   |
+341 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+327 |     const fn is_retryable_error(err: &ExecutionError) -> bool {
+    |     +++++
+
+error: item in documentation is missing backticks
+ --> src/application/loop_executor.rs:1:5
+  |
+1 | //! LoopExecutor - Iterative refinement loops with convergence detection
+  |     ^^^^^^^^^^^^
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+  |
+1 - //! LoopExecutor - Iterative refinement loops with convergence detection
+1 + //! `LoopExecutor` - Iterative refinement loops with convergence detection
+  |
+
+error: unnecessary structure name repetition
+  --> src/application/loop_executor.rs:44:13
+   |
+44 |             ConvergenceStrategy::Fixed(max_iter) => state.iteration >= *max_iter,
+   |             ^^^^^^^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+   = note: `-D clippy::use-self` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::use_self)]`
+
+error: unnecessary structure name repetition
+  --> src/application/loop_executor.rs:46:13
+   |
+46 |             ConvergenceStrategy::Adaptive(threshold) => {
+   |             ^^^^^^^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: use Option::map_or instead of an if let/else
+  --> src/application/loop_executor.rs:47:17
+   |
+47 | /                 if let Some(change_rate) = state.change_rate {
+48 | |                     change_rate < *threshold
+49 | |                 } else {
+50 | |                     false // No change rate yet, can't converge
+51 | |                 }
+   | |_________________^ help: try: `state.change_rate.map_or(false, |change_rate| change_rate < *threshold)`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#option_if_let_else
+
+error: unnecessary structure name repetition
+  --> src/application/loop_executor.rs:54:13
+   |
+54 |             ConvergenceStrategy::Threshold(quality_threshold) => {
+   |             ^^^^^^^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: use Option::map_or instead of an if let/else
+  --> src/application/loop_executor.rs:55:17
+   |
+55 | /                 if let Some(quality) = state.quality_metric {
+56 | |                     quality >= *quality_threshold
+57 | |                 } else {
+58 | |                     false // No quality metric yet, can't converge
+59 | |                 }
+   | |_________________^ help: try: `state.quality_metric.map_or(false, |quality| quality >= *quality_threshold)`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#option_if_let_else
+
+error: this argument is passed by value, but not consumed in the function body
+   --> src/application/loop_executor.rs:119:17
+    |
+119 |         result: String,
+    |                 ^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_pass_by_value
+    = note: `-D clippy::needless-pass-by-value` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_pass_by_value)]`
+help: consider changing the type to
+    |
+119 -         result: String,
+119 +         result: &str,
+    |
+help: change `result.clone()` to
+    |
+129 -         self.last_result = Some(result.clone());
+129 +         self.last_result = Some(result.to_string());
+    |
+
+error: this function's return value is unnecessary
+   --> src/application/loop_executor.rs:117:5
+    |
+117 | /     fn update_iteration(
+118 | |         &mut self,
+119 | |         result: String,
+120 | |         quality_metric: Option<f64>,
+121 | |     ) -> Result<()> {
+    | |___________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_wraps
+    = note: `-D clippy::unnecessary-wraps` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_wraps)]`
+help: remove the return type...
+    |
+121 -     ) -> Result<()> {
+121 +     ) -> () {
+    |
+help: ...and then remove returned values
+    |
+144 -         Ok(())
+    |
+
+error: item in documentation is missing backticks
+   --> src/application/loop_executor.rs:158:5
+    |
+158 | /// LoopExecutor configuration
+    |     ^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+158 - /// LoopExecutor configuration
+158 + /// `LoopExecutor` configuration
+    |
+
+error: item in documentation is missing backticks
+   --> src/application/loop_executor.rs:185:5
+    |
+185 | /// LoopExecutor - orchestrates iterative refinement with convergence detection
+    |     ^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+185 - /// LoopExecutor - orchestrates iterative refinement with convergence detection
+185 + /// `LoopExecutor` - orchestrates iterative refinement with convergence detection
+    |
+
+error: item in documentation is missing backticks
+   --> src/application/loop_executor.rs:224:20
+    |
+224 |     /// Create new LoopExecutor with convergence strategy
+    |                    ^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+224 -     /// Create new LoopExecutor with convergence strategy
+224 +     /// Create new `LoopExecutor` with convergence strategy
+    |
+
+error: the function has a cognitive complexity of (59/25)
+   --> src/application/loop_executor.rs:286:14
+    |
+286 |     async fn run_loop<F, Fut>(
+    |              ^^^^^^^^
+    |
+    = help: you could split it up into multiple smaller functions
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cognitive_complexity
+    = note: `-D clippy::cognitive-complexity` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::cognitive_complexity)]`
+
+error: variables can be used directly in the `format!` string
+   --> src/application/loop_executor.rs:338:51
+    |
+338 | ...                   return Err(e).context(format!("Iteration {} failed", current_iteration));
+    |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+338 -                             return Err(e).context(format!("Iteration {} failed", current_iteration));
+338 +                             return Err(e).context(format!("Iteration {current_iteration} failed"));
+    |
+
+error: unused `self` argument
+   --> src/application/loop_executor.rs:378:33
+    |
+378 |     fn calculate_quality_metric(&self, _result: &str) -> Option<f64> {
+    |                                 ^^^^^
+    |
+    = help: consider refactoring to an associated function
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_self
+
+error: this could be a `const fn`
+   --> src/application/loop_executor.rs:378:5
+    |
+378 | /     fn calculate_quality_metric(&self, _result: &str) -> Option<f64> {
+379 | |         // TODO: Implement domain-specific quality metric
+380 | |         // For now, return None (quality not measured)
+381 | |         None
+382 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+378 |     const fn calculate_quality_metric(&self, _result: &str) -> Option<f64> {
+    |     +++++
+
+error: temporary with significant `Drop` can be early dropped
+   --> src/application/loop_executor.rs:397:29
+    |
+396 |                       _ = checkpoint_ticker.tick() => {
+    |  _____________________________________________________-
+397 | |                         let state_guard = state.read().await;
+    | |                             ^^^^^^^^^^^
+...   |
+417 | |                     }
+    | |_____________________- temporary `state_guard` is currently being dropped at the end of its contained scope
+    |
+    = note: this might lead to unnecessary resource contention
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#significant_drop_tightening
+    = note: `-D clippy::significant-drop-tightening` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::significant_drop_tightening)]`
+help: drop the temporary after the end of its last usage
+   --> /Users/odgrim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-0.1.41/src/macros.rs:2961:127
+    |
+2961~         $crate::valueset!(@ { (&$next, $crate::__macro_support::Option::Some(&$crate::__macro_support::format_args!($($rest)+)
+2962~                                         drop(state_guard); as &dyn Value)), $($out),* }, $next, )
+    |
+
+error: variables can be used directly in the `format!` string
+   --> src/application/loop_executor.rs:402:71
+    |
+402 | ...                   let checkpoint_path = checkpoint_dir.join(format!("{}.json", loop_id));
+    |                                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+402 -                             let checkpoint_path = checkpoint_dir.join(format!("{}.json", loop_id));
+402 +                             let checkpoint_path = checkpoint_dir.join(format!("{loop_id}.json"));
+    |
+
+error: temporary with significant `Drop` can be early dropped
+   --> src/application/loop_executor.rs:430:13
+    |
+429 |       async fn save_checkpoint(&self) -> Result<()> {
+    |  ___________________________________________________-
+430 | |         let state = self.state.read().await;
+    | |             ^^^^^
+431 | |         let checkpoint_path = self.config.checkpoint_dir.join(format!("{}.json", state.loop_id));
+...   |
+441 | |         Ok(())
+442 | |     }
+    | |_____- temporary `state` is currently being dropped at the end of its contained scope
+    |
+    = note: this might lead to unnecessary resource contention
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#significant_drop_tightening
+help: drop the temporary after the end of its last usage
+    |
+434 ~             .context("Failed to serialize checkpoint")?;
+435 +         drop(state);
+    |
+
+error: this could be rewritten as `let...else`
+   --> src/application/loop_executor.rs:447:9
+    |
+447 | /         let mut entries = match fs::read_dir(&self.config.checkpoint_dir).await {
+448 | |             Ok(e) => e,
+449 | |             Err(_) => return Ok(None), // No checkpoint dir, no recovery
+450 | |         };
+    | |__________^ help: consider writing: `let Ok(mut entries) = fs::read_dir(&self.config.checkpoint_dir).await else { return Ok(None) };`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_let_else
+    = note: `-D clippy::manual-let-else` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::manual_let_else)]`
+
+error: casting `usize` to `f64` causes a loss of precision on targets with 64-bit wide pointers (`usize` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+   --> src/application/loop_executor.rs:510:19
+    |
+510 |     let max_len = previous.len().max(current.len()) as f64;
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_precision_loss
+    = note: `-D clippy::cast-precision-loss` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::cast_precision_loss)]`
+
+error: casting `usize` to `f64` causes a loss of precision on targets with 64-bit wide pointers (`usize` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+   --> src/application/loop_executor.rs:511:29
+    |
+511 |       let common_prefix_len = previous
+    |  _____________________________^
+512 | |         .chars()
+513 | |         .zip(current.chars())
+514 | |         .take_while(|(a, b)| a == b)
+515 | |         .count() as f64;
+    | |_______________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_precision_loss
+
+error: item in documentation is missing backticks
+  --> src/application/task_coordinator.rs:20:9
+   |
+20 | /// The TaskCoordinator is the central orchestration component that:
+   |         ^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+20 - /// The TaskCoordinator is the central orchestration component that:
+20 + /// The `TaskCoordinator` is the central orchestration component that:
+   |
+
+error: item in documentation is missing backticks
+  --> src/application/task_coordinator.rs:21:44
+   |
+21 | /// - Resolves task dependencies using the DependencyResolver
+   |                                            ^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+21 - /// - Resolves task dependencies using the DependencyResolver
+21 + /// - Resolves task dependencies using the `DependencyResolver`
+   |
+
+error: item in documentation is missing backticks
+  --> src/application/task_coordinator.rs:22:56
+   |
+22 | /// - Calculates and updates task priorities using the PriorityCalculator
+   |                                                        ^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+22 - /// - Calculates and updates task priorities using the PriorityCalculator
+22 + /// - Calculates and updates task priorities using the `PriorityCalculator`
+   |
+
+error: item in documentation is missing backticks
+  --> src/application/task_coordinator.rs:23:51
+   |
+23 | /// - Manages task status transitions through the TaskQueueService
+   |                                                   ^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+23 - /// - Manages task status transitions through the TaskQueueService
+23 + /// - Manages task status transitions through the `TaskQueueService`
+   |
+
+error: item in documentation is missing backticks
+  --> src/application/task_coordinator.rs:62:22
+   |
+62 |     /// Create a new TaskCoordinator with dependency injection
+   |                      ^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+62 -     /// Create a new TaskCoordinator with dependency injection
+62 +     /// Create a new `TaskCoordinator` with dependency injection
+   |
+
+error: item in documentation is missing backticks
+  --> src/application/task_coordinator.rs:72:15
+   |
+72 |     /// A new TaskCoordinator instance with a status update channel (buffer size: 1000)
+   |               ^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+72 -     /// A new TaskCoordinator instance with a status update channel (buffer size: 1000)
+72 +     /// A new `TaskCoordinator` instance with a status update channel (buffer size: 1000)
+   |
+
+error: this could be a `const fn`
+   --> src/application/task_coordinator.rs:101:5
+    |
+101 | /     pub fn take_status_receiver(&mut self) -> Option<mpsc::Receiver<TaskStatusUpdate>> {
+102 | |         self.status_rx.take()
+103 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+101 |     pub const fn take_status_receiver(&mut self) -> Option<mpsc::Receiver<TaskStatusUpdate>> {
+    |         +++++
+
+error: variables can be used directly in the `format!` string
+   --> src/application/task_coordinator.rs:347:26
+    |
+347 |                 .context(format!("Failed to get dependency task {}", dep_id))?;
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+347 -                 .context(format!("Failed to get dependency task {}", dep_id))?;
+347 +                 .context(format!("Failed to get dependency task {dep_id}"))?;
+    |
+
+error: this could be a `const fn`
+  --> src/domain/error.rs:46:5
+   |
+46 | /     pub fn is_permanent(&self) -> bool {
+47 | |         matches!(
+48 | |             self,
+49 | |             TaskError::MaxRetriesExceeded
+...  |
+53 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+   |
+46 |     pub const fn is_permanent(&self) -> bool {
+   |         +++++
+
+error: unnecessary structure name repetition
+  --> src/domain/error.rs:49:13
+   |
+49 |             TaskError::MaxRetriesExceeded
+   |             ^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/error.rs:50:19
+   |
+50 |                 | TaskError::CircularDependency
+   |                   ^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/error.rs:51:19
+   |
+51 |                 | TaskError::InvalidPriority(_)
+   |                   ^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: this could be a `const fn`
+   --> src/domain/error.rs:95:5
+    |
+ 95 | /     pub fn is_transient(&self) -> bool {
+ 96 | |         matches!(
+ 97 | |             self,
+ 98 | |             DatabaseError::ConnectionFailed(_) | DatabaseError::TransactionFailed(_)
+ 99 | |         )
+100 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+ 95 |     pub const fn is_transient(&self) -> bool {
+    |         +++++
+
+error: unnecessary structure name repetition
+  --> src/domain/error.rs:98:13
+   |
+98 |             DatabaseError::ConnectionFailed(_) | DatabaseError::TransactionFailed(_)
+   |             ^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/error.rs:98:50
+   |
+98 |             DatabaseError::ConnectionFailed(_) | DatabaseError::TransactionFailed(_)
+   |                                                  ^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: this could be a `const fn`
+   --> src/domain/error.rs:137:5
+    |
+137 | /     pub fn is_transient(&self) -> bool {
+138 | |         match self {
+139 | |             ClaudeApiError::RateLimitExceeded
+140 | |             | ClaudeApiError::Timeout(_)
+...   |
+145 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+137 |     pub const fn is_transient(&self) -> bool {
+    |         +++++
+
+error: unnecessary structure name repetition
+   --> src/domain/error.rs:139:13
+    |
+139 |             ClaudeApiError::RateLimitExceeded
+    |             ^^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+   --> src/domain/error.rs:140:15
+    |
+140 |             | ClaudeApiError::Timeout(_)
+    |               ^^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+   --> src/domain/error.rs:141:15
+    |
+141 |             | ClaudeApiError::RequestFailed(_) => true,
+    |               ^^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+   --> src/domain/error.rs:142:13
+    |
+142 |             ClaudeApiError::ApiError { status, .. } => *status >= 500,
+    |             ^^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: this could be a `const fn`
+   --> src/domain/error.rs:148:5
+    |
+148 | /     pub fn is_permanent(&self) -> bool {
+149 | |         match self {
+150 | |             ClaudeApiError::AuthenticationFailed(_)
+151 | |             | ClaudeApiError::TokenLimitExceeded { .. } => true,
+...   |
+155 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+148 |     pub const fn is_permanent(&self) -> bool {
+    |         +++++
+
+error: unnecessary structure name repetition
+   --> src/domain/error.rs:150:13
+    |
+150 |             ClaudeApiError::AuthenticationFailed(_)
+    |             ^^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+   --> src/domain/error.rs:151:15
+    |
+151 |             | ClaudeApiError::TokenLimitExceeded { .. } => true,
+    |               ^^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+   --> src/domain/error.rs:152:13
+    |
+152 |             ClaudeApiError::ApiError { status, .. } => *status == 400 || *status == 401,
+    |             ^^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: this could be a `const fn`
+   --> src/domain/error.rs:192:5
+    |
+192 | /     pub fn is_transient(&self) -> bool {
+193 | |         matches!(
+194 | |             self,
+195 | |             McpError::ServerCrashed
+...   |
+199 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+192 |     pub const fn is_transient(&self) -> bool {
+    |         +++++
+
+error: unnecessary structure name repetition
+   --> src/domain/error.rs:195:13
+    |
+195 |             McpError::ServerCrashed
+    |             ^^^^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+   --> src/domain/error.rs:196:19
+    |
+196 |                 | McpError::HealthCheckFailed(_)
+    |                   ^^^^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+   --> src/domain/error.rs:197:19
+    |
+197 |                 | McpError::ToolCallFailed(_)
+    |                   ^^^^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/agent.rs:19:13
+   |
+19 |             AgentStatus::Idle => write!(f, "idle"),
+   |             ^^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/agent.rs:20:13
+   |
+20 |             AgentStatus::Busy => write!(f, "busy"),
+   |             ^^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/agent.rs:21:13
+   |
+21 |             AgentStatus::Terminated => write!(f, "terminated"),
+   |             ^^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/agent.rs:31:26
+   |
+31 |             "idle" => Ok(AgentStatus::Idle),
+   |                          ^^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/agent.rs:32:26
+   |
+32 |             "busy" => Ok(AgentStatus::Busy),
+   |                          ^^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/agent.rs:33:32
+   |
+33 |             "terminated" => Ok(AgentStatus::Terminated),
+   |                                ^^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: variables can be used directly in the `format!` string
+  --> src/domain/models/agent.rs:34:22
+   |
+34 |             _ => Err(anyhow::anyhow!("Invalid agent status: {}", s)),
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+34 -             _ => Err(anyhow::anyhow!("Invalid agent status: {}", s)),
+34 +             _ => Err(anyhow::anyhow!("Invalid agent status: {s}")),
+   |
+
+error: this could be a `const fn`
+  --> src/domain/models/config.rs:36:1
+   |
+36 | / fn default_max_agents() -> usize {
+37 | |     10
+38 | | }
+   | |_^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+   |
+36 | const fn default_max_agents() -> usize {
+   | +++++
+
+error: item in documentation is missing backticks
+  --> src/domain/models/config.rs:58:17
+   |
+58 |     /// Path to SQLite database file
+   |                 ^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+58 -     /// Path to SQLite database file
+58 +     /// Path to `SQLite` database file
+   |
+
+error: this could be a `const fn`
+  --> src/domain/models/config.rs:71:1
+   |
+71 | / fn default_max_connections() -> u32 {
+72 | |     10
+73 | | }
+   | |_^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+   |
+71 | const fn default_max_connections() -> u32 {
+   | +++++
+
+error: this could be a `const fn`
+   --> src/domain/models/config.rs:109:1
+    |
+109 | / fn default_retention_days() -> u32 {
+110 | |     30
+111 | | }
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+109 | const fn default_retention_days() -> u32 {
+    | +++++
+
+error: this could be a `const fn`
+   --> src/domain/models/config.rs:136:1
+    |
+136 | / fn default_requests_per_second() -> f64 {
+137 | |     10.0
+138 | | }
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+136 | const fn default_requests_per_second() -> f64 {
+    | +++++
+
+error: this could be a `const fn`
+   --> src/domain/models/config.rs:140:1
+    |
+140 | / fn default_burst_size() -> u32 {
+141 | |     20
+142 | | }
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+140 | const fn default_burst_size() -> u32 {
+    | +++++
+
+error: this could be a `const fn`
+   --> src/domain/models/config.rs:170:1
+    |
+170 | / fn default_max_retries() -> u32 {
+171 | |     3
+172 | | }
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+170 | const fn default_max_retries() -> u32 {
+    | +++++
+
+error: this could be a `const fn`
+   --> src/domain/models/config.rs:174:1
+    |
+174 | / fn default_initial_backoff_ms() -> u64 {
+175 | |     10000
+176 | | }
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+174 | const fn default_initial_backoff_ms() -> u64 {
+    | +++++
+
+error: this could be a `const fn`
+   --> src/domain/models/config.rs:178:1
+    |
+178 | / fn default_max_backoff_ms() -> u64 {
+179 | |     300000
+180 | | }
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+178 | const fn default_max_backoff_ms() -> u64 {
+    | +++++
+
+error: this could be a `const fn`
+   --> src/domain/models/config.rs:224:1
+    |
+224 | / fn default_per_agent_memory_mb() -> u64 {
+225 | |     512
+226 | | }
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+224 | const fn default_per_agent_memory_mb() -> u64 {
+    | +++++
+
+error: this could be a `const fn`
+   --> src/domain/models/config.rs:228:1
+    |
+228 | / fn default_total_memory_mb() -> u64 {
+229 | |     4096
+230 | | }
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+228 | const fn default_total_memory_mb() -> u64 {
+    | +++++
+
+error: unnecessary structure name repetition
+  --> src/domain/models/memory.rs:20:13
+   |
+20 |             MemoryType::Semantic => write!(f, "semantic"),
+   |             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/memory.rs:21:13
+   |
+21 |             MemoryType::Episodic => write!(f, "episodic"),
+   |             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/memory.rs:22:13
+   |
+22 |             MemoryType::Procedural => write!(f, "procedural"),
+   |             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/memory.rs:32:30
+   |
+32 |             "semantic" => Ok(MemoryType::Semantic),
+   |                              ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/memory.rs:33:30
+   |
+33 |             "episodic" => Ok(MemoryType::Episodic),
+   |                              ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/memory.rs:34:32
+   |
+34 |             "procedural" => Ok(MemoryType::Procedural),
+   |                                ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: variables can be used directly in the `format!` string
+  --> src/domain/models/memory.rs:35:22
+   |
+35 |             _ => Err(format!("Invalid memory type: {}", s)),
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+35 -             _ => Err(format!("Invalid memory type: {}", s)),
+35 +             _ => Err(format!("Invalid memory type: {s}")),
+   |
+
+error: missing `#[must_use]` attribute on a method returning `Self`
+   --> src/domain/models/memory.rs:108:5
+    |
+108 | /     pub fn with_new_version(&self, value: Value, updated_by: String) -> Self {
+109 | |         Self {
+110 | |             id: 0, // New entry in database
+111 | |             namespace: self.namespace.clone(),
+...   |
+123 | |     }
+    | |_____^
+    |
+    = help: consider adding the `#[must_use]` attribute to the method or directly to the `Self` type
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#return_self_not_must_use
+
+error: this could be a `const fn`
+   --> src/domain/models/memory.rs:132:5
+    |
+132 | /     pub fn is_active(&self) -> bool {
+133 | |         !self.is_deleted
+134 | |     }
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+    |
+132 |     pub const fn is_active(&self) -> bool {
+    |         +++++
+
+error: you are deriving `PartialEq` and can implement `Eq`
+ --> src/domain/models/session.rs:6:48
+  |
+6 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+  |                                                ^^^^^^^^^ help: consider deriving `Eq` as well: `PartialEq, Eq`
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#derive_partial_eq_without_eq
+  = note: `-D clippy::derive-partial-eq-without-eq` implied by `-D warnings`
+  = help: to override `-D warnings` add `#[allow(clippy::derive_partial_eq_without_eq)]`
+
+error: you are deriving `PartialEq` and can implement `Eq`
+  --> src/domain/models/session.rs:17:48
+   |
+17 | #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+   |                                                ^^^^^^^^^ help: consider deriving `Eq` as well: `PartialEq, Eq`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#derive_partial_eq_without_eq
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:23:13
+   |
+23 |             TaskStatus::Pending => write!(f, "pending"),
+   |             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:24:13
+   |
+24 |             TaskStatus::Blocked => write!(f, "blocked"),
+   |             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:25:13
+   |
+25 |             TaskStatus::Ready => write!(f, "ready"),
+   |             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:26:13
+   |
+26 |             TaskStatus::Running => write!(f, "running"),
+   |             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:27:13
+   |
+27 |             TaskStatus::Completed => write!(f, "completed"),
+   |             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:28:13
+   |
+28 |             TaskStatus::Failed => write!(f, "failed"),
+   |             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:29:13
+   |
+29 |             TaskStatus::Cancelled => write!(f, "cancelled"),
+   |             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:39:29
+   |
+39 |             "pending" => Ok(TaskStatus::Pending),
+   |                             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:40:29
+   |
+40 |             "blocked" => Ok(TaskStatus::Blocked),
+   |                             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:41:27
+   |
+41 |             "ready" => Ok(TaskStatus::Ready),
+   |                           ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:42:29
+   |
+42 |             "running" => Ok(TaskStatus::Running),
+   |                             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:43:31
+   |
+43 |             "completed" => Ok(TaskStatus::Completed),
+   |                               ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:44:28
+   |
+44 |             "failed" => Ok(TaskStatus::Failed),
+   |                            ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:45:31
+   |
+45 |             "cancelled" => Ok(TaskStatus::Cancelled),
+   |                               ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: variables can be used directly in the `format!` string
+  --> src/domain/models/task.rs:46:22
+   |
+46 |             _ => Err(anyhow::anyhow!("Invalid task status: {}", s)),
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+46 -             _ => Err(anyhow::anyhow!("Invalid task status: {}", s)),
+46 +             _ => Err(anyhow::anyhow!("Invalid task status: {s}")),
+   |
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:64:13
+   |
+64 |             TaskSource::Human => write!(f, "human"),
+   |             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:65:13
+   |
+65 |             TaskSource::AgentRequirements => write!(f, "agent_requirements"),
+   |             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:66:13
+   |
+66 |             TaskSource::AgentPlanner => write!(f, "agent_planner"),
+   |             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:67:13
+   |
+67 |             TaskSource::AgentImplementation => write!(f, "agent_implementation"),
+   |             ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:77:27
+   |
+77 |             "human" => Ok(TaskSource::Human),
+   |                           ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:78:40
+   |
+78 |             "agent_requirements" => Ok(TaskSource::AgentRequirements),
+   |                                        ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:79:35
+   |
+79 |             "agent_planner" => Ok(TaskSource::AgentPlanner),
+   |                                   ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:80:42
+   |
+80 |             "agent_implementation" => Ok(TaskSource::AgentImplementation),
+   |                                          ^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: variables can be used directly in the `format!` string
+  --> src/domain/models/task.rs:81:22
+   |
+81 |             _ => Err(anyhow::anyhow!("Invalid task source: {}", s)),
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+81 -             _ => Err(anyhow::anyhow!("Invalid task source: {}", s)),
+81 +             _ => Err(anyhow::anyhow!("Invalid task source: {s}")),
+   |
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:97:13
+   |
+97 |             DependencyType::Sequential => write!(f, "sequential"),
+   |             ^^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+  --> src/domain/models/task.rs:98:13
+   |
+98 |             DependencyType::Parallel => write!(f, "parallel"),
+   |             ^^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+   --> src/domain/models/task.rs:108:32
+    |
+108 |             "sequential" => Ok(DependencyType::Sequential),
+    |                                ^^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: unnecessary structure name repetition
+   --> src/domain/models/task.rs:109:30
+    |
+109 |             "parallel" => Ok(DependencyType::Parallel),
+    |                              ^^^^^^^^^^^^^^ help: use the applicable keyword: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#use_self
+
+error: variables can be used directly in the `format!` string
+   --> src/domain/models/task.rs:110:22
+    |
+110 |             _ => Err(anyhow::anyhow!("Invalid dependency type: {}", s)),
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+110 -             _ => Err(anyhow::anyhow!("Invalid dependency type: {}", s)),
+110 +             _ => Err(anyhow::anyhow!("Invalid dependency type: {s}")),
+    |
+
+error: item in documentation is missing backticks
+  --> src/domain/ports/priority_calculator.rs:54:45
+   |
+54 |     /// * `Ok(Vec<(Uuid, f64)>)` - List of (task_id, new_priority) tuples
+   |                                             ^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+54 -     /// * `Ok(Vec<(Uuid, f64)>)` - List of (task_id, new_priority) tuples
+54 +     /// * `Ok(Vec<(Uuid, f64)>)` - List of (`task_id`, new_priority) tuples
+   |
+
+error: item in documentation is missing backticks
+  --> src/domain/ports/priority_calculator.rs:54:54
+   |
+54 |     /// * `Ok(Vec<(Uuid, f64)>)` - List of (task_id, new_priority) tuples
+   |                                                      ^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+54 -     /// * `Ok(Vec<(Uuid, f64)>)` - List of (task_id, new_priority) tuples
+54 +     /// * `Ok(Vec<(Uuid, f64)>)` - List of (task_id, `new_priority`) tuples
+   |
+
+error: item in documentation is missing backticks
+ --> src/domain/ports/task_queue_service.rs:9:29
+  |
+9 | /// Implementations can use SQLite, PostgreSQL, or in-memory storage.
+  |                             ^^^^^^
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+  |
+9 - /// Implementations can use SQLite, PostgreSQL, or in-memory storage.
+9 + /// Implementations can use `SQLite`, PostgreSQL, or in-memory storage.
+  |
+
+error: item in documentation is missing backticks
+ --> src/domain/ports/task_queue_service.rs:9:37
+  |
+9 | /// Implementations can use SQLite, PostgreSQL, or in-memory storage.
+  |                                     ^^^^^^^^^^
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+  |
+9 - /// Implementations can use SQLite, PostgreSQL, or in-memory storage.
+9 + /// Implementations can use SQLite, `PostgreSQL`, or in-memory storage.
+  |
+
+error: unnecessary `Debug` formatting in `format!` args
+  --> src/infrastructure/config/loader.rs:85:65
+   |
+85 |             .context(format!("Failed to load config from {:?}", path.as_ref()))?;
+   |                                                                 ^^^^^^^^^^^^^
+   |
+   = help: use `Display` formatting and change this to `path.as_ref().display()`
+   = note: switching to `Display` formatting will change how the value is shown; escaped characters will no longer be escaped and surrounding quotes will be removed
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_debug_formatting
+   = note: `-D clippy::unnecessary-debug-formatting` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::unnecessary_debug_formatting)]`
+
+error: item in documentation is missing backticks
+ --> src/infrastructure/database/mod.rs:3:26
+  |
+3 | //! This module provides SQLite database connectivity with:
+  |                          ^^^^^^
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+  |
+3 - //! This module provides SQLite database connectivity with:
+3 + //! This module provides `SQLite` database connectivity with:
+  |
+
+error: item in documentation is missing backticks
+  --> src/infrastructure/database/agent_repo.rs:10:5
+   |
+10 | /// SQLite implementation of AgentRepository using sqlx
+   |     ^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+10 - /// SQLite implementation of AgentRepository using sqlx
+10 + /// `SQLite` implementation of AgentRepository using sqlx
+   |
+
+error: item in documentation is missing backticks
+  --> src/infrastructure/database/agent_repo.rs:10:30
+   |
+10 | /// SQLite implementation of AgentRepository using sqlx
+   |                              ^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+10 - /// SQLite implementation of AgentRepository using sqlx
+10 + /// SQLite implementation of `AgentRepository` using sqlx
+   |
+
+error: item in documentation is missing backticks
+  --> src/infrastructure/database/agent_repo.rs:13:10
+   |
+13 | /// Uses SQLite with WAL mode for better concurrency.
+   |          ^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+13 - /// Uses SQLite with WAL mode for better concurrency.
+13 + /// Uses `SQLite` with WAL mode for better concurrency.
+   |
+
+error: item in documentation is missing backticks
+  --> src/infrastructure/database/agent_repo.rs:38:20
+   |
+38 |     /// * `pool` - SQLite connection pool
+   |                    ^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+38 -     /// * `pool` - SQLite connection pool
+38 +     /// * `pool` - `SQLite` connection pool
+   |
+
+error: this could be a `const fn`
+  --> src/infrastructure/database/agent_repo.rs:39:5
+   |
+39 | /     pub fn new(pool: SqlitePool) -> Self {
+40 | |         Self { pool }
+41 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+   |
+39 |     pub const fn new(pool: SqlitePool) -> Self {
+   |         +++++
+
+error: variables can be used directly in the `format!` string
+  --> src/infrastructure/database/agent_repo.rs:47:56
+   |
+47 |                 .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {}", e)))?,
+   |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+47 -                 .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {}", e)))?,
+47 +                 .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {e}")))?,
+   |
+
+error: variables can be used directly in the `format!` string
+  --> src/infrastructure/database/agent_repo.rs:58:56
+   |
+58 |                 .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {}", e)))?,
+   |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+58 -                 .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {}", e)))?,
+58 +                 .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {e}")))?,
+   |
+
+error: variables can be used directly in the `format!` string
+  --> src/infrastructure/database/agent_repo.rs:60:56
+   |
+60 |                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
+   |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+60 -                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
+60 +                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
+   |
+
+error: casting `i64` to `u64` may lose the sign of the value
+  --> src/infrastructure/database/agent_repo.rs:62:33
+   |
+62 |             memory_usage_bytes: row.memory_usage_bytes as u64,
+   |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_sign_loss
+   = note: `-D clippy::cast-sign-loss` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::cast_sign_loss)]`
+
+error: variables can be used directly in the `format!` string
+  --> src/infrastructure/database/agent_repo.rs:65:56
+   |
+65 |                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
+   |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+65 -                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
+65 +                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
+   |
+
+error: variables can be used directly in the `format!` string
+  --> src/infrastructure/database/agent_repo.rs:72:56
+   |
+72 |                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
+   |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+72 -                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
+72 +                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
+   |
+
+error: casting `u64` to `i64` may wrap around the value
+  --> src/infrastructure/database/agent_repo.rs:85:28
+   |
+85 |         let memory_bytes = agent.memory_usage_bytes as i64;
+   |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+   = note: `-D clippy::cast-possible-wrap` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::cast_possible_wrap)]`
+
+error: casting `u64` to `i64` may wrap around the value
+   --> src/infrastructure/database/agent_repo.rs:152:28
+    |
+152 |         let memory_bytes = agent.memory_usage_bytes as i64;
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
+   --> src/infrastructure/database/agent_repo.rs:192:22
+    |
+192 |           let agents = match status {
+    |  ______________________^
+193 | |             Some(s) => {
+194 | |                 query.push_str(" WHERE status = ? ORDER BY created_at DESC");
+195 | |                 let status_str = s.to_string();
+...   |
+235 | |         };
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#single_match_else
+    = note: `-D clippy::single-match-else` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::single_match_else)]`
+help: try
+    |
+192 ~         let agents = if let Some(s) = status {
+193 +             query.push_str(" WHERE status = ? ORDER BY created_at DESC");
+194 +             let status_str = s.to_string();
+195 +             sqlx::query_as::<
+196 +                 _,
+197 +                 (
+198 +                     String,
+199 +                     String,
+200 +                     String,
+201 +                     Option<String>,
+202 +                     String,
+203 +                     i64,
+204 +                     f64,
+205 +                     String,
+206 +                     Option<String>,
+207 +                 ),
+208 +             >(&query)
+209 +             .bind(status_str)
+210 +             .fetch_all(&self.pool)
+211 +             .await
+212 +             .map_err(DatabaseError::QueryFailed)?
+213 +         } else {
+214 +             query.push_str(" ORDER BY created_at DESC");
+215 +             sqlx::query_as::<
+216 +                 _,
+217 +                 (
+218 +                     String,
+219 +                     String,
+220 +                     String,
+221 +                     Option<String>,
+222 +                     String,
+223 +                     i64,
+224 +                     f64,
+225 +                     String,
+226 +                     Option<String>,
+227 +                 ),
+228 +             >(&query)
+229 +             .fetch_all(&self.pool)
+230 +             .await
+231 +             .map_err(DatabaseError::QueryFailed)?
+232 ~         };
+    |
+
+error: item in documentation is missing backticks
+  --> src/infrastructure/database/connection.rs:10:13
+   |
+10 | /// Manages SQLite connection pool with WAL mode enabled for better concurrency.
+   |             ^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+10 - /// Manages SQLite connection pool with WAL mode enabled for better concurrency.
+10 + /// Manages `SQLite` connection pool with WAL mode enabled for better concurrency.
+   |
+
+error: item in documentation is missing backticks
+  --> src/infrastructure/database/connection.rs:20:28
+   |
+20 |     /// * `database_url` - SQLite database URL (e.g., "sqlite:.abathur/abathur.db")
+   |                            ^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+20 -     /// * `database_url` - SQLite database URL (e.g., "sqlite:.abathur/abathur.db")
+20 +     /// * `database_url` - `SQLite` database URL (e.g., "sqlite:.abathur/abathur.db")
+   |
+
+error: this could be a `const fn`
+  --> src/infrastructure/database/connection.rs:79:5
+   |
+79 | /     pub fn pool(&self) -> &SqlitePool {
+80 | |         &self.pool
+81 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+   |
+79 |     pub const fn pool(&self) -> &SqlitePool {
+   |         +++++
+
+error: item in documentation is missing backticks
+  --> src/infrastructure/database/session_repo.rs:12:5
+   |
+12 | /// SQLite implementation of SessionRepository
+   |     ^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+12 - /// SQLite implementation of SessionRepository
+12 + /// `SQLite` implementation of SessionRepository
+   |
+
+error: item in documentation is missing backticks
+  --> src/infrastructure/database/session_repo.rs:12:30
+   |
+12 | /// SQLite implementation of SessionRepository
+   |                              ^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+12 - /// SQLite implementation of SessionRepository
+12 + /// SQLite implementation of `SessionRepository`
+   |
+
+error: this could be a `const fn`
+  --> src/infrastructure/database/session_repo.rs:18:5
+   |
+18 | /     pub fn new(pool: SqlitePool) -> Self {
+19 | |         Self { pool }
+20 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+   |
+18 |     pub const fn new(pool: SqlitePool) -> Self {
+   |         +++++
+
+error: item in documentation is missing backticks
+  --> src/services/dependency_resolver.rs:29:22
+   |
+29 |     /// Create a new DependencyResolver instance
+   |                      ^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+29 -     /// Create a new DependencyResolver instance
+29 +     /// Create a new `DependencyResolver` instance
+   |
+
+error: this could be a `const fn`
+  --> src/services/dependency_resolver.rs:30:5
+   |
+30 | /     pub fn new() -> Self {
+31 | |         Self
+32 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+help: make the function `const`
+   |
+30 |     pub const fn new() -> Self {
+   |         +++++
+
+error: variables can be used directly in the `format!` string
+  --> src/services/dependency_resolver.rs:56:24
+   |
+56 |             return Err(anyhow!("Circular dependency detected: {:?}", cycle))
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+   |
+56 -             return Err(anyhow!("Circular dependency detected: {:?}", cycle))
+56 +             return Err(anyhow!("Circular dependency detected: {cycle:?}"))
+   |
+
+error: unused `self` argument
+   --> src/services/dependency_resolver.rs:173:29
+    |
+173 |     fn build_adjacency_list(&self, tasks: &[Task]) -> HashMap<Uuid, Vec<Uuid>> {
+    |                             ^^^^^
+    |
+    = help: consider refactoring to an associated function
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_self
+
+error: unused `self` argument
+   --> src/services/dependency_resolver.rs:197:9
+    |
+197 |         &self,
+    |         ^^^^^
+    |
+    = help: consider refactoring to an associated function
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_self
+
+error: item in documentation is missing backticks
+  --> src/services/memory_service.rs:44:22
+   |
+44 |     /// Create a new MemoryService with the given repository
+   |                      ^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+44 -     /// Create a new MemoryService with the given repository
+44 +     /// Create a new `MemoryService` with the given repository
+   |
+
+error: item in documentation is missing backticks
+  --> src/services/memory_service.rs:47:58
+   |
+47 |     /// * `repo` - Arc-wrapped trait object implementing MemoryRepository
+   |                                                          ^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+   |
+47 -     /// * `repo` - Arc-wrapped trait object implementing MemoryRepository
+47 +     /// * `repo` - Arc-wrapped trait object implementing `MemoryRepository`
+   |
+
+error: variables can be used directly in the `format!` string
+   --> src/services/memory_service.rs:213:28
+    |
+213 |             .ok_or_else(|| anyhow!("Memory not found at {}:{}", namespace, key))?;
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+213 -             .ok_or_else(|| anyhow!("Memory not found at {}:{}", namespace, key))?;
+213 +             .ok_or_else(|| anyhow!("Memory not found at {namespace}:{key}"))?;
+    |
+
+error: variables can be used directly in the `format!` string
+   --> src/services/memory_service.rs:216:24
+    |
+216 |               return Err(anyhow!(
+    |  ________________________^
+217 | |                 "Cannot update deleted memory at {}:{}",
+218 | |                 namespace,
+219 | |                 key
+220 | |             ));
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+
+error: item in documentation is missing backticks
+   --> src/services/memory_service.rs:233:42
+    |
+233 |     /// Deleted memories won't appear in get() or search() results.
+    |                                          ^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+233 -     /// Deleted memories won't appear in get() or search() results.
+233 +     /// Deleted memories won't appear in `get()` or search() results.
+    |
+
+error: item in documentation is missing backticks
+   --> src/services/memory_service.rs:233:51
+    |
+233 |     /// Deleted memories won't appear in get() or search() results.
+    |                                                   ^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#doc_markdown
+help: try
+    |
+233 -     /// Deleted memories won't appear in get() or search() results.
+233 +     /// Deleted memories won't appear in get() or `search()` results.
+    |
+
+error: variables can be used directly in the `format!` string
+   --> src/services/memory_service.rs:254:28
+    |
+254 |             .ok_or_else(|| anyhow!("Memory not found at {}:{}", namespace, key))?;
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#uninlined_format_args
+help: change this to
+    |
+254 -             .ok_or_else(|| anyhow!("Memory not found at {}:{}", namespace, key))?;
+254 +             .ok_or_else(|| anyhow!("Memory not found at {namespace}:{key}"))?;
+    |
+
+error: unused `async` for function with no await statements
+   --> src/application/loop_executor.rs:486:5
+    |
+486 | /     pub async fn shutdown(&self) {
+487 | |         info!("Triggering loop executor shutdown");
+488 | |         let _ = self.shutdown_tx.send(());
+489 | |     }
+    | |_____^
+    |
+    = help: consider removing the `async` from this function
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_async
+    = note: `-D clippy::unused-async` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unused_async)]`
+
+error: could not compile `abathur` (lib) due to 166 previous errors
