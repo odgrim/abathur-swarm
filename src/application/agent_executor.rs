@@ -400,6 +400,49 @@ mod tests {
             })
         }
 
+        async fn send_message(
+            &self,
+            _request: crate::domain::ports::MessageRequest,
+        ) -> Result<crate::domain::ports::MessageResponse, ClaudeError> {
+            use crate::domain::ports::{ContentBlock, MessageResponse, Usage};
+
+            Ok(MessageResponse {
+                id: "mock-msg-id".to_string(),
+                content: vec![ContentBlock {
+                    content_type: "text".to_string(),
+                    text: Some("Mock message response".to_string()),
+                }],
+                stop_reason: Some("end_turn".to_string()),
+                usage: Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                },
+            })
+        }
+
+        async fn stream_message(
+            &self,
+            _request: crate::domain::ports::MessageRequest,
+        ) -> Result<
+            Box<
+                dyn futures::Stream<Item = Result<crate::domain::ports::MessageChunk, ClaudeError>>
+                    + Send
+                    + Unpin,
+            >,
+            ClaudeError,
+        > {
+            use crate::domain::ports::MessageChunk;
+            use futures::stream;
+
+            // Create a simple mock stream with one chunk
+            let chunks = vec![Ok(MessageChunk {
+                delta: Some("Mock streaming response".to_string()),
+                stop_reason: Some("end_turn".to_string()),
+            })];
+
+            Ok(Box::new(stream::iter(chunks)))
+        }
+
         async fn health_check(&self) -> Result<(), ClaudeError> {
             Ok(())
         }
@@ -418,8 +461,68 @@ mod tests {
             })
         }
 
-        async fn list_tools(&self, _server_name: &str) -> Result<Vec<String>, McpError> {
-            Ok(vec!["tool1".to_string(), "tool2".to_string()])
+        async fn call_tool(
+            &self,
+            _server: &str,
+            _tool: &str,
+            _args: serde_json::Value,
+        ) -> Result<serde_json::Value, McpError> {
+            Ok(serde_json::json!({"success": true}))
+        }
+
+        async fn list_tools(
+            &self,
+            _server_name: &str,
+        ) -> Result<Vec<crate::domain::ports::ToolInfo>, McpError> {
+            use crate::domain::ports::ToolInfo;
+
+            Ok(vec![
+                ToolInfo {
+                    name: "tool1".to_string(),
+                    description: Some("Mock tool 1".to_string()),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {}
+                    }),
+                },
+                ToolInfo {
+                    name: "tool2".to_string(),
+                    description: Some("Mock tool 2".to_string()),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {}
+                    }),
+                },
+            ])
+        }
+
+        async fn read_resource(
+            &self,
+            _server: &str,
+            uri: &str,
+        ) -> Result<crate::domain::ports::ResourceContent, McpError> {
+            use crate::domain::ports::ResourceContent;
+
+            Ok(ResourceContent {
+                uri: uri.to_string(),
+                mime_type: Some("text/plain".to_string()),
+                text: Some("Mock resource content".to_string()),
+                blob: None,
+            })
+        }
+
+        async fn list_resources(
+            &self,
+            _server: &str,
+        ) -> Result<Vec<crate::domain::ports::ResourceInfo>, McpError> {
+            use crate::domain::ports::ResourceInfo;
+
+            Ok(vec![ResourceInfo {
+                uri: "mock://resource1".to_string(),
+                name: "Mock Resource".to_string(),
+                description: Some("A mock resource for testing".to_string()),
+                mime_type: Some("text/plain".to_string()),
+            }])
         }
 
         async fn health_check(&self, _server_name: &str) -> Result<(), McpError> {
