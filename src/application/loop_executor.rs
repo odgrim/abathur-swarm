@@ -19,7 +19,7 @@ use tokio::select;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 use tokio::time::{interval, timeout};
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// Convergence detection strategy for loop termination
@@ -381,7 +381,6 @@ impl LoopExecutor {
     }
 
     /// Spawn background checkpointing task
-    #[instrument(skip(self))]
     fn spawn_checkpointer(&self) -> tokio::task::JoinHandle<()> {
         let state = Arc::clone(&self.state);
         let checkpoint_dir = self.config.checkpoint_dir.clone();
@@ -426,7 +425,6 @@ impl LoopExecutor {
     }
 
     /// Save checkpoint to disk
-    #[instrument(skip(self))]
     async fn save_checkpoint(&self) -> Result<()> {
         let state = self.state.read().await;
         let checkpoint_path = self.config.checkpoint_dir.join(format!("{}.json", state.loop_id));
@@ -443,7 +441,6 @@ impl LoopExecutor {
     }
 
     /// Try to recover from most recent checkpoint
-    #[instrument(skip(self))]
     async fn try_recover_checkpoint(&self) -> Result<Option<LoopState>> {
         // Find most recent checkpoint file
         let mut entries = match fs::read_dir(&self.config.checkpoint_dir).await {

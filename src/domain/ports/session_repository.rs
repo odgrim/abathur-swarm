@@ -1,78 +1,27 @@
-/// Session repository port (trait) for dependency injection.
-///
-/// Defines the contract for session storage operations that infrastructure
-/// adapters must implement. Services depend on this trait, not concrete implementations.
-use crate::domain::models::{Session, SessionStatus};
-use anyhow::Result;
 use async_trait::async_trait;
+use serde_json::Value;
+use uuid::Uuid;
 
-/// Repository trait for session persistence
-///
-/// Implementations should handle:
-/// - JSON serialization/deserialization of events and state
-/// - Concurrent access with appropriate locking
-/// - Transaction management for atomic updates
+use crate::domain::models::{Session, SessionEvent};
+
+/// Repository trait for session persistence operations
 #[async_trait]
 pub trait SessionRepository: Send + Sync {
-    /// Creates a new session
-    ///
-    /// # Errors
-    /// Returns error if:
-    /// - Session ID already exists
-    /// - Database connection fails
-    /// - JSON serialization fails
-    async fn create(&self, session: Session) -> Result<()>;
+    /// Create a new session
+    async fn create(&self, session: Session) -> anyhow::Result<Uuid>;
 
-    /// Retrieves session by ID
-    ///
-    /// # Returns
-    /// - `Some(Session)` if found
-    /// - `None` if not found
-    ///
-    /// # Errors
-    /// Returns error if:
-    /// - Database connection fails
-    /// - JSON deserialization fails
-    async fn get(&self, session_id: &str) -> Result<Option<Session>>;
+    /// Get a session by ID
+    async fn get(&self, id: Uuid) -> anyhow::Result<Option<Session>>;
 
-    /// Updates an existing session
-    ///
-    /// # Errors
-    /// Returns error if:
-    /// - Session not found
-    /// - Database connection fails
-    /// - JSON serialization fails
-    async fn update(&self, session: Session) -> Result<()>;
+    /// Append an event to a session's history
+    async fn append_event(&self, session_id: Uuid, event: SessionEvent) -> anyhow::Result<()>;
 
-    /// Lists sessions with optional filters
-    ///
-    /// # Arguments
-    /// - `project_id`: Optional project ID filter
-    /// - `status`: Optional status filter
-    /// - `limit`: Maximum number of results
-    ///
-    /// # Errors
-    /// Returns error if:
-    /// - Database connection fails
-    /// - JSON deserialization fails
-    async fn list(
-        &self,
-        project_id: Option<&str>,
-        status: Option<SessionStatus>,
-        limit: usize,
-    ) -> Result<Vec<Session>>;
+    /// Get all events for a session, ordered by timestamp
+    async fn get_events(&self, session_id: Uuid) -> anyhow::Result<Vec<SessionEvent>>;
 
-    /// Deletes a session
-    ///
-    /// # Errors
-    /// Returns error if:
-    /// - Session not found
-    /// - Database connection fails
-    async fn delete(&self, session_id: &str) -> Result<()>;
+    /// Get a specific state value from a session's state object
+    async fn get_state(&self, session_id: Uuid, key: &str) -> anyhow::Result<Option<Value>>;
 
-    /// Checks if session exists
-    ///
-    /// # Errors
-    /// Returns error if database connection fails
-    async fn exists(&self, session_id: &str) -> Result<bool>;
+    /// Set a state value in a session's state object (merges, doesn't replace)
+    async fn set_state(&self, session_id: Uuid, key: &str, value: Value) -> anyhow::Result<()>;
 }

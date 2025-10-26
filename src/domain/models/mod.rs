@@ -6,5 +6,5 @@ pub use config::{
     Config, DatabaseConfig, LoggingConfig, McpServerConfig, RateLimitConfig, ResourceLimitsConfig,
     RetryConfig,
 };
-pub use session::{Event, Session, SessionStatus};
+pub use session::{Session, SessionEvent};
 pub use task::{DependencyType, Task, TaskSource, TaskStatus};
