@@ -12,3 +12,5 @@ reorder_modules = true
 normalize_comments = true
 wrap_comments = true
 comment_width = 100
+use_small_heuristics = "Default"
+remove_nested_parens = true
