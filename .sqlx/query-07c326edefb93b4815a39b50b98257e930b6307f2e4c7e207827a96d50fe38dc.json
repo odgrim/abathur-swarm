@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE memories\n            SET is_deleted = 1\n            WHERE namespace = ? AND key = ?\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "07c326edefb93b4815a39b50b98257e930b6307f2e4c7e207827a96d50fe38dc"
+}
