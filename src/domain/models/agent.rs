@@ -135,7 +135,7 @@ mod tests {
         assert_eq!(agent.status, AgentStatus::Idle);
         assert!(agent.current_task_id.is_none());
         assert_eq!(agent.memory_usage_bytes, 0);
-        assert_eq!(agent.cpu_usage_percent, 0.0);
+        assert!((agent.cpu_usage_percent - 0.0).abs() < f64::EPSILON);
         assert!(agent.terminated_at.is_none());
     }
 

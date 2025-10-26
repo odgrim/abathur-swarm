@@ -322,7 +322,7 @@ impl Task {
     // ========================
 
     /// Check if task is in a terminal state (cannot transition further)
-    pub fn is_terminal(&self) -> bool {
+    pub const fn is_terminal(&self) -> bool {
         matches!(
             self.status,
             TaskStatus::Completed | TaskStatus::Cancelled | TaskStatus::Failed
@@ -371,7 +371,7 @@ impl Task {
     /// Calculate effective priority including dependency depth boost
     pub fn calculate_priority(&self) -> f64 {
         // Base priority (0-10) + depth boost (0.5 per level)
-        self.priority as f64 + (self.dependency_depth as f64 * 0.5)
+        f64::from(self.dependency_depth).mul_add(0.5, f64::from(self.priority))
     }
 
     /// Update the calculated priority field
@@ -382,12 +382,13 @@ impl Task {
 
     /// Check if task has exceeded execution timeout
     pub fn is_timed_out(&self) -> bool {
-        if let Some(started) = self.started_at {
+        self.started_at.is_some_and(|started| {
             let elapsed = Utc::now().signed_duration_since(started);
-            elapsed.num_seconds() as u32 > self.max_execution_timeout_seconds
-        } else {
-            false
-        }
+            elapsed
+                .num_seconds()
+                .try_into()
+                .is_ok_and(|secs: u32| secs > self.max_execution_timeout_seconds)
+        })
     }
 
     /// Get elapsed execution time in seconds (None if not started)
@@ -400,21 +401,21 @@ impl Task {
 
     /// Check if task has dependencies
     pub fn has_dependencies(&self) -> bool {
-        self.dependencies.is_some() && !self.dependencies.as_ref().unwrap().is_empty()
+        self.dependencies
+            .as_ref()
+            .is_some_and(|deps| !deps.is_empty())
     }
 
     /// Get dependency count
     pub fn dependency_count(&self) -> usize {
-        self.dependencies.as_ref().map_or(0, |deps| deps.len())
+        self.dependencies.as_ref().map_or(0, std::vec::Vec::len)
     }
 
     /// Check if all dependencies are in the completed set
     pub fn dependencies_met(&self, completed_tasks: &[Uuid]) -> bool {
-        if let Some(deps) = &self.dependencies {
+        self.dependencies.as_ref().is_none_or(|deps| {
             deps.iter().all(|dep_id| completed_tasks.contains(dep_id))
-        } else {
-            true // No dependencies means they're all met
-        }
+        })
     }
 
     /// Update task status based on dependency resolution
@@ -445,11 +446,7 @@ impl Task {
 
     /// Check if task has exceeded its deadline
     pub fn is_past_deadline(&self) -> bool {
-        if let Some(deadline) = self.deadline {
-            Utc::now() > deadline
-        } else {
-            false
-        }
+        self.deadline.is_some_and(|deadline| Utc::now() > deadline)
     }
 
     /// Set dependencies and update dependency depth

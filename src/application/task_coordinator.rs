@@ -409,11 +409,7 @@ mod tests {
             Ok(tasks
                 .values()
                 .filter(|t| {
-                    if let Some(ref deps) = t.dependencies {
-                        deps.contains(&task_id)
-                    } else {
-                        false
-                    }
+                    t.dependencies.as_ref().is_some_and(|deps| deps.contains(&task_id))
                 })
                 .cloned()
                 .collect())
@@ -471,11 +467,11 @@ mod tests {
     impl PriorityCalculator for MockPriorityCalculator {
         async fn calculate_priority(&self, task: &Task) -> Result<f64> {
             // Simple mock: return base priority
-            Ok(task.priority as f64)
+            Ok(f64::from(task.priority))
         }
 
         async fn recalculate_priorities(&self, tasks: &[Task]) -> Result<Vec<(Uuid, f64)>> {
-            Ok(tasks.iter().map(|t| (t.id, t.priority as f64)).collect())
+            Ok(tasks.iter().map(|t| (t.id, f64::from(t.priority))).collect())
         }
     }
 
@@ -485,7 +481,7 @@ mod tests {
 
         Task {
             id: task_id,
-            summary: format!("Task {}", id),
+            summary: format!("Task {id}"),
             description: "Test task".to_string(),
             agent_type: "test".to_string(),
             priority: 5,

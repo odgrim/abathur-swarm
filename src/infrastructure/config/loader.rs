@@ -194,7 +194,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.max_agents, 10);
-        assert_eq!(config.rate_limit.requests_per_second, 10.0);
+        assert!((config.rate_limit.requests_per_second - 10.0).abs() < f64::EPSILON);
         assert_eq!(config.database.path, ".abathur/abathur.db");
         assert_eq!(config.logging.level, "info");
         ConfigLoader::validate(&config).expect("Default config should be valid");
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_yaml_parsing() {
-        let yaml = r#"
+        let yaml = r"
 max_agents: 20
 rate_limit:
   requests_per_second: 15.0
@@ -214,12 +214,12 @@ logging:
   level: debug
   format: pretty
   retention_days: 7
-"#;
+";
 
         let config: Config = serde_yaml::from_str(yaml).expect("YAML should parse");
 
         assert_eq!(config.max_agents, 20);
-        assert_eq!(config.rate_limit.requests_per_second, 15.0);
+        assert!((config.rate_limit.requests_per_second - 15.0).abs() < f64::EPSILON);
         assert_eq!(config.rate_limit.burst_size, 30);
         assert_eq!(config.database.path, "/custom/path.db");
         assert_eq!(config.database.max_connections, 5);
