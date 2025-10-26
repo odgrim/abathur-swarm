@@ -21,6 +21,7 @@ venv/
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 
 # Rust
 /target/
@@ -36,9 +37,14 @@ Cargo.lock
 /target/
 >>>>>>> task_phase4-logger-impl_2025-10-25-23-00-07
 =======
+=======
+>>>>>>> task_cli-structure_20251025-210033
 
 
 # Added by cargo
 
 /target
+<<<<<<< HEAD
 >>>>>>> task_phase4-audit-logger_2025-10-25-23-00-08
+=======
+>>>>>>> task_cli-structure_20251025-210033
