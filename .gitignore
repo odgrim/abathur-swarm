@@ -58,9 +58,13 @@ site/
 
 # Virtual environment (local)
 venv/
+<<<<<<< HEAD
 
 # Rust
 /target/
 **/*.rs.bk
 *.pdb
+=======
+target/
+>>>>>>> task_phase3-database-connection_2025-10-25-23-00-01
 Cargo.lock
