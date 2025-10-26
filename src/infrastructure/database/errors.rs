@@ -19,4 +19,10 @@ pub enum DatabaseError {
 
     #[error("Invalid state update: {0}")]
     InvalidStateUpdate(String),
+
+    #[error("Parse error: {0}")]
+    ParseError(String),
+
+    #[error("Not found: {0}")]
+    NotFound(uuid::Uuid),
 }
