@@ -1,90 +1,107 @@
+use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use uuid::Uuid;
 
-/// MCP tool invocation request
-#[derive(Debug, Clone)]
-pub struct McpToolRequest {
-    pub task_id: Uuid,
-    pub server_name: String,
-    pub tool_name: String,
-    pub arguments: Value,
+/// Represents an MCP tool
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tool {
+    /// Tool name
+    pub name: String,
+    /// Tool description
+    pub description: String,
+    /// JSON Schema for tool input
+    pub input_schema: Value,
 }
 
-/// MCP tool invocation response
-#[derive(Debug, Clone)]
-pub struct McpToolResponse {
-    pub task_id: Uuid,
-    pub result: Value,
-    pub is_error: bool,
+/// Represents an MCP resource
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Resource {
+    /// Resource URI
+    pub uri: String,
+    /// Resource name
+    pub name: String,
+    /// MIME type of resource
+    pub mime_type: Option<String>,
 }
 
-/// Error types specific to MCP operations
-#[derive(Debug, thiserror::Error)]
-pub enum McpError {
-    #[error("Server not found: {0}")]
-    ServerNotFound(String),
-
-    #[error("Tool not found: {0}")]
-    ToolNotFound(String),
-
-    #[error("Invalid arguments: {0}")]
-    InvalidArguments(String),
-
-    #[error("Tool execution failed: {0}")]
-    ExecutionFailed(String),
-
-    #[error("Connection error: {0}")]
-    ConnectionError(String),
-
-    #[error("Timeout error")]
-    Timeout,
-}
-
-/// Port trait for MCP (Model Context Protocol) client
+/// Client interface for Model Context Protocol (MCP) operations
 ///
-/// Defines the interface for interacting with MCP servers and tools.
-/// Implementations must handle:
-/// - Server lifecycle management
-/// - Tool discovery and invocation
-/// - Error handling and recovery
+/// Provides methods to interact with MCP servers via stdio transport.
+/// Implementations should handle server lifecycle, health monitoring,
+/// and JSON-RPC communication.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use anyhow::Result;
+/// use serde_json::json;
+///
+/// async fn example(client: &dyn McpClient) -> Result<()> {
+///     // List available tools from GitHub MCP server
+///     let tools = client.list_tools("github-mcp").await?;
+///
+///     // Call a tool
+///     let result = client.call_tool(
+///         "github-mcp",
+///         "list_repositories",
+///         json!({"org": "anthropics"})
+///     ).await?;
+///
+///     // List available resources
+///     let resources = client.list_resources("github-mcp").await?;
+///
+///     // Read a resource
+///     let content = client.read_resource(
+///         "github-mcp",
+///         "repo://anthropics/claude-code"
+///     ).await?;
+///
+///     Ok(())
+/// }
+/// ```
 #[async_trait]
 pub trait McpClient: Send + Sync {
-    /// Invoke an MCP tool
+    /// List available tools from an MCP server
     ///
     /// # Arguments
-    /// * `request` - The MCP tool request with server, tool name, and arguments
+    /// * `server` - The name of the MCP server
     ///
     /// # Returns
-    /// * `Ok(McpToolResponse)` - Successful tool execution result
-    /// * `Err(McpError)` - Tool error, connection error, or invalid request
-    ///
-    /// # Errors
-    /// - `McpError::ServerNotFound` - MCP server not configured (non-retryable)
-    /// - `McpError::ToolNotFound` - Tool doesn't exist on server (non-retryable)
-    /// - `McpError::InvalidArguments` - Invalid tool arguments (non-retryable)
-    /// - `McpError::ExecutionFailed` - Tool execution failed (check message)
-    /// - `McpError::ConnectionError` - Connection to server failed (retryable)
-    /// - `McpError::Timeout` - Tool execution timed out (retryable)
-    async fn invoke_tool(&self, request: McpToolRequest) -> Result<McpToolResponse, McpError>;
+    /// * `Ok(Vec<Tool>)` - List of available tools
+    /// * `Err(_)` - If the server is not found, not running, or the request fails
+    async fn list_tools(&self, server: &str) -> Result<Vec<Tool>>;
 
-    /// List available tools from a specific MCP server
+    /// Call a tool on an MCP server
     ///
     /// # Arguments
-    /// * `server_name` - Name of the MCP server to query
+    /// * `server` - The name of the MCP server
+    /// * `tool` - The name of the tool to call
+    /// * `args` - JSON arguments for the tool
     ///
     /// # Returns
-    /// * `Ok(Vec<String>)` - List of available tool names
-    /// * `Err(McpError)` - Server not found or connection error
-    async fn list_tools(&self, server_name: &str) -> Result<Vec<String>, McpError>;
+    /// * `Ok(Value)` - The tool result
+    /// * `Err(_)` - If the server is not found, tool not found, or the call fails
+    async fn call_tool(&self, server: &str, tool: &str, args: Value) -> Result<Value>;
 
-    /// Health check for MCP server connectivity
+    /// List available resources from an MCP server
     ///
     /// # Arguments
-    /// * `server_name` - Name of the MCP server to check
+    /// * `server` - The name of the MCP server
     ///
     /// # Returns
-    /// * `Ok(())` - Server is reachable and healthy
-    /// * `Err(McpError)` - Server is unreachable or unhealthy
-    async fn health_check(&self, server_name: &str) -> Result<(), McpError>;
+    /// * `Ok(Vec<Resource>)` - List of available resources
+    /// * `Err(_)` - If the server is not found, not running, or the request fails
+    async fn list_resources(&self, server: &str) -> Result<Vec<Resource>>;
+
+    /// Read a resource from an MCP server
+    ///
+    /// # Arguments
+    /// * `server` - The name of the MCP server
+    /// * `uri` - The URI of the resource to read
+    ///
+    /// # Returns
+    /// * `Ok(String)` - The resource content
+    /// * `Err(_)` - If the server is not found, resource not found, or the read fails
+    async fn read_resource(&self, server: &str, uri: &str) -> Result<String>;
 }

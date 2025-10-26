@@ -1,7 +1,4 @@
-//! CLI output formatting module
-//!
-//! Provides various output formatters for terminal display.
+pub mod progress;
 
-pub mod table;
-
-pub use table::TableFormatter;
+// Re-export commonly used items
+pub use progress::{MultiProgressManager, ProgressBarExt, create_progress_bar, create_spinner};

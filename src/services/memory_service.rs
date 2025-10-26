@@ -73,14 +73,13 @@ impl MemoryService {
             .get(&memory.namespace, &memory.key)
             .await
             .context("Failed to check for existing memory")?
+            && existing.is_active()
         {
-            if existing.is_active() {
-                return Err(anyhow!(
-                    "Memory already exists at {}:{}. Use update() to modify it.",
-                    memory.namespace,
-                    memory.key
-                ));
-            }
+            return Err(anyhow!(
+                "Memory already exists at {}:{}. Use update() to modify it.",
+                memory.namespace,
+                memory.key
+            ));
         }
 
         // Insert the memory

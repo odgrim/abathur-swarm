@@ -1234,17 +1234,23 @@ def task_status(watch: bool = typer.Option(False, help="Watch mode (live updates
         services = await _get_services()
 
         # Count tasks by status
-        pending = len(await services["database"].list_tasks(TaskStatus.PENDING, 1000))
-        running = len(await services["database"].list_tasks(TaskStatus.RUNNING, 1000))
-        completed = len(await services["database"].list_tasks(TaskStatus.COMPLETED, 1000))
-        failed = len(await services["database"].list_tasks(TaskStatus.FAILED, 1000))
+        pending = len(await services["database"].list_tasks(status=TaskStatus.PENDING, limit=1000))
+        blocked = len(await services["database"].list_tasks(status=TaskStatus.BLOCKED, limit=1000))
+        ready = len(await services["database"].list_tasks(status=TaskStatus.READY, limit=1000))
+        running = len(await services["database"].list_tasks(status=TaskStatus.RUNNING, limit=1000))
+        completed = len(await services["database"].list_tasks(status=TaskStatus.COMPLETED, limit=1000))
+        failed = len(await services["database"].list_tasks(status=TaskStatus.FAILED, limit=1000))
+        cancelled = len(await services["database"].list_tasks(status=TaskStatus.CANCELLED, limit=1000))
 
         console.print("[bold]Task Queue Status[/bold]")
         console.print(f"Pending tasks: {pending}")
+        console.print(f"Blocked tasks: {blocked}")
+        console.print(f"Ready tasks: {ready}")
         console.print(f"Running tasks: {running}")
         console.print(f"Completed tasks: {completed}")
         console.print(f"Failed tasks: {failed}")
-        console.print(f"Total tasks: {pending + running + completed + failed}")
+        console.print(f"Cancelled tasks: {cancelled}")
+        console.print(f"Total tasks: {pending + blocked + ready + running + completed + failed + cancelled}")
 
     asyncio.run(_status())
 

@@ -63,3 +63,7 @@ venv/
 # Added by cargo
 
 /target
+# Database files
+*.db
+*.db-shm
+*.db-wal

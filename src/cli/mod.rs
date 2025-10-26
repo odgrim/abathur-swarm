@@ -1,7 +1,6 @@
-//! CLI module for Abathur
-//!
-//! Contains command-line interface implementations and output formatting.
-
 pub mod output;
 
-pub use output::TableFormatter;
+// Re-export commonly used items
+pub use output::progress::{
+    MultiProgressManager, ProgressBarExt, create_progress_bar, create_spinner,
+};
