@@ -456,11 +456,21 @@ impl LoopExecutor {
             {
                 let modified_dt: DateTime<Utc> = modified.into();
 
+<<<<<<< HEAD
                 if latest_checkpoint
                     .as_ref()
                     .is_none_or(|(dt, _)| modified_dt > *dt)
                 {
                     latest_checkpoint = Some((modified_dt, path));
+=======
+                        if latest_checkpoint
+                            .as_ref()
+                            .is_none_or(|(dt, _)| modified_dt > *dt)
+                        {
+                            latest_checkpoint = Some((modified_dt, path));
+                        }
+                    }
+>>>>>>> task_claude-api-request-response-types_20251025-205946
                 }
             }
         }
@@ -608,7 +618,11 @@ mod tests {
 
         let result = executor
             .execute(task, |iter, _task| async move {
+<<<<<<< HEAD
                 Ok(format!("Iteration {iter}"))
+=======
+                Ok(format!("Iteration {}", iter))
+>>>>>>> task_claude-api-request-response-types_20251025-205946
             })
             .await
             .unwrap();
@@ -666,7 +680,11 @@ mod tests {
             executor_clone
                 .execute(task, |iter, _task| async move {
                     tokio::time::sleep(Duration::from_millis(100)).await;
+<<<<<<< HEAD
                     Ok(format!("Iteration {iter}"))
+=======
+                    Ok(format!("Iteration {}", iter))
+>>>>>>> task_claude-api-request-response-types_20251025-205946
                 })
                 .await
         });
@@ -700,7 +718,11 @@ mod tests {
         // Run to completion
         let result = executor
             .execute(task, |iter, _task| async move {
+<<<<<<< HEAD
                 Ok(format!("Iteration {iter}"))
+=======
+                Ok(format!("Iteration {}", iter))
+>>>>>>> task_claude-api-request-response-types_20251025-205946
             })
             .await
             .unwrap();
