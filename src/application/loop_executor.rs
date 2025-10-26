@@ -449,18 +449,17 @@ impl LoopExecutor {
 
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Ok(metadata) = entry.metadata().await {
-                    if let Ok(modified) = metadata.modified() {
-                        let modified_dt: DateTime<Utc> = modified.into();
+            if path.extension().and_then(|s| s.to_str()) == Some("json")
+                && let Ok(metadata) = entry.metadata().await
+                && let Ok(modified) = metadata.modified()
+            {
+                let modified_dt: DateTime<Utc> = modified.into();
 
-                        if latest_checkpoint
-                            .as_ref()
-                            .is_none_or(|(dt, _)| modified_dt > *dt)
-                        {
-                            latest_checkpoint = Some((modified_dt, path));
-                        }
-                    }
+                if latest_checkpoint
+                    .as_ref()
+                    .is_none_or(|(dt, _)| modified_dt > *dt)
+                {
+                    latest_checkpoint = Some((modified_dt, path));
                 }
             }
         }

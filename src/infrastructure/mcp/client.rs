@@ -49,7 +49,7 @@
 //! }
 //! ```
 
-use crate::domain::ports::{mcp_client::{McpClient, Resource, Tool}};
+use crate::domain::ports::mcp_client::{McpClient, Resource, Tool};
 use crate::infrastructure::mcp::{
     error::{McpError, Result},
     health_monitor::HealthMonitor,
@@ -153,7 +153,8 @@ impl McpClientImpl {
 
         // Start health monitoring
         let shutdown_rx = self.shutdown_tx.subscribe();
-        self.health_monitor.start_monitoring(name.clone(), shutdown_rx);
+        self.health_monitor
+            .start_monitoring(name.clone(), shutdown_rx);
 
         tracing::info!(
             server_name = %name,

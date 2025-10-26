@@ -405,12 +405,7 @@ mod tests {
     #[test]
     fn test_multi_progress_add_custom_progress_bar() {
         let manager = MultiProgressManager::hidden();
-        let pb = manager.add_custom_progress_bar(
-            100,
-            "Custom task",
-            "{bar:40} {pos}/{len}",
-            "=>-",
-        );
+        let pb = manager.add_custom_progress_bar(100, "Custom task", "{bar:40} {pos}/{len}", "=>-");
         assert_eq!(pb.length().unwrap(), 100);
         pb.finish();
     }

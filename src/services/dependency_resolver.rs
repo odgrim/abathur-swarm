@@ -11,12 +11,17 @@ use uuid::Uuid;
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use abathur::services::DependencyResolver;
 /// use abathur::domain::models::task::Task;
+/// # use anyhow::Result;
 ///
+/// # fn main() -> Result<()> {
 /// let resolver = DependencyResolver::new();
+/// # let tasks: Vec<Task> = vec![];
 /// let sorted_tasks = resolver.resolve(&tasks)?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct DependencyResolver;
@@ -84,12 +89,11 @@ impl DependencyResolver {
         let mut path: Vec<Uuid> = Vec::new();
 
         for &task_id in &task_ids {
-            if colors[&task_id] == 0 {
-                if let Some(cycle) = Self::dfs_detect_cycle(task_id, &graph, &mut colors, &mut path)
-                {
-                    warn!("Circular dependency detected: {:?}", cycle);
-                    return Some(cycle);
-                }
+            if colors[&task_id] == 0
+                && let Some(cycle) = Self::dfs_detect_cycle(task_id, &graph, &mut colors, &mut path)
+            {
+                warn!("Circular dependency detected: {:?}", cycle);
+                return Some(cycle);
             }
         }
 

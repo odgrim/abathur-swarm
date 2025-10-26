@@ -1,4 +1,6 @@
-use crate::infrastructure::mcp::{error::McpError, error::Result, server_manager::McpServerManager};
+use crate::infrastructure::mcp::{
+    error::McpError, error::Result, server_manager::McpServerManager,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -204,17 +206,14 @@ impl HealthMonitor {
         timeout: Duration,
     ) -> Result<bool> {
         // Get transport for the server
-        let transport = manager
-            .get_transport(server_name)
-            .await
-            .map_err(|e| {
-                tracing::debug!(
-                    server_name = %server_name,
-                    error = %e,
-                    "Failed to get transport for health check"
-                );
-                e
-            })?;
+        let transport = manager.get_transport(server_name).await.map_err(|e| {
+            tracing::debug!(
+                server_name = %server_name,
+                error = %e,
+                "Failed to get transport for health check"
+            );
+            e
+        })?;
 
         let mut transport = transport.lock().await;
 
@@ -277,12 +276,8 @@ mod tests {
     #[tokio::test]
     async fn test_health_monitor_custom_config() {
         let manager = Arc::new(McpServerManager {});
-        let monitor = HealthMonitor::with_config(
-            manager,
-            Duration::from_secs(5),
-            5,
-            Duration::from_secs(3),
-        );
+        let monitor =
+            HealthMonitor::with_config(manager, Duration::from_secs(5), 5, Duration::from_secs(3));
 
         assert_eq!(monitor.check_interval, Duration::from_secs(5));
         assert_eq!(monitor.max_failures, 5);
