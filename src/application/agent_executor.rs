@@ -1,5 +1,6 @@
 use crate::domain::models::Config;
-use crate::domain::ports::{ClaudeClient, ClaudeError, ClaudeRequest, McpClient, McpError};
+use crate::domain::ports::{ClaudeClient, ClaudeError, ClaudeRequest, McpClient};
+use crate::infrastructure::mcp::McpError;
 use anyhow::Result;
 use serde_json::Value;
 use std::fmt::Write as _;
@@ -347,8 +348,7 @@ impl AgentExecutor {
 mod tests {
     use super::*;
     use crate::domain::ports::{
-        ClaudeClient, ClaudeError, ClaudeRequest, ClaudeResponse, McpClient, McpError,
-        McpToolRequest, McpToolResponse,
+        ClaudeClient, ClaudeError, ClaudeRequest, ClaudeResponse, McpClient, Resource, Tool,
     };
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -410,20 +410,28 @@ mod tests {
 
     #[async_trait]
     impl McpClient for MockMcpClient {
-        async fn invoke_tool(&self, request: McpToolRequest) -> Result<McpToolResponse, McpError> {
-            Ok(McpToolResponse {
-                task_id: request.task_id,
-                result: serde_json::json!({"success": true}),
-                is_error: false,
-            })
+        async fn list_tools(&self, _server: &str) -> Result<Vec<Tool>> {
+            Ok(vec![Tool {
+                name: "test_tool".to_string(),
+                description: "A test tool".to_string(),
+                input_schema: serde_json::json!({}),
+            }])
         }
 
-        async fn list_tools(&self, _server_name: &str) -> Result<Vec<String>, McpError> {
-            Ok(vec!["tool1".to_string(), "tool2".to_string()])
+        async fn call_tool(&self, _server: &str, _tool: &str, _args: Value) -> Result<Value> {
+            Ok(serde_json::json!({"success": true}))
         }
 
-        async fn health_check(&self, _server_name: &str) -> Result<(), McpError> {
-            Ok(())
+        async fn list_resources(&self, _server: &str) -> Result<Vec<Resource>> {
+            Ok(vec![Resource {
+                uri: "test://resource".to_string(),
+                name: "Test Resource".to_string(),
+                mime_type: Some("text/plain".to_string()),
+            }])
+        }
+
+        async fn read_resource(&self, _server: &str, _uri: &str) -> Result<String> {
+            Ok("test resource content".to_string())
         }
     }
 

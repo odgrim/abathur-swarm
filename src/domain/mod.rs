@@ -7,4 +7,4 @@ pub mod models;
 pub mod ports;
 
 // Re-export error types for convenient access
-pub use error::{ClaudeApiError, ConfigError, DatabaseError, McpError, TaskError};
+pub use error::{DomainError, TaskError};

@@ -8,7 +8,7 @@ pub mod task_queue_service;
 
 pub use agent_repository::AgentRepository;
 pub use claude_client::{ClaudeClient, ClaudeError, ClaudeRequest, ClaudeResponse, TokenUsage};
-pub use mcp_client::{McpClient, McpError, McpToolRequest, McpToolResponse};
+pub use mcp_client::{McpClient, Resource, Tool};
 pub use memory_repository::MemoryRepository;
 pub use priority_calculator::PriorityCalculator;
 pub use session_repository::SessionRepository;

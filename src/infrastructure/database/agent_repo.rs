@@ -66,13 +66,8 @@ impl AgentRepositoryImpl {
             created_at: DateTime::parse_from_rfc3339(&row.created_at)
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
                 .with_timezone(&Utc),
-            terminated_at: row
-                .terminated_at
-                .as_ref()
-                .map(|s| DateTime::parse_from_rfc3339(s))
-                .transpose()
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
-                .map(|dt| dt.with_timezone(&Utc)),
+            tasks_completed: 0, // TODO: Load from database
+            tasks_failed: 0,    // TODO: Load from database
         })
     }
 }
@@ -87,15 +82,13 @@ impl AgentRepository for AgentRepositoryImpl {
         let memory_bytes = i64::try_from(agent.memory_usage_bytes)
             .map_err(|e| DatabaseError::ValidationError(format!("Memory usage too large: {e}")))?;
         let created_str = agent.created_at.to_rfc3339();
-        let terminated_str = agent.terminated_at.map(|dt| dt.to_rfc3339());
-
         sqlx::query!(
             r#"
             INSERT INTO agents (
                 id, agent_type, status, current_task_id, heartbeat_at,
-                memory_usage_bytes, cpu_usage_percent, created_at, terminated_at
+                memory_usage_bytes, cpu_usage_percent, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             id_str,
             agent.agent_type,
@@ -104,8 +97,7 @@ impl AgentRepository for AgentRepositoryImpl {
             heartbeat_str,
             memory_bytes,
             agent.cpu_usage_percent,
-            created_str,
-            terminated_str
+            created_str
         )
         .execute(&self.pool)
         .await
@@ -154,7 +146,6 @@ impl AgentRepository for AgentRepositoryImpl {
         let heartbeat_str = agent.heartbeat_at.to_rfc3339();
         let memory_bytes = i64::try_from(agent.memory_usage_bytes)
             .map_err(|e| DatabaseError::ValidationError(format!("Memory usage too large: {e}")))?;
-        let terminated_str = agent.terminated_at.map(|dt| dt.to_rfc3339());
         let id_str = agent.id.to_string();
 
         sqlx::query!(
@@ -165,8 +156,7 @@ impl AgentRepository for AgentRepositoryImpl {
                 current_task_id = ?,
                 heartbeat_at = ?,
                 memory_usage_bytes = ?,
-                cpu_usage_percent = ?,
-                terminated_at = ?
+                cpu_usage_percent = ?
             WHERE id = ?
             "#,
             agent.agent_type,
@@ -175,7 +165,6 @@ impl AgentRepository for AgentRepositoryImpl {
             heartbeat_str,
             memory_bytes,
             agent.cpu_usage_percent,
-            terminated_str,
             id_str
         )
         .execute(&self.pool)
