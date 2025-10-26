@@ -58,3 +58,4 @@ site/
 
 # Virtual environment (local)
 venv/
+/target/
