@@ -122,8 +122,8 @@ impl DependencyResolver {
         let task_map: HashMap<Uuid, &Task> = tasks.iter().map(|t| (t.id, t)).collect();
 
         // Build adjacency list and in-degree map
-        let graph = self.build_adjacency_list(tasks);
-        let mut in_degree = self.calculate_in_degrees(tasks, &graph)?;
+        let graph = Self::build_adjacency_list(tasks);
+        let mut in_degree = Self::calculate_in_degrees(tasks, &graph)?;
 
         // Queue of tasks with no dependencies (in-degree = 0)
         let mut queue: VecDeque<Uuid> = tasks

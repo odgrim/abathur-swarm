@@ -59,8 +59,9 @@ impl AgentRepositoryImpl {
             heartbeat_at: DateTime::parse_from_rfc3339(&row.heartbeat_at)
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
                 .with_timezone(&Utc),
-            memory_usage_bytes: u64::try_from(row.memory_usage_bytes)
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid memory_usage_bytes: {e}")))?,
+            memory_usage_bytes: u64::try_from(row.memory_usage_bytes).map_err(|e| {
+                DatabaseError::ParseError(format!("Invalid memory_usage_bytes: {e}"))
+            })?,
             cpu_usage_percent: row.cpu_usage_percent,
             created_at: DateTime::parse_from_rfc3339(&row.created_at)
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
