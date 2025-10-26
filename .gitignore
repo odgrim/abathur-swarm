@@ -58,3 +58,8 @@ site/
 
 # Virtual environment (local)
 venv/
+
+
+# Added by cargo
+
+/target
