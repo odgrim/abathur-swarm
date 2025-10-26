@@ -222,7 +222,7 @@ mod tests {
     fn test_task_error_not_found_display() {
         let task_id = Uuid::new_v4();
         let err = TaskError::NotFound(task_id);
-        assert_eq!(err.to_string(), format!("Task not found: {}", task_id));
+        assert_eq!(err.to_string(), format!("Task not found: {task_id}"));
     }
 
     #[test]
