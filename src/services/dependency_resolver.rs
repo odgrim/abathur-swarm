@@ -89,12 +89,11 @@ impl DependencyResolver {
         let mut path: Vec<Uuid> = Vec::new();
 
         for &task_id in &task_ids {
-            if colors[&task_id] == 0 {
-                if let Some(cycle) = Self::dfs_detect_cycle(task_id, &graph, &mut colors, &mut path)
-                {
-                    warn!("Circular dependency detected: {:?}", cycle);
-                    return Some(cycle);
-                }
+            if colors[&task_id] == 0
+                && let Some(cycle) = Self::dfs_detect_cycle(task_id, &graph, &mut colors, &mut path)
+            {
+                warn!("Circular dependency detected: {:?}", cycle);
+                return Some(cycle);
             }
         }
 
