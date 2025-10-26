@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE memories\n            SET value = ?,\n                version = version + 1,\n                updated_by = ?,\n                updated_at = ?\n            WHERE namespace = ? AND key = ? AND is_deleted = 0\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "29a6389668d70b97e27d82992d94cb4aef5154a4ebb1fe29e808f6a0f526dc32"
+}

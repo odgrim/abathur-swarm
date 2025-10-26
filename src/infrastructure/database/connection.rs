@@ -346,8 +346,8 @@ mod tests {
             "agents table should exist"
         );
         assert!(
-            table_names.contains(&"memory_entries".to_string()),
-            "memory_entries table should exist"
+            table_names.contains(&"memories".to_string()),
+            "memories table should exist"
         );
 
         conn.close().await;

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO memories (\n                namespace, key, value, memory_type, version, is_deleted,\n                metadata, created_by, updated_by, created_at, updated_at\n            )\n            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "8c1fe40146f4f8ac6f578ad01f3a94ba23a064c9794daf198d9737231b343bf6"
+}
