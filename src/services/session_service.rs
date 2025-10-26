@@ -22,6 +22,7 @@ use tracing::{instrument, warn};
 /// use std::sync::Arc;
 /// use abathur::services::SessionService;
 /// use abathur::domain::ports::SessionRepository;
+/// use abathur::domain::models::Session;
 ///
 /// async fn example(repo: Arc<dyn SessionRepository>) {
 ///     let service = SessionService::new(repo);
