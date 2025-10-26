@@ -1,10 +1,15 @@
+<<<<<<< HEAD
 use anyhow::{Context, Result};
+=======
+use crate::domain::ports::errors::DatabaseError;
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
 };
 use std::str::FromStr;
 use std::time::Duration;
 
+<<<<<<< HEAD
 <<<<<<< HEAD
 /// Database connection pool manager
 ///
@@ -13,12 +18,16 @@ use std::time::Duration;
 =======
 /// Database connection pool with SQLite configuration optimized for concurrent access
 >>>>>>> task_phase3-database-connection_2025-10-25-23-00-01
+=======
+/// Database connection manager with connection pooling
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
 pub struct DatabaseConnection {
     pool: SqlitePool,
 }
 
 impl DatabaseConnection {
     /// Create a new database connection pool with WAL mode enabled
+<<<<<<< HEAD
     ///
     /// # Arguments
 <<<<<<< HEAD
@@ -57,6 +66,14 @@ impl DatabaseConnection {
 >>>>>>> task_phase3-database-connection_2025-10-25-23-00-01
         let options = SqliteConnectOptions::from_str(database_url)
             .context("invalid database URL")?
+=======
+    pub async fn new(database_url: &str) -> Result<Self, DatabaseError> {
+        // Configure connection options
+        let options = SqliteConnectOptions::from_str(database_url)
+            .map_err(|e| {
+                DatabaseError::ConnectionPoolError(format!("Invalid database URL: {}", e))
+            })?
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
@@ -64,11 +81,16 @@ impl DatabaseConnection {
             .create_if_missing(true);
 
 <<<<<<< HEAD
+<<<<<<< HEAD
         // Create connection pool with configured limits
+=======
+        // Create connection pool
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
         let pool = SqlitePoolOptions::new()
             .min_connections(5)
             .max_connections(10)
             .idle_timeout(Duration::from_secs(30))
+<<<<<<< HEAD
             .max_lifetime(Duration::from_secs(1800)) // 30 minutes
 =======
         // Create connection pool with configured options
@@ -82,10 +104,23 @@ impl DatabaseConnection {
             .connect_with(options)
             .await
             .context("failed to create connection pool")?;
+=======
+            .max_lifetime(Duration::from_secs(1800))
+            .acquire_timeout(Duration::from_secs(10))
+            .connect_with(options)
+            .await
+            .map_err(|e| {
+                DatabaseError::ConnectionPoolError(format!(
+                    "Failed to create connection pool: {}",
+                    e
+                ))
+            })?;
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
 
         Ok(Self { pool })
     }
 
+<<<<<<< HEAD
     /// Run database migrations at startup
     ///
 <<<<<<< HEAD
@@ -105,10 +140,19 @@ impl DatabaseConnection {
             .run(&self.pool)
             .await
             .context("failed to run migrations")?;
+=======
+    /// Run migrations at startup
+    pub async fn migrate(&self) -> Result<(), DatabaseError> {
+        sqlx::migrate!("./migrations")
+            .run(&self.pool)
+            .await
+            .map_err(|e| DatabaseError::MigrationError(format!("Migration failed: {}", e)))?;
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
         Ok(())
     }
 
     /// Get a reference to the connection pool
+<<<<<<< HEAD
     ///
 <<<<<<< HEAD
     /// Use this to pass the pool to repository implementations.
@@ -118,10 +162,14 @@ impl DatabaseConnection {
     /// The pool manages connection lifecycle automatically.
     pub fn pool(&self) -> &SqlitePool {
 >>>>>>> task_phase3-database-connection_2025-10-25-23-00-01
+=======
+    pub fn pool(&self) -> &SqlitePool {
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
         &self.pool
     }
 
     /// Close the connection pool gracefully
+<<<<<<< HEAD
     ///
 <<<<<<< HEAD
     /// Closes all connections and waits for them to finish.
@@ -130,6 +178,8 @@ impl DatabaseConnection {
     /// This method closes all connections in the pool. It should be called during
     /// application shutdown to ensure clean termination.
 >>>>>>> task_phase3-database-connection_2025-10-25-23-00-01
+=======
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
     pub async fn close(&self) {
         self.pool.close().await;
     }
@@ -141,6 +191,7 @@ mod tests {
 
     #[tokio::test]
 <<<<<<< HEAD
+<<<<<<< HEAD
     async fn test_connection_pool_creation() {
         // Use in-memory database for testing
         let db = DatabaseConnection::new("sqlite::memory:")
@@ -150,10 +201,19 @@ mod tests {
         // Verify pool is accessible
         assert!(!db.pool().is_closed());
 
+=======
+    async fn test_connection_creation() {
+        let db = DatabaseConnection::new("sqlite::memory:")
+            .await
+            .expect("Failed to create connection");
+
+        assert!(!db.pool().is_closed());
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
         db.close().await;
     }
 
     #[tokio::test]
+<<<<<<< HEAD
     async fn test_migration_runs_successfully() {
         let db = DatabaseConnection::new("sqlite::memory:")
             .await
@@ -289,5 +349,14 @@ mod tests {
         // Verify pool is closed after close()
         assert!(conn.pool().is_closed());
 >>>>>>> task_phase3-database-connection_2025-10-25-23-00-01
+=======
+    async fn test_migration() {
+        let db = DatabaseConnection::new("sqlite::memory:")
+            .await
+            .expect("Failed to create connection");
+
+        db.migrate().await.expect("Failed to run migrations");
+        db.close().await;
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
     }
 }

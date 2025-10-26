@@ -1,47 +1,7 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Testing
-.pytest_cache/
-.coverage
-coverage.xml
-htmlcov/
-.tox/
-
-# Type checking
-.mypy_cache/
-.dmypy.json
-
-# Linting
-.ruff_cache/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# Environment
+/target/
+/.abathur/
 .env
+<<<<<<< HEAD
 .venv
 env/
 venv/
@@ -68,3 +28,5 @@ venv/
 target/
 >>>>>>> task_phase3-database-connection_2025-10-25-23-00-01
 Cargo.lock
+=======
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02

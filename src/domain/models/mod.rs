@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 //! Domain models
 //!
 //! Pure domain entities with business logic and validation rules.
@@ -18,4 +19,8 @@ pub use config::{
 pub use memory::{Memory, MemoryType};
 pub use queue::{QueueItem, TaskQueue};
 pub use session::{Session, SessionEvent};
+=======
+pub mod task;
+
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
 pub use task::{DependencyType, Task, TaskSource, TaskStatus};
