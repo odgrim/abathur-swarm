@@ -99,7 +99,7 @@ mod tests {
             .expect("failed to create database connection");
 
         // Verify pool is accessible
-        assert!(db.pool().is_closed() == false);
+        assert!(!db.pool().is_closed());
 
         db.close().await;
     }

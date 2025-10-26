@@ -14,6 +14,22 @@ pub struct AgentRepositoryImpl {
     pool: SqlitePool,
 }
 
+/// Raw agent row data from database queries
+///
+/// This struct helps reduce the number of function parameters and satisfies
+/// clippy's argument count limits.
+struct AgentRowData {
+    id: String,
+    agent_type: String,
+    status: String,
+    current_task_id: Option<String>,
+    heartbeat_at: String,
+    memory_usage_bytes: i64,
+    cpu_usage_percent: f64,
+    created_at: String,
+    terminated_at: Option<String>,
+}
+
 impl AgentRepositoryImpl {
     /// Create a new agent repository instance
     ///
@@ -24,38 +40,28 @@ impl AgentRepositoryImpl {
     }
 
     /// Helper function to parse a row into an Agent struct
-    fn parse_agent_row(
-        id: String,
-        agent_type: String,
-        status: String,
-        current_task_id: Option<String>,
-        heartbeat_at: String,
-        memory_usage_bytes: i64,
-        cpu_usage_percent: f64,
-        created_at: String,
-        terminated_at: Option<String>,
-    ) -> Result<Agent, DatabaseError> {
+    fn parse_agent_row(row: AgentRowData) -> Result<Agent, DatabaseError> {
         Ok(Agent {
-            id: Uuid::parse_str(&id)
+            id: Uuid::parse_str(&row.id)
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {}", e)))?,
-            agent_type,
-            status: status
+            agent_type: row.agent_type,
+            status: row.status
                 .parse()
                 .map_err(|e: anyhow::Error| DatabaseError::ParseError(e.to_string()))?,
-            current_task_id: current_task_id
+            current_task_id: row.current_task_id
                 .as_ref()
                 .map(|s| Uuid::parse_str(s))
                 .transpose()
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {}", e)))?,
-            heartbeat_at: DateTime::parse_from_rfc3339(&heartbeat_at)
+            heartbeat_at: DateTime::parse_from_rfc3339(&row.heartbeat_at)
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
                 .with_timezone(&Utc),
-            memory_usage_bytes: memory_usage_bytes as u64,
-            cpu_usage_percent,
-            created_at: DateTime::parse_from_rfc3339(&created_at)
+            memory_usage_bytes: row.memory_usage_bytes as u64,
+            cpu_usage_percent: row.cpu_usage_percent,
+            created_at: DateTime::parse_from_rfc3339(&row.created_at)
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
                 .with_timezone(&Utc),
-            terminated_at: terminated_at
+            terminated_at: row.terminated_at
                 .as_ref()
                 .map(|s| DateTime::parse_from_rfc3339(s))
                 .transpose()
@@ -118,17 +124,17 @@ impl AgentRepository for AgentRepositoryImpl {
 
         match row {
             Some(r) => {
-                let agent = Self::parse_agent_row(
-                    r.id,
-                    r.agent_type,
-                    r.status,
-                    r.current_task_id,
-                    r.heartbeat_at,
-                    r.memory_usage_bytes,
-                    r.cpu_usage_percent,
-                    r.created_at,
-                    r.terminated_at,
-                )?;
+                let agent = Self::parse_agent_row(AgentRowData {
+                    id: r.id,
+                    agent_type: r.agent_type,
+                    status: r.status,
+                    current_task_id: r.current_task_id,
+                    heartbeat_at: r.heartbeat_at,
+                    memory_usage_bytes: r.memory_usage_bytes,
+                    cpu_usage_percent: r.cpu_usage_percent,
+                    created_at: r.created_at,
+                    terminated_at: r.terminated_at,
+                })?;
                 Ok(Some(agent))
             }
             None => Ok(None),
@@ -202,7 +208,7 @@ impl AgentRepository for AgentRepositoryImpl {
         agents
             .into_iter()
             .map(|(id, agent_type, status, current_task_id, heartbeat_at, memory_usage_bytes, cpu_usage_percent, created_at, terminated_at)| {
-                Self::parse_agent_row(
+                Self::parse_agent_row(AgentRowData {
                     id,
                     agent_type,
                     status,
@@ -212,7 +218,7 @@ impl AgentRepository for AgentRepositoryImpl {
                     cpu_usage_percent,
                     created_at,
                     terminated_at,
-                )
+                })
             })
             .collect()
     }
@@ -241,17 +247,17 @@ impl AgentRepository for AgentRepositoryImpl {
         rows
             .into_iter()
             .map(|r| {
-                Self::parse_agent_row(
-                    r.id,
-                    r.agent_type,
-                    r.status,
-                    r.current_task_id,
-                    r.heartbeat_at,
-                    r.memory_usage_bytes,
-                    r.cpu_usage_percent,
-                    r.created_at,
-                    r.terminated_at,
-                )
+                Self::parse_agent_row(AgentRowData {
+                    id: r.id,
+                    agent_type: r.agent_type,
+                    status: r.status,
+                    current_task_id: r.current_task_id,
+                    heartbeat_at: r.heartbeat_at,
+                    memory_usage_bytes: r.memory_usage_bytes,
+                    cpu_usage_percent: r.cpu_usage_percent,
+                    created_at: r.created_at,
+                    terminated_at: r.terminated_at,
+                })
             })
             .collect()
     }

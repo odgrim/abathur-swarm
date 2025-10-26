@@ -16,6 +16,7 @@ use sqlx::SqlitePool;
 ///     teardown_test_db(pool).await;
 /// }
 /// ```
+#[allow(dead_code)]
 pub async fn setup_test_db() -> SqlitePool {
     let pool = SqlitePool::connect("sqlite::memory:")
         .await
@@ -34,6 +35,7 @@ pub async fn setup_test_db() -> SqlitePool {
 ///
 /// Closes the connection pool and cleans up resources.
 /// Always call this at the end of your test to avoid resource leaks.
+#[allow(dead_code)]
 pub async fn teardown_test_db(pool: SqlitePool) {
     pool.close().await;
 }
