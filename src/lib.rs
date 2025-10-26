@@ -9,7 +9,7 @@ pub use domain::models::{
     Agent, AgentStatus, Config, DatabaseConfig, LoggingConfig, McpServerConfig, Memory, MemoryType,
     RateLimitConfig, ResourceLimitsConfig, RetryConfig,
 };
-pub use domain::ports::{AgentRepository, MemoryRepository, PriorityCalculator, TaskQueueService};
+pub use domain::ports::{AgentRepository, ClaudeClient, MemoryRepository, PriorityCalculator, TaskQueueService};
 pub use infrastructure::config::{ConfigError, ConfigLoader};
-pub use infrastructure::database::{AgentRepositoryImpl, DatabaseConnection, DatabaseError};
+pub use infrastructure::database::errors::DatabaseError;
 pub use services::{DependencyResolver, MemoryService};

@@ -76,7 +76,8 @@ criterion = "0.5"
 cargo-tarpaulin = "0.27"
 
 # Mock HTTP server
-wiremock = "0.6"
+# wiremock = "0.6"  # Disabled due to let-chains feature incompatibility
+mockito = "1.5"
 
 # Testing utilities
 tempfile = "3.23.0"
