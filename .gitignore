@@ -58,3 +58,9 @@ site/
 
 # Virtual environment (local)
 venv/
+
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
