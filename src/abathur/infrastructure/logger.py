@@ -17,9 +17,10 @@ def setup_logging(log_level: str = "INFO", log_dir: Path | None = None) -> None:
         log_dir: Directory for log files (if None, only console logging)
     """
     # Configure stdlib logging
+    # Use stderr for MCP server compatibility (stdout reserved for JSON-RPC)
     logging.basicConfig(
         format="%(message)s",
-        stream=sys.stdout,
+        stream=sys.stderr,
         level=getattr(logging, log_level.upper()),
     )
 

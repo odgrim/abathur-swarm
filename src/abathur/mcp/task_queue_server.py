@@ -859,6 +859,10 @@ class AbathurTaskQueueServer:
 async def main() -> None:
     """Main entry point."""
     import argparse
+    from ..infrastructure.logger import setup_logging
+
+    # Setup logging to stderr (stdout reserved for MCP JSON-RPC protocol)
+    setup_logging(log_level="INFO")
 
     parser = argparse.ArgumentParser(description="Abathur Task Queue MCP Server")
     parser.add_argument(
