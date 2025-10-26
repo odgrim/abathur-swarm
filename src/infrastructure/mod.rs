@@ -11,6 +11,7 @@
 //!
 //! Infrastructure implementations satisfy the port traits defined in the domain layer.
 
+pub mod claude;
 pub mod config;
 pub mod database;
 pub mod mcp;
