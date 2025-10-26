@@ -8,11 +8,17 @@ pub enum DatabaseError {
     #[error("UUID parse error: {0}")]
     UuidParseError(#[from] uuid::Error),
 
+    #[error("Parse error: {0}")]
+    ParseError(String),
+
     #[error("DateTime parse error: {0}")]
     DateTimeParseError(#[from] chrono::ParseError),
 
     #[error("JSON serialization error: {0}")]
     JsonError(#[from] serde_json::Error),
+
+    #[error("Not found: {0}")]
+    NotFound(uuid::Uuid),
 
     #[error("Session not found: {0}")]
     SessionNotFound(uuid::Uuid),
