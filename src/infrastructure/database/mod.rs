@@ -4,8 +4,10 @@
 //! - Connection pooling with sqlx
 //! - WAL mode for concurrent access
 //! - Automatic migrations
-//! - Repository implementations (to be added)
+//! - Repository implementations
 
 pub mod connection;
+pub mod memory_repo;
 
 pub use connection::DatabaseConnection;
+pub use memory_repo::MemoryRepositoryImpl;

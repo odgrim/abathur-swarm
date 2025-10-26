@@ -3,10 +3,6 @@
 -- SQLite version: 3.x with WAL mode enabled
 
 -- Enable WAL mode and configure pragmas
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
 
 -- =============================================================================
 -- Table: tasks

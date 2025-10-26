@@ -8,6 +8,7 @@
 //! - Claude API client
 //! - Memory management (semantic, episodic, procedural)
 
+pub mod domain;
 pub mod infrastructure;
 
 // Re-export key types for convenience
