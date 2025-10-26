@@ -49,6 +49,9 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 # Async traits
 async-trait = "0.1.89"
 
+# Futures utilities
+futures = "0.3"
+
 # MCP Integration
 rmcp = "0.1"
 
