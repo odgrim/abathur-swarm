@@ -409,7 +409,9 @@ mod tests {
             Ok(tasks
                 .values()
                 .filter(|t| {
-                    t.dependencies.as_ref().is_some_and(|deps| deps.contains(&task_id))
+                    t.dependencies
+                        .as_ref()
+                        .is_some_and(|deps| deps.contains(&task_id))
                 })
                 .cloned()
                 .collect())
@@ -471,7 +473,10 @@ mod tests {
         }
 
         async fn recalculate_priorities(&self, tasks: &[Task]) -> Result<Vec<(Uuid, f64)>> {
-            Ok(tasks.iter().map(|t| (t.id, f64::from(t.priority))).collect())
+            Ok(tasks
+                .iter()
+                .map(|t| (t.id, f64::from(t.priority)))
+                .collect())
         }
     }
 

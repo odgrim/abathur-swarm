@@ -413,9 +413,9 @@ impl Task {
 
     /// Check if all dependencies are in the completed set
     pub fn dependencies_met(&self, completed_tasks: &[Uuid]) -> bool {
-        self.dependencies.as_ref().is_none_or(|deps| {
-            deps.iter().all(|dep_id| completed_tasks.contains(dep_id))
-        })
+        self.dependencies
+            .as_ref()
+            .is_none_or(|deps| deps.iter().all(|dep_id| completed_tasks.contains(dep_id)))
     }
 
     /// Update task status based on dependency resolution
