@@ -10,7 +10,7 @@ pub use application::{
     ResourceStatus, TaskCoordinator, TaskStatusUpdate,
 };
 pub use cli::output::progress::{
-    create_progress_bar, create_spinner, MultiProgressManager, ProgressBarExt,
+    MultiProgressManager, ProgressBarExt, create_progress_bar, create_spinner,
 };
 pub use domain::models::{
     Agent, AgentStatus, Config, DatabaseConfig, LoggingConfig, McpServerConfig, Memory, MemoryType,

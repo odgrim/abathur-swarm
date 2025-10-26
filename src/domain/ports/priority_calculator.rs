@@ -12,11 +12,13 @@ use async_trait::async_trait;
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use abathur::domain::ports::PriorityCalculator;
+/// use abathur::domain::models::task::Task;
+/// use anyhow::Result;
 ///
-/// async fn example(calc: &dyn PriorityCalculator) -> Result<()> {
-///     let priority = calc.calculate_priority(&task).await?;
+/// async fn example(calc: &dyn PriorityCalculator, task: &Task) -> Result<()> {
+///     let priority = calc.calculate_priority(task).await?;
 ///     Ok(())
 /// }
 /// ```

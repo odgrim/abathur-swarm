@@ -336,7 +336,7 @@ impl AgentExecutor {
                     | ClaudeError::Timeout
             ),
             ExecutionError::McpError { source, .. } => {
-                matches!(source, McpError::ConnectionError(_) | McpError::Timeout)
+                matches!(source, McpError::CommunicationError(_) | McpError::HealthCheckTimeout(_))
             }
             ExecutionError::Timeout { .. } => true,
             _ => false,

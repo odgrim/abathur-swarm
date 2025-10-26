@@ -188,8 +188,9 @@ impl Default for LoopExecutorConfig {
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use abathur::application::{LoopExecutor, ConvergenceStrategy};
+/// use abathur::domain::models::Task;
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {

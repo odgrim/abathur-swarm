@@ -688,7 +688,10 @@ mod tests {
 
         let result = task.retry();
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TaskError::MaxRetriesExceeded { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            TaskError::MaxRetriesExceeded { .. }
+        ));
     }
 
     #[test]

@@ -10,11 +10,13 @@ use uuid::Uuid;
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use abathur::domain::ports::TaskQueueService;
+/// use abathur::domain::models::task::TaskStatus;
+/// use anyhow::Result;
 /// use uuid::Uuid;
 ///
-/// async fn example(queue: &dyn TaskQueueService) -> Result<()> {
+/// async fn example(queue: &dyn TaskQueueService, task_id: Uuid) -> Result<()> {
 ///     let task = queue.get_task(task_id).await?;
 ///     queue.update_task_status(task_id, TaskStatus::Running).await?;
 ///     Ok(())

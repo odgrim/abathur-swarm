@@ -15,9 +15,11 @@ use tokio::task::JoinHandle;
 /// # Example
 ///
 /// ```rust,no_run
+/// use abathur::infrastructure::mcp::{McpServerManager, HealthMonitor};
 /// use std::sync::Arc;
 /// use tokio::sync::broadcast;
 ///
+/// # async fn example() -> anyhow::Result<()> {
 /// let manager = Arc::new(McpServerManager::new());
 /// let (shutdown_tx, _) = broadcast::channel(1);
 ///
@@ -27,6 +29,8 @@ use tokio::task::JoinHandle;
 /// // Later: trigger graceful shutdown
 /// shutdown_tx.send(()).unwrap();
 /// handle.await.unwrap();
+/// # Ok(())
+/// # }
 /// ```
 pub struct HealthMonitor {
     manager: Arc<McpServerManager>,
@@ -84,12 +88,17 @@ impl HealthMonitor {
     /// # Example
     ///
     /// ```rust,no_run
+    /// use tokio::sync::broadcast;
+    ///
+    /// # async fn example(monitor: &abathur::infrastructure::mcp::HealthMonitor) -> anyhow::Result<()> {
     /// let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
     /// let handle = monitor.start_monitoring("github-mcp".to_string(), shutdown_rx);
     ///
     /// // Trigger shutdown
     /// shutdown_tx.send(()).unwrap();
     /// handle.await.unwrap();
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn start_monitoring(
         &self,

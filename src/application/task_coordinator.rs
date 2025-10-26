@@ -33,21 +33,33 @@ pub struct TaskStatusUpdate {
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use abathur::application::TaskCoordinator;
+/// use abathur::domain::ports::{TaskQueueService, PriorityCalculator};
+/// use abathur::services::DependencyResolver;
 /// use std::sync::Arc;
+/// use uuid::Uuid;
+/// use anyhow::Result;
 ///
-/// let coordinator = TaskCoordinator::new(
-///     Arc::clone(&task_queue),
-///     Arc::clone(&dependency_resolver),
-///     Arc::clone(&priority_calc),
-/// );
+/// async fn example(
+///     task_queue: Arc<dyn TaskQueueService>,
+///     dependency_resolver: Arc<DependencyResolver>,
+///     priority_calc: Arc<dyn PriorityCalculator>,
+///     task_id: Uuid,
+/// ) -> Result<()> {
+///     let coordinator = TaskCoordinator::new(
+///         task_queue,
+///         dependency_resolver,
+///         priority_calc,
+///     );
 ///
-/// // Coordinate a task through its lifecycle
-/// coordinator.coordinate_task_lifecycle(task_id).await?;
+///     // Coordinate a task through its lifecycle
+///     coordinator.coordinate_task_lifecycle(task_id).await?;
 ///
-/// // Get the next ready task
-/// let next_task = coordinator.get_next_ready_task().await?;
+///     // Get the next ready task
+///     let next_task = coordinator.get_next_ready_task().await?;
+///     Ok(())
+/// }
 /// ```
 pub struct TaskCoordinator {
     task_queue: Arc<dyn TaskQueueService>,

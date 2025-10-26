@@ -34,6 +34,7 @@ pub struct Resource {
 /// # Example
 ///
 /// ```rust,no_run
+/// use abathur::domain::ports::McpClient;
 /// use anyhow::Result;
 /// use serde_json::json;
 ///
