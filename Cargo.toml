@@ -1,0 +1,126 @@
+[package]
+name = "abathur"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+authors = ["Abathur Contributors"]
+description = "Agentic swarm orchestrator with task queue, memory, and MCP integration"
+license = "MIT"
+repository = "https://github.com/yourusername/abathur"
+
+[[bin]]
+name = "abathur"
+path = "src/main.rs"
+
+[lib]
+name = "abathur"
+path = "src/lib.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.42", features = ["full"] }
+futures = "0.3"
+
+# Database
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls", "macros", "migrate"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+
+# Configuration management
+figment = { version = "0.10", features = ["yaml", "env"] }
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
+
+# Terminal output
+comfy-table = "7.1"
+indicatif = "0.17"
+console = "0.15"
+
+# Date/Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUIDs
+uuid = { version = "1.11", features = ["v4", "serde"] }
+
+# MCP integration (placeholder - will use rmcp when available)
+# rmcp = "0.1"
+
+# Async traits
+async-trait = "0.1"
+
+# Rate limiting
+governor = "0.7"
+
+# Retry logic
+backoff = { version = "0.4", features = ["tokio"] }
+
+# Process management
+nix = { version = "0.29", features = ["process", "signal"] }
+
+[dev-dependencies]
+# Testing
+tokio-test = "0.4"
+mockito = "1.6"
+temp-env = "0.3"
+tempfile = "3.14"
+
+# Property-based testing
+proptest = "1.6"
+test-strategy = "0.4"
+
+# Benchmarking
+criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+
+[[bench]]
+name = "task_queue"
+harness = false
+
+[[bench]]
+name = "priority_calculation"
+harness = false
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.bench]
+inherits = "release"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+# Deny critical lints
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Allow specific pedantic lints prone to false positives
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
