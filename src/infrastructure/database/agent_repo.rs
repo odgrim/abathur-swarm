@@ -66,8 +66,7 @@ impl AgentRepositoryImpl {
             created_at: DateTime::parse_from_rfc3339(&row.created_at)
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
                 .with_timezone(&Utc),
-            tasks_completed: 0, // TODO: Load from database
-            tasks_failed: 0,    // TODO: Load from database
+            terminated_at: None, // TODO: Load from database
         })
     }
 }

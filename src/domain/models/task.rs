@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::domain::error::TaskError;
 
 /// Task lifecycle states
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
     Pending, // Submitted, dependencies not yet checked
@@ -208,9 +208,9 @@ impl Task {
     /// Mark task as ready if all dependencies are met
     pub fn mark_ready(&mut self) -> Result<(), TaskError> {
         if self.status != TaskStatus::Pending && self.status != TaskStatus::Blocked {
-            return Err(TaskError::InvalidStatusTransition {
-                from: self.status.to_string(),
-                to: TaskStatus::Ready.to_string(),
+            return Err(TaskError::InvalidStateTransition {
+                from: self.status,
+                to: TaskStatus::Ready,
             });
         }
 
@@ -222,9 +222,9 @@ impl Task {
     /// Mark task as blocked due to unresolved dependencies
     pub fn block(&mut self, _unresolved_count: usize) -> Result<(), TaskError> {
         if self.status != TaskStatus::Pending && self.status != TaskStatus::Ready {
-            return Err(TaskError::InvalidStatusTransition {
-                from: self.status.to_string(),
-                to: TaskStatus::Blocked.to_string(),
+            return Err(TaskError::InvalidStateTransition {
+                from: self.status,
+                to: TaskStatus::Blocked,
             });
         }
 
@@ -236,9 +236,9 @@ impl Task {
     /// Start task execution (transition to Running)
     pub fn start(&mut self) -> Result<(), TaskError> {
         if self.status != TaskStatus::Ready {
-            return Err(TaskError::InvalidStatusTransition {
-                from: self.status.to_string(),
-                to: TaskStatus::Running.to_string(),
+            return Err(TaskError::InvalidStateTransition {
+                from: self.status,
+                to: TaskStatus::Running,
             });
         }
 
@@ -251,9 +251,9 @@ impl Task {
     /// Complete task successfully
     pub fn complete(&mut self, result_data: Option<serde_json::Value>) -> Result<(), TaskError> {
         if self.status != TaskStatus::Running {
-            return Err(TaskError::InvalidStatusTransition {
-                from: self.status.to_string(),
-                to: TaskStatus::Completed.to_string(),
+            return Err(TaskError::InvalidStateTransition {
+                from: self.status,
+                to: TaskStatus::Completed,
             });
         }
 
@@ -267,9 +267,9 @@ impl Task {
     /// Fail task with error message
     pub fn fail(&mut self, error_message: String) -> Result<(), TaskError> {
         if self.status != TaskStatus::Running {
-            return Err(TaskError::InvalidStatusTransition {
-                from: self.status.to_string(),
-                to: TaskStatus::Failed.to_string(),
+            return Err(TaskError::InvalidStateTransition {
+                from: self.status,
+                to: TaskStatus::Failed,
             });
         }
 
@@ -283,9 +283,9 @@ impl Task {
     /// Cancel task (can be done from any non-terminal state)
     pub fn cancel(&mut self) -> Result<(), TaskError> {
         if self.is_terminal() {
-            return Err(TaskError::InvalidStatusTransition {
-                from: self.status.to_string(),
-                to: TaskStatus::Cancelled.to_string(),
+            return Err(TaskError::InvalidStateTransition {
+                from: self.status,
+                to: TaskStatus::Cancelled,
             });
         }
 
@@ -298,14 +298,17 @@ impl Task {
     /// Retry a failed task (increments retry count and resets to Pending)
     pub fn retry(&mut self) -> Result<(), TaskError> {
         if self.status != TaskStatus::Failed {
-            return Err(TaskError::InvalidStatusTransition {
-                from: self.status.to_string(),
-                to: TaskStatus::Pending.to_string(),
+            return Err(TaskError::InvalidStateTransition {
+                from: self.status,
+                to: TaskStatus::Pending,
             });
         }
 
         if !self.can_retry() {
-            return Err(TaskError::MaxRetriesExceeded);
+            return Err(TaskError::MaxRetriesExceeded {
+                retry_count: self.retry_count,
+                max_retries: self.max_retries,
+            });
         }
 
         self.retry_count += 1;
@@ -685,7 +688,7 @@ mod tests {
 
         let result = task.retry();
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TaskError::MaxRetriesExceeded));
+        assert!(matches!(result.unwrap_err(), TaskError::MaxRetriesExceeded { .. }));
     }
 
     #[test]

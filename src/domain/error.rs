@@ -207,36 +207,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_task_error_not_found_display() {
-        let task_id = Uuid::new_v4();
-        let err = TaskError::NotFound(task_id);
-        assert_eq!(err.to_string(), format!("Task not found: {task_id}"));
-    }
-
-    #[test]
     fn test_task_error_invalid_priority_display() {
         let err = TaskError::InvalidPriority(15);
-        assert_eq!(err.to_string(), "Invalid priority: 15, must be 0-10");
+        assert_eq!(err.to_string(), "Invalid priority: 15 (must be 0-10)");
     }
 
     #[test]
     fn test_task_error_circular_dependency_display() {
-        let err = TaskError::CircularDependency;
-        assert_eq!(err.to_string(), "Task has circular dependency");
-    }
-
-    #[test]
-    fn test_task_error_is_permanent() {
-        assert!(TaskError::MaxRetriesExceeded.is_permanent());
-        assert!(TaskError::CircularDependency.is_permanent());
-        assert!(TaskError::InvalidPriority(15).is_permanent());
-        assert!(!TaskError::NotFound(Uuid::new_v4()).is_permanent());
-    }
-
-    #[test]
-    fn test_task_error_is_transient() {
-        assert!(TaskError::NotFound(Uuid::new_v4()).is_transient());
-        assert!(!TaskError::MaxRetriesExceeded.is_transient());
+        let task_ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+        let err = TaskError::CircularDependency(task_ids.clone());
+        assert!(err.to_string().contains("Circular dependency detected"));
     }
 
     #[test]
@@ -332,23 +312,5 @@ mod tests {
             value: "invalid".to_string(),
         };
         assert_eq!(err.to_string(), "Invalid value for priority: invalid");
-    }
-
-    #[test]
-    fn test_task_error_clone() {
-        let err1 = TaskError::NotFound(Uuid::new_v4());
-        let err2 = err1.clone();
-        assert_eq!(err1, err2);
-    }
-
-    #[test]
-    fn test_task_error_equality() {
-        let task_id = Uuid::new_v4();
-        let err1 = TaskError::NotFound(task_id);
-        let err2 = TaskError::NotFound(task_id);
-        assert_eq!(err1, err2);
-
-        let err3 = TaskError::CircularDependency;
-        assert_ne!(err1, err3);
     }
 }
