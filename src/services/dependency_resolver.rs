@@ -11,12 +11,16 @@ use uuid::Uuid;
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use abathur::services::DependencyResolver;
 /// use abathur::domain::models::task::Task;
 ///
+/// # fn example() -> anyhow::Result<()> {
 /// let resolver = DependencyResolver::new();
+/// # let tasks: Vec<Task> = vec![];
 /// let sorted_tasks = resolver.resolve(&tasks)?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct DependencyResolver;
