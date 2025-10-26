@@ -19,6 +19,7 @@ site/
 # Virtual environment (local)
 venv/
 <<<<<<< HEAD
+<<<<<<< HEAD
 
 # Rust
 /target/
@@ -30,3 +31,6 @@ target/
 Cargo.lock
 =======
 >>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
+=======
+/target/
+>>>>>>> task_phase4-logger-impl_2025-10-25-23-00-07

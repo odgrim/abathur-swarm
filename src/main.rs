@@ -1,4 +1,5 @@
 <<<<<<< HEAD
+<<<<<<< HEAD
 //! Abathur CLI entry point
 
 =======
@@ -31,6 +32,17 @@ async fn main() -> Result<()> {
     // Close connection
     db.close().await;
 >>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
+=======
+use abathur::logging::{info, LogConfig, LoggerImpl};
+use anyhow::Result;
+
+fn main() -> Result<()> {
+    // Initialize logging
+    let config = LogConfig::default();
+    let _logger = LoggerImpl::init(&config)?;
+
+    info!("Abathur started");
+>>>>>>> task_phase4-logger-impl_2025-10-25-23-00-07
 
     Ok(())
 }

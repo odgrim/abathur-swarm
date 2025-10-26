@@ -2,47 +2,102 @@
 name = "abathur"
 version = "0.1.0"
 edition = "2021"
-authors = ["Abathur Contributors"]
-description = "Async task orchestration and memory management system"
-license = "MIT"
+rust-version = "1.83"
+description = "AI agent orchestration system - Rust rewrite"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
-# Async runtime
-tokio = { version = "1.35", features = ["full"] }
+# CLI framework
+clap = { version = "4.5", features = ["derive"] }
 
-# Database
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "macros", "chrono", "uuid"] }
+# Async runtime
+tokio = { version = "1.42", features = ["full"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-
-# UUID generation
-uuid = { version = "1.6", features = ["v4", "serde"] }
-
-# Date/Time
-chrono = { version = "0.4", features = ["serde"] }
+serde_yaml = "0.9"
 
 # Error handling
-thiserror = "1.0"
 anyhow = "1.0"
+thiserror = "2.0"
 
-# Async trait
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "fmt"] }
+tracing-appender = "0.2"
+regex = "1.10"
+secrecy = { version = "0.8", features = ["serde"] }
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json", "stream"] }
+
+# Configuration management
+figment = { version = "0.10", features = ["yaml", "env"] }
+
+# Terminal UI
+ratatui = "0.26"
+crossterm = "0.27"
+indicatif = "0.17"
+comfy-table = "7.1"
+
+# Time and UUID
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
+
+# Async traits
 async-trait = "0.1"
 
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# MCP Integration
+rmcp = "0.1"
+
+# Resource monitoring
+sysinfo = "0.30"
+
+# Security
+keyring = "2.3"
 
 [dev-dependencies]
-# Testing
-proptest = "1.4"
-tokio-test = "0.4"
+# Property testing
+proptest = "1.6"
+test-strategy = "0.4"
 
-[[bin]]
-name = "abathur"
-path = "src/main.rs"
+# Benchmarking
+criterion = "0.5"
 
-[lib]
-name = "abathur"
-path = "src/lib.rs"
+# Test coverage
+cargo-tarpaulin = "0.27"
+
+# Mock HTTP server
+# wiremock = "0.6"  # Disabled due to Rust version compatibility
+
+# Logging test utilities
+tracing-test = "0.2"
+tempfile = "3.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
+
+[profile.test]
+opt-level = 0
+
+[lints.clippy]
+# Deny critical lints
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Allow specific pedantic lints prone to false positives
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
