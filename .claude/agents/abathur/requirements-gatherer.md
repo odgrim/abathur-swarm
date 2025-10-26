@@ -554,7 +554,6 @@ tech_architect_task = task_enqueue({
     "priority": 7,
     "agent_type": "technical-architect",
     "prerequisite_task_ids": [current_task_id],
-    "parent_task_id": current_task_id,  # Track lineage: this agent spawned the tech-architect task
     "metadata": {
         "requirements_task_id": current_task_id,
         "memory_namespace": f"task:{current_task_id}:requirements",

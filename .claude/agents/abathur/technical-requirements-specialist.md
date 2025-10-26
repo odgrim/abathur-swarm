@@ -535,7 +535,6 @@ Component spec: {component['name']}
             "priority": 7,
             "agent_type": "task-planner",
             "prerequisite_task_ids": prerequisite_tasks,
-            "parent_task_id": current_task_id,  # Track lineage: this agent spawned the task-planner task
             "metadata": {
                 "tech_spec_task_id": current_task_id,
                 "component_name": component['name'],
@@ -651,7 +650,6 @@ Original requirements: task:{requirements_task_id}:requirements
         "priority": 7,
         "agent_type": "task-planner",
         "prerequisite_task_ids": [current_task_id],
-        "parent_task_id": current_task_id,  # Track lineage: this agent spawned the task-planner task
         "metadata": {
             "tech_spec_task_id": current_task_id,
             "requirements_task_id": requirements_task_id,

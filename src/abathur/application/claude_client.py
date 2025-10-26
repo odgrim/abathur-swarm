@@ -139,6 +139,8 @@ class ClaudeClient:
         max_tokens: int = 8000,
         temperature: float = 0.7,
         model: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_executor: Any = None,
     ) -> dict[str, Any]:
         """Execute a task using Claude.
 
@@ -148,6 +150,8 @@ class ClaudeClient:
             max_tokens: Maximum tokens in response
             temperature: Sampling temperature
             model: Model to use (overrides default)
+            tools: Optional list of tools (from MCP or other sources)
+            tool_executor: Optional callable to execute tool calls
 
         Returns:
             Dictionary with:
@@ -218,36 +222,138 @@ class ClaudeClient:
                 "executing_claude_task",
                 model=model_to_use,
                 auth_method=self.auth_provider.get_auth_method(),
+                tools_count=len(tools) if tools else 0,
             )
 
-            response = await self.async_client.messages.create(
-                model=model_to_use,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_message}],
-                timeout=self.timeout,
-            )
+            # Build messages list
+            messages = [{"role": "user", "content": user_message}]
 
-            # Extract text content
-            content_text = ""
-            for block in response.content:
-                if hasattr(block, "text"):
-                    content_text += block.text
+            # Track token usage across multiple turns
+            total_input_tokens = 0
+            total_output_tokens = 0
 
-            logger.info(
-                "claude_task_completed",
-                tokens_used=response.usage.input_tokens + response.usage.output_tokens,
-                stop_reason=response.stop_reason,
-            )
+            # Agentic loop: handle tool calls and continue conversation
+            max_turns = 10  # Prevent infinite loops
+            final_text = []
 
+            for turn in range(max_turns):
+                # Make API call with tools if provided
+                api_kwargs = {
+                    "model": model_to_use,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "system": system_prompt,
+                    "messages": messages,
+                    "timeout": self.timeout,
+                }
+
+                if tools:
+                    api_kwargs["tools"] = tools
+
+                response = await self.async_client.messages.create(**api_kwargs)
+
+                # Track token usage
+                total_input_tokens += response.usage.input_tokens
+                total_output_tokens += response.usage.output_tokens
+
+                # Process response content
+                assistant_content = []
+                has_tool_use = False
+
+                for block in response.content:
+                    if hasattr(block, "text"):
+                        final_text.append(block.text)
+                        assistant_content.append({"type": "text", "text": block.text})
+                    elif hasattr(block, "type") and block.type == "tool_use":
+                        has_tool_use = True
+                        tool_block = {
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input,
+                        }
+                        assistant_content.append(tool_block)
+
+                        # Execute tool if executor provided
+                        if tool_executor:
+                            logger.info(
+                                "executing_tool",
+                                tool_name=block.name,
+                                tool_input=block.input,
+                            )
+
+                            try:
+                                tool_result = await tool_executor(block.name, block.input)
+                                logger.info(
+                                    "tool_executed",
+                                    tool_name=block.name,
+                                    success=True,
+                                )
+                            except Exception as e:
+                                logger.error(
+                                    "tool_execution_failed",
+                                    tool_name=block.name,
+                                    error=str(e),
+                                )
+                                tool_result = {
+                                    "error": str(e),
+                                    "type": "error",
+                                }
+
+                # If no tool use, we're done
+                if not has_tool_use or response.stop_reason == "end_turn":
+                    logger.info(
+                        "claude_task_completed",
+                        turns=turn + 1,
+                        tokens_used=total_input_tokens + total_output_tokens,
+                        stop_reason=response.stop_reason,
+                    )
+
+                    return {
+                        "success": True,
+                        "content": "\n".join(final_text),
+                        "stop_reason": response.stop_reason,
+                        "usage": {
+                            "input_tokens": total_input_tokens,
+                            "output_tokens": total_output_tokens,
+                        },
+                        "error": None,
+                    }
+
+                # Add assistant response to messages
+                messages.append({"role": "assistant", "content": assistant_content})
+
+                # Add tool results to messages
+                if has_tool_use and tool_executor:
+                    tool_results = []
+                    for block in response.content:
+                        if hasattr(block, "type") and block.type == "tool_use":
+                            try:
+                                tool_result = await tool_executor(block.name, block.input)
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": block.id,
+                                    "content": str(tool_result),
+                                })
+                            except Exception as e:
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": block.id,
+                                    "content": f"Error: {e}",
+                                    "is_error": True,
+                                })
+
+                    messages.append({"role": "user", "content": tool_results})
+
+            # Max turns reached
+            logger.warning("max_turns_reached", turns=max_turns)
             return {
                 "success": True,
-                "content": content_text,
-                "stop_reason": response.stop_reason,
+                "content": "\n".join(final_text),
+                "stop_reason": "max_turns",
                 "usage": {
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens,
+                    "input_tokens": total_input_tokens,
+                    "output_tokens": total_output_tokens,
                 },
                 "error": None,
             }

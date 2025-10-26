@@ -8,9 +8,11 @@ from uuid import uuid4
 import yaml
 
 from abathur.application.claude_client import ClaudeClient
+from abathur.application.mcp_client_wrapper import MCPClientWrapper
 from abathur.domain.models import Agent, AgentState, Result, Task
 from abathur.infrastructure.database import Database
 from abathur.infrastructure.logger import get_logger
+from abathur.infrastructure.mcp_config import MCPConfigLoader
 
 logger = get_logger(__name__)
 
@@ -46,6 +48,7 @@ class AgentExecutor:
             Execution result
         """
         agent_id = uuid4()
+        mcp_client = None
 
         try:
             # Load agent definition
@@ -74,6 +77,58 @@ class AgentExecutor:
             # Update agent to busy
             await self.database.update_agent_state(agent_id, AgentState.BUSY)
 
+            # Setup MCP tools if agent requires them
+            tools = None
+            tool_executor = None
+            mcp_server_names = agent_def.get("mcp_servers", [])
+
+            if mcp_server_names:
+                logger.info(
+                    "setting_up_mcp_tools",
+                    agent_id=str(agent_id),
+                    servers=mcp_server_names,
+                )
+
+                # Load MCP configuration
+                mcp_config_loader = MCPConfigLoader(self.agents_dir.parent.parent)
+                all_mcp_servers = mcp_config_loader.load_mcp_config()
+
+                # Filter to only requested servers
+                requested_servers = {
+                    name: server
+                    for name, server in all_mcp_servers.items()
+                    if name in mcp_server_names
+                }
+
+                if requested_servers:
+                    # Create MCP client wrapper
+                    mcp_client = MCPClientWrapper()
+
+                    # Connect to servers
+                    await mcp_client.connect_to_servers(requested_servers)
+
+                    # Get tools from MCP servers
+                    tools = await mcp_client.get_tools()
+
+                    # Create tool executor
+                    async def execute_tool(tool_name: str, tool_input: dict) -> Any:
+                        return await mcp_client.execute_tool(tool_name, tool_input)
+
+                    tool_executor = execute_tool
+
+                    logger.info(
+                        "mcp_tools_ready",
+                        agent_id=str(agent_id),
+                        tool_count=len(tools),
+                        servers=list(requested_servers.keys()),
+                    )
+                else:
+                    logger.warning(
+                        "mcp_servers_not_found",
+                        requested=mcp_server_names,
+                        available=list(all_mcp_servers.keys()),
+                    )
+
             # Build system prompt
             system_prompt = agent_def.get("system_prompt", "")
             if not system_prompt and "specialization" in agent_def:
@@ -91,6 +146,8 @@ class AgentExecutor:
                 max_tokens=agent_def.get("resource_limits", {}).get("max_tokens", 8000),
                 temperature=agent_def.get("resource_limits", {}).get("temperature", 0.7),
                 model=agent.model,
+                tools=tools,
+                tool_executor=tool_executor,
             )
 
             # Create result
@@ -161,6 +218,19 @@ class AgentExecutor:
                 success=False,
                 error=f"Execution error ({type(e).__name__}): {e}",
             )
+
+        finally:
+            # Cleanup MCP client
+            if mcp_client:
+                try:
+                    await mcp_client.close()
+                    logger.debug("mcp_client_closed", agent_id=str(agent_id))
+                except Exception as e:
+                    logger.error(
+                        "mcp_client_close_error",
+                        agent_id=str(agent_id),
+                        error=str(e),
+                    )
 
     def _load_agent_definition(self, agent_type: str) -> dict[str, Any]:
         """Load agent definition from YAML or MD file.
