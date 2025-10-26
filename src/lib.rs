@@ -40,10 +40,13 @@ pub use cli::output::progress::{
     MultiProgressManager, ProgressBarExt, create_progress_bar, create_spinner,
 };
 pub use domain::models::{
-    Agent, AgentStatus, Config, DatabaseConfig, LoggingConfig, McpServerConfig, Memory, MemoryType,
-    RateLimitConfig, ResourceLimitsConfig, RetryConfig,
+    Agent, AgentStatus, Config, DatabaseConfig, DependencyType, LoggingConfig, McpServerConfig,
+    Memory, MemoryType, RateLimitConfig, ResourceLimitsConfig, RetryConfig, Task, TaskSource,
+    TaskStatus,
 };
-pub use domain::ports::{AgentRepository, ClaudeClient, MemoryRepository, PriorityCalculator, TaskQueueService};
+pub use domain::ports::{
+    AgentRepository, ClaudeClient, DatabaseError, MemoryRepository, PriorityCalculator,
+    TaskFilters, TaskQueueService, TaskRepository,
+};
 pub use infrastructure::config::{ConfigError, ConfigLoader};
-pub use infrastructure::database::errors::DatabaseError;
 pub use services::{DependencyResolver, MemoryService};

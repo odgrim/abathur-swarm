@@ -100,6 +100,20 @@ impl DependencyResolver {
         None
     }
 
+    /// Validate that all dependencies exist
+    pub fn validate_dependencies(&self, task: &Task, available_tasks: &[Task]) -> Result<()> {
+        if let Some(deps) = &task.dependencies {
+            let available_ids: HashSet<Uuid> = available_tasks.iter().map(|t| t.id).collect();
+
+            for dep_id in deps {
+                if !available_ids.contains(dep_id) && *dep_id != task.id {
+                    return Err(anyhow::anyhow!("Dependency task {} not found", dep_id));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Topological sort using Kahn's algorithm
     ///
     /// Returns tasks in dependency order using in-degree tracking.
@@ -259,12 +273,49 @@ impl DependencyResolver {
 
         None
     }
+
+    /// Calculate the dependency depth for a task
+    /// Returns the maximum depth in the dependency chain
+    pub fn calculate_depth(&self, task: &Task, all_tasks: &[Task]) -> Result<u32> {
+        let task_map: HashMap<Uuid, &Task> = all_tasks.iter().map(|t| (t.id, t)).collect();
+        let mut visited = HashSet::new();
+        calculate_depth_recursive(task, &task_map, &mut visited)
+    }
 }
 
 impl Default for DependencyResolver {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// Standalone helper for depth calculation
+fn calculate_depth_recursive(
+    task: &Task,
+    task_map: &HashMap<Uuid, &Task>,
+    visited: &mut HashSet<Uuid>,
+) -> Result<u32> {
+    if visited.contains(&task.id) {
+        return Err(anyhow::anyhow!("Circular dependency detected"));
+    }
+
+    visited.insert(task.id);
+
+    let max_depth = if let Some(deps) = &task.dependencies {
+        let mut depths = Vec::new();
+        for &dep_id in deps {
+            if let Some(&dep_task) = task_map.get(&dep_id) {
+                let depth = calculate_depth_recursive(dep_task, task_map, visited)?;
+                depths.push(depth);
+            }
+        }
+        depths.into_iter().max().unwrap_or(0) + 1
+    } else {
+        0
+    };
+
+    visited.remove(&task.id);
+    Ok(max_depth)
 }
 
 #[cfg(test)]

@@ -26,14 +26,6 @@ pub enum DatabaseError {
     #[error("Invalid state update: {0}")]
     InvalidStateUpdate(String),
 
-<<<<<<< HEAD
     #[error("Validation error: {0}")]
     ValidationError(String),
-=======
-    #[error("Parse error: {0}")]
-    ParseError(String),
-
-    #[error("Not found: {0}")]
-    NotFound(uuid::Uuid),
->>>>>>> task_sse-streaming-parser_20251025-210007
 }

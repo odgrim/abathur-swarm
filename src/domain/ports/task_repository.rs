@@ -1,4 +1,4 @@
-use crate::domain::models::{Task, TaskStatus};
+use crate::domain::models::{Task, TaskSource, TaskStatus};
 use crate::domain::ports::errors::DatabaseError;
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -10,7 +10,7 @@ pub struct TaskFilters {
     pub agent_type: Option<String>,
     pub feature_branch: Option<String>,
     pub session_id: Option<Uuid>,
-    pub source: Option<crate::domain::models::TaskSource>,
+    pub source: Option<TaskSource>,
     pub exclude_status: Option<TaskStatus>,
     pub limit: Option<i64>,
 }
@@ -43,8 +43,7 @@ pub trait TaskRepository: Send + Sync {
     async fn update_status(&self, id: Uuid, status: TaskStatus) -> Result<(), DatabaseError>;
 
     /// Get tasks by feature branch
-    async fn get_by_feature_branch(&self, feature_branch: &str)
-        -> Result<Vec<Task>, DatabaseError>;
+    async fn get_by_feature_branch(&self, feature_branch: &str) -> Result<Vec<Task>, DatabaseError>;
 
     /// Get tasks by parent task ID
     async fn get_by_parent(&self, parent_id: Uuid) -> Result<Vec<Task>, DatabaseError>;
