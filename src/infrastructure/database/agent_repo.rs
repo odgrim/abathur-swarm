@@ -85,7 +85,7 @@ impl AgentRepository for AgentRepositoryImpl {
         let current_task_str = agent.current_task_id.map(|id| id.to_string());
         let heartbeat_str = agent.heartbeat_at.to_rfc3339();
         let memory_bytes = i64::try_from(agent.memory_usage_bytes)
-            .map_err(|e| DatabaseError::ParseError(format!("Memory usage too large: {e}")))?;
+            .map_err(|e| DatabaseError::ValidationError(format!("Memory usage too large: {e}")))?;
         let created_str = agent.created_at.to_rfc3339();
         let terminated_str = agent.terminated_at.map(|dt| dt.to_rfc3339());
 
@@ -153,7 +153,7 @@ impl AgentRepository for AgentRepositoryImpl {
         let current_task_str = agent.current_task_id.map(|id| id.to_string());
         let heartbeat_str = agent.heartbeat_at.to_rfc3339();
         let memory_bytes = i64::try_from(agent.memory_usage_bytes)
-            .map_err(|e| DatabaseError::ParseError(format!("Memory usage too large: {e}")))?;
+            .map_err(|e| DatabaseError::ValidationError(format!("Memory usage too large: {e}")))?;
         let terminated_str = agent.terminated_at.map(|dt| dt.to_rfc3339());
         let id_str = agent.id.to_string();
 
