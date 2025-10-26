@@ -56,7 +56,10 @@ async fn test_get_nonexistent_agent() {
     let repo = AgentRepositoryImpl::new(pool.clone());
 
     let nonexistent_id = Uuid::new_v4();
-    let result = repo.get(nonexistent_id).await.expect("query should succeed");
+    let result = repo
+        .get(nonexistent_id)
+        .await
+        .expect("query should succeed");
 
     assert!(result.is_none());
 

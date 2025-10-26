@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
+};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -111,15 +113,15 @@ mod tests {
             .expect("failed to create database connection");
 
         // Run migrations
-        db.migrate()
-            .await
-            .expect("failed to run migrations");
+        db.migrate().await.expect("failed to run migrations");
 
         // Verify agents table exists
-        let result: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agents'")
-            .fetch_one(db.pool())
-            .await
-            .expect("failed to query table");
+        let result: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agents'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("failed to query table");
 
         assert_eq!(result.0, 1, "agents table should exist");
 

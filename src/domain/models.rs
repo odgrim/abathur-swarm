@@ -118,7 +118,10 @@ mod tests {
         assert_eq!("idle".parse::<AgentStatus>().unwrap(), AgentStatus::Idle);
         assert_eq!("IDLE".parse::<AgentStatus>().unwrap(), AgentStatus::Idle);
         assert_eq!("busy".parse::<AgentStatus>().unwrap(), AgentStatus::Busy);
-        assert_eq!("terminated".parse::<AgentStatus>().unwrap(), AgentStatus::Terminated);
+        assert_eq!(
+            "terminated".parse::<AgentStatus>().unwrap(),
+            AgentStatus::Terminated
+        );
         assert!("invalid".parse::<AgentStatus>().is_err());
     }
 

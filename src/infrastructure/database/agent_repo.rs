@@ -45,10 +45,12 @@ impl AgentRepositoryImpl {
             id: Uuid::parse_str(&row.id)
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {}", e)))?,
             agent_type: row.agent_type,
-            status: row.status
+            status: row
+                .status
                 .parse()
                 .map_err(|e: anyhow::Error| DatabaseError::ParseError(e.to_string()))?,
-            current_task_id: row.current_task_id
+            current_task_id: row
+                .current_task_id
                 .as_ref()
                 .map(|s| Uuid::parse_str(s))
                 .transpose()
@@ -61,7 +63,8 @@ impl AgentRepositoryImpl {
             created_at: DateTime::parse_from_rfc3339(&row.created_at)
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
                 .with_timezone(&Utc),
-            terminated_at: row.terminated_at
+            terminated_at: row
+                .terminated_at
                 .as_ref()
                 .map(|s| DateTime::parse_from_rfc3339(s))
                 .transpose()
@@ -182,33 +185,59 @@ impl AgentRepository for AgentRepositoryImpl {
         let mut query = String::from(
             "SELECT id, agent_type, status, current_task_id, heartbeat_at, \
              memory_usage_bytes, cpu_usage_percent, created_at, terminated_at \
-             FROM agents"
+             FROM agents",
         );
 
         let agents = match status {
             Some(s) => {
                 query.push_str(" WHERE status = ? ORDER BY created_at DESC");
                 let status_str = s.to_string();
-                sqlx::query_as::<_, (String, String, String, Option<String>, String, i64, f64, String, Option<String>)>(&query)
-                    .bind(status_str)
-                    .fetch_all(&self.pool)
-                    .await
-                    .map_err(DatabaseError::QueryFailed)?
+                sqlx::query_as::<
+                    _,
+                    (
+                        String,
+                        String,
+                        String,
+                        Option<String>,
+                        String,
+                        i64,
+                        f64,
+                        String,
+                        Option<String>,
+                    ),
+                >(&query)
+                .bind(status_str)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(DatabaseError::QueryFailed)?
             }
             None => {
                 query.push_str(" ORDER BY created_at DESC");
-                sqlx::query_as::<_, (String, String, String, Option<String>, String, i64, f64, String, Option<String>)>(&query)
-                    .fetch_all(&self.pool)
-                    .await
-                    .map_err(DatabaseError::QueryFailed)?
+                sqlx::query_as::<
+                    _,
+                    (
+                        String,
+                        String,
+                        String,
+                        Option<String>,
+                        String,
+                        i64,
+                        f64,
+                        String,
+                        Option<String>,
+                    ),
+                >(&query)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(DatabaseError::QueryFailed)?
             }
         };
 
         // Map rows to Agent structs
         agents
             .into_iter()
-            .map(|(id, agent_type, status, current_task_id, heartbeat_at, memory_usage_bytes, cpu_usage_percent, created_at, terminated_at)| {
-                Self::parse_agent_row(AgentRowData {
+            .map(
+                |(
                     id,
                     agent_type,
                     status,
@@ -218,12 +247,27 @@ impl AgentRepository for AgentRepositoryImpl {
                     cpu_usage_percent,
                     created_at,
                     terminated_at,
-                })
-            })
+                )| {
+                    Self::parse_agent_row(AgentRowData {
+                        id,
+                        agent_type,
+                        status,
+                        current_task_id,
+                        heartbeat_at,
+                        memory_usage_bytes,
+                        cpu_usage_percent,
+                        created_at,
+                        terminated_at,
+                    })
+                },
+            )
             .collect()
     }
 
-    async fn find_stale_agents(&self, heartbeat_threshold: Duration) -> Result<Vec<Agent>, DatabaseError> {
+    async fn find_stale_agents(
+        &self,
+        heartbeat_threshold: Duration,
+    ) -> Result<Vec<Agent>, DatabaseError> {
         // Calculate the cutoff timestamp
         let cutoff = Utc::now() - heartbeat_threshold;
         let cutoff_str = cutoff.to_rfc3339();
@@ -244,8 +288,7 @@ impl AgentRepository for AgentRepositoryImpl {
         .map_err(DatabaseError::QueryFailed)?;
 
         // Map rows to Agent structs
-        rows
-            .into_iter()
+        rows.into_iter()
             .map(|r| {
                 Self::parse_agent_row(AgentRowData {
                     id: r.id,

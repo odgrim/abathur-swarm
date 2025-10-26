@@ -78,7 +78,10 @@ pub trait AgentRepository: Send + Sync {
     /// # Returns
     /// * `Ok(Vec<Agent>)` - List of stale agents
     /// * `Err(DatabaseError)` on query failure
-    async fn find_stale_agents(&self, heartbeat_threshold: Duration) -> Result<Vec<Agent>, DatabaseError>;
+    async fn find_stale_agents(
+        &self,
+        heartbeat_threshold: Duration,
+    ) -> Result<Vec<Agent>, DatabaseError>;
 
     /// Update an agent's heartbeat to current time
     ///
