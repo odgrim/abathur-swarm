@@ -1,0 +1,74 @@
+# Abathur Configuration Template
+# Override any setting by creating .abathur/local.yaml in your project
+# or setting environment variables with ABATHUR_ prefix
+#
+# Example environment variables:
+#   export ABATHUR_MAX_AGENTS=20
+#   export ABATHUR_RATE_LIMIT__REQUESTS_PER_SECOND=15.0
+#   export ABATHUR_DATABASE__PATH=/custom/path/abathur.db
+#   export ABATHUR_LOGGING__LEVEL=debug
+
+# Maximum concurrent agents (1-100)
+max_agents: 10
+
+# Database configuration
+database:
+  # Path to SQLite database file
+  path: ".abathur/abathur.db"
+
+  # Maximum number of database connections in pool
+  max_connections: 10
+
+# Logging configuration
+logging:
+  # Log level: trace, debug, info, warn, error
+  level: "info"
+
+  # Log format: json, pretty
+  format: "json"
+
+  # Number of days to retain logs
+  retention_days: 30
+
+# Claude API rate limiting
+rate_limit:
+  # Requests per second allowed
+  requests_per_second: 10.0
+
+  # Burst size for token bucket algorithm
+  burst_size: 20
+
+# Retry policy for transient failures
+retry:
+  # Maximum number of retry attempts
+  max_retries: 3
+
+  # Initial backoff delay in milliseconds
+  initial_backoff_ms: 10000
+
+  # Maximum backoff delay in milliseconds
+  max_backoff_ms: 300000
+
+# MCP (Model Context Protocol) server configurations
+mcp_servers:
+  - name: "memory"
+    command: "npx"
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-memory"
+    env: {}
+
+  - name: "github"
+    command: "npx"
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-github"
+    env: {}
+
+# Resource limits per agent
+resource_limits:
+  # Memory limit per agent in MB
+  per_agent_memory_mb: 512
+
+  # Total memory limit across all agents in MB
+  total_memory_mb: 4096

@@ -47,14 +47,19 @@ env/
 venv/
 
 # Runtime
-.abathur/
+.abathur/*.db
+.abathur/*.db-shm
+.abathur/*.db-wal
 .abathur/worktrees/
-*.db
-*.db-shm
-*.db-wal
+!.abathur/config.yaml
 design_docs/Chapter*
 # Documentation
 site/
 
 # Virtual environment (local)
 venv/
+
+
+# Added by cargo
+
+/target
