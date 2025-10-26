@@ -24,10 +24,10 @@ thiserror = "2.0"
 
 # Logging and tracing
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 tracing-appender = "0.2"
+secrecy = "0.8"
 regex = "1.10"
-secrecy = { version = "0.8", features = ["serde"] }
 
 # Database
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
@@ -71,12 +71,9 @@ criterion = "0.5"
 # Test coverage
 cargo-tarpaulin = "0.27"
 
-# Mock HTTP server
-# wiremock = "0.6"  # Disabled due to Rust version compatibility
-
-# Logging test utilities
-tracing-test = "0.2"
+# Testing utilities
 tempfile = "3.8"
+tracing-test = "0.2"
 
 [profile.release]
 opt-level = 3

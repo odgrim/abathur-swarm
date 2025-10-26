@@ -1,5 +1,6 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 //! Abathur CLI entry point
 
 =======
@@ -45,4 +46,8 @@ fn main() -> Result<()> {
 >>>>>>> task_phase4-logger-impl_2025-10-25-23-00-07
 
     Ok(())
+=======
+fn main() {
+    println!("Hello, world!");
+>>>>>>> task_phase4-audit-logger_2025-10-25-23-00-08
 }
