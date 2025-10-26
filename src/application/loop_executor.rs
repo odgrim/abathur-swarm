@@ -456,21 +456,11 @@ impl LoopExecutor {
             {
                 let modified_dt: DateTime<Utc> = modified.into();
 
-<<<<<<< HEAD
                 if latest_checkpoint
                     .as_ref()
                     .is_none_or(|(dt, _)| modified_dt > *dt)
                 {
                     latest_checkpoint = Some((modified_dt, path));
-=======
-                        if latest_checkpoint
-                            .as_ref()
-                            .is_none_or(|(dt, _)| modified_dt > *dt)
-                        {
-                            latest_checkpoint = Some((modified_dt, path));
-                        }
-                    }
->>>>>>> task_claude-api-request-response-types_20251025-205946
                 }
             }
         }
