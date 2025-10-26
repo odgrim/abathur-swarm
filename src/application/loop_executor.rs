@@ -43,13 +43,13 @@ impl ConvergenceStrategy {
         match self {
             Self::Fixed(max_iter) => state.iteration >= *max_iter,
 
-            Self::Adaptive(threshold) => {
-                state.change_rate.map_or(false, |change_rate| change_rate < *threshold)
-            }
+            Self::Adaptive(threshold) => state
+                .change_rate
+                .is_some_and(|change_rate| change_rate < *threshold),
 
-            Self::Threshold(quality_threshold) => {
-                state.quality_metric.map_or(false, |quality| quality >= *quality_threshold)
-            }
+            Self::Threshold(quality_threshold) => state
+                .quality_metric
+                .is_some_and(|quality| quality >= *quality_threshold),
         }
     }
 }
@@ -106,15 +106,15 @@ impl LoopState {
     }
 
     /// Update state after iteration
-    fn update_iteration(&mut self, result: String, quality_metric: Option<f64>) -> Result<()> {
+    fn update_iteration(&mut self, result: &str, quality_metric: Option<f64>) {
         // Calculate change rate if we have previous result
         if let Some(prev) = &self.last_result {
-            self.change_rate = Some(calculate_change_rate(prev, &result));
+            self.change_rate = Some(calculate_change_rate(prev, result));
         }
 
         // Update results
         self.previous_result = self.last_result.clone();
-        self.last_result = Some(result.clone());
+        self.last_result = Some(result.to_string());
         self.quality_metric = quality_metric;
 
         // Add to history

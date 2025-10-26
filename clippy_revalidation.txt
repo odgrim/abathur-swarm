@@ -1,1 +1,276 @@
     Blocking waiting for file lock on build directory
+    Checking abathur v0.1.0 (/Users/odgrim/dev/home/agentics/abathur/.abathur/features/rust-rewrite)
+error: this `map_or` can be simplified
+  --> src/application/loop_executor.rs:47:17
+   |
+47 |                 state.change_rate.map_or(false, |change_rate| change_rate < *threshold)
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+   = note: `-D clippy::unnecessary-map-or` implied by `-D clippy::all`
+   = help: to override `-D clippy::all` add `#[allow(clippy::unnecessary_map_or)]`
+help: use is_some_and instead
+   |
+47 -                 state.change_rate.map_or(false, |change_rate| change_rate < *threshold)
+47 +                 state.change_rate.is_some_and(|change_rate| change_rate < *threshold)
+   |
+
+error: this `map_or` can be simplified
+  --> src/application/loop_executor.rs:51:17
+   |
+51 |                 state.quality_metric.map_or(false, |quality| quality >= *quality_threshold)
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_map_or
+help: use is_some_and instead
+   |
+51 -                 state.quality_metric.map_or(false, |quality| quality >= *quality_threshold)
+51 +                 state.quality_metric.is_some_and(|quality| quality >= *quality_threshold)
+   |
+
+error: this argument is passed by value, but not consumed in the function body
+   --> src/application/loop_executor.rs:109:44
+    |
+109 |     fn update_iteration(&mut self, result: String, quality_metric: Option<f64>) -> Result<()> {
+    |                                            ^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_pass_by_value
+    = note: `-D clippy::needless-pass-by-value` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_pass_by_value)]`
+help: consider changing the type to
+    |
+109 -     fn update_iteration(&mut self, result: String, quality_metric: Option<f64>) -> Result<()> {
+109 +     fn update_iteration(&mut self, result: &str, quality_metric: Option<f64>) -> Result<()> {
+    |
+help: change `result.clone()` to
+    |
+117 -         self.last_result = Some(result.clone());
+117 +         self.last_result = Some(result.to_string());
+    |
+
+error: this function's return value is unnecessary
+   --> src/application/loop_executor.rs:109:5
+    |
+109 |     fn update_iteration(&mut self, result: String, quality_metric: Option<f64>) -> Result<()> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_wraps
+    = note: `-D clippy::unnecessary-wraps` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_wraps)]`
+help: remove the return type...
+    |
+109 -     fn update_iteration(&mut self, result: String, quality_metric: Option<f64>) -> Result<()> {
+109 +     fn update_iteration(&mut self, result: String, quality_metric: Option<f64>) -> () {
+    |
+help: ...and then remove returned values
+    |
+132 -         Ok(())
+    |
+
+error: the function has a cognitive complexity of (59/25)
+   --> src/application/loop_executor.rs:273:14
+    |
+273 |     async fn run_loop<F, Fut>(&self, task: Task, iteration_fn: F) -> Result<LoopState>
+    |              ^^^^^^^^
+    |
+    = help: you could split it up into multiple smaller functions
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cognitive_complexity
+    = note: `-D clippy::cognitive-complexity` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::cognitive_complexity)]`
+
+error: unused `self` argument
+   --> src/application/loop_executor.rs:364:39
+    |
+364 |     const fn calculate_quality_metric(&self, _result: &str) -> Option<f64> {
+    |                                       ^^^^^
+    |
+    = help: consider refactoring to an associated function
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_self
+    = note: `-D clippy::unused-self` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unused_self)]`
+
+error: temporary with significant `Drop` can be early dropped
+   --> src/application/loop_executor.rs:383:29
+    |
+382 |                       _ = checkpoint_ticker.tick() => {
+    |  _____________________________________________________-
+383 | |                         let state_guard = state.read().await;
+    | |                             ^^^^^^^^^^^
+...   |
+403 | |                     }
+    | |_____________________- temporary `state_guard` is currently being dropped at the end of its contained scope
+    |
+    = note: this might lead to unnecessary resource contention
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#significant_drop_tightening
+    = note: `-D clippy::significant-drop-tightening` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::significant_drop_tightening)]`
+help: drop the temporary after the end of its last usage
+   --> /Users/odgrim/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-0.1.41/src/macros.rs:2961:127
+    |
+2961~         $crate::valueset!(@ { (&$next, $crate::__macro_support::Option::Some(&$crate::__macro_support::format_args!($($rest)+)
+2962~                                         drop(state_guard); as &dyn Value)), $($out),* }, $next, )
+    |
+
+error: temporary with significant `Drop` can be early dropped
+   --> src/application/loop_executor.rs:416:13
+    |
+415 |       async fn save_checkpoint(&self) -> Result<()> {
+    |  ___________________________________________________-
+416 | |         let state = self.state.read().await;
+    | |             ^^^^^
+417 | |         let checkpoint_path = self
+418 | |             .config
+...   |
+430 | |         Ok(())
+431 | |     }
+    | |_____- temporary `state` is currently being dropped at the end of its contained scope
+    |
+    = note: this might lead to unnecessary resource contention
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#significant_drop_tightening
+help: drop the temporary after the end of its last usage
+    |
+423 ~             serde_json::to_string_pretty(&*state).context("Failed to serialize checkpoint")?;
+424 +         drop(state);
+    |
+
+error: this could be rewritten as `let...else`
+   --> src/application/loop_executor.rs:436:9
+    |
+436 | /         let mut entries = match fs::read_dir(&self.config.checkpoint_dir).await {
+437 | |             Ok(e) => e,
+438 | |             Err(_) => return Ok(None), // No checkpoint dir, no recovery
+439 | |         };
+    | |__________^ help: consider writing: `let Ok(mut entries) = fs::read_dir(&self.config.checkpoint_dir).await else { return Ok(None) };`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_let_else
+    = note: `-D clippy::manual-let-else` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::manual_let_else)]`
+
+error: casting `usize` to `f64` causes a loss of precision on targets with 64-bit wide pointers (`usize` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+   --> src/application/loop_executor.rs:502:19
+    |
+502 |     let max_len = previous.len().max(current.len()) as f64;
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_precision_loss
+    = note: `-D clippy::cast-precision-loss` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::cast_precision_loss)]`
+
+error: casting `usize` to `f64` causes a loss of precision on targets with 64-bit wide pointers (`usize` is 64 bits wide, but `f64`'s mantissa is only 52 bits wide)
+   --> src/application/loop_executor.rs:503:29
+    |
+503 |       let common_prefix_len = previous
+    |  _____________________________^
+504 | |         .chars()
+505 | |         .zip(current.chars())
+506 | |         .take_while(|(a, b)| a == b)
+507 | |         .count() as f64;
+    | |_______________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_precision_loss
+
+error: this could be a `const fn`
+  --> src/domain/error.rs:51:5
+   |
+51 | /     pub fn is_transient(&self) -> bool {
+52 | |         !self.is_permanent()
+53 | |     }
+   | |_____^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#missing_const_for_fn
+   = note: `-D clippy::missing-const-for-fn` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::missing_const_for_fn)]`
+help: make the function `const`
+   |
+51 |     pub const fn is_transient(&self) -> bool {
+   |         +++++
+
+error: missing `#[must_use]` attribute on a method returning `Self`
+   --> src/domain/models/memory.rs:108:5
+    |
+108 | /     pub fn with_new_version(&self, value: Value, updated_by: String) -> Self {
+109 | |         Self {
+110 | |             id: 0, // New entry in database
+111 | |             namespace: self.namespace.clone(),
+...   |
+123 | |     }
+    | |_____^
+    |
+    = help: consider adding the `#[must_use]` attribute to the method or directly to the `Self` type
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#return_self_not_must_use
+    = note: `-D clippy::return-self-not-must-use` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::return_self_not_must_use)]`
+
+error: unnecessary `Debug` formatting in `format!` args
+  --> src/infrastructure/config/loader.rs:85:65
+   |
+85 |             .context(format!("Failed to load config from {:?}", path.as_ref()))?;
+   |                                                                 ^^^^^^^^^^^^^
+   |
+   = help: use `Display` formatting and change this to `path.as_ref().display()`
+   = note: switching to `Display` formatting will change how the value is shown; escaped characters will no longer be escaped and surrounding quotes will be removed
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unnecessary_debug_formatting
+   = note: `-D clippy::unnecessary-debug-formatting` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::unnecessary_debug_formatting)]`
+
+error: casting `i64` to `u64` may lose the sign of the value
+  --> src/infrastructure/database/agent_repo.rs:62:33
+   |
+62 |             memory_usage_bytes: row.memory_usage_bytes as u64,
+   |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_sign_loss
+   = note: `-D clippy::cast-sign-loss` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::cast_sign_loss)]`
+
+error: casting `u64` to `i64` may wrap around the value
+  --> src/infrastructure/database/agent_repo.rs:85:28
+   |
+85 |         let memory_bytes = agent.memory_usage_bytes as i64;
+   |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+   = note: `-D clippy::cast-possible-wrap` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::cast_possible_wrap)]`
+
+error: casting `u64` to `i64` may wrap around the value
+   --> src/infrastructure/database/agent_repo.rs:152:28
+    |
+152 |         let memory_bytes = agent.memory_usage_bytes as i64;
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_possible_wrap
+
+error: unused `self` argument
+   --> src/services/dependency_resolver.rs:173:29
+    |
+173 |     fn build_adjacency_list(&self, tasks: &[Task]) -> HashMap<Uuid, Vec<Uuid>> {
+    |                             ^^^^^
+    |
+    = help: consider refactoring to an associated function
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_self
+
+error: unused `self` argument
+   --> src/services/dependency_resolver.rs:197:9
+    |
+197 |         &self,
+    |         ^^^^^
+    |
+    = help: consider refactoring to an associated function
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_self
+
+error: unused `async` for function with no await statements
+   --> src/application/loop_executor.rs:478:5
+    |
+478 | /     pub async fn shutdown(&self) {
+479 | |         info!("Triggering loop executor shutdown");
+480 | |         let _ = self.shutdown_tx.send(());
+481 | |     }
+    | |_____^
+    |
+    = help: consider removing the `async` from this function
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_async
+    = note: `-D clippy::unused-async` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unused_async)]`
+
+error: could not compile `abathur` (lib) due to 20 previous errors
