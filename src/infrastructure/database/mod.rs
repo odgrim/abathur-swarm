@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 //! Database infrastructure layer
 //!
 //! This module provides `SQLite` database connectivity with:
@@ -6,6 +7,8 @@
 //! - Automatic migrations
 //! - Repository implementations
 
+=======
+>>>>>>> task_sse-streaming-parser_20251025-210007
 pub mod agent_repo;
 pub mod connection;
 pub mod errors;

@@ -2,29 +2,120 @@
 name = "abathur"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+authors = ["Abathur Contributors"]
+description = "AI agent orchestration system - Rust rewrite"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
-anyhow = "1.0.100"
-async-trait = "0.1.89"
-bytes = "1"
-chrono = { version = "0.4.42", features = ["serde"] }
-dirs = "6.0.0"
-figment = { version = "0.10.19", features = ["yaml", "env"] }
-futures = "0.3"
-reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "stream"] }
+# CLI framework
+clap = { version = "4.5", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1.48.0", features = ["full"] }
+
+# Serialization
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 serde_yaml = "0.9.34"
-sqlx = { version = "0.8.6", features = ["runtime-tokio-native-tls", "sqlite"] }
+
+# Error handling
+anyhow = "1.0.100"
 thiserror = "2.0.17"
-tokio = { version = "1.48.0", features = ["full"] }
-tokio-stream = "0.1"
+
+# Logging and tracing
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Database
+sqlx = { version = "0.8.6", features = ["runtime-tokio-native-tls", "sqlite", "macros", "migrate", "chrono", "uuid"] }
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json", "stream"] }
+
+# Streaming support
+futures = "0.3"
+tokio-stream = "0.1"
+bytes = "1.0"
+
+# Configuration management
+figment = { version = "0.10.19", features = ["yaml", "env"] }
+
+# Terminal UI
+ratatui = "0.26"
+crossterm = "0.27"
+indicatif = "0.17"
+comfy-table = "7.1"
+
+# Time and UUID
+chrono = { version = "0.4.42", features = ["serde"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 
+# Async traits
+async-trait = "0.1.89"
+
+# MCP Integration
+rmcp = "0.1"
+
+# Resource monitoring
+sysinfo = "0.30"
+
+# Security
+keyring = "2.3"
+
+# Utilities
+dirs = "6.0.0"
+
 [dev-dependencies]
+# Mocking
 mockall = "0.13.1"
+
+# Property testing
 proptest = "1.6.0"
+test-strategy = "0.4"
+
+# Benchmarking
+criterion = "0.5"
+
+# Test coverage
+cargo-tarpaulin = "0.27"
+
+# Mock HTTP server
+# Note: wiremock 0.6 is incompatible with edition 2024, disabling for now
+# wiremock = "0.6"
+
+# Testing utilities
 tempfile = "3.23.0"
-tokio = { version = "1.42.0", features = ["macros", "rt"] }
-wiremock = "0.5"
+tokio-test = "0.4"
+
+[[bin]]
+name = "abathur"
+path = "src/main.rs"
+
+[lib]
+name = "abathur"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.dev]
+opt-level = 0
+
+[profile.test]
+opt-level = 0
+
+[lints.clippy]
+# Deny critical lints
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Allow specific pedantic lints prone to false positives
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
