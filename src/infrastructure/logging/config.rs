@@ -66,14 +66,14 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-fn default_format() -> LogFormat {
+const fn default_format() -> LogFormat {
     LogFormat::Json
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
-fn default_retention_days() -> i64 {
+const fn default_retention_days() -> i64 {
     30
 }

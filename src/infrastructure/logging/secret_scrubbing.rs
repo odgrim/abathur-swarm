@@ -39,13 +39,13 @@ impl SecretScrubbingLayer {
             .replace_all(&scrubbed, |caps: &regex::Captures| {
                 // Extract the field name before the value
                 let full_match = &caps[0];
-                if let Some(colon_pos) = full_match.find(':') {
-                    format!("{}:[REDACTED]", &full_match[..colon_pos])
-                } else if let Some(eq_pos) = full_match.find('=') {
-                    format!("{}=[REDACTED]", &full_match[..eq_pos])
-                } else {
-                    "[REDACTED]".to_string()
-                }
+                full_match.find(':').map_or_else(
+                    || full_match.find('=').map_or_else(
+                        || "[REDACTED]".to_string(),
+                        |eq_pos| format!("{}=[REDACTED]", &full_match[..eq_pos])
+                    ),
+                    |colon_pos| format!("{}:[REDACTED]", &full_match[..colon_pos])
+                )
             })
             .to_string();
         scrubbed = self.password_pattern

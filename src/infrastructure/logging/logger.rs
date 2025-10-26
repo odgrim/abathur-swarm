@@ -26,6 +26,7 @@ impl LoggerImpl {
     ///
     /// # Errors
     /// Returns an error if the logger cannot be initialized
+    #[allow(clippy::too_many_lines)]
     pub fn init(config: &LogConfig) -> Result<Self> {
         // Parse log level
         let default_level = parse_log_level(&config.level)?;
@@ -173,7 +174,7 @@ fn parse_log_level(level: &str) -> Result<Level> {
         "info" => Ok(Level::INFO),
         "warn" => Ok(Level::WARN),
         "error" => Ok(Level::ERROR),
-        _ => anyhow::bail!("Invalid log level: {}", level),
+        _ => anyhow::bail!("Invalid log level: {level}"),
     }
 }
 

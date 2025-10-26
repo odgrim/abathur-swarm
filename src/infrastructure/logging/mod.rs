@@ -5,7 +5,7 @@
 //! - Secret scrubbing for API keys, passwords, and tokens
 //! - Log rotation with retention policies
 //! - Async non-blocking file writes
-//! - Environment-based filtering (RUST_LOG)
+//! - Environment-based filtering (`RUST_LOG`)
 //!
 //! # Examples
 //!
