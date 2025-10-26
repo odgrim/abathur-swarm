@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
 use tokio::select;
-use tokio::sync::broadcast;
 use tokio::sync::RwLock;
+use tokio::sync::broadcast;
 use tokio::time::{interval, timeout};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -114,11 +114,7 @@ impl LoopState {
     }
 
     /// Update state after iteration
-    fn update_iteration(
-        &mut self,
-        result: String,
-        quality_metric: Option<f64>,
-    ) -> Result<()> {
+    fn update_iteration(&mut self, result: String, quality_metric: Option<f64>) -> Result<()> {
         // Calculate change rate if we have previous result
         if let Some(prev) = &self.last_result {
             self.change_rate = Some(calculate_change_rate(prev, &result));
@@ -243,11 +239,7 @@ impl LoopExecutor {
     ///
     /// # Returns
     /// Final loop state after convergence or max iterations
-    pub async fn execute<F, Fut>(
-        &self,
-        task: Task,
-        iteration_fn: F,
-    ) -> Result<LoopState>
+    pub async fn execute<F, Fut>(&self, task: Task, iteration_fn: F) -> Result<LoopState>
     where
         F: Fn(u32, Task) -> Fut + Send + Sync,
         Fut: std::future::Future<Output = Result<String>> + Send,
@@ -262,7 +254,10 @@ impl LoopExecutor {
 
         // Try to recover from checkpoint
         if let Some(recovered_state) = self.try_recover_checkpoint().await? {
-            info!("Recovered from checkpoint at iteration {}", recovered_state.iteration);
+            info!(
+                "Recovered from checkpoint at iteration {}",
+                recovered_state.iteration
+            );
             *self.state.write().await = recovered_state;
         }
 
@@ -282,11 +277,7 @@ impl LoopExecutor {
     }
 
     /// Run the main iteration loop
-    async fn run_loop<F, Fut>(
-        &self,
-        task: Task,
-        iteration_fn: F,
-    ) -> Result<LoopState>
+    async fn run_loop<F, Fut>(&self, task: Task, iteration_fn: F) -> Result<LoopState>
     where
         F: Fn(u32, Task) -> Fut + Send + Sync,
         Fut: std::future::Future<Output = Result<String>> + Send,
@@ -301,7 +292,10 @@ impl LoopExecutor {
 
             // Check max iterations safety limit
             if current_iteration >= self.config.max_iterations {
-                warn!("Reached maximum iteration limit: {}", self.config.max_iterations);
+                warn!(
+                    "Reached maximum iteration limit: {}",
+                    self.config.max_iterations
+                );
                 break;
             }
 
@@ -427,10 +421,13 @@ impl LoopExecutor {
     /// Save checkpoint to disk
     async fn save_checkpoint(&self) -> Result<()> {
         let state = self.state.read().await;
-        let checkpoint_path = self.config.checkpoint_dir.join(format!("{}.json", state.loop_id));
+        let checkpoint_path = self
+            .config
+            .checkpoint_dir
+            .join(format!("{}.json", state.loop_id));
 
-        let json = serde_json::to_string_pretty(&*state)
-            .context("Failed to serialize checkpoint")?;
+        let json =
+            serde_json::to_string_pretty(&*state).context("Failed to serialize checkpoint")?;
 
         fs::write(&checkpoint_path, json)
             .await
@@ -457,7 +454,10 @@ impl LoopExecutor {
                     if let Ok(modified) = metadata.modified() {
                         let modified_dt: DateTime<Utc> = modified.into();
 
-                        if latest_checkpoint.as_ref().is_none_or(|(dt, _)| modified_dt > *dt) {
+                        if latest_checkpoint
+                            .as_ref()
+                            .is_none_or(|(dt, _)| modified_dt > *dt)
+                        {
                             latest_checkpoint = Some((modified_dt, path));
                         }
                     }
@@ -472,8 +472,8 @@ impl LoopExecutor {
                 .await
                 .context("Failed to read checkpoint file")?;
 
-            let state: LoopState = serde_json::from_str(&json)
-                .context("Failed to deserialize checkpoint")?;
+            let state: LoopState =
+                serde_json::from_str(&json).context("Failed to deserialize checkpoint")?;
 
             return Ok(Some(state));
         }
@@ -577,12 +577,16 @@ mod tests {
     async fn test_loop_state_update() {
         let mut state = LoopState::new(Uuid::new_v4());
 
-        state.update_iteration("First result".into(), Some(0.5)).unwrap();
+        state
+            .update_iteration("First result".into(), Some(0.5))
+            .unwrap();
         assert_eq!(state.iteration, 1);
         assert_eq!(state.last_result, Some("First result".into()));
         assert_eq!(state.quality_metric, Some(0.5));
 
-        state.update_iteration("Second result".into(), Some(0.8)).unwrap();
+        state
+            .update_iteration("Second result".into(), Some(0.8))
+            .unwrap();
         assert_eq!(state.iteration, 2);
         assert_eq!(state.previous_result, Some("First result".into()));
         assert!(state.change_rate.is_some());
@@ -598,16 +602,16 @@ mod tests {
             checkpoint_dir: temp_dir.path().to_path_buf(),
         };
 
-        let executor = LoopExecutor::new(
-            ConvergenceStrategy::Fixed(5),
-            config,
-        );
+        let executor = LoopExecutor::new(ConvergenceStrategy::Fixed(5), config);
 
         let task = Task::new("Test task".into(), "Test description".into());
 
-        let result = executor.execute(task, |iter, _task| async move {
-            Ok(format!("Iteration {}", iter))
-        }).await.unwrap();
+        let result = executor
+            .execute(task, |iter, _task| async move {
+                Ok(format!("Iteration {}", iter))
+            })
+            .await
+            .unwrap();
 
         assert_eq!(result.iteration, 5);
         assert!(result.converged);
@@ -624,17 +628,16 @@ mod tests {
             checkpoint_dir: temp_dir.path().to_path_buf(),
         };
 
-        let executor = LoopExecutor::new(
-            ConvergenceStrategy::Fixed(5),
-            config,
-        );
+        let executor = LoopExecutor::new(ConvergenceStrategy::Fixed(5), config);
 
         let task = Task::new("Test task".into(), "Test description".into());
 
-        let result = executor.execute(task, |_iter, _task| async move {
-            tokio::time::sleep(Duration::from_secs(2)).await; // Exceeds timeout
-            Ok("Result".into())
-        }).await;
+        let result = executor
+            .execute(task, |_iter, _task| async move {
+                tokio::time::sleep(Duration::from_secs(2)).await; // Exceeds timeout
+                Ok("Result".into())
+            })
+            .await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timed out"));
@@ -660,10 +663,12 @@ mod tests {
 
         // Spawn loop execution
         let exec_handle = tokio::spawn(async move {
-            executor_clone.execute(task, |iter, _task| async move {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                Ok(format!("Iteration {}", iter))
-            }).await
+            executor_clone
+                .execute(task, |iter, _task| async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    Ok(format!("Iteration {}", iter))
+                })
+                .await
         });
 
         // Let it run a few iterations
@@ -688,25 +693,22 @@ mod tests {
             checkpoint_dir: temp_dir.path().to_path_buf(),
         };
 
-        let executor = LoopExecutor::new(
-            ConvergenceStrategy::Fixed(5),
-            config.clone(),
-        );
+        let executor = LoopExecutor::new(ConvergenceStrategy::Fixed(5), config.clone());
 
         let task = Task::new("Test task".into(), "Test description".into());
 
         // Run to completion
-        let result = executor.execute(task, |iter, _task| async move {
-            Ok(format!("Iteration {}", iter))
-        }).await.unwrap();
+        let result = executor
+            .execute(task, |iter, _task| async move {
+                Ok(format!("Iteration {}", iter))
+            })
+            .await
+            .unwrap();
 
         assert_eq!(result.iteration, 5);
 
         // Create new executor with same config (simulating restart)
-        let executor2 = LoopExecutor::new(
-            ConvergenceStrategy::Fixed(10),
-            config,
-        );
+        let executor2 = LoopExecutor::new(ConvergenceStrategy::Fixed(10), config);
 
         // Should recover checkpoint
         let recovered = executor2.try_recover_checkpoint().await.unwrap();

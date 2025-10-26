@@ -153,9 +153,18 @@ mod tests {
 
     #[test]
     fn test_memory_type_from_str() {
-        assert_eq!("semantic".parse::<MemoryType>().unwrap(), MemoryType::Semantic);
-        assert_eq!("EPISODIC".parse::<MemoryType>().unwrap(), MemoryType::Episodic);
-        assert_eq!("Procedural".parse::<MemoryType>().unwrap(), MemoryType::Procedural);
+        assert_eq!(
+            "semantic".parse::<MemoryType>().unwrap(),
+            MemoryType::Semantic
+        );
+        assert_eq!(
+            "EPISODIC".parse::<MemoryType>().unwrap(),
+            MemoryType::Episodic
+        );
+        assert_eq!(
+            "Procedural".parse::<MemoryType>().unwrap(),
+            MemoryType::Procedural
+        );
         assert!("invalid".parse::<MemoryType>().is_err());
     }
 
@@ -188,10 +197,7 @@ mod tests {
             "user1".to_string(),
         );
 
-        let updated = original.with_new_version(
-            json!({"data": "new"}),
-            "user2".to_string(),
-        );
+        let updated = original.with_new_version(json!({"data": "new"}), "user2".to_string());
 
         assert_eq!(updated.namespace, original.namespace);
         assert_eq!(updated.key, original.key);
