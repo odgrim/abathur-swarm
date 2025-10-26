@@ -20,13 +20,13 @@ pub enum TaskStatus {
 impl fmt::Display for TaskStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TaskStatus::Pending => write!(f, "pending"),
-            TaskStatus::Blocked => write!(f, "blocked"),
-            TaskStatus::Ready => write!(f, "ready"),
-            TaskStatus::Running => write!(f, "running"),
-            TaskStatus::Completed => write!(f, "completed"),
-            TaskStatus::Failed => write!(f, "failed"),
-            TaskStatus::Cancelled => write!(f, "cancelled"),
+            Self::Pending => write!(f, "pending"),
+            Self::Blocked => write!(f, "blocked"),
+            Self::Ready => write!(f, "ready"),
+            Self::Running => write!(f, "running"),
+            Self::Completed => write!(f, "completed"),
+            Self::Failed => write!(f, "failed"),
+            Self::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -36,14 +36,14 @@ impl FromStr for TaskStatus {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "pending" => Ok(TaskStatus::Pending),
-            "blocked" => Ok(TaskStatus::Blocked),
-            "ready" => Ok(TaskStatus::Ready),
-            "running" => Ok(TaskStatus::Running),
-            "completed" => Ok(TaskStatus::Completed),
-            "failed" => Ok(TaskStatus::Failed),
-            "cancelled" => Ok(TaskStatus::Cancelled),
-            _ => Err(anyhow::anyhow!("Invalid task status: {}", s)),
+            "pending" => Ok(Self::Pending),
+            "blocked" => Ok(Self::Blocked),
+            "ready" => Ok(Self::Ready),
+            "running" => Ok(Self::Running),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(anyhow::anyhow!("Invalid task status: {s}")),
         }
     }
 }
@@ -61,10 +61,10 @@ pub enum TaskSource {
 impl fmt::Display for TaskSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TaskSource::Human => write!(f, "human"),
-            TaskSource::AgentRequirements => write!(f, "agent_requirements"),
-            TaskSource::AgentPlanner => write!(f, "agent_planner"),
-            TaskSource::AgentImplementation => write!(f, "agent_implementation"),
+            Self::Human => write!(f, "human"),
+            Self::AgentRequirements => write!(f, "agent_requirements"),
+            Self::AgentPlanner => write!(f, "agent_planner"),
+            Self::AgentImplementation => write!(f, "agent_implementation"),
         }
     }
 }
@@ -74,11 +74,11 @@ impl FromStr for TaskSource {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "human" => Ok(TaskSource::Human),
-            "agent_requirements" => Ok(TaskSource::AgentRequirements),
-            "agent_planner" => Ok(TaskSource::AgentPlanner),
-            "agent_implementation" => Ok(TaskSource::AgentImplementation),
-            _ => Err(anyhow::anyhow!("Invalid task source: {}", s)),
+            "human" => Ok(Self::Human),
+            "agent_requirements" => Ok(Self::AgentRequirements),
+            "agent_planner" => Ok(Self::AgentPlanner),
+            "agent_implementation" => Ok(Self::AgentImplementation),
+            _ => Err(anyhow::anyhow!("Invalid task source: {s}")),
         }
     }
 }
@@ -94,8 +94,8 @@ pub enum DependencyType {
 impl fmt::Display for DependencyType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DependencyType::Sequential => write!(f, "sequential"),
-            DependencyType::Parallel => write!(f, "parallel"),
+            Self::Sequential => write!(f, "sequential"),
+            Self::Parallel => write!(f, "parallel"),
         }
     }
 }
@@ -105,9 +105,9 @@ impl FromStr for DependencyType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "sequential" => Ok(DependencyType::Sequential),
-            "parallel" => Ok(DependencyType::Parallel),
-            _ => Err(anyhow::anyhow!("Invalid dependency type: {}", s)),
+            "sequential" => Ok(Self::Sequential),
+            "parallel" => Ok(Self::Parallel),
+            _ => Err(anyhow::anyhow!("Invalid dependency type: {s}")),
         }
     }
 }

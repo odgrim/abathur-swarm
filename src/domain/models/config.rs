@@ -33,7 +33,7 @@ pub struct Config {
     pub resource_limits: ResourceLimitsConfig,
 }
 
-fn default_max_agents() -> usize {
+const fn default_max_agents() -> usize {
     10
 }
 
@@ -55,7 +55,7 @@ impl Default for Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct DatabaseConfig {
-    /// Path to SQLite database file
+    /// Path to `SQLite` database file
     #[serde(default = "default_database_path")]
     pub path: String,
 
@@ -68,7 +68,7 @@ fn default_database_path() -> String {
     ".abathur/abathur.db".to_string()
 }
 
-fn default_max_connections() -> u32 {
+const fn default_max_connections() -> u32 {
     10
 }
 
@@ -106,7 +106,7 @@ fn default_log_format() -> String {
     "json".to_string()
 }
 
-fn default_retention_days() -> u32 {
+const fn default_retention_days() -> u32 {
     30
 }
 
@@ -133,11 +133,11 @@ pub struct RateLimitConfig {
     pub burst_size: u32,
 }
 
-fn default_requests_per_second() -> f64 {
+const fn default_requests_per_second() -> f64 {
     10.0
 }
 
-fn default_burst_size() -> u32 {
+const fn default_burst_size() -> u32 {
     20
 }
 
@@ -167,16 +167,16 @@ pub struct RetryConfig {
     pub max_backoff_ms: u64,
 }
 
-fn default_max_retries() -> u32 {
+const fn default_max_retries() -> u32 {
     3
 }
 
-fn default_initial_backoff_ms() -> u64 {
+const fn default_initial_backoff_ms() -> u64 {
     10000
 }
 
-fn default_max_backoff_ms() -> u64 {
-    300000
+const fn default_max_backoff_ms() -> u64 {
+    300_000
 }
 
 impl Default for RetryConfig {
@@ -221,11 +221,11 @@ pub struct ResourceLimitsConfig {
     pub total_memory_mb: u64,
 }
 
-fn default_per_agent_memory_mb() -> u64 {
+const fn default_per_agent_memory_mb() -> u64 {
     512
 }
 
-fn default_total_memory_mb() -> u64 {
+const fn default_total_memory_mb() -> u64 {
     4096
 }
 

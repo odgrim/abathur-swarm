@@ -41,10 +41,10 @@ pub struct MemoryService {
 }
 
 impl MemoryService {
-    /// Create a new MemoryService with the given repository
+    /// Create a new `MemoryService` with the given repository
     ///
     /// # Arguments
-    /// * `repo` - Arc-wrapped trait object implementing MemoryRepository
+    /// * `repo` - Arc-wrapped trait object implementing `MemoryRepository`
     pub fn new(repo: Arc<dyn MemoryRepository>) -> Self {
         Self { repo }
     }
@@ -214,14 +214,10 @@ impl MemoryService {
             .get(namespace, key)
             .await
             .context("Failed to check existing memory")?
-            .ok_or_else(|| anyhow!("Memory not found at {}:{}", namespace, key))?;
+            .ok_or_else(|| anyhow!("Memory not found at {namespace}:{key}"))?;
 
         if !existing.is_active() {
-            return Err(anyhow!(
-                "Cannot update deleted memory at {}:{}",
-                namespace,
-                key
-            ));
+            return Err(anyhow!("Cannot update deleted memory at {namespace}:{key}"));
         }
 
         // Update via repository (creates new version)
@@ -234,7 +230,7 @@ impl MemoryService {
     /// Soft delete a memory
     ///
     /// Marks the memory as deleted without physically removing it from storage.
-    /// Deleted memories won't appear in get() or search() results.
+    /// Deleted memories won't appear in `get()` or `search()` results.
     ///
     /// # Arguments
     /// * `namespace` - The hierarchical namespace
@@ -255,7 +251,7 @@ impl MemoryService {
             .get(namespace, key)
             .await
             .context("Failed to check existing memory")?
-            .ok_or_else(|| anyhow!("Memory not found at {}:{}", namespace, key))?;
+            .ok_or_else(|| anyhow!("Memory not found at {namespace}:{key}"))?;
 
         // Soft delete
         self.repo

@@ -1,8 +1,10 @@
+pub mod agent;
 pub mod config;
 pub mod memory;
 pub mod session;
 pub mod task;
 
+pub use agent::{Agent, AgentStatus};
 pub use config::{
     Config, DatabaseConfig, LoggingConfig, McpServerConfig, RateLimitConfig, ResourceLimitsConfig,
     RetryConfig,

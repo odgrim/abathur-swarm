@@ -17,9 +17,9 @@ pub enum MemoryType {
 impl std::fmt::Display for MemoryType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MemoryType::Semantic => write!(f, "semantic"),
-            MemoryType::Episodic => write!(f, "episodic"),
-            MemoryType::Procedural => write!(f, "procedural"),
+            Self::Semantic => write!(f, "semantic"),
+            Self::Episodic => write!(f, "episodic"),
+            Self::Procedural => write!(f, "procedural"),
         }
     }
 }
@@ -29,10 +29,10 @@ impl std::str::FromStr for MemoryType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "semantic" => Ok(MemoryType::Semantic),
-            "episodic" => Ok(MemoryType::Episodic),
-            "procedural" => Ok(MemoryType::Procedural),
-            _ => Err(format!("Invalid memory type: {}", s)),
+            "semantic" => Ok(Self::Semantic),
+            "episodic" => Ok(Self::Episodic),
+            "procedural" => Ok(Self::Procedural),
+            _ => Err(format!("Invalid memory type: {s}")),
         }
     }
 }
@@ -105,6 +105,7 @@ impl Memory {
     }
 
     /// Create a new version of this memory with updated value
+    #[must_use]
     pub fn with_new_version(&self, value: Value, updated_by: String) -> Self {
         Self {
             id: 0, // New entry in database
@@ -129,7 +130,7 @@ impl Memory {
     }
 
     /// Check if memory is active (not deleted)
-    pub fn is_active(&self) -> bool {
+    pub const fn is_active(&self) -> bool {
         !self.is_deleted
     }
 

@@ -1,4 +1,4 @@
-//! LoopExecutor - Iterative refinement loops with convergence detection
+//! `LoopExecutor` - Iterative refinement loops with convergence detection
 //!
 //! Implements async orchestration for iterative task execution with:
 //! - Multiple convergence strategies (fixed, adaptive, threshold)
@@ -41,23 +41,15 @@ impl ConvergenceStrategy {
     /// Check if loop has converged based on strategy
     fn is_converged(&self, state: &LoopState) -> bool {
         match self {
-            ConvergenceStrategy::Fixed(max_iter) => state.iteration >= *max_iter,
+            Self::Fixed(max_iter) => state.iteration >= *max_iter,
 
-            ConvergenceStrategy::Adaptive(threshold) => {
-                if let Some(change_rate) = state.change_rate {
-                    change_rate < *threshold
-                } else {
-                    false // No change rate yet, can't converge
-                }
-            }
+            Self::Adaptive(threshold) => state
+                .change_rate
+                .is_some_and(|change_rate| change_rate < *threshold),
 
-            ConvergenceStrategy::Threshold(quality_threshold) => {
-                if let Some(quality) = state.quality_metric {
-                    quality >= *quality_threshold
-                } else {
-                    false // No quality metric yet, can't converge
-                }
-            }
+            Self::Threshold(quality_threshold) => state
+                .quality_metric
+                .is_some_and(|quality| quality >= *quality_threshold),
         }
     }
 }
@@ -114,15 +106,15 @@ impl LoopState {
     }
 
     /// Update state after iteration
-    fn update_iteration(&mut self, result: String, quality_metric: Option<f64>) -> Result<()> {
+    fn update_iteration(&mut self, result: &str, quality_metric: Option<f64>) {
         // Calculate change rate if we have previous result
         if let Some(prev) = &self.last_result {
-            self.change_rate = Some(calculate_change_rate(prev, &result));
+            self.change_rate = Some(calculate_change_rate(prev, result));
         }
 
         // Update results
         self.previous_result = self.last_result.clone();
-        self.last_result = Some(result.clone());
+        self.last_result = Some(result.to_string());
         self.quality_metric = quality_metric;
 
         // Add to history
@@ -136,8 +128,6 @@ impl LoopState {
 
         // Increment iteration counter
         self.iteration += 1;
-
-        Ok(())
     }
 }
 
@@ -151,7 +141,7 @@ pub struct IterationResult {
     pub timestamp: DateTime<Utc>,
 }
 
-/// LoopExecutor configuration
+/// `LoopExecutor` configuration
 #[derive(Debug, Clone)]
 pub struct LoopExecutorConfig {
     /// Maximum iterations (safety limit)
@@ -178,7 +168,7 @@ impl Default for LoopExecutorConfig {
     }
 }
 
-/// LoopExecutor - orchestrates iterative refinement with convergence detection
+/// `LoopExecutor` - orchestrates iterative refinement with convergence detection
 ///
 /// Uses tokio async runtime for:
 /// - Concurrent iteration execution
@@ -188,8 +178,9 @@ impl Default for LoopExecutorConfig {
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use abathur::application::{LoopExecutor, ConvergenceStrategy};
+/// use abathur::domain::models::task::Task;
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
@@ -198,7 +189,7 @@ impl Default for LoopExecutorConfig {
 ///         Default::default()
 ///     );
 ///
-///     let task = Task::new("Iterative refinement".into(), "Refine output".into());
+///     # let task = Task::new("example".to_string(), "example task".to_string());
 ///     let result = executor.execute(task, |iter, _task| async move {
 ///         // Your iteration logic here
 ///         Ok(format!("Iteration {}", iter))
@@ -216,7 +207,7 @@ pub struct LoopExecutor {
 }
 
 impl LoopExecutor {
-    /// Create new LoopExecutor with convergence strategy
+    /// Create new `LoopExecutor` with convergence strategy
     pub fn new(convergence: ConvergenceStrategy, config: LoopExecutorConfig) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -239,6 +230,7 @@ impl LoopExecutor {
     ///
     /// # Returns
     /// Final loop state after convergence or max iterations
+    #[allow(clippy::cognitive_complexity)]
     pub async fn execute<F, Fut>(&self, task: Task, iteration_fn: F) -> Result<LoopState>
     where
         F: Fn(u32, Task) -> Fut + Send + Sync,
@@ -277,6 +269,7 @@ impl LoopExecutor {
     }
 
     /// Run the main iteration loop
+    #[allow(clippy::cognitive_complexity)]
     async fn run_loop<F, Fut>(&self, task: Task, iteration_fn: F) -> Result<LoopState>
     where
         F: Fn(u32, Task) -> Fut + Send + Sync,
@@ -317,18 +310,17 @@ impl LoopExecutor {
                     match iteration_result {
                         Ok(Ok(result)) => {
                             // Iteration succeeded
-                            let quality = self.calculate_quality_metric(&result);
+                            let quality = Self::calculate_quality_metric(&result);
 
                             self.state.write().await
-                                .update_iteration(result, quality)
-                                .context("Failed to update iteration state")?;
+                                .update_iteration(&result, quality);
 
                             debug!("Iteration {} completed successfully", current_iteration);
                         }
                         Ok(Err(e)) => {
                             // Iteration failed
                             warn!("Iteration {} failed: {:#}", current_iteration, e);
-                            return Err(e).context(format!("Iteration {} failed", current_iteration));
+                            return Err(e).context(format!("Iteration {current_iteration} failed"));
                         }
                         Err(_) => {
                             // Timeout
@@ -368,7 +360,7 @@ impl LoopExecutor {
     /// Calculate quality metric for iteration result
     ///
     /// This is a placeholder - actual implementation would use domain-specific metrics
-    fn calculate_quality_metric(&self, _result: &str) -> Option<f64> {
+    const fn calculate_quality_metric(_result: &str) -> Option<f64> {
         // TODO: Implement domain-specific quality metric
         // For now, return None (quality not measured)
         None
@@ -392,17 +384,20 @@ impl LoopExecutor {
                         // Only checkpoint at interval boundaries
                         if state_guard.iteration % checkpoint_interval == 0 && state_guard.iteration > 0 {
                             let loop_id = state_guard.loop_id;
-                            let checkpoint_path = checkpoint_dir.join(format!("{}.json", loop_id));
+                            let checkpoint_path = checkpoint_dir.join(format!("{loop_id}.json"));
+                            let iteration = state_guard.iteration;
 
                             match serde_json::to_string_pretty(&*state_guard) {
                                 Ok(json) => {
+                                    drop(state_guard);
                                     if let Err(e) = fs::write(&checkpoint_path, json).await {
                                         warn!("Failed to write checkpoint: {:#}", e);
                                     } else {
-                                        debug!("Checkpoint saved at iteration {}", state_guard.iteration);
+                                        debug!("Checkpoint saved at iteration {iteration}");
                                     }
                                 }
                                 Err(e) => {
+                                    drop(state_guard);
                                     warn!("Failed to serialize checkpoint: {:#}", e);
                                 }
                             }
@@ -428,6 +423,7 @@ impl LoopExecutor {
 
         let json =
             serde_json::to_string_pretty(&*state).context("Failed to serialize checkpoint")?;
+        drop(state);
 
         fs::write(&checkpoint_path, json)
             .await
@@ -440,9 +436,8 @@ impl LoopExecutor {
     /// Try to recover from most recent checkpoint
     async fn try_recover_checkpoint(&self) -> Result<Option<LoopState>> {
         // Find most recent checkpoint file
-        let mut entries = match fs::read_dir(&self.config.checkpoint_dir).await {
-            Ok(e) => e,
-            Err(_) => return Ok(None), // No checkpoint dir, no recovery
+        let Ok(mut entries) = fs::read_dir(&self.config.checkpoint_dir).await else {
+            return Ok(None); // No checkpoint dir, no recovery
         };
 
         let mut latest_checkpoint: Option<(DateTime<Utc>, PathBuf)> = None;
@@ -482,7 +477,7 @@ impl LoopExecutor {
     }
 
     /// Trigger graceful shutdown
-    pub async fn shutdown(&self) {
+    pub fn shutdown(&self) {
         info!("Triggering loop executor shutdown");
         let _ = self.shutdown_tx.send(());
     }
@@ -500,6 +495,7 @@ impl LoopExecutor {
 /// - Levenshtein distance
 /// - Semantic embeddings (cosine similarity)
 /// - Domain-specific metrics
+#[allow(clippy::cast_precision_loss)]
 fn calculate_change_rate(previous: &str, current: &str) -> f64 {
     if previous == current {
         return 0.0;
@@ -577,16 +573,12 @@ mod tests {
     async fn test_loop_state_update() {
         let mut state = LoopState::new(Uuid::new_v4());
 
-        state
-            .update_iteration("First result".into(), Some(0.5))
-            .unwrap();
+        state.update_iteration("First result", Some(0.5));
         assert_eq!(state.iteration, 1);
         assert_eq!(state.last_result, Some("First result".into()));
         assert_eq!(state.quality_metric, Some(0.5));
 
-        state
-            .update_iteration("Second result".into(), Some(0.8))
-            .unwrap();
+        state.update_iteration("Second result", Some(0.8));
         assert_eq!(state.iteration, 2);
         assert_eq!(state.previous_result, Some("First result".into()));
         assert!(state.change_rate.is_some());
@@ -675,7 +667,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         // Trigger shutdown
-        executor.shutdown().await;
+        executor.shutdown();
 
         // Should complete gracefully
         let result = exec_handle.await.unwrap().unwrap();

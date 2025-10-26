@@ -82,7 +82,10 @@ impl ConfigLoader {
             .merge(Serialized::defaults(Config::default()))
             .merge(Yaml::file(path.as_ref()))
             .extract()
-            .context(format!("Failed to load config from {:?}", path.as_ref()))?;
+            .context(format!(
+                "Failed to load config from {}",
+                path.as_ref().display()
+            ))?;
 
         Self::validate(&config)?;
         Ok(config)
@@ -260,8 +263,10 @@ logging:
 
     #[test]
     fn test_validate_zero_agents() {
-        let mut config = Config::default();
-        config.max_agents = 0;
+        let config = Config {
+            max_agents: 0,
+            ..Default::default()
+        };
 
         let result = ConfigLoader::validate(&config);
         assert!(result.is_err());
@@ -273,8 +278,10 @@ logging:
 
     #[test]
     fn test_validate_too_many_agents() {
-        let mut config = Config::default();
-        config.max_agents = 101;
+        let config = Config {
+            max_agents: 101,
+            ..Default::default()
+        };
 
         let result = ConfigLoader::validate(&config);
         assert!(result.is_err());
