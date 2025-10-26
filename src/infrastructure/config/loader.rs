@@ -82,7 +82,10 @@ impl ConfigLoader {
             .merge(Serialized::defaults(Config::default()))
             .merge(Yaml::file(path.as_ref()))
             .extract()
-            .context(format!("Failed to load config from {}", path.as_ref().display()))?;
+            .context(format!(
+                "Failed to load config from {}",
+                path.as_ref().display()
+            ))?;
 
         Self::validate(&config)?;
         Ok(config)

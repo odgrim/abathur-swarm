@@ -80,7 +80,7 @@ impl DependencyResolver {
     #[instrument(skip(self, tasks), fields(task_count = tasks.len()))]
     pub fn detect_cycle(&self, tasks: &[Task]) -> Option<Vec<Uuid>> {
         // Build adjacency list
-        let graph = self.build_adjacency_list(tasks);
+        let graph = Self::build_adjacency_list(tasks);
         let task_ids: Vec<Uuid> = tasks.iter().map(|t| t.id).collect();
 
         // Track colors: 0 = white (unvisited), 1 = gray (visiting), 2 = black (visited)

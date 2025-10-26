@@ -573,14 +573,12 @@ mod tests {
     async fn test_loop_state_update() {
         let mut state = LoopState::new(Uuid::new_v4());
 
-        state
-            .update_iteration("First result", Some(0.5));
+        state.update_iteration("First result", Some(0.5));
         assert_eq!(state.iteration, 1);
         assert_eq!(state.last_result, Some("First result".into()));
         assert_eq!(state.quality_metric, Some(0.5));
 
-        state
-            .update_iteration("Second result", Some(0.8));
+        state.update_iteration("Second result", Some(0.8));
         assert_eq!(state.iteration, 2);
         assert_eq!(state.previous_result, Some("First result".into()));
         assert!(state.change_rate.is_some());
