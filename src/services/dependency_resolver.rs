@@ -279,7 +279,7 @@ mod tests {
 
         Task {
             id: task_id,
-            summary: format!("Task {}", id),
+            summary: format!("Task {id}"),
             description: "Test task".to_string(),
             agent_type: "test".to_string(),
             priority: 5,
@@ -460,8 +460,7 @@ mod tests {
         let err_msg = format!("{:?}", result.as_ref().unwrap_err());
         assert!(
             err_msg.contains("Circular dependency"),
-            "Expected 'Circular dependency' in: {}",
-            err_msg
+            "Expected 'Circular dependency' in: {err_msg}"
         );
     }
 
@@ -479,8 +478,7 @@ mod tests {
         let err_msg = format!("{:?}", result.as_ref().unwrap_err());
         assert!(
             err_msg.contains("non-existent"),
-            "Expected 'non-existent' in: {}",
-            err_msg
+            "Expected 'non-existent' in: {err_msg}"
         );
     }
 
