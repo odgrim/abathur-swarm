@@ -170,7 +170,7 @@ impl DependencyResolver {
     /// Build adjacency list representation of task dependency graph
     ///
     /// Returns a map where each task ID maps to a list of tasks that depend on it.
-    fn build_adjacency_list(&self, tasks: &[Task]) -> HashMap<Uuid, Vec<Uuid>> {
+    fn build_adjacency_list(tasks: &[Task]) -> HashMap<Uuid, Vec<Uuid>> {
         let mut graph: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
 
         // Initialize all task IDs in the graph
@@ -194,7 +194,6 @@ impl DependencyResolver {
     ///
     /// In-degree = number of tasks this task depends on
     fn calculate_in_degrees(
-        &self,
         tasks: &[Task],
         _graph: &HashMap<Uuid, Vec<Uuid>>,
     ) -> Result<HashMap<Uuid, usize>> {
