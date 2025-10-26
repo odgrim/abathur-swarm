@@ -4,7 +4,6 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::domain::models::{Agent, AgentStatus};
-<<<<<<< HEAD
 use crate::domain::ports::AgentRepository;
 use crate::infrastructure::database::DatabaseError;
 
@@ -12,14 +11,6 @@ use crate::infrastructure::database::DatabaseError;
 ///
 /// Provides persistent storage for agents with compile-time verified queries.
 /// Uses `SQLite` with WAL mode for better concurrency.
-=======
-use crate::domain::ports::{AgentRepository, DatabaseError};
-
-/// SQLite implementation of AgentRepository using sqlx
-///
-/// Provides persistent storage for agents with compile-time verified queries.
-/// Uses SQLite with WAL mode for better concurrency.
->>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
 pub struct AgentRepositoryImpl {
     pool: SqlitePool,
 }
@@ -44,13 +35,8 @@ impl AgentRepositoryImpl {
     /// Create a new agent repository instance
     ///
     /// # Arguments
-<<<<<<< HEAD
     /// * `pool` - `SQLite` connection pool
     pub const fn new(pool: SqlitePool) -> Self {
-=======
-    /// * `pool` - SQLite connection pool
-    pub fn new(pool: SqlitePool) -> Self {
->>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
         Self { pool }
     }
 
@@ -58,11 +44,7 @@ impl AgentRepositoryImpl {
     fn parse_agent_row(row: AgentRowData) -> Result<Agent, DatabaseError> {
         Ok(Agent {
             id: Uuid::parse_str(&row.id)
-<<<<<<< HEAD
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {e}")))?,
-=======
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {}", e)))?,
->>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
             agent_type: row.agent_type,
             status: row
                 .status
@@ -73,7 +55,6 @@ impl AgentRepositoryImpl {
                 .as_ref()
                 .map(|s| Uuid::parse_str(s))
                 .transpose()
-<<<<<<< HEAD
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {e}")))?,
             heartbeat_at: DateTime::parse_from_rfc3339(&row.heartbeat_at)
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
@@ -86,24 +67,6 @@ impl AgentRepositoryImpl {
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
                 .with_timezone(&Utc),
             terminated_at: None, // TODO: Load from database
-=======
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {}", e)))?,
-            heartbeat_at: DateTime::parse_from_rfc3339(&row.heartbeat_at)
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
-                .with_timezone(&Utc),
-            memory_usage_bytes: row.memory_usage_bytes as u64,
-            cpu_usage_percent: row.cpu_usage_percent,
-            created_at: DateTime::parse_from_rfc3339(&row.created_at)
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
-                .with_timezone(&Utc),
-            terminated_at: row
-                .terminated_at
-                .as_ref()
-                .map(|s| DateTime::parse_from_rfc3339(s))
-                .transpose()
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {}", e)))?
-                .map(|dt| dt.with_timezone(&Utc)),
->>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
         })
     }
 }
@@ -115,29 +78,16 @@ impl AgentRepository for AgentRepositoryImpl {
         let status_str = agent.status.to_string();
         let current_task_str = agent.current_task_id.map(|id| id.to_string());
         let heartbeat_str = agent.heartbeat_at.to_rfc3339();
-<<<<<<< HEAD
         let memory_bytes = i64::try_from(agent.memory_usage_bytes)
             .map_err(|e| DatabaseError::ValidationError(format!("Memory usage too large: {e}")))?;
         let created_str = agent.created_at.to_rfc3339();
-=======
-        let memory_bytes = agent.memory_usage_bytes as i64;
-        let created_str = agent.created_at.to_rfc3339();
-        let terminated_str = agent.terminated_at.map(|dt| dt.to_rfc3339());
-
->>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
         sqlx::query!(
             r#"
             INSERT INTO agents (
                 id, agent_type, status, current_task_id, heartbeat_at,
-<<<<<<< HEAD
                 memory_usage_bytes, cpu_usage_percent, created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-=======
-                memory_usage_bytes, cpu_usage_percent, created_at, terminated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
->>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
             "#,
             id_str,
             agent.agent_type,
@@ -146,12 +96,7 @@ impl AgentRepository for AgentRepositoryImpl {
             heartbeat_str,
             memory_bytes,
             agent.cpu_usage_percent,
-<<<<<<< HEAD
             created_str
-=======
-            created_str,
-            terminated_str
->>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
         )
         .execute(&self.pool)
         .await
@@ -198,13 +143,8 @@ impl AgentRepository for AgentRepositoryImpl {
         let status_str = agent.status.to_string();
         let current_task_str = agent.current_task_id.map(|id| id.to_string());
         let heartbeat_str = agent.heartbeat_at.to_rfc3339();
-<<<<<<< HEAD
         let memory_bytes = i64::try_from(agent.memory_usage_bytes)
             .map_err(|e| DatabaseError::ValidationError(format!("Memory usage too large: {e}")))?;
-=======
-        let memory_bytes = agent.memory_usage_bytes as i64;
-        let terminated_str = agent.terminated_at.map(|dt| dt.to_rfc3339());
->>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
         let id_str = agent.id.to_string();
 
         sqlx::query!(
@@ -215,12 +155,7 @@ impl AgentRepository for AgentRepositoryImpl {
                 current_task_id = ?,
                 heartbeat_at = ?,
                 memory_usage_bytes = ?,
-<<<<<<< HEAD
                 cpu_usage_percent = ?
-=======
-                cpu_usage_percent = ?,
-                terminated_at = ?
->>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
             WHERE id = ?
             "#,
             agent.agent_type,
@@ -229,10 +164,7 @@ impl AgentRepository for AgentRepositoryImpl {
             heartbeat_str,
             memory_bytes,
             agent.cpu_usage_percent,
-<<<<<<< HEAD
-=======
             terminated_str,
->>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
             id_str
         )
         .execute(&self.pool)
@@ -250,7 +182,6 @@ impl AgentRepository for AgentRepositoryImpl {
              FROM agents",
         );
 
-<<<<<<< HEAD
         let agents = if let Some(s) = status {
             query.push_str(" WHERE status = ? ORDER BY created_at DESC");
             let status_str = s.to_string();
@@ -291,51 +222,6 @@ impl AgentRepository for AgentRepositoryImpl {
             .fetch_all(&self.pool)
             .await
             .map_err(DatabaseError::QueryFailed)?
-=======
-        let agents = match status {
-            Some(s) => {
-                query.push_str(" WHERE status = ? ORDER BY created_at DESC");
-                let status_str = s.to_string();
-                sqlx::query_as::<
-                    _,
-                    (
-                        String,
-                        String,
-                        String,
-                        Option<String>,
-                        String,
-                        i64,
-                        f64,
-                        String,
-                        Option<String>,
-                    ),
-                >(&query)
-                .bind(status_str)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(DatabaseError::QueryFailed)?
-            }
-            None => {
-                query.push_str(" ORDER BY created_at DESC");
-                sqlx::query_as::<
-                    _,
-                    (
-                        String,
-                        String,
-                        String,
-                        Option<String>,
-                        String,
-                        i64,
-                        f64,
-                        String,
-                        Option<String>,
-                    ),
-                >(&query)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(DatabaseError::QueryFailed)?
-            }
->>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
         };
 
         // Map rows to Agent structs
