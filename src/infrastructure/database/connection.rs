@@ -89,7 +89,7 @@ mod tests {
             .expect("failed to create connection");
 
         // Verify pool is accessible
-        assert!(conn.pool().is_closed() == false);
+        assert!(!conn.pool().is_closed());
 
         conn.close().await;
     }
