@@ -58,3 +58,5 @@ site/
 
 # Virtual environment (local)
 venv/
+target/
+Cargo.lock
