@@ -68,7 +68,10 @@ impl MemoryService {
     #[instrument(skip(self, memory), fields(namespace = %memory.namespace, key = %memory.key), err)]
     pub async fn add(&self, memory: Memory) -> Result<i64> {
         // Validate memory doesn't already exist
-        if let Some(existing) = self.repo.get(&memory.namespace, &memory.key).await
+        if let Some(existing) = self
+            .repo
+            .get(&memory.namespace, &memory.key)
+            .await
             .context("Failed to check for existing memory")?
         {
             if existing.is_active() {
@@ -206,7 +209,8 @@ impl MemoryService {
         updated_by: &str,
     ) -> Result<u32> {
         // Verify memory exists and is active
-        let existing = self.repo
+        let existing = self
+            .repo
             .get(namespace, key)
             .await
             .context("Failed to check existing memory")?
@@ -362,10 +366,7 @@ mod tests {
             .returning(|_, _| Ok(None));
 
         // Expect insert to succeed
-        mock_repo
-            .expect_insert()
-            .times(1)
-            .returning(|_| Ok(42));
+        mock_repo.expect_insert().times(1).returning(|_| Ok(42));
 
         let service = MemoryService::new(Arc::new(mock_repo));
         let result = service.add(memory).await;
@@ -445,11 +446,7 @@ mod tests {
 
         mock_repo
             .expect_search()
-            .with(
-                eq("test:namespace"),
-                eq(Some(MemoryType::Semantic)),
-                eq(50),
-            )
+            .with(eq("test:namespace"), eq(Some(MemoryType::Semantic)), eq(50))
             .times(1)
             .returning(move |_, _, _| Ok(vec![memory1.clone(), memory2.clone()]));
 
