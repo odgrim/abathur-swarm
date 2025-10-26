@@ -128,8 +128,6 @@ impl LoopState {
 
         // Increment iteration counter
         self.iteration += 1;
-
-        Ok(())
     }
 }
 
@@ -232,6 +230,7 @@ impl LoopExecutor {
     ///
     /// # Returns
     /// Final loop state after convergence or max iterations
+    #[allow(clippy::cognitive_complexity)]
     pub async fn execute<F, Fut>(&self, task: Task, iteration_fn: F) -> Result<LoopState>
     where
         F: Fn(u32, Task) -> Fut + Send + Sync,
@@ -270,6 +269,7 @@ impl LoopExecutor {
     }
 
     /// Run the main iteration loop
+    #[allow(clippy::cognitive_complexity)]
     async fn run_loop<F, Fut>(&self, task: Task, iteration_fn: F) -> Result<LoopState>
     where
         F: Fn(u32, Task) -> Fut + Send + Sync,
@@ -310,11 +310,10 @@ impl LoopExecutor {
                     match iteration_result {
                         Ok(Ok(result)) => {
                             // Iteration succeeded
-                            let quality = self.calculate_quality_metric(&result);
+                            let quality = Self::calculate_quality_metric(&result);
 
                             self.state.write().await
-                                .update_iteration(result, quality)
-                                .context("Failed to update iteration state")?;
+                                .update_iteration(&result, quality);
 
                             debug!("Iteration {} completed successfully", current_iteration);
                         }
@@ -361,7 +360,7 @@ impl LoopExecutor {
     /// Calculate quality metric for iteration result
     ///
     /// This is a placeholder - actual implementation would use domain-specific metrics
-    const fn calculate_quality_metric(&self, _result: &str) -> Option<f64> {
+    const fn calculate_quality_metric(_result: &str) -> Option<f64> {
         // TODO: Implement domain-specific quality metric
         // For now, return None (quality not measured)
         None
@@ -386,16 +385,19 @@ impl LoopExecutor {
                         if state_guard.iteration % checkpoint_interval == 0 && state_guard.iteration > 0 {
                             let loop_id = state_guard.loop_id;
                             let checkpoint_path = checkpoint_dir.join(format!("{loop_id}.json"));
+                            let iteration = state_guard.iteration;
 
                             match serde_json::to_string_pretty(&*state_guard) {
                                 Ok(json) => {
+                                    drop(state_guard);
                                     if let Err(e) = fs::write(&checkpoint_path, json).await {
                                         warn!("Failed to write checkpoint: {:#}", e);
                                     } else {
-                                        debug!("Checkpoint saved at iteration {}", state_guard.iteration);
+                                        debug!("Checkpoint saved at iteration {iteration}");
                                     }
                                 }
                                 Err(e) => {
+                                    drop(state_guard);
                                     warn!("Failed to serialize checkpoint: {:#}", e);
                                 }
                             }
@@ -421,6 +423,7 @@ impl LoopExecutor {
 
         let json =
             serde_json::to_string_pretty(&*state).context("Failed to serialize checkpoint")?;
+        drop(state);
 
         fs::write(&checkpoint_path, json)
             .await
@@ -433,9 +436,8 @@ impl LoopExecutor {
     /// Try to recover from most recent checkpoint
     async fn try_recover_checkpoint(&self) -> Result<Option<LoopState>> {
         // Find most recent checkpoint file
-        let mut entries = match fs::read_dir(&self.config.checkpoint_dir).await {
-            Ok(e) => e,
-            Err(_) => return Ok(None), // No checkpoint dir, no recovery
+        let Ok(mut entries) = fs::read_dir(&self.config.checkpoint_dir).await else {
+            return Ok(None); // No checkpoint dir, no recovery
         };
 
         let mut latest_checkpoint: Option<(DateTime<Utc>, PathBuf)> = None;
@@ -475,7 +477,7 @@ impl LoopExecutor {
     }
 
     /// Trigger graceful shutdown
-    pub async fn shutdown(&self) {
+    pub fn shutdown(&self) {
         info!("Triggering loop executor shutdown");
         let _ = self.shutdown_tx.send(());
     }
@@ -493,6 +495,7 @@ impl LoopExecutor {
 /// - Levenshtein distance
 /// - Semantic embeddings (cosine similarity)
 /// - Domain-specific metrics
+#[allow(clippy::cast_precision_loss)]
 fn calculate_change_rate(previous: &str, current: &str) -> f64 {
     if previous == current {
         return 0.0;
@@ -571,15 +574,13 @@ mod tests {
         let mut state = LoopState::new(Uuid::new_v4());
 
         state
-            .update_iteration("First result".into(), Some(0.5))
-            .unwrap();
+            .update_iteration("First result", Some(0.5));
         assert_eq!(state.iteration, 1);
         assert_eq!(state.last_result, Some("First result".into()));
         assert_eq!(state.quality_metric, Some(0.5));
 
         state
-            .update_iteration("Second result".into(), Some(0.8))
-            .unwrap();
+            .update_iteration("Second result", Some(0.8));
         assert_eq!(state.iteration, 2);
         assert_eq!(state.previous_result, Some("First result".into()));
         assert!(state.change_rate.is_some());

@@ -48,7 +48,7 @@ impl TaskError {
     }
 
     /// Returns true if this error is transient and could succeed on retry
-    pub fn is_transient(&self) -> bool {
+    pub const fn is_transient(&self) -> bool {
         !self.is_permanent()
     }
 }

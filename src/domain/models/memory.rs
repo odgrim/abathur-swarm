@@ -105,6 +105,7 @@ impl Memory {
     }
 
     /// Create a new version of this memory with updated value
+    #[must_use]
     pub fn with_new_version(&self, value: Value, updated_by: String) -> Self {
         Self {
             id: 0, // New entry in database
