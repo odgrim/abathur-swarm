@@ -27,8 +27,8 @@ use uuid::Uuid;
 pub struct DependencyResolver;
 
 impl DependencyResolver {
-    /// Create a new DependencyResolver instance
-    pub fn new() -> Self {
+    /// Create a new `DependencyResolver` instance
+    pub const fn new() -> Self {
         Self
     }
 
@@ -54,7 +54,7 @@ impl DependencyResolver {
     pub fn resolve(&self, tasks: &[Task]) -> Result<Vec<Task>> {
         // First check for cycles
         if let Some(cycle) = self.detect_cycle(tasks) {
-            return Err(anyhow!("Circular dependency detected: {:?}", cycle))
+            return Err(anyhow!("Circular dependency detected: {cycle:?}"))
                 .context("Failed to resolve task dependencies");
         }
 
@@ -81,7 +81,7 @@ impl DependencyResolver {
     #[instrument(skip(self, tasks), fields(task_count = tasks.len()))]
     pub fn detect_cycle(&self, tasks: &[Task]) -> Option<Vec<Uuid>> {
         // Build adjacency list
-        let graph = self.build_adjacency_list(tasks);
+        let graph = Self::build_adjacency_list(tasks);
         let task_ids: Vec<Uuid> = tasks.iter().map(|t| t.id).collect();
 
         // Track colors: 0 = white (unvisited), 1 = gray (visiting), 2 = black (visited)
@@ -122,8 +122,8 @@ impl DependencyResolver {
         let task_map: HashMap<Uuid, &Task> = tasks.iter().map(|t| (t.id, t)).collect();
 
         // Build adjacency list and in-degree map
-        let graph = self.build_adjacency_list(tasks);
-        let mut in_degree = self.calculate_in_degrees(tasks, &graph)?;
+        let graph = Self::build_adjacency_list(tasks);
+        let mut in_degree = Self::calculate_in_degrees(tasks, &graph)?;
 
         // Queue of tasks with no dependencies (in-degree = 0)
         let mut queue: VecDeque<Uuid> = tasks
@@ -170,7 +170,7 @@ impl DependencyResolver {
     /// Build adjacency list representation of task dependency graph
     ///
     /// Returns a map where each task ID maps to a list of tasks that depend on it.
-    fn build_adjacency_list(&self, tasks: &[Task]) -> HashMap<Uuid, Vec<Uuid>> {
+    fn build_adjacency_list(tasks: &[Task]) -> HashMap<Uuid, Vec<Uuid>> {
         let mut graph: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
 
         // Initialize all task IDs in the graph
@@ -194,7 +194,6 @@ impl DependencyResolver {
     ///
     /// In-degree = number of tasks this task depends on
     fn calculate_in_degrees(
-        &self,
         tasks: &[Task],
         _graph: &HashMap<Uuid, Vec<Uuid>>,
     ) -> Result<HashMap<Uuid, usize>> {

@@ -667,7 +667,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         // Trigger shutdown
-        executor.shutdown().await;
+        executor.shutdown();
 
         // Should complete gracefully
         let result = exec_handle.await.unwrap().unwrap();
