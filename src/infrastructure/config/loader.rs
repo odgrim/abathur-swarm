@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_yaml_parsing() {
-        let yaml = r#"
+        let yaml = r"
 max_agents: 20
 rate_limit:
   requests_per_second: 15.0
@@ -214,7 +214,7 @@ logging:
   level: debug
   format: pretty
   retention_days: 7
-"#;
+";
 
         let config: Config = serde_yaml::from_str(yaml).expect("YAML should parse");
 

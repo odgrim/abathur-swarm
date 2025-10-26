@@ -567,7 +567,7 @@ mod tests {
 
     #[test]
     fn test_calculate_change_rate() {
-        assert_eq!(calculate_change_rate("hello", "hello"), 0.0);
+        assert!((calculate_change_rate("hello", "hello") - 0.0).abs() < f64::EPSILON);
         assert!(calculate_change_rate("hello", "world") > 0.5);
         assert!(calculate_change_rate("", "something") > 0.9);
     }
@@ -607,7 +607,7 @@ mod tests {
 
         let result = executor
             .execute(task, |iter, _task| async move {
-                Ok(format!("Iteration {}", iter))
+                Ok(format!("Iteration {iter}"))
             })
             .await
             .unwrap();
@@ -665,7 +665,7 @@ mod tests {
             executor_clone
                 .execute(task, |iter, _task| async move {
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    Ok(format!("Iteration {}", iter))
+                    Ok(format!("Iteration {iter}"))
                 })
                 .await
         });
@@ -699,7 +699,7 @@ mod tests {
         // Run to completion
         let result = executor
             .execute(task, |iter, _task| async move {
-                Ok(format!("Iteration {}", iter))
+                Ok(format!("Iteration {iter}"))
             })
             .await
             .unwrap();

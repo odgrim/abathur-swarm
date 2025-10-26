@@ -31,7 +31,7 @@ proptest! {
 
             tasks.push(Task {
                 id,
-                summary: format!("Task {}", id),
+                summary: format!("Task {id}"),
                 description: "Property test task".to_string(),
                 agent_type: "test".to_string(),
                 priority: 5,
@@ -101,7 +101,7 @@ proptest! {
         for &id in &task_ids {
             tasks.push(Task {
                 id,
-                summary: format!("Task {}", id),
+                summary: format!("Task {id}"),
                 description: "Property test task".to_string(),
                 agent_type: "test".to_string(),
                 priority: 5,
@@ -167,7 +167,7 @@ proptest! {
 
             tasks.push(Task {
                 id,
-                summary: format!("Task {}", id),
+                summary: format!("Task {id}"),
                 description: "Property test task".to_string(),
                 agent_type: "test".to_string(),
                 priority: 5,
@@ -225,7 +225,7 @@ proptest! {
         for &id in &task_ids {
             tasks.push(Task {
                 id,
-                summary: format!("Task {}", id),
+                summary: format!("Task {id}"),
                 description: "Property test task".to_string(),
                 agent_type: "test".to_string(),
                 priority: 5,

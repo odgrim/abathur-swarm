@@ -87,22 +87,22 @@ async fn test_append_and_get_events() {
         .expect("failed to append event 2");
 
     // Get events
-    let events = repo
+    let session_events = repo
         .get_events(session.id)
         .await
         .expect("failed to get events");
 
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0].event_type, "user_message");
-    assert_eq!(events[0].actor, "user123");
-    assert_eq!(events[0].content, json!({"message": "Hello"}));
+    assert_eq!(session_events.len(), 2);
+    assert_eq!(session_events[0].event_type, "user_message");
+    assert_eq!(session_events[0].actor, "user123");
+    assert_eq!(session_events[0].content, json!({"message": "Hello"}));
 
-    assert_eq!(events[1].event_type, "assistant_message");
-    assert_eq!(events[1].actor, "assistant");
-    assert_eq!(events[1].content, json!({"message": "Hi there!"}));
+    assert_eq!(session_events[1].event_type, "assistant_message");
+    assert_eq!(session_events[1].actor, "assistant");
+    assert_eq!(session_events[1].content, json!({"message": "Hi there!"}));
 
     // Verify events are ordered by timestamp
-    assert!(events[0].timestamp <= events[1].timestamp);
+    assert!(session_events[0].timestamp <= session_events[1].timestamp);
 
     teardown_test_db(pool).await;
 }

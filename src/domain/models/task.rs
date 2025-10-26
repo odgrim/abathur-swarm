@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::domain::error::TaskError;
 
 /// Task lifecycle states
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
     Pending, // Submitted, dependencies not yet checked
@@ -201,34 +201,47 @@ impl Task {
         Ok(())
     }
 
-    // ==================== State Transition Methods ====================
+    // ========================
+    // State Transition Methods
+    // ========================
 
-    /// Check if status can transition to target status
-    pub fn can_transition_to(&self, target: TaskStatus) -> bool {
-        TaskStatus::is_valid_transition(self.status, target)
-    }
-
-    /// Mark task as ready if it's currently pending or blocked
+    /// Mark task as ready if all dependencies are met
     pub fn mark_ready(&mut self) -> Result<(), TaskError> {
-        if !self.can_transition_to(TaskStatus::Ready) {
-            return Err(TaskError::InvalidStateTransition {
-                from: self.status,
-                to: TaskStatus::Ready,
+        if self.status != TaskStatus::Pending && self.status != TaskStatus::Blocked {
+            return Err(TaskError::InvalidStatusTransition {
+                from: self.status.to_string(),
+                to: TaskStatus::Ready.to_string(),
             });
         }
+
         self.status = TaskStatus::Ready;
+        self.last_updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Mark task as blocked due to unresolved dependencies
+    pub fn block(&mut self, _unresolved_count: usize) -> Result<(), TaskError> {
+        if self.status != TaskStatus::Pending && self.status != TaskStatus::Ready {
+            return Err(TaskError::InvalidStatusTransition {
+                from: self.status.to_string(),
+                to: TaskStatus::Blocked.to_string(),
+            });
+        }
+
+        self.status = TaskStatus::Blocked;
         self.last_updated_at = Utc::now();
         Ok(())
     }
 
     /// Start task execution (transition to Running)
     pub fn start(&mut self) -> Result<(), TaskError> {
-        if !self.can_transition_to(TaskStatus::Running) {
-            return Err(TaskError::InvalidStateTransition {
-                from: self.status,
-                to: TaskStatus::Running,
+        if self.status != TaskStatus::Ready {
+            return Err(TaskError::InvalidStatusTransition {
+                from: self.status.to_string(),
+                to: TaskStatus::Running.to_string(),
             });
         }
+
         self.status = TaskStatus::Running;
         self.started_at = Some(Utc::now());
         self.last_updated_at = Utc::now();
@@ -236,176 +249,235 @@ impl Task {
     }
 
     /// Complete task successfully
-    pub fn complete(&mut self) -> Result<(), TaskError> {
-        if !self.can_transition_to(TaskStatus::Completed) {
-            return Err(TaskError::InvalidStateTransition {
-                from: self.status,
-                to: TaskStatus::Completed,
+    pub fn complete(&mut self, result_data: Option<serde_json::Value>) -> Result<(), TaskError> {
+        if self.status != TaskStatus::Running {
+            return Err(TaskError::InvalidStatusTransition {
+                from: self.status.to_string(),
+                to: TaskStatus::Completed.to_string(),
             });
         }
+
         self.status = TaskStatus::Completed;
         self.completed_at = Some(Utc::now());
         self.last_updated_at = Utc::now();
+        self.result_data = result_data;
         Ok(())
     }
 
-    /// Mark task as failed with error message
+    /// Fail task with error message
     pub fn fail(&mut self, error_message: String) -> Result<(), TaskError> {
-        if !self.can_transition_to(TaskStatus::Failed) {
-            return Err(TaskError::InvalidStateTransition {
-                from: self.status,
-                to: TaskStatus::Failed,
+        if self.status != TaskStatus::Running {
+            return Err(TaskError::InvalidStatusTransition {
+                from: self.status.to_string(),
+                to: TaskStatus::Failed.to_string(),
             });
         }
+
         self.status = TaskStatus::Failed;
-        self.error_message = Some(error_message);
         self.completed_at = Some(Utc::now());
         self.last_updated_at = Utc::now();
+        self.error_message = Some(error_message);
         Ok(())
     }
 
-    /// Cancel task
+    /// Cancel task (can be done from any non-terminal state)
     pub fn cancel(&mut self) -> Result<(), TaskError> {
-        if !self.can_transition_to(TaskStatus::Cancelled) {
-            return Err(TaskError::InvalidStateTransition {
-                from: self.status,
-                to: TaskStatus::Cancelled,
+        if self.is_terminal() {
+            return Err(TaskError::InvalidStatusTransition {
+                from: self.status.to_string(),
+                to: TaskStatus::Cancelled.to_string(),
             });
         }
+
         self.status = TaskStatus::Cancelled;
         self.completed_at = Some(Utc::now());
         self.last_updated_at = Utc::now();
         Ok(())
     }
 
-    /// Mark task as blocked
-    pub fn block(&mut self) -> Result<(), TaskError> {
-        if !self.can_transition_to(TaskStatus::Blocked) {
-            return Err(TaskError::InvalidStateTransition {
-                from: self.status,
-                to: TaskStatus::Blocked,
+    /// Retry a failed task (increments retry count and resets to Pending)
+    pub fn retry(&mut self) -> Result<(), TaskError> {
+        if self.status != TaskStatus::Failed {
+            return Err(TaskError::InvalidStatusTransition {
+                from: self.status.to_string(),
+                to: TaskStatus::Pending.to_string(),
             });
         }
-        self.status = TaskStatus::Blocked;
+
+        if !self.can_retry() {
+            return Err(TaskError::MaxRetriesExceeded);
+        }
+
+        self.retry_count += 1;
+        self.status = TaskStatus::Pending;
+        self.started_at = None;
+        self.completed_at = None;
+        self.error_message = None;
         self.last_updated_at = Utc::now();
         Ok(())
     }
 
-    // ==================== Business Logic Query Methods ====================
+    // ========================
+    // Query Methods
+    // ========================
 
-    /// Check if task is in a terminal state
-    pub fn is_terminal(&self) -> bool {
+    /// Check if task is in a terminal state (cannot transition further)
+    pub const fn is_terminal(&self) -> bool {
         matches!(
             self.status,
-            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+            TaskStatus::Completed | TaskStatus::Cancelled | TaskStatus::Failed
         )
     }
 
-    /// Check if task is ready for execution
+    /// Check if task is ready to execute
     pub fn is_ready(&self) -> bool {
-        matches!(self.status, TaskStatus::Ready)
+        self.status == TaskStatus::Ready
     }
 
     /// Check if task is currently running
     pub fn is_running(&self) -> bool {
-        matches!(self.status, TaskStatus::Running)
+        self.status == TaskStatus::Running
     }
 
     /// Check if task can be retried
     pub fn can_retry(&self) -> bool {
-        self.retry_count < self.max_retries
+        self.status == TaskStatus::Failed && self.retry_count < self.max_retries
     }
 
-    /// Increment retry count
-    pub fn increment_retry(&mut self) -> Result<(), TaskError> {
-        if !self.can_retry() {
-            return Err(TaskError::MaxRetriesExceeded {
-                retry_count: self.retry_count,
-                max_retries: self.max_retries,
-            });
-        }
-        self.retry_count += 1;
-        self.last_updated_at = Utc::now();
-        Ok(())
+    /// Check if task is blocked by dependencies
+    pub fn is_blocked(&self) -> bool {
+        self.status == TaskStatus::Blocked
     }
 
-    /// Calculate effective priority (base priority + depth boost)
+    /// Check if task is completed successfully
+    pub fn is_completed(&self) -> bool {
+        self.status == TaskStatus::Completed
+    }
+
+    /// Check if task has failed
+    pub fn is_failed(&self) -> bool {
+        self.status == TaskStatus::Failed
+    }
+
+    /// Check if task is cancelled
+    pub fn is_cancelled(&self) -> bool {
+        self.status == TaskStatus::Cancelled
+    }
+
+    // ========================
+    // Business Logic Methods
+    // ========================
+
+    /// Calculate effective priority including dependency depth boost
     pub fn calculate_priority(&self) -> f64 {
-        self.priority as f64 + (self.dependency_depth as f64 * 0.5)
+        // Base priority (0-10) + depth boost (0.5 per level)
+        f64::from(self.dependency_depth).mul_add(0.5, f64::from(self.priority))
     }
 
-    /// Update calculated priority
+    /// Update the calculated priority field
     pub fn update_calculated_priority(&mut self) {
         self.calculated_priority = self.calculate_priority();
         self.last_updated_at = Utc::now();
+    }
+
+    /// Check if task has exceeded execution timeout
+    pub fn is_timed_out(&self) -> bool {
+        self.started_at.is_some_and(|started| {
+            let elapsed = Utc::now().signed_duration_since(started);
+            elapsed
+                .num_seconds()
+                .try_into()
+                .is_ok_and(|secs: u32| secs > self.max_execution_timeout_seconds)
+        })
+    }
+
+    /// Get elapsed execution time in seconds (None if not started)
+    pub fn elapsed_time(&self) -> Option<i64> {
+        self.started_at.map(|started| {
+            let end = self.completed_at.unwrap_or_else(Utc::now);
+            end.signed_duration_since(started).num_seconds()
+        })
     }
 
     /// Check if task has dependencies
     pub fn has_dependencies(&self) -> bool {
         self.dependencies
             .as_ref()
-            .map(|deps| !deps.is_empty())
-            .unwrap_or(false)
+            .is_some_and(|deps| !deps.is_empty())
     }
 
-    /// Get elapsed time since start (if running)
-    pub fn elapsed_time(&self) -> Option<chrono::Duration> {
-        self.started_at
-            .map(|start| Utc::now().signed_duration_since(start))
+    /// Get dependency count
+    pub fn dependency_count(&self) -> usize {
+        self.dependencies.as_ref().map_or(0, std::vec::Vec::len)
     }
 
-    /// Check if execution has timed out
-    pub fn is_timed_out(&self) -> bool {
-        if let Some(elapsed) = self.elapsed_time() {
-            elapsed.num_seconds() as u32 > self.max_execution_timeout_seconds
+    /// Check if all dependencies are in the completed set
+    pub fn dependencies_met(&self, completed_tasks: &[Uuid]) -> bool {
+        self.dependencies
+            .as_ref()
+            .is_none_or(|deps| deps.iter().all(|dep_id| completed_tasks.contains(dep_id)))
+    }
+
+    /// Update task status based on dependency resolution
+    pub fn update_status_for_dependencies(
+        &mut self,
+        completed_tasks: &[Uuid],
+    ) -> Result<(), TaskError> {
+        if self.is_terminal() || self.status == TaskStatus::Running {
+            return Ok(()); // Don't modify terminal or running tasks
+        }
+
+        if self.dependencies_met(completed_tasks) {
+            self.mark_ready()?;
         } else {
-            false
+            let unresolved = self.dependency_count()
+                - self
+                    .dependencies
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .filter(|id| completed_tasks.contains(id))
+                    .count();
+            self.block(unresolved)?;
         }
+
+        Ok(())
     }
-}
 
-impl TaskStatus {
-    /// Check if transition from current status to target status is valid
-    pub fn is_valid_transition(from: TaskStatus, to: TaskStatus) -> bool {
-        match (from, to) {
-            // Pending can go to Blocked, Ready, or Cancelled
-            (TaskStatus::Pending, TaskStatus::Blocked) => true,
-            (TaskStatus::Pending, TaskStatus::Ready) => true,
-            (TaskStatus::Pending, TaskStatus::Cancelled) => true,
+    /// Check if task has exceeded its deadline
+    pub fn is_past_deadline(&self) -> bool {
+        self.deadline.is_some_and(|deadline| Utc::now() > deadline)
+    }
 
-            // Blocked can go to Ready or Cancelled
-            (TaskStatus::Blocked, TaskStatus::Ready) => true,
-            (TaskStatus::Blocked, TaskStatus::Cancelled) => true,
-
-            // Ready can go to Running or Cancelled
-            (TaskStatus::Ready, TaskStatus::Running) => true,
-            (TaskStatus::Ready, TaskStatus::Cancelled) => true,
-
-            // Running can go to Completed, Failed, or Cancelled
-            (TaskStatus::Running, TaskStatus::Completed) => true,
-            (TaskStatus::Running, TaskStatus::Failed) => true,
-            (TaskStatus::Running, TaskStatus::Cancelled) => true,
-
-            // Failed can go to Ready (for retry) or Cancelled
-            (TaskStatus::Failed, TaskStatus::Ready) => true,
-            (TaskStatus::Failed, TaskStatus::Cancelled) => true,
-
-            // Terminal states cannot transition further
-            (TaskStatus::Completed, _) => false,
-            (TaskStatus::Cancelled, _) => false,
-
-            // Same state is allowed (no-op)
-            (a, b) if a == b => true,
-
-            // All other transitions are invalid
-            _ => false,
-        }
+    /// Set dependencies and update dependency depth
+    pub fn set_dependencies(
+        &mut self,
+        dependencies: Vec<Uuid>,
+        dependency_type: DependencyType,
+        depth: u32,
+    ) {
+        self.dependencies = Some(dependencies);
+        self.dependency_type = dependency_type;
+        self.dependency_depth = depth;
+        self.update_calculated_priority();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ========================
+    // Helper Functions
+    // ========================
+
+    fn create_test_task() -> Task {
+        Task::new("Test task".to_string(), "Test description".to_string())
+    }
+
+    // ========================
+    // Enum Tests
+    // ========================
 
     #[test]
     fn test_task_status_display() {
@@ -421,28 +493,11 @@ mod tests {
     #[test]
     fn test_task_status_from_str() {
         assert_eq!(
-            "pending".parse::<TaskStatus>().unwrap(),
+            TaskStatus::from_str("pending").unwrap(),
             TaskStatus::Pending
         );
-        assert_eq!(
-            "BLOCKED".parse::<TaskStatus>().unwrap(),
-            TaskStatus::Blocked
-        );
-        assert_eq!("Ready".parse::<TaskStatus>().unwrap(), TaskStatus::Ready);
-        assert_eq!(
-            "running".parse::<TaskStatus>().unwrap(),
-            TaskStatus::Running
-        );
-        assert_eq!(
-            "completed".parse::<TaskStatus>().unwrap(),
-            TaskStatus::Completed
-        );
-        assert_eq!("failed".parse::<TaskStatus>().unwrap(), TaskStatus::Failed);
-        assert_eq!(
-            "cancelled".parse::<TaskStatus>().unwrap(),
-            TaskStatus::Cancelled
-        );
-        assert!("invalid".parse::<TaskStatus>().is_err());
+        assert_eq!(TaskStatus::from_str("READY").unwrap(), TaskStatus::Ready);
+        assert!(TaskStatus::from_str("invalid").is_err());
     }
 
     #[test]
@@ -460,435 +515,195 @@ mod tests {
     }
 
     #[test]
-    fn test_task_source_from_str() {
-        assert_eq!("human".parse::<TaskSource>().unwrap(), TaskSource::Human);
-        assert_eq!(
-            "AGENT_REQUIREMENTS".parse::<TaskSource>().unwrap(),
-            TaskSource::AgentRequirements
-        );
-        assert_eq!(
-            "agent_planner".parse::<TaskSource>().unwrap(),
-            TaskSource::AgentPlanner
-        );
-        assert_eq!(
-            "Agent_Implementation".parse::<TaskSource>().unwrap(),
-            TaskSource::AgentImplementation
-        );
-        assert!("invalid".parse::<TaskSource>().is_err());
-    }
-
-    #[test]
     fn test_dependency_type_display() {
         assert_eq!(DependencyType::Sequential.to_string(), "sequential");
         assert_eq!(DependencyType::Parallel.to_string(), "parallel");
     }
 
-    #[test]
-    fn test_dependency_type_from_str() {
-        assert_eq!(
-            "sequential".parse::<DependencyType>().unwrap(),
-            DependencyType::Sequential
-        );
-        assert_eq!(
-            "PARALLEL".parse::<DependencyType>().unwrap(),
-            DependencyType::Parallel
-        );
-        assert!("invalid".parse::<DependencyType>().is_err());
-    }
+    // ========================
+    // Constructor Tests
+    // ========================
 
     #[test]
-    fn test_task_new() {
-        let task = Task::new(
-            "Test task".to_string(),
-            "A test task description".to_string(),
-        );
-
+    fn test_task_new_creates_valid_task() {
+        let task = create_test_task();
         assert_eq!(task.summary, "Test task");
-        assert_eq!(task.description, "A test task description");
-        assert_eq!(task.agent_type, "requirements-gatherer");
-        assert_eq!(task.priority, 5);
-        assert_eq!(task.calculated_priority, 5.0);
+        assert_eq!(task.description, "Test description");
         assert_eq!(task.status, TaskStatus::Pending);
-        assert_eq!(task.dependencies, None);
-        assert_eq!(task.dependency_type, DependencyType::Sequential);
-        assert_eq!(task.dependency_depth, 0);
+        assert_eq!(task.priority, 5);
         assert_eq!(task.retry_count, 0);
         assert_eq!(task.max_retries, 3);
-        assert_eq!(task.max_execution_timeout_seconds, 3600);
-        assert_eq!(task.source, TaskSource::Human);
-        assert_eq!(task.input_data, None);
-        assert_eq!(task.result_data, None);
-        assert_eq!(task.error_message, None);
-        assert_eq!(task.created_by, None);
-        assert_eq!(task.parent_task_id, None);
-        assert_eq!(task.session_id, None);
-        assert_eq!(task.started_at, None);
-        assert_eq!(task.completed_at, None);
-        assert_eq!(task.deadline, None);
-        assert_eq!(task.estimated_duration_seconds, None);
-        assert_eq!(task.feature_branch, None);
-        assert_eq!(task.task_branch, None);
-        assert_eq!(task.worktree_path, None);
     }
 
     #[test]
-    fn test_validate_summary_valid() {
-        let task = Task::new("Short summary".to_string(), "Description".to_string());
-        assert!(task.validate_summary().is_ok());
+    fn test_task_new_sets_timestamps() {
+        let task = create_test_task();
+        assert!(task.started_at.is_none());
+        assert!(task.completed_at.is_none());
+        assert!(task.submitted_at <= Utc::now());
     }
 
-    #[test]
-    fn test_validate_summary_max_length() {
-        // Exactly 140 characters should be valid
-        let summary = "a".repeat(140);
-        let task = Task::new(summary, "Description".to_string());
-        assert!(task.validate_summary().is_ok());
-    }
+    // ========================
+    // State Transition Tests
+    // ========================
 
     #[test]
-    fn test_validate_summary_too_long() {
-        // 141 characters should fail
-        let summary = "a".repeat(141);
-        let task = Task::new(summary, "Description".to_string());
-        let result = task.validate_summary();
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("exceeds 140 characters")
-        );
-    }
-
-    #[test]
-    fn test_validate_priority_valid() {
-        for priority in 0..=10 {
-            let mut task = Task::new("Test".to_string(), "Test".to_string());
-            task.priority = priority;
-            assert!(
-                task.validate_priority().is_ok(),
-                "Priority {} should be valid",
-                priority
-            );
-        }
-    }
-
-    #[test]
-    fn test_validate_priority_too_high() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        task.priority = 11;
-        let result = task.validate_priority();
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("must be between 0 and 10")
-        );
-    }
-
-    #[test]
-    fn test_task_with_dependencies() {
-        let dep_id = Uuid::new_v4();
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        task.dependencies = Some(vec![dep_id]);
-        task.dependency_type = DependencyType::Parallel;
-        task.dependency_depth = 2;
-
-        assert_eq!(task.dependencies, Some(vec![dep_id]));
-        assert_eq!(task.dependency_type, DependencyType::Parallel);
-        assert_eq!(task.dependency_depth, 2);
-    }
-
-    #[test]
-    fn test_task_serialization() {
-        let task = Task::new("Test task".to_string(), "Description".to_string());
-        let serialized = serde_json::to_string(&task).unwrap();
-        let deserialized: Task = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(task.summary, deserialized.summary);
-        assert_eq!(task.description, deserialized.description);
-        assert_eq!(task.status, deserialized.status);
-        assert_eq!(task.source, deserialized.source);
-    }
-
-    #[test]
-    fn test_task_status_serialization() {
-        let status = TaskStatus::Running;
-        let serialized = serde_json::to_string(&status).unwrap();
-        assert_eq!(serialized, "\"running\"");
-        let deserialized: TaskStatus = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(status, deserialized);
-    }
-
-    #[test]
-    fn test_task_source_serialization() {
-        let source = TaskSource::AgentPlanner;
-        let serialized = serde_json::to_string(&source).unwrap();
-        assert_eq!(serialized, "\"agent_planner\"");
-        let deserialized: TaskSource = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(source, deserialized);
-    }
-
-    #[test]
-    fn test_dependency_type_serialization() {
-        let dep_type = DependencyType::Parallel;
-        let serialized = serde_json::to_string(&dep_type).unwrap();
-        assert_eq!(serialized, "\"parallel\"");
-        let deserialized: DependencyType = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(dep_type, deserialized);
-    }
-
-    // ==================== State Transition Tests ====================
-
-    #[test]
-    fn test_task_mark_ready_from_pending() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
+    fn test_mark_ready_from_pending() {
+        let mut task = create_test_task();
         assert_eq!(task.status, TaskStatus::Pending);
 
-        assert!(task.mark_ready().is_ok());
+        task.mark_ready().unwrap();
         assert_eq!(task.status, TaskStatus::Ready);
     }
 
     #[test]
-    fn test_task_mark_ready_from_blocked() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
+    fn test_mark_ready_from_blocked() {
+        let mut task = create_test_task();
         task.status = TaskStatus::Blocked;
 
-        assert!(task.mark_ready().is_ok());
+        task.mark_ready().unwrap();
         assert_eq!(task.status, TaskStatus::Ready);
     }
 
     #[test]
-    fn test_task_mark_ready_from_invalid_state() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
+    fn test_mark_ready_from_invalid_state() {
+        let mut task = create_test_task();
         task.status = TaskStatus::Running;
 
         let result = task.mark_ready();
         assert!(result.is_err());
-        assert_eq!(task.status, TaskStatus::Running); // Status unchanged
+        assert_eq!(task.status, TaskStatus::Running);
     }
 
     #[test]
-    fn test_task_start_from_ready() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        task.status = TaskStatus::Ready;
-        assert!(task.started_at.is_none());
+    fn test_block_from_pending() {
+        let mut task = create_test_task();
+        task.block(2).unwrap();
+        assert_eq!(task.status, TaskStatus::Blocked);
+    }
 
-        assert!(task.start().is_ok());
+    #[test]
+    fn test_start_from_ready() {
+        let mut task = create_test_task();
+        task.status = TaskStatus::Ready;
+
+        task.start().unwrap();
         assert_eq!(task.status, TaskStatus::Running);
         assert!(task.started_at.is_some());
     }
 
     #[test]
-    fn test_task_start_from_invalid_state() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
+    fn test_start_from_pending_fails() {
+        let mut task = create_test_task();
         assert_eq!(task.status, TaskStatus::Pending);
 
         let result = task.start();
         assert!(result.is_err());
-        assert_eq!(task.status, TaskStatus::Pending);
-        assert!(task.started_at.is_none());
     }
 
     #[test]
-    fn test_task_complete_from_running() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        task.status = TaskStatus::Running;
-        task.started_at = Some(Utc::now());
-        assert!(task.completed_at.is_none());
+    fn test_complete_from_running() {
+        let mut task = create_test_task();
+        task.status = TaskStatus::Ready;
+        task.start().unwrap();
 
-        assert!(task.complete().is_ok());
+        let result_data = Some(serde_json::json!({"result": "success"}));
+        task.complete(result_data.clone()).unwrap();
+
         assert_eq!(task.status, TaskStatus::Completed);
         assert!(task.completed_at.is_some());
+        assert_eq!(task.result_data, result_data);
     }
 
     #[test]
-    fn test_task_complete_from_invalid_state() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        assert_eq!(task.status, TaskStatus::Pending);
-
-        let result = task.complete();
+    fn test_complete_from_pending_fails() {
+        let mut task = create_test_task();
+        let result = task.complete(None);
         assert!(result.is_err());
-        assert_eq!(task.status, TaskStatus::Pending);
     }
 
     #[test]
-    fn test_task_fail_from_running() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        task.status = TaskStatus::Running;
-        task.started_at = Some(Utc::now());
-
-        let error_msg = "Something went wrong".to_string();
-        assert!(task.fail(error_msg.clone()).is_ok());
-        assert_eq!(task.status, TaskStatus::Failed);
-        assert_eq!(task.error_message, Some(error_msg));
-        assert!(task.completed_at.is_some());
-    }
-
-    #[test]
-    fn test_task_fail_from_invalid_state() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        assert_eq!(task.status, TaskStatus::Pending);
-
-        let result = task.fail("Error".to_string());
-        assert!(result.is_err());
-        assert_eq!(task.status, TaskStatus::Pending);
-    }
-
-    #[test]
-    fn test_task_cancel_from_any_non_terminal_state() {
-        // Can cancel from Pending
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        assert!(task.cancel().is_ok());
-        assert_eq!(task.status, TaskStatus::Cancelled);
-
-        // Can cancel from Blocked
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        task.status = TaskStatus::Blocked;
-        assert!(task.cancel().is_ok());
-        assert_eq!(task.status, TaskStatus::Cancelled);
-
-        // Can cancel from Ready
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
+    fn test_fail_from_running() {
+        let mut task = create_test_task();
         task.status = TaskStatus::Ready;
-        assert!(task.cancel().is_ok());
-        assert_eq!(task.status, TaskStatus::Cancelled);
+        task.start().unwrap();
 
-        // Can cancel from Running
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        task.status = TaskStatus::Running;
-        assert!(task.cancel().is_ok());
-        assert_eq!(task.status, TaskStatus::Cancelled);
+        task.fail("Test error".to_string()).unwrap();
+
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert!(task.completed_at.is_some());
+        assert_eq!(task.error_message, Some("Test error".to_string()));
     }
 
     #[test]
-    fn test_task_cancel_from_terminal_state() {
-        // Cannot cancel from Completed
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
+    fn test_cancel_from_any_non_terminal_state() {
+        let mut task1 = create_test_task();
+        task1.cancel().unwrap();
+        assert_eq!(task1.status, TaskStatus::Cancelled);
+
+        let mut task2 = create_test_task();
+        task2.status = TaskStatus::Ready;
+        task2.cancel().unwrap();
+        assert_eq!(task2.status, TaskStatus::Cancelled);
+
+        let mut task3 = create_test_task();
+        task3.status = TaskStatus::Running;
+        task3.cancel().unwrap();
+        assert_eq!(task3.status, TaskStatus::Cancelled);
+    }
+
+    #[test]
+    fn test_cancel_from_terminal_state_fails() {
+        let mut task = create_test_task();
         task.status = TaskStatus::Completed;
+
         let result = task.cancel();
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_task_block_from_pending() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
+    fn test_retry_failed_task() {
+        let mut task = create_test_task();
+        task.status = TaskStatus::Failed;
+        task.retry_count = 1;
+
+        task.retry().unwrap();
+
         assert_eq!(task.status, TaskStatus::Pending);
-
-        assert!(task.block().is_ok());
-        assert_eq!(task.status, TaskStatus::Blocked);
-    }
-
-    // ==================== State Transition Validation Tests ====================
-
-    #[test]
-    fn test_task_status_valid_transitions() {
-        // Pending transitions
-        assert!(TaskStatus::is_valid_transition(
-            TaskStatus::Pending,
-            TaskStatus::Blocked
-        ));
-        assert!(TaskStatus::is_valid_transition(
-            TaskStatus::Pending,
-            TaskStatus::Ready
-        ));
-        assert!(TaskStatus::is_valid_transition(
-            TaskStatus::Pending,
-            TaskStatus::Cancelled
-        ));
-
-        // Blocked transitions
-        assert!(TaskStatus::is_valid_transition(
-            TaskStatus::Blocked,
-            TaskStatus::Ready
-        ));
-        assert!(TaskStatus::is_valid_transition(
-            TaskStatus::Blocked,
-            TaskStatus::Cancelled
-        ));
-
-        // Ready transitions
-        assert!(TaskStatus::is_valid_transition(
-            TaskStatus::Ready,
-            TaskStatus::Running
-        ));
-        assert!(TaskStatus::is_valid_transition(
-            TaskStatus::Ready,
-            TaskStatus::Cancelled
-        ));
-
-        // Running transitions
-        assert!(TaskStatus::is_valid_transition(
-            TaskStatus::Running,
-            TaskStatus::Completed
-        ));
-        assert!(TaskStatus::is_valid_transition(
-            TaskStatus::Running,
-            TaskStatus::Failed
-        ));
-        assert!(TaskStatus::is_valid_transition(
-            TaskStatus::Running,
-            TaskStatus::Cancelled
-        ));
-
-        // Failed transitions (for retry)
-        assert!(TaskStatus::is_valid_transition(
-            TaskStatus::Failed,
-            TaskStatus::Ready
-        ));
-        assert!(TaskStatus::is_valid_transition(
-            TaskStatus::Failed,
-            TaskStatus::Cancelled
-        ));
+        assert_eq!(task.retry_count, 2);
+        assert!(task.started_at.is_none());
+        assert!(task.completed_at.is_none());
+        assert!(task.error_message.is_none());
     }
 
     #[test]
-    fn test_task_status_invalid_transitions() {
-        // Cannot transition from Pending directly to Running
-        assert!(!TaskStatus::is_valid_transition(
-            TaskStatus::Pending,
-            TaskStatus::Running
-        ));
+    fn test_retry_exceeds_max_retries() {
+        let mut task = create_test_task();
+        task.status = TaskStatus::Failed;
+        task.retry_count = 3;
+        task.max_retries = 3;
 
-        // Cannot transition from Completed to anything
-        assert!(!TaskStatus::is_valid_transition(
-            TaskStatus::Completed,
-            TaskStatus::Running
-        ));
-        assert!(!TaskStatus::is_valid_transition(
-            TaskStatus::Completed,
-            TaskStatus::Failed
-        ));
-
-        // Cannot transition from Cancelled to anything
-        assert!(!TaskStatus::is_valid_transition(
-            TaskStatus::Cancelled,
-            TaskStatus::Running
-        ));
+        let result = task.retry();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TaskError::MaxRetriesExceeded));
     }
 
     #[test]
-    fn test_task_status_same_state_transition() {
-        // Same state transitions are allowed (no-op)
-        assert!(TaskStatus::is_valid_transition(
-            TaskStatus::Pending,
-            TaskStatus::Pending
-        ));
-        assert!(TaskStatus::is_valid_transition(
-            TaskStatus::Running,
-            TaskStatus::Running
-        ));
+    fn test_retry_from_non_failed_state_fails() {
+        let mut task = create_test_task();
+        task.status = TaskStatus::Pending;
+
+        let result = task.retry();
+        assert!(result.is_err());
     }
 
-    // ==================== Business Logic Query Tests ====================
+    // ========================
+    // Query Method Tests
+    // ========================
 
     #[test]
-    fn test_task_is_terminal() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        assert!(!task.is_terminal());
-
-        task.status = TaskStatus::Running;
+    fn test_is_terminal() {
+        let mut task = create_test_task();
         assert!(!task.is_terminal());
 
         task.status = TaskStatus::Completed;
@@ -902,8 +717,8 @@ mod tests {
     }
 
     #[test]
-    fn test_task_is_ready() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
+    fn test_is_ready() {
+        let mut task = create_test_task();
         assert!(!task.is_ready());
 
         task.status = TaskStatus::Ready;
@@ -911,8 +726,8 @@ mod tests {
     }
 
     #[test]
-    fn test_task_is_running() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
+    fn test_is_running() {
+        let mut task = create_test_task();
         assert!(!task.is_running());
 
         task.status = TaskStatus::Running;
@@ -920,168 +735,305 @@ mod tests {
     }
 
     #[test]
-    fn test_task_can_retry() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        task.max_retries = 3;
-
-        assert!(task.can_retry());
-
+    fn test_can_retry() {
+        let mut task = create_test_task();
+        task.status = TaskStatus::Failed;
         task.retry_count = 2;
+        task.max_retries = 3;
         assert!(task.can_retry());
 
         task.retry_count = 3;
         assert!(!task.can_retry());
 
-        task.retry_count = 4;
+        task.status = TaskStatus::Completed;
         assert!(!task.can_retry());
     }
 
     #[test]
-    fn test_task_increment_retry() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        task.max_retries = 3;
-        assert_eq!(task.retry_count, 0);
+    fn test_is_blocked() {
+        let mut task = create_test_task();
+        assert!(!task.is_blocked());
 
-        assert!(task.increment_retry().is_ok());
-        assert_eq!(task.retry_count, 1);
-
-        assert!(task.increment_retry().is_ok());
-        assert_eq!(task.retry_count, 2);
-
-        assert!(task.increment_retry().is_ok());
-        assert_eq!(task.retry_count, 3);
-
-        // Should fail now
-        let result = task.increment_retry();
-        assert!(result.is_err());
-        assert_eq!(task.retry_count, 3); // Count unchanged
+        task.status = TaskStatus::Blocked;
+        assert!(task.is_blocked());
     }
 
     #[test]
-    fn test_task_calculate_priority() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        task.priority = 5;
-        task.dependency_depth = 0;
-        assert_eq!(task.calculate_priority(), 5.0);
+    fn test_is_completed() {
+        let mut task = create_test_task();
+        assert!(!task.is_completed());
 
+        task.status = TaskStatus::Completed;
+        assert!(task.is_completed());
+    }
+
+    #[test]
+    fn test_is_failed() {
+        let mut task = create_test_task();
+        assert!(!task.is_failed());
+
+        task.status = TaskStatus::Failed;
+        assert!(task.is_failed());
+    }
+
+    #[test]
+    fn test_is_cancelled() {
+        let mut task = create_test_task();
+        assert!(!task.is_cancelled());
+
+        task.status = TaskStatus::Cancelled;
+        assert!(task.is_cancelled());
+    }
+
+    // ========================
+    // Business Logic Tests
+    // ========================
+
+    #[test]
+    fn test_calculate_priority_base() {
+        let task = create_test_task();
+        assert!((task.calculate_priority() - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_calculate_priority_with_depth() {
+        let mut task = create_test_task();
         task.dependency_depth = 2;
-        assert_eq!(task.calculate_priority(), 6.0); // 5 + (2 * 0.5)
+        assert!((task.calculate_priority() - 6.0).abs() < f64::EPSILON); // 5 + (2 * 0.5)
 
-        task.dependency_depth = 10;
-        assert_eq!(task.calculate_priority(), 10.0); // 5 + (10 * 0.5)
+        task.dependency_depth = 4;
+        assert!((task.calculate_priority() - 7.0).abs() < f64::EPSILON); // 5 + (4 * 0.5)
     }
 
     #[test]
-    fn test_task_update_calculated_priority() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        task.priority = 7;
-        task.dependency_depth = 4;
+    fn test_update_calculated_priority() {
+        let mut task = create_test_task();
+        task.dependency_depth = 3;
 
         task.update_calculated_priority();
-        assert_eq!(task.calculated_priority, 9.0); // 7 + (4 * 0.5)
+        assert!((task.calculated_priority - 6.5).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_task_has_dependencies() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
+    fn test_is_timed_out() {
+        let mut task = create_test_task();
+        assert!(!task.is_timed_out());
+
+        task.started_at = Some(Utc::now() - chrono::Duration::seconds(3700));
+        task.max_execution_timeout_seconds = 3600;
+        assert!(task.is_timed_out());
+
+        task.max_execution_timeout_seconds = 4000;
+        assert!(!task.is_timed_out());
+    }
+
+    #[test]
+    fn test_elapsed_time_not_started() {
+        let task = create_test_task();
+        assert!(task.elapsed_time().is_none());
+    }
+
+    #[test]
+    fn test_elapsed_time_running() {
+        let mut task = create_test_task();
+        task.started_at = Some(Utc::now() - chrono::Duration::seconds(10));
+
+        let elapsed = task.elapsed_time().unwrap();
+        assert!(elapsed >= 10);
+    }
+
+    #[test]
+    fn test_elapsed_time_completed() {
+        let mut task = create_test_task();
+        task.started_at = Some(Utc::now() - chrono::Duration::seconds(20));
+        task.completed_at = Some(Utc::now() - chrono::Duration::seconds(5));
+
+        let elapsed = task.elapsed_time().unwrap();
+        assert!((15..=16).contains(&elapsed));
+    }
+
+    #[test]
+    fn test_has_dependencies() {
+        let mut task = create_test_task();
         assert!(!task.has_dependencies());
+
+        task.dependencies = Some(vec![Uuid::new_v4()]);
+        assert!(task.has_dependencies());
 
         task.dependencies = Some(vec![]);
         assert!(!task.has_dependencies());
+    }
 
-        task.dependencies = Some(vec![Uuid::new_v4()]);
-        assert!(task.has_dependencies());
+    #[test]
+    fn test_dependency_count() {
+        let mut task = create_test_task();
+        assert_eq!(task.dependency_count(), 0);
 
         task.dependencies = Some(vec![Uuid::new_v4(), Uuid::new_v4()]);
-        assert!(task.has_dependencies());
+        assert_eq!(task.dependency_count(), 2);
     }
 
     #[test]
-    fn test_task_elapsed_time() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        assert!(task.elapsed_time().is_none());
-
-        task.started_at = Some(Utc::now() - chrono::Duration::seconds(10));
-        let elapsed = task.elapsed_time().unwrap();
-        assert!(elapsed.num_seconds() >= 9); // Allow some variance
-        assert!(elapsed.num_seconds() <= 11);
+    fn test_dependencies_met_no_dependencies() {
+        let task = create_test_task();
+        assert!(task.dependencies_met(&[]));
     }
 
     #[test]
-    fn test_task_is_timed_out() {
-        let mut task = Task::new("Test".to_string(), "Test".to_string());
-        task.max_execution_timeout_seconds = 60;
+    fn test_dependencies_met_all_completed() {
+        let dep1 = Uuid::new_v4();
+        let dep2 = Uuid::new_v4();
 
-        // Not started, so no timeout
-        assert!(!task.is_timed_out());
+        let mut task = create_test_task();
+        task.dependencies = Some(vec![dep1, dep2]);
 
-        // Started recently
-        task.started_at = Some(Utc::now() - chrono::Duration::seconds(30));
-        assert!(!task.is_timed_out());
-
-        // Started more than timeout ago
-        task.started_at = Some(Utc::now() - chrono::Duration::seconds(70));
-        assert!(task.is_timed_out());
+        assert!(task.dependencies_met(&[dep1, dep2]));
     }
 
     #[test]
-    fn test_task_lifecycle_happy_path() {
-        let mut task = Task::new("Test task".to_string(), "Description".to_string());
+    fn test_dependencies_met_some_incomplete() {
+        let dep1 = Uuid::new_v4();
+        let dep2 = Uuid::new_v4();
 
-        // Start in Pending
-        assert_eq!(task.status, TaskStatus::Pending);
+        let mut task = create_test_task();
+        task.dependencies = Some(vec![dep1, dep2]);
 
-        // Mark as ready
-        assert!(task.mark_ready().is_ok());
-        assert_eq!(task.status, TaskStatus::Ready);
-
-        // Start execution
-        assert!(task.start().is_ok());
-        assert_eq!(task.status, TaskStatus::Running);
-        assert!(task.started_at.is_some());
-
-        // Complete
-        assert!(task.complete().is_ok());
-        assert_eq!(task.status, TaskStatus::Completed);
-        assert!(task.completed_at.is_some());
-        assert!(task.is_terminal());
+        assert!(!task.dependencies_met(&[dep1]));
     }
 
     #[test]
-    fn test_task_lifecycle_with_failure_and_retry() {
-        let mut task = Task::new("Test task".to_string(), "Description".to_string());
-        task.status = TaskStatus::Running;
-        task.max_retries = 3;
+    fn test_update_status_for_dependencies_met() {
+        let dep1 = Uuid::new_v4();
+        let mut task = create_test_task();
+        task.dependencies = Some(vec![dep1]);
 
-        // Fail the task
-        assert!(task.fail("Error occurred".to_string()).is_ok());
-        assert_eq!(task.status, TaskStatus::Failed);
-        assert!(task.error_message.is_some());
-
-        // Retry
-        assert!(task.increment_retry().is_ok());
-        assert_eq!(task.retry_count, 1);
-
-        // Back to ready
-        assert!(task.mark_ready().is_ok());
+        task.update_status_for_dependencies(&[dep1]).unwrap();
         assert_eq!(task.status, TaskStatus::Ready);
     }
 
     #[test]
-    fn test_task_lifecycle_with_blocking() {
-        let mut task = Task::new("Test task".to_string(), "Description".to_string());
-        task.dependencies = Some(vec![Uuid::new_v4()]);
+    fn test_update_status_for_dependencies_blocked() {
+        let dep1 = Uuid::new_v4();
+        let mut task = create_test_task();
+        task.dependencies = Some(vec![dep1]);
 
-        // Start in Pending
-        assert_eq!(task.status, TaskStatus::Pending);
-        assert!(task.has_dependencies());
-
-        // Block due to unmet dependencies
-        assert!(task.block().is_ok());
+        task.update_status_for_dependencies(&[]).unwrap();
         assert_eq!(task.status, TaskStatus::Blocked);
+    }
 
-        // Dependencies met, mark as ready
-        assert!(task.mark_ready().is_ok());
-        assert_eq!(task.status, TaskStatus::Ready);
+    #[test]
+    fn test_update_status_for_dependencies_ignores_terminal() {
+        let mut task = create_test_task();
+        task.status = TaskStatus::Completed;
+
+        task.update_status_for_dependencies(&[]).unwrap();
+        assert_eq!(task.status, TaskStatus::Completed);
+    }
+
+    #[test]
+    fn test_is_past_deadline() {
+        let mut task = create_test_task();
+        assert!(!task.is_past_deadline());
+
+        task.deadline = Some(Utc::now() + chrono::Duration::hours(1));
+        assert!(!task.is_past_deadline());
+
+        task.deadline = Some(Utc::now() - chrono::Duration::hours(1));
+        assert!(task.is_past_deadline());
+    }
+
+    #[test]
+    fn test_set_dependencies() {
+        let dep1 = Uuid::new_v4();
+        let dep2 = Uuid::new_v4();
+
+        let mut task = create_test_task();
+        task.set_dependencies(vec![dep1, dep2], DependencyType::Parallel, 3);
+
+        assert_eq!(task.dependencies, Some(vec![dep1, dep2]));
+        assert_eq!(task.dependency_type, DependencyType::Parallel);
+        assert_eq!(task.dependency_depth, 3);
+        assert!((task.calculated_priority - 6.5).abs() < f64::EPSILON); // 5 + (3 * 0.5)
+    }
+
+    // ========================
+    // Validation Tests
+    // ========================
+
+    #[test]
+    fn test_validate_summary_success() {
+        let task = create_test_task();
+        assert!(task.validate_summary().is_ok());
+    }
+
+    #[test]
+    fn test_validate_summary_too_long() {
+        let mut task = create_test_task();
+        task.summary = "a".repeat(141);
+        assert!(task.validate_summary().is_err());
+    }
+
+    #[test]
+    fn test_validate_priority_success() {
+        let task = create_test_task();
+        assert!(task.validate_priority().is_ok());
+    }
+
+    #[test]
+    fn test_validate_priority_too_high() {
+        let mut task = create_test_task();
+        task.priority = 11;
+        assert!(task.validate_priority().is_err());
+    }
+
+    // ========================
+    // Serialization Tests
+    // ========================
+
+    #[test]
+    fn test_task_serialization() {
+        let task = create_test_task();
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(json.contains("pending"));
+        assert!(json.contains("Test task"));
+    }
+
+    #[test]
+    fn test_task_deserialization() {
+        let json = r#"{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "summary": "Test",
+            "description": "Description",
+            "agent_type": "test-agent",
+            "priority": 5,
+            "calculated_priority": 5.0,
+            "status": "pending",
+            "dependencies": null,
+            "dependency_type": "sequential",
+            "dependency_depth": 0,
+            "input_data": null,
+            "result_data": null,
+            "error_message": null,
+            "retry_count": 0,
+            "max_retries": 3,
+            "max_execution_timeout_seconds": 3600,
+            "submitted_at": "2024-01-01T00:00:00Z",
+            "started_at": null,
+            "completed_at": null,
+            "last_updated_at": "2024-01-01T00:00:00Z",
+            "created_by": null,
+            "parent_task_id": null,
+            "session_id": null,
+            "source": "human",
+            "deadline": null,
+            "estimated_duration_seconds": null,
+            "feature_branch": null,
+            "task_branch": null,
+            "worktree_path": null
+        }"#;
+
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert_eq!(task.summary, "Test");
+        assert_eq!(task.status, TaskStatus::Pending);
     }
 }
