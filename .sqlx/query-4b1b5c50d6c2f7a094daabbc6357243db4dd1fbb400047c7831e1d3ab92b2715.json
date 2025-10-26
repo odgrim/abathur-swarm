@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO tasks (\n                id, summary, description, agent_type, priority, calculated_priority,\n                status, dependencies, dependency_type, dependency_depth,\n                input_data, result_data, error_message, retry_count, max_retries,\n                max_execution_timeout_seconds, submitted_at, started_at, completed_at,\n                last_updated_at, created_by, parent_task_id, session_id, source,\n                deadline, estimated_duration_seconds, feature_branch, task_branch,\n                worktree_path\n            )\n            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 29
+    },
+    "nullable": []
+  },
+  "hash": "4b1b5c50d6c2f7a094daabbc6357243db4dd1fbb400047c7831e1d3ab92b2715"
+}
