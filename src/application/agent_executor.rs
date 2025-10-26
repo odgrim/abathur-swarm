@@ -104,6 +104,11 @@ pub enum ExecutionError {
 /// - Comprehensive error handling
 pub struct AgentExecutor {
     claude_client: Arc<dyn ClaudeClient>,
+    /// MCP client for tool invocations
+    ///
+    /// Reserved for future MCP tool integration. Currently, the execute_inner
+    /// method has a TODO (line 290) to implement MCP tool call parsing and execution.
+    #[allow(dead_code)]
     mcp_client: Arc<dyn McpClient>,
 }
 
@@ -170,7 +175,7 @@ impl AgentExecutor {
     ) -> Result<String, ExecutionError> {
         let task_id = ctx.task_id;
 
-        match timeout(timeout_duration, self.execute_inner(ctx)).await {
+        match timeout(timeout_duration, self.execute_with_retry(ctx)).await {
             Ok(result) => result,
             Err(_) => Err(ExecutionError::Timeout {
                 task_id,
@@ -339,7 +344,10 @@ impl AgentExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::ports::{ClaudeClient, McpClient};
+    use crate::domain::ports::{
+        ClaudeClient, ClaudeError, ClaudeRequest, ClaudeResponse,
+        McpClient, McpError, McpToolRequest, McpToolResponse,
+    };
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicU32, Ordering};
 
