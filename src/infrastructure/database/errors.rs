@@ -25,4 +25,7 @@ pub enum DatabaseError {
 
     #[error("Invalid state update: {0}")]
     InvalidStateUpdate(String),
+
+    #[error("Validation error: {0}")]
+    ValidationError(String),
 }
