@@ -11,6 +11,6 @@ pub use config::{
     RetryConfig,
 };
 pub use memory::{Memory, MemoryType};
-pub use queue::{Queue, QueueError};
+pub use queue::{QueueItem, TaskQueue};
 pub use session::{Session, SessionEvent};
 pub use task::{DependencyType, Task, TaskSource, TaskStatus};
