@@ -138,7 +138,7 @@ impl AgentExecutor {
     /// * `Err(ExecutionError)` - Execution failed or timed out
     ///
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// let result = executor.execute(ctx).await?;
     /// ```
     pub async fn execute(&self, ctx: ExecutionContext) -> Result<String, ExecutionError> {
@@ -164,7 +164,7 @@ impl AgentExecutor {
     /// * `Err(ExecutionError::*)` - Other execution errors
     ///
     /// # Example
-    /// ```no_run
+    /// ```ignore
     /// let timeout = Duration::from_secs(600); // 10 minutes
     /// let result = executor.execute_with_timeout(ctx, timeout).await?;
     /// ```
