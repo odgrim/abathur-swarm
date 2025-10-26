@@ -6,9 +6,10 @@ pub mod services;
 // Re-export commonly used types for convenience
 pub use application::{ConvergenceStrategy, LoopExecutor, LoopState, TaskCoordinator, TaskStatusUpdate};
 pub use domain::models::{
-    Config, DatabaseConfig, LoggingConfig, McpServerConfig, Memory, MemoryType,
+    Agent, AgentStatus, Config, DatabaseConfig, LoggingConfig, McpServerConfig, Memory, MemoryType,
     RateLimitConfig, ResourceLimitsConfig, RetryConfig,
 };
-pub use domain::ports::{MemoryRepository, PriorityCalculator, TaskQueueService};
+pub use domain::ports::{AgentRepository, MemoryRepository, PriorityCalculator, TaskQueueService};
 pub use infrastructure::config::{ConfigError, ConfigLoader};
+pub use infrastructure::database::{AgentRepositoryImpl, DatabaseConnection, DatabaseError};
 pub use services::{DependencyResolver, MemoryService};

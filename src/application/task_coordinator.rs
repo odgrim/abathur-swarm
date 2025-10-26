@@ -51,6 +51,7 @@ pub struct TaskStatusUpdate {
 /// ```
 pub struct TaskCoordinator {
     task_queue: Arc<dyn TaskQueueService>,
+    #[allow(dead_code)] // Reserved for future complex dependency resolution
     dependency_resolver: Arc<DependencyResolver>,
     priority_calc: Arc<dyn PriorityCalculator>,
     status_tx: mpsc::Sender<TaskStatusUpdate>,
