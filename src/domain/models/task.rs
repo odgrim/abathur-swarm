@@ -4,10 +4,15 @@ use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
 
+<<<<<<< HEAD
 use crate::domain::error::TaskError;
 
 /// Task lifecycle states
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+=======
+/// Task lifecycle states
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
     Pending, // Submitted, dependencies not yet checked
@@ -22,6 +27,7 @@ pub enum TaskStatus {
 impl fmt::Display for TaskStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+<<<<<<< HEAD
             Self::Pending => write!(f, "pending"),
             Self::Blocked => write!(f, "blocked"),
             Self::Ready => write!(f, "ready"),
@@ -29,6 +35,15 @@ impl fmt::Display for TaskStatus {
             Self::Completed => write!(f, "completed"),
             Self::Failed => write!(f, "failed"),
             Self::Cancelled => write!(f, "cancelled"),
+=======
+            TaskStatus::Pending => write!(f, "pending"),
+            TaskStatus::Blocked => write!(f, "blocked"),
+            TaskStatus::Ready => write!(f, "ready"),
+            TaskStatus::Running => write!(f, "running"),
+            TaskStatus::Completed => write!(f, "completed"),
+            TaskStatus::Failed => write!(f, "failed"),
+            TaskStatus::Cancelled => write!(f, "cancelled"),
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
         }
     }
 }
@@ -38,6 +53,7 @@ impl FromStr for TaskStatus {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+<<<<<<< HEAD
             "pending" => Ok(Self::Pending),
             "blocked" => Ok(Self::Blocked),
             "ready" => Ok(Self::Ready),
@@ -46,6 +62,16 @@ impl FromStr for TaskStatus {
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
             _ => Err(anyhow::anyhow!("Invalid task status: {s}")),
+=======
+            "pending" => Ok(TaskStatus::Pending),
+            "blocked" => Ok(TaskStatus::Blocked),
+            "ready" => Ok(TaskStatus::Ready),
+            "running" => Ok(TaskStatus::Running),
+            "completed" => Ok(TaskStatus::Completed),
+            "failed" => Ok(TaskStatus::Failed),
+            "cancelled" => Ok(TaskStatus::Cancelled),
+            _ => Err(anyhow::anyhow!("Invalid task status: {}", s)),
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
         }
     }
 }
@@ -63,10 +89,17 @@ pub enum TaskSource {
 impl fmt::Display for TaskSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+<<<<<<< HEAD
             Self::Human => write!(f, "human"),
             Self::AgentRequirements => write!(f, "agent_requirements"),
             Self::AgentPlanner => write!(f, "agent_planner"),
             Self::AgentImplementation => write!(f, "agent_implementation"),
+=======
+            TaskSource::Human => write!(f, "human"),
+            TaskSource::AgentRequirements => write!(f, "agent_requirements"),
+            TaskSource::AgentPlanner => write!(f, "agent_planner"),
+            TaskSource::AgentImplementation => write!(f, "agent_implementation"),
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
         }
     }
 }
@@ -76,11 +109,19 @@ impl FromStr for TaskSource {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+<<<<<<< HEAD
             "human" => Ok(Self::Human),
             "agent_requirements" => Ok(Self::AgentRequirements),
             "agent_planner" => Ok(Self::AgentPlanner),
             "agent_implementation" => Ok(Self::AgentImplementation),
             _ => Err(anyhow::anyhow!("Invalid task source: {s}")),
+=======
+            "human" => Ok(TaskSource::Human),
+            "agent_requirements" => Ok(TaskSource::AgentRequirements),
+            "agent_planner" => Ok(TaskSource::AgentPlanner),
+            "agent_implementation" => Ok(TaskSource::AgentImplementation),
+            _ => Err(anyhow::anyhow!("Invalid task source: {}", s)),
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
         }
     }
 }
@@ -96,8 +137,13 @@ pub enum DependencyType {
 impl fmt::Display for DependencyType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+<<<<<<< HEAD
             Self::Sequential => write!(f, "sequential"),
             Self::Parallel => write!(f, "parallel"),
+=======
+            DependencyType::Sequential => write!(f, "sequential"),
+            DependencyType::Parallel => write!(f, "parallel"),
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
         }
     }
 }
@@ -107,9 +153,15 @@ impl FromStr for DependencyType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+<<<<<<< HEAD
             "sequential" => Ok(Self::Sequential),
             "parallel" => Ok(Self::Parallel),
             _ => Err(anyhow::anyhow!("Invalid dependency type: {s}")),
+=======
+            "sequential" => Ok(DependencyType::Sequential),
+            "parallel" => Ok(DependencyType::Parallel),
+            _ => Err(anyhow::anyhow!("Invalid dependency type: {}", s)),
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
         }
     }
 }
@@ -200,9 +252,12 @@ impl Task {
         }
         Ok(())
     }
+<<<<<<< HEAD
 
-    // =================    // State Transition Methods
-    // =================
+    // ========================
+    // State Transition Methods
+    // ========================
+
     /// Mark task as ready if all dependencies are met
     pub fn mark_ready(&mut self) -> Result<(), TaskError> {
         if self.status != TaskStatus::Pending && self.status != TaskStatus::Blocked {
@@ -318,8 +373,10 @@ impl Task {
         Ok(())
     }
 
-    // =================    // Query Methods
-    // =================
+    // ========================
+    // Query Methods
+    // ========================
+
     /// Check if task is in a terminal state (cannot transition further)
     pub const fn is_terminal(&self) -> bool {
         matches!(
@@ -363,8 +420,10 @@ impl Task {
         self.status == TaskStatus::Cancelled
     }
 
-    // =================    // Business Logic Methods
-    // =================
+    // ========================
+    // Business Logic Methods
+    // ========================
+
     /// Calculate effective priority including dependency depth boost
     pub fn calculate_priority(&self) -> f64 {
         // Base priority (0-10) + depth boost (0.5 per level)
@@ -464,14 +523,18 @@ impl Task {
 mod tests {
     use super::*;
 
-    // =================    // Helper Functions
-    // =================
+    // ========================
+    // Helper Functions
+    // ========================
+
     fn create_test_task() -> Task {
         Task::new("Test task".to_string(), "Test description".to_string())
     }
 
-    // =================    // Enum Tests
-    // =================
+    // ========================
+    // Enum Tests
+    // ========================
+
     #[test]
     fn test_task_status_display() {
         assert_eq!(TaskStatus::Pending.to_string(), "pending");
@@ -513,8 +576,10 @@ mod tests {
         assert_eq!(DependencyType::Parallel.to_string(), "parallel");
     }
 
-    // =================    // Constructor Tests
-    // =================
+    // ========================
+    // Constructor Tests
+    // ========================
+
     #[test]
     fn test_task_new_creates_valid_task() {
         let task = create_test_task();
@@ -534,8 +599,10 @@ mod tests {
         assert!(task.submitted_at <= Utc::now());
     }
 
-    // =================    // State Transition Tests
-    // =================
+    // ========================
+    // State Transition Tests
+    // ========================
+
     #[test]
     fn test_mark_ready_from_pending() {
         let mut task = create_test_task();
@@ -689,8 +756,10 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // =================    // Query Method Tests
-    // =================
+    // ========================
+    // Query Method Tests
+    // ========================
+
     #[test]
     fn test_is_terminal() {
         let mut task = create_test_task();
@@ -775,8 +844,10 @@ mod tests {
         assert!(task.is_cancelled());
     }
 
-    // =================    // Business Logic Tests
-    // =================
+    // ========================
+    // Business Logic Tests
+    // ========================
+
     #[test]
     fn test_calculate_priority_base() {
         let task = create_test_task();
@@ -944,8 +1015,10 @@ mod tests {
         assert!((task.calculated_priority - 6.5).abs() < f64::EPSILON); // 5 + (3 * 0.5)
     }
 
-    // =================    // Validation Tests
-    // =================
+    // ========================
+    // Validation Tests
+    // ========================
+
     #[test]
     fn test_validate_summary_success() {
         let task = create_test_task();
@@ -972,8 +1045,10 @@ mod tests {
         assert!(task.validate_priority().is_err());
     }
 
-    // =================    // Serialization Tests
-    // =================
+    // ========================
+    // Serialization Tests
+    // ========================
+
     #[test]
     fn test_task_serialization() {
         let task = create_test_task();
@@ -1020,4 +1095,6 @@ mod tests {
         assert_eq!(task.summary, "Test");
         assert_eq!(task.status, TaskStatus::Pending);
     }
+=======
+>>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
 }
