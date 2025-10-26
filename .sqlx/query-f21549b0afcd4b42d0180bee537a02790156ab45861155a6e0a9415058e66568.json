@@ -31,7 +31,11 @@
       {
         "name": "memory_usage_bytes",
         "ordinal": 5,
+<<<<<<< HEAD
         "type_info": "Integer"
+=======
+        "type_info": "Int64"
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
       },
       {
         "name": "cpu_usage_percent",

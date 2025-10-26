@@ -1,4 +1,5 @@
 <<<<<<< HEAD
+<<<<<<< HEAD
 //! Domain layer module
 //!
 //! This module contains the core business logic and domain models:
@@ -17,3 +18,7 @@ pub use error::{DomainError, TaskError};
 pub mod models;
 pub mod ports;
 >>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
+=======
+pub mod models;
+pub mod ports;
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03

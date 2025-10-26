@@ -1,9 +1,14 @@
+<<<<<<< HEAD
 //! Abathur CLI entry point
 
+=======
+use abathur::DatabaseConnection;
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
 use anyhow::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+<<<<<<< HEAD
     // TODO: Initialize tracing/logging
     // TODO: Load configuration
     // TODO: Parse CLI arguments
@@ -11,6 +16,21 @@ async fn main() -> Result<()> {
 
     println!("Abathur - Agentic Swarm Orchestrator");
     println!("TODO: Implement CLI");
+=======
+    // Initialize tracing
+    tracing_subscriber::fmt::init();
+
+    // Create database connection
+    let db = DatabaseConnection::new("sqlite:.abathur/abathur.db").await?;
+
+    // Run migrations
+    db.migrate().await?;
+
+    println!("Abathur database initialized successfully!");
+
+    // Close connection
+    db.close().await;
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
 
     Ok(())
 }

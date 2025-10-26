@@ -1,14 +1,19 @@
 <<<<<<< HEAD
+<<<<<<< HEAD
 use anyhow::{Context, Result};
 =======
 use crate::domain::ports::errors::DatabaseError;
 >>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
+=======
+use anyhow::{Context, Result};
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
 };
 use std::str::FromStr;
 use std::time::Duration;
 
+<<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
 /// Database connection pool manager
@@ -21,6 +26,12 @@ use std::time::Duration;
 =======
 /// Database connection manager with connection pooling
 >>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
+=======
+/// Database connection pool manager
+///
+/// Manages SQLite connection pool with WAL mode enabled for better concurrency.
+/// Handles connection lifecycle, migrations, and configuration.
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
 pub struct DatabaseConnection {
     pool: SqlitePool,
 }
@@ -28,10 +39,16 @@ pub struct DatabaseConnection {
 impl DatabaseConnection {
     /// Create a new database connection pool with WAL mode enabled
 <<<<<<< HEAD
+<<<<<<< HEAD
     ///
     /// # Arguments
 <<<<<<< HEAD
     /// * `database_url` - `SQLite` database URL (e.g., "sqlite:.abathur/abathur.db")
+=======
+    ///
+    /// # Arguments
+    /// * `database_url` - SQLite database URL (e.g., "sqlite:.abathur/abathur.db")
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
     ///
     /// # Configuration
     /// - Journal mode: WAL (Write-Ahead Logging)
@@ -49,6 +66,7 @@ impl DatabaseConnection {
     /// * `Err` if database URL is invalid or connection fails
     pub async fn new(database_url: &str) -> Result<Self> {
         // Configure connection options
+<<<<<<< HEAD
 =======
     /// * `database_url` - SQLite database URL (e.g., "sqlite:abathur.db" or "sqlite::memory:")
     ///
@@ -74,6 +92,10 @@ impl DatabaseConnection {
                 DatabaseError::ConnectionPoolError(format!("Invalid database URL: {}", e))
             })?
 >>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
+=======
+        let options = SqliteConnectOptions::from_str(database_url)
+            .context("invalid database URL")?
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
@@ -82,14 +104,19 @@ impl DatabaseConnection {
 
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
         // Create connection pool with configured limits
 =======
         // Create connection pool
 >>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
+=======
+        // Create connection pool with configured limits
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
         let pool = SqlitePoolOptions::new()
             .min_connections(5)
             .max_connections(10)
             .idle_timeout(Duration::from_secs(30))
+<<<<<<< HEAD
 <<<<<<< HEAD
             .max_lifetime(Duration::from_secs(1800)) // 30 minutes
 =======
@@ -100,10 +127,14 @@ impl DatabaseConnection {
             .idle_timeout(Some(Duration::from_secs(30)))
             .max_lifetime(Some(Duration::from_secs(1800))) // 30 minutes
 >>>>>>> task_phase3-database-connection_2025-10-25-23-00-01
+=======
+            .max_lifetime(Duration::from_secs(1800)) // 30 minutes
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
             .acquire_timeout(Duration::from_secs(10))
             .connect_with(options)
             .await
             .context("failed to create connection pool")?;
+<<<<<<< HEAD
 =======
             .max_lifetime(Duration::from_secs(1800))
             .acquire_timeout(Duration::from_secs(10))
@@ -116,14 +147,21 @@ impl DatabaseConnection {
                 ))
             })?;
 >>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
+=======
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
 
         Ok(Self { pool })
     }
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     /// Run database migrations at startup
     ///
 <<<<<<< HEAD
+=======
+    /// Run database migrations at startup
+    ///
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
     /// Applies all pending migrations from the migrations/ directory.
     /// Safe to call multiple times - only applies new migrations.
     ///
@@ -131,15 +169,19 @@ impl DatabaseConnection {
     /// * `Ok(())` on success
     /// * `Err` if migrations fail
     pub async fn migrate(&self) -> Result<()> {
+<<<<<<< HEAD
 =======
     /// This method runs all pending migrations from the migrations/ directory.
     /// Migrations are applied in order based on their timestamp prefix.
     pub async fn run_migrations(&self) -> Result<()> {
 >>>>>>> task_phase3-database-connection_2025-10-25-23-00-01
+=======
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
         sqlx::migrate!("./migrations")
             .run(&self.pool)
             .await
             .context("failed to run migrations")?;
+<<<<<<< HEAD
 =======
     /// Run migrations at startup
     pub async fn migrate(&self) -> Result<(), DatabaseError> {
@@ -148,10 +190,13 @@ impl DatabaseConnection {
             .await
             .map_err(|e| DatabaseError::MigrationError(format!("Migration failed: {}", e)))?;
 >>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
+=======
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
         Ok(())
     }
 
     /// Get a reference to the connection pool
+<<<<<<< HEAD
 <<<<<<< HEAD
     ///
 <<<<<<< HEAD
@@ -165,10 +210,16 @@ impl DatabaseConnection {
 =======
     pub fn pool(&self) -> &SqlitePool {
 >>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
+=======
+    ///
+    /// Use this to pass the pool to repository implementations.
+    pub fn pool(&self) -> &SqlitePool {
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
         &self.pool
     }
 
     /// Close the connection pool gracefully
+<<<<<<< HEAD
 <<<<<<< HEAD
     ///
 <<<<<<< HEAD
@@ -180,6 +231,11 @@ impl DatabaseConnection {
 >>>>>>> task_phase3-database-connection_2025-10-25-23-00-01
 =======
 >>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
+=======
+    ///
+    /// Closes all connections and waits for them to finish.
+    /// Should be called during application shutdown.
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
     pub async fn close(&self) {
         self.pool.close().await;
     }
@@ -192,6 +248,9 @@ mod tests {
     #[tokio::test]
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
     async fn test_connection_pool_creation() {
         // Use in-memory database for testing
         let db = DatabaseConnection::new("sqlite::memory:")
@@ -201,6 +260,7 @@ mod tests {
         // Verify pool is accessible
         assert!(!db.pool().is_closed());
 
+<<<<<<< HEAD
 =======
     async fn test_connection_creation() {
         let db = DatabaseConnection::new("sqlite::memory:")
@@ -209,11 +269,16 @@ mod tests {
 
         assert!(!db.pool().is_closed());
 >>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
+=======
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
         db.close().await;
     }
 
     #[tokio::test]
 <<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
     async fn test_migration_runs_successfully() {
         let db = DatabaseConnection::new("sqlite::memory:")
             .await
@@ -233,6 +298,7 @@ mod tests {
         assert_eq!(result.0, 1, "agents table should exist");
 
         db.close().await;
+<<<<<<< HEAD
 =======
     async fn test_create_connection() {
         let conn = DatabaseConnection::new("sqlite::memory:")
@@ -358,5 +424,7 @@ mod tests {
         db.migrate().await.expect("Failed to run migrations");
         db.close().await;
 >>>>>>> task_phase3-task-repository_2025-10-25-23-00-02
+=======
+>>>>>>> task_phase3-agent-repository_2025-10-25-23-00-03
     }
 }
