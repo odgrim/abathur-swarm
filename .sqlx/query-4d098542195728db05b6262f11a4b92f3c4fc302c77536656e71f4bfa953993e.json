@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT id, agent_type, status, current_task_id, heartbeat_at,\n                   memory_usage_bytes, cpu_usage_percent, created_at, terminated_at\n            FROM agents\n            WHERE heartbeat_at < ?\n            AND status != 'terminated'\n            ORDER BY heartbeat_at ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "agent_type",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "current_task_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "heartbeat_at",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "memory_usage_bytes",
+        "ordinal": 5,
+        "type_info": "Int64"
+      },
+      {
+        "name": "cpu_usage_percent",
+        "ordinal": 6,
+        "type_info": "Float"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "terminated_at",
+        "ordinal": 8,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "4d098542195728db05b6262f11a4b92f3c4fc302c77536656e71f4bfa953993e"
+}

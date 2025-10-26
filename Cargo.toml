@@ -1,0 +1,48 @@
+[package]
+name = "abathur"
+version = "0.1.0"
+edition = "2021"
+authors = ["Abathur Contributors"]
+description = "Async task orchestration and memory management system"
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "macros", "chrono", "uuid"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# UUID generation
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Date/Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Async trait
+async-trait = "0.1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# Testing
+proptest = "1.4"
+tokio-test = "0.4"
+
+[[bin]]
+name = "abathur"
+path = "src/main.rs"
+
+[lib]
+name = "abathur"
+path = "src/lib.rs"
