@@ -19,7 +19,9 @@ pub mod session_repository;
 pub mod task_queue_service;
 
 pub use agent_repository::AgentRepository;
-pub use claude_client::{ClaudeClient, ClaudeError, ClaudeRequest, ClaudeResponse, TokenUsage};
+pub use claude_client::{
+    ClaudeClient, ContentBlock, Message, MessageChunk, MessageRequest, MessageResponse, Usage,
+};
 pub use logger::{Level, Logger};
 pub use mcp_client::{McpClient, Resource, Tool};
 pub use memory_repository::MemoryRepository;
