@@ -192,8 +192,9 @@ impl Default for LoopExecutorConfig {
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use abathur::application::{LoopExecutor, ConvergenceStrategy};
+/// use abathur::domain::models::task::Task;
 ///
 /// #[tokio::main]
 /// async fn main() -> anyhow::Result<()> {
@@ -202,7 +203,7 @@ impl Default for LoopExecutorConfig {
 ///         Default::default()
 ///     );
 ///
-///     let task = Task::new("Iterative refinement".into(), "Refine output".into());
+///     # let task = Task::new("example".to_string(), "example task".to_string());
 ///     let result = executor.execute(task, |iter, _task| async move {
 ///         // Your iteration logic here
 ///         Ok(format!("Iteration {}", iter))

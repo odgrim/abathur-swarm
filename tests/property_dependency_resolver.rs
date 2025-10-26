@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 /// Strategy to generate a valid task with given ID and dependencies
+#[allow(dead_code)]
 fn task_strategy(id: Uuid, dependencies: Option<Vec<Uuid>>) -> impl Strategy<Value = Task> {
     Just(Task {
         id,
@@ -41,6 +42,7 @@ fn task_strategy(id: Uuid, dependencies: Option<Vec<Uuid>>) -> impl Strategy<Val
 }
 
 /// Generate a DAG (Directed Acyclic Graph) of tasks
+#[allow(dead_code)]
 fn acyclic_task_graph_strategy(size: usize) -> impl Strategy<Value = Vec<Task>> {
     // Generate task IDs
     let task_ids: Vec<Uuid> = (0..size).map(|_| Uuid::new_v4()).collect();
@@ -135,7 +137,7 @@ proptest! {
             });
         }
 
-        let result = resolver.topological_sort(&tasks)?;
+        let result = resolver.topological_sort(&tasks).unwrap();
 
         // Verify: All dependencies come before dependents
         let position_map: HashMap<Uuid, usize> = result
@@ -155,8 +157,6 @@ proptest! {
                 }
             }
         }
-
-        Ok(())
     }
 
     /// Property: Resolved tasks contain all input tasks
@@ -206,7 +206,7 @@ proptest! {
             });
         }
 
-        let result = resolver.topological_sort(&tasks)?;
+        let result = resolver.topological_sort(&tasks).unwrap();
 
         // Verify: Same number of tasks
         prop_assert_eq!(result.len(), tasks.len());
@@ -215,8 +215,6 @@ proptest! {
         let input_ids: HashSet<Uuid> = tasks.iter().map(|t| t.id).collect();
         let output_ids: HashSet<Uuid> = result.iter().map(|t| t.id).collect();
         prop_assert_eq!(input_ids, output_ids);
-
-        Ok(())
     }
 
     /// Property: Cycle detection is consistent
@@ -281,8 +279,6 @@ proptest! {
         } else {
             prop_assert!(resolve_result.is_ok(), "Resolve should succeed when no cycle");
         }
-
-        Ok(())
     }
 
     /// Property: Independent tasks can be in any order
@@ -333,7 +329,7 @@ proptest! {
             });
         }
 
-        let result = resolver.topological_sort(&tasks)?;
+        let result = resolver.topological_sort(&tasks).unwrap();
 
         // All tasks should be present
         prop_assert_eq!(result.len(), size);
@@ -342,7 +338,5 @@ proptest! {
         let input_ids: HashSet<Uuid> = task_ids.into_iter().collect();
         let output_ids: HashSet<Uuid> = result.iter().map(|t| t.id).collect();
         prop_assert_eq!(input_ids, output_ids);
-
-        Ok(())
     }
 }
