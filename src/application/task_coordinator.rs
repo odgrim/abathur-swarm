@@ -171,7 +171,7 @@ impl TaskCoordinator {
                 .send(TaskStatusUpdate {
                     task_id,
                     old_status: task.status.clone(),
-                    new_status,
+                    new_status: new_status.clone(),
                 })
                 .await;
 
