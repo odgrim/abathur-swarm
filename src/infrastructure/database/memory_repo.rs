@@ -35,8 +35,7 @@ impl MemoryRepository for MemoryRepositoryImpl {
         let metadata_json = memory
             .metadata
             .as_ref()
-            .map(|m| serde_json::to_string(m).ok())
-            .flatten();
+            .and_then(|m| serde_json::to_string(m).ok());
         let created_at_str = memory.created_at.to_rfc3339();
         let updated_at_str = memory.updated_at.to_rfc3339();
         let version_i64 = memory.version as i64;
