@@ -2,9 +2,9 @@
 
 A CLI orchestration system for managing swarms of specialized Claude agents with task queues, concurrent execution, and iterative refinement.
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Rust 1.83+](https://img.shields.io/badge/rust-1.83+-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![CI](https://img.shields.io/github/workflow/status/yourorg/abathur/CI)](https://github.com/yourorg/abathur/actions)
 
 ---
 
@@ -48,34 +48,47 @@ A CLI orchestration system for managing swarms of specialized Claude agents with
 
 ## Requirements
 
-- **Python**: 3.10 or higher
-- **Git**: For template cloning
-- **Anthropic API Key**: For Claude access
+- **Rust**: 1.83 or higher (install via [rustup](https://rustup.rs/))
+- **SQLite**: For database operations (usually pre-installed)
+- **Git**: For version control
+- **Anthropic API Key**: For Claude access (optional for core development)
 
 ---
 
 ## Installation
 
-### Using pip
+### From Source (Recommended)
 
 ```bash
-pip install abathur
+# Clone the repository
+git clone https://github.com/yourorg/abathur.git
+cd abathur
+
+# Build the project
+cargo build --release
+
+# Install locally
+cargo install --path .
 ```
 
-### Using pipx (Recommended for CLI tools)
-
-[pipx](https://pipx.pypa.io/) installs the CLI in an isolated environment, preventing dependency conflicts:
+### Using Cargo
 
 ```bash
-pipx install abathur
+cargo install abathur
 ```
 
 ### For Development
 
 ```bash
+# Clone repository
 git clone https://github.com/yourorg/abathur.git
 cd abathur
-poetry install
+
+# Build with development dependencies
+cargo build
+
+# Run tests
+cargo test
 ```
 
 ---
@@ -316,85 +329,152 @@ Create `.mcp.json` in your project root:
 git clone https://github.com/yourorg/abathur.git
 cd abathur
 
-# Install with development dependencies
-poetry install
+# Install Rust toolchain (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Install pre-commit hooks
-pre-commit install
+# Install development tools
+rustup component add rustfmt clippy
+
+# Build the project
+cargo build
+```
+
+### Building
+
+```bash
+# Debug build (fast compilation, slower runtime)
+cargo build
+
+# Release build (optimized, slower compilation)
+cargo build --release
+
+# Run without installing
+cargo run -- <command>
+
+# Example: List tasks
+cargo run -- task list
 ```
 
 ### Testing
 
 ```bash
 # Run all tests
-pytest
+cargo test
 
-# Run with coverage
-pytest --cov=abathur --cov-report=html
+# Run tests with output
+cargo test -- --nocapture
 
-# Run specific test file
-pytest tests/integration/test_database.py
+# Run specific test
+cargo test test_task_creation
 
-# Run with verbose output
-pytest -v
+# Run tests for specific module
+cargo test domain::models
+
+# Run with coverage (requires cargo-tarpaulin)
+cargo install cargo-tarpaulin
+cargo tarpaulin --all-features --workspace --timeout 120 --out Html
 ```
 
 ### Linting & Formatting
 
 ```bash
-# Type checking
-mypy src/abathur
+# Format code
+cargo fmt
 
-# Linting
-ruff check src/ tests/
+# Check formatting without making changes
+cargo fmt --check
 
-# Formatting
-black src/ tests/
+# Run clippy (linter)
+cargo clippy --all-targets --all-features
 
-# Run all pre-commit hooks
-pre-commit run --all-files
+# Clippy with warnings as errors
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Check all (format, clippy, test)
+cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test
 ```
 
 ### Running Locally
 
 ```bash
-# Install in editable mode
-poetry install
+# Run in debug mode
+cargo run -- --help
 
-# Use the CLI
-abathur --help
+# Run with logging
+RUST_LOG=debug cargo run -- task list
+
+# Run with trace logging for specific module
+RUST_LOG=abathur::domain::task=trace cargo run -- task show <id>
+```
+
+### Benchmarking
+
+```bash
+# Run all benchmarks
+cargo bench
+
+# Run specific benchmark
+cargo bench task_queue
+
+# Generate benchmark report
+cargo bench -- --save-baseline main
 ```
 
 ---
 
 ## Documentation
 
+- **[Contributing Guide](CONTRIBUTING.md)**: Development setup and guidelines
+- **[Architecture](docs/ARCHITECTURE.md)**: System architecture and design patterns
+- **[API Documentation](https://docs.rs/abathur)**: Rust API documentation (cargo doc)
 - **[User Guide](docs/USER_GUIDE.md)**: Comprehensive usage guide
-- **[API Reference](docs/API_REFERENCE.md)**: Python API documentation
-- **[Architecture](design_docs/prd_deliverables/03_ARCHITECTURE.md)**: System architecture
-- **[System Design](design_docs/prd_deliverables/04_SYSTEM_DESIGN.md)**: Algorithms and protocols
-- **[Implementation Roadmap](design_docs/prd_deliverables/08_IMPLEMENTATION_ROADMAP.md)**: Development phases
+
+### Generating Documentation
+
+```bash
+# Generate and open API documentation
+cargo doc --open
+
+# Generate documentation for all dependencies
+cargo doc --document-private-items --open
+```
 
 ---
 
 ## Project Status
 
-This is a working system with the following components implemented:
+**Rust Rewrite in Progress** - This project is being rewritten from Python to Rust for improved performance, type safety, and concurrency.
 
+### Implemented Components
+
+**Phase 1: Foundation** ✅
+- Cargo project structure with Clean Architecture
+- Domain models (Task, Agent, ExecutionResult)
+- Error types with thiserror
+- SQLite database layer with sqlx
+- Configuration management with figment
+
+**Phase 2: In Progress** 🚧
+- Service layer implementations
+- Repository pattern with async traits
+- Port definitions for hexagonal architecture
+
+**Phase 3: Planned** 📋
+- CLI layer with clap
+- Application orchestration services
+- Swarm coordination
+- MCP integration
+
+### Python Legacy Components (Maintained)
+
+The Python implementation remains functional with all features:
 - SQLite database with WAL mode
 - Configuration system with hierarchy
 - Structured logging with audit trails
-- Domain models with Pydantic validation
-- Template Manager (Git-based cloning, caching, validation)
 - Task Coordinator (priority queue, retry logic)
-- Claude Client (async API, retry with backoff)
-- Agent Executor (YAML-based agents, lifecycle management)
 - Swarm Orchestrator
-- Agent Pool (dynamic lifecycle, health monitoring)
-- Resource Monitor (CPU/memory tracking, limits)
-- Loop Executor (iterative refinement, convergence detection, checkpointing)
-- MCP Manager (server lifecycle, health monitoring, auto-restart)
-- CLI with rich output and tree visualization
+- MCP Manager
+- CLI with rich output
 
 ---
 
@@ -409,13 +489,25 @@ This is a working system with the following components implemented:
 
 ## Contributing
 
-Contributions are welcome! Please:
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+
+**Quick Start**:
 
 1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all tests pass
-5. Submit a pull request
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Make your changes following the style guide
+4. Add tests for new functionality
+5. Ensure all checks pass:
+   ```bash
+   cargo fmt --check
+   cargo clippy --all-targets --all-features -- -D warnings
+   cargo test --all-features
+   ```
+6. Commit your changes (`git commit -m 'Add amazing feature'`)
+7. Push to your branch (`git push origin feature/amazing-feature`)
+8. Open a Pull Request
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for complete development workflow, code style guidelines, and testing requirements.
 
 ---
 
