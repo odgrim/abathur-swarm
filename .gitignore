@@ -19,4 +19,4 @@ target/
 **/*.rs.bk
 *.pdb
 Cargo.lock
-.sqlx
+.sqlx/
