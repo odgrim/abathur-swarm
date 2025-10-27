@@ -10,13 +10,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-/// Persisted swarm state
+/// Persisted swarm state - only tracks process information
+/// Task statistics are derived from the database, not stored here
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SwarmStateFile {
     state: String,
     max_agents: usize,
-    tasks_processed: u64,
-    tasks_failed: u64,
     pid: Option<u32>,
 }
 
@@ -25,8 +24,6 @@ impl Default for SwarmStateFile {
         Self {
             state: "Stopped".to_string(),
             max_agents: 0,
-            tasks_processed: 0,
-            tasks_failed: 0,
             pid: None,
         }
     }
@@ -129,32 +126,50 @@ impl SwarmService {
         let cwd = std::env::current_dir()
             .context("Failed to get current directory")?;
 
-        // Spawn background process with hidden --__daemon flag
+        // Create log file for daemon stderr/stdout
+        let log_path = cwd.join(".abathur/swarm_daemon.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .context("Failed to create daemon log file")?;
+
+        // Write log header
+        use std::io::Write;
+        let mut header_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)?;
+        writeln!(header_file, "\n=== Daemon starting at {} ===",
+                 chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))?;
+
+        // Spawn background process with hidden --daemon flag
         // This flag will be handled in main.rs to run the orchestrator loop
         #[cfg(unix)]
         let child = Command::new(&exe_path)
             .arg("swarm")
-            .arg("--__daemon")
+            .arg("start")
+            .arg("--daemon")
             .arg("--max-agents")
             .arg(max_agents.to_string())
             .current_dir(&cwd)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(log_file.try_clone()?))
+            .stderr(Stdio::from(log_file))
             .spawn()
             .context("Failed to spawn background swarm process")?;
 
         #[cfg(windows)]
         let child = Command::new(&exe_path)
             .arg("swarm")
-            .arg("--__daemon")
+            .arg("start")
+            .arg("--daemon")
             .arg("--max-agents")
             .arg(max_agents.to_string())
             .current_dir(&cwd)
             .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(log_file.try_clone()?))
+            .stderr(Stdio::from(log_file))
             .spawn()
             .context("Failed to spawn background swarm process")?;
 
@@ -219,7 +234,12 @@ impl SwarmService {
     }
 
     /// Get swarm statistics
-    pub async fn get_stats(&self) -> Result<SwarmStats> {
+    ///
+    /// Combines process state from state file with task statistics from database
+    pub async fn get_stats(
+        &self,
+        task_service: &crate::cli::service::TaskQueueServiceAdapter,
+    ) -> Result<SwarmStats> {
         let mut state = Self::read_state()?;
 
         // Check if the recorded PID is actually alive
@@ -252,13 +272,24 @@ impl SwarmService {
             _ => SwarmState::Stopped,
         };
 
+        // Get task statistics from database (source of truth)
+        let queue_stats = task_service.get_queue_stats().await?;
+
+        // Calculate agent statistics
+        let active_agents = queue_stats.running;
+        let idle_agents = if swarm_state == SwarmState::Running {
+            state.max_agents.saturating_sub(active_agents)
+        } else {
+            0
+        };
+
         Ok(SwarmStats {
             state: swarm_state,
             max_agents: state.max_agents,
-            active_agents: 0,
-            idle_agents: 0,
-            tasks_processed: state.tasks_processed,
-            tasks_failed: state.tasks_failed,
+            active_agents,
+            idle_agents,
+            tasks_processed: queue_stats.completed as u64,
+            tasks_failed: queue_stats.failed as u64,
         })
     }
 

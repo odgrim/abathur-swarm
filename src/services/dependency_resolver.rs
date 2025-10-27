@@ -281,6 +281,39 @@ impl DependencyResolver {
         let mut visited = HashSet::new();
         calculate_depth_recursive(task, &task_map, &mut visited)
     }
+
+    /// Check if all dependencies for a task are met (completed)
+    ///
+    /// Returns true if the task has no dependencies or all dependencies are completed
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - The task to check
+    /// * `all_tasks` - All available tasks to check against
+    ///
+    /// # Returns
+    ///
+    /// * `true` - All dependencies are completed
+    /// * `false` - One or more dependencies are not completed
+    pub fn check_dependencies_met(&self, task: &Task, all_tasks: &[Task]) -> bool {
+        use crate::domain::models::task::TaskStatus;
+
+        // If no dependencies, they're all met
+        let Some(ref deps) = task.dependencies else {
+            return true;
+        };
+
+        // Build a map of task statuses for quick lookup
+        let status_map: HashMap<Uuid, TaskStatus> =
+            all_tasks.iter().map(|t| (t.id, t.status)).collect();
+
+        // Check if all dependencies are completed
+        deps.iter().all(|&dep_id| {
+            status_map
+                .get(&dep_id)
+                .map_or(false, |&status| status == TaskStatus::Completed)
+        })
+    }
 }
 
 impl Default for DependencyResolver {

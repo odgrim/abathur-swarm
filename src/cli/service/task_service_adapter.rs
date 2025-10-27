@@ -207,6 +207,69 @@ impl TaskQueueServiceAdapter {
 
         Ok(stats)
     }
+
+    /// Resolve task dependencies
+    ///
+    /// Updates Pending/Blocked tasks to Ready if their dependencies are met.
+    /// Returns the number of tasks updated.
+    pub async fn resolve_dependencies(&self) -> Result<usize> {
+        self.service
+            .resolve_dependencies()
+            .await
+            .context("Failed to resolve dependencies")
+    }
+
+    /// Resolve a task ID prefix to a full UUID
+    ///
+    /// Searches for tasks whose ID starts with the given prefix.
+    /// Returns an error if the prefix matches zero or multiple tasks.
+    pub async fn resolve_task_id_prefix(&self, prefix: &str) -> Result<Uuid> {
+        // Try to parse as full UUID first
+        if let Ok(uuid) = Uuid::parse_str(prefix) {
+            return Ok(uuid);
+        }
+
+        // Validate prefix format (should be hex)
+        if !prefix.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            return Err(anyhow!(
+                "Invalid task ID prefix '{}': must contain only hexadecimal characters",
+                prefix
+            ));
+        }
+
+        // Get all tasks and search for matching prefixes
+        let all_tasks = self
+            .service
+            .list(TaskFilters::default())
+            .await
+            .context("Failed to list tasks for prefix matching")?;
+
+        let prefix_lower = prefix.to_lowercase();
+        let matches: Vec<&DomainTask> = all_tasks
+            .iter()
+            .filter(|task| task.id.to_string().to_lowercase().starts_with(&prefix_lower))
+            .collect();
+
+        match matches.len() {
+            0 => Err(anyhow!(
+                "No task found with ID prefix '{}'. Use 'abathur task list' to see available tasks.",
+                prefix
+            )),
+            1 => Ok(matches[0].id),
+            n => {
+                let matching_ids: Vec<String> = matches
+                    .iter()
+                    .map(|t| t.id.to_string()[..8].to_string())
+                    .collect();
+                Err(anyhow!(
+                    "Task ID prefix '{}' is ambiguous, matches {} tasks: {}. Please provide a longer prefix.",
+                    prefix,
+                    n,
+                    matching_ids.join(", ")
+                ))
+            }
+        }
+    }
 }
 
 // Conversion functions

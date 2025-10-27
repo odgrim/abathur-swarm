@@ -59,9 +59,9 @@ pub enum TaskCommands {
         #[arg(short, long, default_value = "5")]
         priority: u8,
 
-        /// Task dependencies (comma-separated UUIDs)
+        /// Task dependencies (comma-separated UUIDs or prefixes)
         #[arg(short = 'D', long, value_delimiter = ',')]
-        dependencies: Vec<Uuid>,
+        dependencies: Vec<String>,
     },
 
     /// List tasks in the queue
@@ -77,15 +77,15 @@ pub enum TaskCommands {
 
     /// Show details for a specific task
     Show {
-        /// Task ID
-        task_id: Uuid,
+        /// Task ID (full UUID or prefix)
+        task_id: String,
     },
 
     /// Update one or more tasks
     Update {
-        /// Task ID(s) to update (comma-separated)
+        /// Task ID(s) to update (comma-separated, full UUIDs or prefixes)
         #[arg(value_delimiter = ',')]
-        task_ids: Vec<Uuid>,
+        task_ids: Vec<String>,
 
         /// Update task status
         #[arg(short, long)]
@@ -99,13 +99,13 @@ pub enum TaskCommands {
         #[arg(short, long)]
         agent_type: Option<String>,
 
-        /// Add dependencies (comma-separated UUIDs)
+        /// Add dependencies (comma-separated UUIDs or prefixes)
         #[arg(long, value_delimiter = ',')]
-        add_dependency: Vec<Uuid>,
+        add_dependency: Vec<String>,
 
-        /// Remove dependencies (comma-separated UUIDs)
+        /// Remove dependencies (comma-separated UUIDs or prefixes)
         #[arg(long, value_delimiter = ',')]
-        remove_dependency: Vec<Uuid>,
+        remove_dependency: Vec<String>,
 
         /// Increment retry count and reset to pending (for failed tasks)
         #[arg(long)]
@@ -118,6 +118,12 @@ pub enum TaskCommands {
 
     /// Show queue status and statistics
     Status,
+
+    /// Resolve task dependencies and update statuses
+    ///
+    /// This command checks all Pending/Blocked tasks and updates them to Ready
+    /// if their dependencies are satisfied.
+    Resolve,
 }
 
 #[derive(Subcommand)]

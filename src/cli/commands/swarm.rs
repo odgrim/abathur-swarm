@@ -6,7 +6,7 @@ use crate::application::{
     agent_executor::AgentExecutor, resource_monitor::ResourceMonitor,
     task_coordinator::TaskCoordinator, SwarmOrchestrator,
 };
-use crate::cli::service::{SwarmService, TaskQueueService};
+use crate::cli::service::{SwarmService, TaskQueueServiceAdapter};
 use crate::infrastructure::claude::{ClaudeClientAdapter, ClaudeClientConfig};
 use crate::infrastructure::config::ConfigLoader;
 use crate::infrastructure::database::{AgentRepositoryImpl, TaskRepositoryImpl};
@@ -20,7 +20,7 @@ use std::sync::Arc;
 ///
 /// Starts the swarm orchestrator with the specified maximum number of agents.
 pub async fn handle_start(
-    _task_service: &TaskQueueService,
+    _task_service: &TaskQueueServiceAdapter,
     max_agents: usize,
     json_output: bool,
 ) -> Result<()> {
@@ -38,12 +38,15 @@ pub async fn handle_start(
                     "status": "started",
                     "max_agents": max_agents,
                     "message": "Swarm orchestrator started successfully",
-                    "database_initialized": db_initialized
+                    "database_initialized": db_initialized,
+                    "log_file": ".abathur/swarm_daemon.log"
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 println!("Starting swarm orchestrator with {} max agents...", max_agents);
                 println!("Swarm orchestrator started successfully");
+                println!();
+                println!("Daemon logs are written to: .abathur/swarm_daemon.log");
                 if !db_initialized {
                     println!();
                     println!("Note: Full orchestration requires database setup.");
@@ -56,11 +59,14 @@ pub async fn handle_start(
             if json_output {
                 let output = json!({
                     "status": "error",
-                    "message": format!("{}", e)
+                    "message": format!("{}", e),
+                    "log_file": ".abathur/swarm_daemon.log"
                 });
                 println!("{}", serde_json::to_string_pretty(&output)?);
             } else {
                 println!("Failed to start swarm orchestrator: {}", e);
+                println!();
+                println!("Check logs at: .abathur/swarm_daemon.log");
                 println!();
                 println!("To enable full swarm functionality:");
                 println!("  1. Run 'abathur init' to initialize Abathur");
@@ -75,7 +81,7 @@ pub async fn handle_start(
 ///
 /// Gracefully stops the swarm orchestrator.
 pub async fn handle_stop(
-    _task_service: &TaskQueueService,
+    _task_service: &TaskQueueServiceAdapter,
     json_output: bool,
 ) -> Result<()> {
     let swarm_service = SwarmService::new();
@@ -113,15 +119,15 @@ pub async fn handle_stop(
 ///
 /// Shows the current status of the swarm orchestrator.
 pub async fn handle_status(
-    task_service: &TaskQueueService,
+    task_service: &TaskQueueServiceAdapter,
     json_output: bool,
 ) -> Result<()> {
     let swarm_service = SwarmService::new();
 
-    // Get swarm stats
-    let swarm_stats = swarm_service.get_stats().await?;
+    // Get swarm stats (includes task stats from database)
+    let swarm_stats = swarm_service.get_stats(task_service).await?;
 
-    // Get queue stats
+    // Get queue stats for detailed breakdown
     let queue_stats = task_service.get_queue_stats().await?;
 
     if json_output {

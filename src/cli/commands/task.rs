@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use uuid::Uuid;
 
 use crate::cli::models::TaskStatus;
 use crate::cli::output::table::{format_queue_stats_table, format_task_table};
@@ -12,15 +11,25 @@ pub async fn handle_submit(
     agent_type: String,
     summary: Option<String>,
     priority: u8,
-    dependencies: Vec<Uuid>,
+    dependencies: Vec<String>,
     json: bool,
 ) -> Result<()> {
+    // Resolve dependency prefixes to full UUIDs
+    let mut resolved_deps = Vec::new();
+    for dep_prefix in &dependencies {
+        let dep_id = service
+            .resolve_task_id_prefix(dep_prefix)
+            .await
+            .context(format!("Failed to resolve dependency '{}'", dep_prefix))?;
+        resolved_deps.push(dep_id);
+    }
+
     let task_id = service
         .submit_task(
             description.clone(),
             agent_type.clone(),
             priority,
-            dependencies.clone(),
+            resolved_deps.clone(),
         )
         .await
         .context("Failed to submit task")?;
@@ -31,7 +40,7 @@ pub async fn handle_submit(
             "description": description,
             "agent_type": agent_type,
             "priority": priority,
-            "dependencies": dependencies,
+            "dependencies": resolved_deps,
         });
         if let Some(summary_text) = &summary {
             output["summary"] = serde_json::json!(summary_text);
@@ -83,7 +92,13 @@ pub async fn handle_list(
 }
 
 /// Handle task show command
-pub async fn handle_show(service: &TaskQueueServiceAdapter, task_id: Uuid, json: bool) -> Result<()> {
+pub async fn handle_show(service: &TaskQueueServiceAdapter, task_id_prefix: String, json: bool) -> Result<()> {
+    // Resolve task ID prefix
+    let task_id = service
+        .resolve_task_id_prefix(&task_id_prefix)
+        .await
+        .context(format!("Failed to resolve task ID '{}'", task_id_prefix))?;
+
     let task = service
         .get_task(task_id)
         .await
@@ -144,12 +159,12 @@ pub async fn handle_show(service: &TaskQueueServiceAdapter, task_id: Uuid, json:
 /// Handle task update command
 pub async fn handle_update(
     service: &TaskQueueServiceAdapter,
-    task_ids: Vec<Uuid>,
+    task_id_prefixes: Vec<String>,
     status: Option<String>,
     priority: Option<u8>,
     agent_type: Option<String>,
-    add_dependency: Vec<Uuid>,
-    remove_dependency: Vec<Uuid>,
+    add_dependency: Vec<String>,
+    remove_dependency: Vec<String>,
     retry: bool,
     cancel: bool,
     json: bool,
@@ -168,6 +183,35 @@ pub async fn handle_update(
         ));
     }
 
+    // Resolve all task ID prefixes
+    let mut task_ids = Vec::new();
+    for prefix in &task_id_prefixes {
+        let task_id = service
+            .resolve_task_id_prefix(prefix)
+            .await
+            .context(format!("Failed to resolve task ID '{}'", prefix))?;
+        task_ids.push(task_id);
+    }
+
+    // Resolve dependency prefixes
+    let mut resolved_add_deps = Vec::new();
+    for dep_prefix in &add_dependency {
+        let dep_id = service
+            .resolve_task_id_prefix(dep_prefix)
+            .await
+            .context(format!("Failed to resolve add-dependency '{}'", dep_prefix))?;
+        resolved_add_deps.push(dep_id);
+    }
+
+    let mut resolved_remove_deps = Vec::new();
+    for dep_prefix in &remove_dependency {
+        let dep_id = service
+            .resolve_task_id_prefix(dep_prefix)
+            .await
+            .context(format!("Failed to resolve remove-dependency '{}'", dep_prefix))?;
+        resolved_remove_deps.push(dep_id);
+    }
+
     let mut results = Vec::new();
     let mut errors = Vec::new();
 
@@ -179,8 +223,8 @@ pub async fn handle_update(
                 status.as_deref(),
                 priority,
                 agent_type.clone(),
-                add_dependency.clone(),
-                remove_dependency.clone(),
+                resolved_add_deps.clone(),
+                resolved_remove_deps.clone(),
                 retry,
                 cancel,
             )
@@ -234,6 +278,39 @@ pub async fn handle_status(service: &TaskQueueServiceAdapter, json: bool) -> Res
     } else {
         println!("Queue Status:");
         println!("{}", format_queue_stats_table(&stats));
+    }
+
+    Ok(())
+}
+
+/// Handle task resolve command
+///
+/// Resolves dependencies for all Pending/Blocked tasks and updates them to Ready
+/// if their dependencies are satisfied.
+pub async fn handle_resolve(service: &TaskQueueServiceAdapter, json: bool) -> Result<()> {
+    let count = service
+        .resolve_dependencies()
+        .await
+        .context("Failed to resolve task dependencies")?;
+
+    if json {
+        let output = serde_json::json!({
+            "status": "success",
+            "tasks_updated": count,
+            "message": format!("{} task(s) updated to Ready status", count)
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Task Dependency Resolution");
+        println!("=========================");
+        println!("Tasks updated to Ready: {}", count);
+
+        if count > 0 {
+            println!("\nRun 'abathur task list --status ready' to view ready tasks.");
+        } else {
+            println!("\nNo tasks were ready to be updated.");
+            println!("Check 'abathur task list --status pending' or '--status blocked' for pending tasks.");
+        }
     }
 
     Ok(())

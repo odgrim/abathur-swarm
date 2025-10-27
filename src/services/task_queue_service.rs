@@ -215,6 +215,80 @@ impl TaskQueueService {
         find_dependent_tasks_recursive(task_id, all_tasks, result);
     }
 
+    /// Resolve task dependencies and update statuses
+    ///
+    /// This function:
+    /// 1. Fetches all tasks with status Pending or Blocked
+    /// 2. Checks if their dependencies are satisfied
+    /// 3. Updates status to Ready if all dependencies are met
+    ///
+    /// # Returns
+    /// Number of tasks that were updated to Ready status
+    ///
+    /// # Errors
+    /// - Database errors
+    #[instrument(skip(self), err)]
+    pub async fn resolve_dependencies(&self) -> Result<usize> {
+        // 1. Fetch all tasks to build dependency graph
+        let all_tasks = self
+            .repo
+            .list(&TaskFilters::default())
+            .await
+            .context("Failed to fetch all tasks")?;
+
+        let mut updated_count = 0;
+
+        // 2. Find tasks that are Pending or Blocked
+        let tasks_to_check: Vec<_> = all_tasks
+            .iter()
+            .filter(|t| matches!(t.status, TaskStatus::Pending | TaskStatus::Blocked))
+            .collect();
+
+        info!("Checking {} tasks for dependency resolution", tasks_to_check.len());
+
+        // 3. Check each task's dependencies
+        for task in tasks_to_check {
+            let should_be_ready = if task.has_dependencies() {
+                // Check if all dependencies are met
+                self.dependency_resolver
+                    .check_dependencies_met(task, &all_tasks)
+            } else {
+                // No dependencies means it should be ready
+                true
+            };
+
+            if should_be_ready {
+                // Update task status to Ready
+                let mut updated_task = (*task).clone();
+                updated_task.status = TaskStatus::Ready;
+                updated_task.last_updated_at = chrono::Utc::now();
+
+                self.repo
+                    .update(&updated_task)
+                    .await
+                    .context(format!("Failed to update task {} to Ready", task.id))?;
+
+                info!("Task {} status updated: {:?} -> Ready", task.id, task.status);
+                updated_count += 1;
+            } else if task.status == TaskStatus::Pending {
+                // Has dependencies but not all met, update to Blocked
+                let mut updated_task = (*task).clone();
+                updated_task.status = TaskStatus::Blocked;
+                updated_task.last_updated_at = chrono::Utc::now();
+
+                self.repo
+                    .update(&updated_task)
+                    .await
+                    .context(format!("Failed to update task {} to Blocked", task.id))?;
+
+                info!("Task {} status updated: Pending -> Blocked", task.id);
+            }
+        }
+
+        info!("Resolved dependencies: {} tasks updated to Ready", updated_count);
+        Ok(updated_count)
+    }
+
     /// Get ready tasks ordered by calculated priority
     ///
     /// Returns tasks with status=Ready, ordered by calculated_priority descending

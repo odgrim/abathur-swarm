@@ -3,7 +3,7 @@
 use abathur_cli::{
     cli::{
         commands::{init, memory, swarm, task},
-        service::{MemoryServiceAdapter, TaskQueueService as MockTaskQueueService, TaskQueueServiceAdapter},
+        service::{MemoryServiceAdapter, TaskQueueServiceAdapter},
         Cli, Commands, MemoryCommands, MemoryType, SwarmCommands, TaskCommands,
     },
     infrastructure::{
@@ -29,6 +29,11 @@ async fn main() -> Result<()> {
             init::handle_init(force, cli.json).await?;
         }
         return Ok(());
+    }
+
+    // For swarm daemon mode, handle separately (it manages its own database connection)
+    if let Commands::Swarm(SwarmCommands::Start { __daemon: true, max_agents }) = cli.command {
+        return swarm::handle_daemon(max_agents).await;
     }
 
     // Load configuration
@@ -58,7 +63,6 @@ async fn main() -> Result<()> {
         priority_calc,
     );
     let task_service = TaskQueueServiceAdapter::new(real_task_service);
-    let mock_task_service = MockTaskQueueService::new(); // For swarm commands (temporary)
 
     // Initialize real memory service with repository and adapter
     let real_memory_service = RealMemoryService::new(memory_repo);
@@ -114,6 +118,9 @@ async fn main() -> Result<()> {
             TaskCommands::Status => {
                 task::handle_status(&task_service, cli.json).await?;
             }
+            TaskCommands::Resolve => {
+                task::handle_resolve(&task_service, cli.json).await?;
+            }
         },
         Commands::Memory(memory_cmd) => match memory_cmd {
             MemoryCommands::List {
@@ -144,20 +151,16 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Swarm(swarm_cmd) => match swarm_cmd {
-            SwarmCommands::Start { max_agents, __daemon } => {
-                if __daemon {
-                    // Run in daemon mode - this is the background process
-                    swarm::handle_daemon(max_agents).await?;
-                } else {
-                    // Normal CLI mode - spawn background process
-                    swarm::handle_start(&mock_task_service, max_agents, cli.json).await?;
-                }
+            SwarmCommands::Start { max_agents, __daemon: _ } => {
+                // Daemon mode is handled at the top of main()
+                // This branch only handles normal CLI mode
+                swarm::handle_start(&task_service, max_agents, cli.json).await?;
             }
             SwarmCommands::Stop => {
-                swarm::handle_stop(&mock_task_service, cli.json).await?;
+                swarm::handle_stop(&task_service, cli.json).await?;
             }
             SwarmCommands::Status => {
-                swarm::handle_status(&mock_task_service, cli.json).await?;
+                swarm::handle_status(&task_service, cli.json).await?;
             }
         },
     }
