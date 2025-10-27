@@ -3,7 +3,7 @@
 use abathur_cli::{
     cli::{
         commands::{init, memory, swarm, task},
-        service::{MemoryService, TaskQueueService as MockTaskQueueService, TaskQueueServiceAdapter},
+        service::{MemoryServiceAdapter, TaskQueueService as MockTaskQueueService, TaskQueueServiceAdapter},
         Cli, Commands, MemoryCommands, MemoryType, SwarmCommands, TaskCommands,
     },
     infrastructure::{
@@ -13,7 +13,7 @@ use abathur_cli::{
             task_repo::TaskRepositoryImpl,
         },
     },
-    services::{DependencyResolver, PriorityCalculator, TaskQueueService as RealTaskQueueService},
+    services::{DependencyResolver, MemoryService as RealMemoryService, PriorityCalculator, TaskQueueService as RealTaskQueueService},
 };
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
 
     // Initialize repositories
     let task_repo = Arc::new(TaskRepositoryImpl::new(db.pool().clone()));
-    let _memory_repo = Arc::new(MemoryRepositoryImpl::new(db.pool().clone()));
+    let memory_repo = Arc::new(MemoryRepositoryImpl::new(db.pool().clone()));
 
     // Initialize services
     let dependency_resolver = DependencyResolver::new();
@@ -59,7 +59,10 @@ async fn main() -> Result<()> {
     );
     let task_service = TaskQueueServiceAdapter::new(real_task_service);
     let mock_task_service = MockTaskQueueService::new(); // For swarm commands (temporary)
-    let memory_service = MemoryService::new();
+
+    // Initialize real memory service with repository and adapter
+    let real_memory_service = RealMemoryService::new(memory_repo);
+    let memory_service = MemoryServiceAdapter::new(real_memory_service);
 
     match cli.command {
         Commands::Init { .. } => {
@@ -125,15 +128,8 @@ async fn main() -> Result<()> {
                 };
                 memory::handle_list(&memory_service, namespace, mem_type, limit, cli.json).await?;
             }
-            MemoryCommands::Show {
-                namespace,
-                key,
-                version,
-            } => {
-                memory::handle_show(&memory_service, namespace, key, version, cli.json).await?;
-            }
-            MemoryCommands::Versions { namespace, key } => {
-                memory::handle_versions(&memory_service, namespace, key, cli.json).await?;
+            MemoryCommands::Show { namespace, key } => {
+                memory::handle_show(&memory_service, namespace, key, cli.json).await?;
             }
             MemoryCommands::Count {
                 namespace,

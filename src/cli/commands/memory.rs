@@ -2,12 +2,12 @@ use anyhow::{Context, Result};
 
 use crate::cli::models::Memory as CliMemory;
 use crate::cli::output::table::format_memory_table;
-use crate::cli::service::MemoryService;
+use crate::cli::service::MemoryServiceAdapter;
 use crate::domain::models::MemoryType;
 
 /// Handle memory list command
 pub async fn handle_list(
-    service: &MemoryService,
+    service: &MemoryServiceAdapter,
     namespace_prefix: Option<String>,
     memory_type: Option<MemoryType>,
     limit: usize,
@@ -45,7 +45,6 @@ pub async fn handle_list(
                         crate::cli::models::MemoryType::Procedural
                     }
                 },
-                version: m.version,
                 created_by: m.created_by,
                 created_at: m.created_at,
                 updated_at: m.updated_at,
@@ -62,31 +61,18 @@ pub async fn handle_list(
 
 /// Handle memory show command
 pub async fn handle_show(
-    service: &MemoryService,
+    service: &MemoryServiceAdapter,
     namespace: String,
     key: String,
-    version: Option<u32>,
     json: bool,
 ) -> Result<()> {
-    let memory = if let Some(v) = version {
-        service
-            .get_version(&namespace, &key, v)
-            .await
-            .context("Failed to retrieve memory version")?
-    } else {
-        service
-            .get(&namespace, &key)
-            .await
-            .context("Failed to retrieve memory")?
-    };
+    let memory = service
+        .get(&namespace, &key)
+        .await
+        .context("Failed to retrieve memory")?;
 
     let memory = memory.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Memory not found at {}:{}{}",
-            namespace,
-            key,
-            version.map(|v| format!(" (version {})", v)).unwrap_or_default()
-        )
+        anyhow::anyhow!("Memory not found at {}:{}", namespace, key)
     })?;
 
     if json {
@@ -97,7 +83,6 @@ pub async fn handle_show(
         println!("Namespace:   {}", memory.namespace);
         println!("Key:         {}", memory.key);
         println!("Type:        {}", memory.memory_type);
-        println!("Version:     {}", memory.version);
         println!("Created by:  {}", memory.created_by);
         println!("Updated by:  {}", memory.updated_by);
         println!("Created at:  {}", memory.created_at.format("%Y-%m-%d %H:%M:%S UTC"));
@@ -114,44 +99,9 @@ pub async fn handle_show(
     Ok(())
 }
 
-/// Handle memory versions command
-pub async fn handle_versions(
-    service: &MemoryService,
-    namespace: String,
-    key: String,
-    json: bool,
-) -> Result<()> {
-    let versions = service
-        .list_versions(&namespace, &key)
-        .await
-        .context("Failed to list memory versions")?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&versions)?);
-    } else {
-        if versions.is_empty() {
-            println!("No versions found for {}:{}", namespace, key);
-            return Ok(());
-        }
-
-        println!("\nVersion History for {}:{}", namespace, key);
-        println!("─────────────────────────────────────────");
-
-        for memory in versions {
-            let status = if memory.is_deleted { " [DELETED]" } else { "" };
-            println!("\nVersion {}{}", memory.version, status);
-            println!("  Updated by: {}", memory.updated_by);
-            println!("  Updated at: {}", memory.updated_at.format("%Y-%m-%d %H:%M:%S UTC"));
-            println!("  Value: {}", serde_json::to_string(&memory.value)?);
-        }
-    }
-
-    Ok(())
-}
-
 /// Handle memory count command
 pub async fn handle_count(
-    service: &MemoryService,
+    service: &MemoryServiceAdapter,
     namespace_prefix: String,
     memory_type: Option<MemoryType>,
     json: bool,

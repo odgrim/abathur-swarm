@@ -11,7 +11,6 @@ use sqlx::SqlitePool;
 /// - Compile-time checked queries using sqlx::query! macro
 /// - JSON serialization for value and metadata fields
 /// - Soft deletes (is_deleted flag)
-/// - Versioning on updates
 /// - Namespace prefix searching with LIKE queries
 pub struct MemoryRepositoryImpl {
     pool: SqlitePool,
@@ -38,22 +37,20 @@ impl MemoryRepository for MemoryRepositoryImpl {
             .and_then(|m| serde_json::to_string(m).ok());
         let created_at_str = memory.created_at.to_rfc3339();
         let updated_at_str = memory.updated_at.to_rfc3339();
-        let version_i64 = memory.version as i64;
         let is_deleted_i64 = memory.is_deleted as i64;
 
         let result = sqlx::query!(
             r#"
             INSERT INTO memories (
-                namespace, key, value, memory_type, version, is_deleted,
+                namespace, key, value, memory_type, is_deleted,
                 metadata, created_by, updated_by, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             memory.namespace,
             memory.key,
             value_json,
             memory_type_str,
-            version_i64,
             is_deleted_i64,
             metadata_json,
             memory.created_by,
@@ -71,7 +68,7 @@ impl MemoryRepository for MemoryRepositoryImpl {
     async fn get(&self, namespace: &str, key: &str) -> Result<Option<Memory>> {
         let row = sqlx::query!(
             r#"
-            SELECT id, namespace, key, value, memory_type, version, is_deleted,
+            SELECT id, namespace, key, value, memory_type, is_deleted,
                    metadata, created_by, updated_by, created_at, updated_at
             FROM memories
             WHERE namespace = ? AND key = ? AND is_deleted = 0
@@ -95,7 +92,6 @@ impl MemoryRepository for MemoryRepositoryImpl {
                         .memory_type
                         .parse()
                         .context("failed to parse memory_type")?,
-                    version: r.version as u32,
                     is_deleted: r.is_deleted != 0,
                     metadata: r
                         .metadata
@@ -129,9 +125,9 @@ impl MemoryRepository for MemoryRepositoryImpl {
         // Use dynamic query since we have conditional parameters
         let rows: Vec<_> = if let Some(mem_type) = memory_type {
             let memory_type_str = mem_type.to_string();
-            sqlx::query_as::<_, (i64, String, String, String, String, i64, i64, Option<String>, String, String, String, String)>(
+            sqlx::query_as::<_, (i64, String, String, String, String, i64, Option<String>, String, String, String, String)>(
                 r#"
-                SELECT id, namespace, key, value, memory_type, version, is_deleted,
+                SELECT id, namespace, key, value, memory_type, is_deleted,
                        metadata, created_by, updated_by, created_at, updated_at
                 FROM memories
                 WHERE namespace LIKE ? AND memory_type = ? AND is_deleted = 0
@@ -146,9 +142,9 @@ impl MemoryRepository for MemoryRepositoryImpl {
             .await
             .context("failed to search memories with type filter")?
         } else {
-            sqlx::query_as::<_, (i64, String, String, String, String, i64, i64, Option<String>, String, String, String, String)>(
+            sqlx::query_as::<_, (i64, String, String, String, String, i64, Option<String>, String, String, String, String)>(
                 r#"
-                SELECT id, namespace, key, value, memory_type, version, is_deleted,
+                SELECT id, namespace, key, value, memory_type, is_deleted,
                        metadata, created_by, updated_by, created_at, updated_at
                 FROM memories
                 WHERE namespace LIKE ? AND is_deleted = 0
@@ -165,7 +161,7 @@ impl MemoryRepository for MemoryRepositoryImpl {
 
         let memories: Result<Vec<Memory>> = rows
             .into_iter()
-            .map(|(id, namespace, key, value, memory_type, version, is_deleted, metadata, created_by, updated_by, created_at, updated_at)| {
+            .map(|(id, namespace, key, value, memory_type, is_deleted, metadata, created_by, updated_by, created_at, updated_at)| {
                 Ok(Memory {
                     id,
                     namespace,
@@ -175,7 +171,6 @@ impl MemoryRepository for MemoryRepositoryImpl {
                     memory_type: memory_type
                         .parse()
                         .context("failed to parse memory_type")?,
-                    version: version as u32,
                     is_deleted: is_deleted != 0,
                     metadata: metadata
                         .as_ref()
@@ -201,7 +196,7 @@ impl MemoryRepository for MemoryRepositoryImpl {
         key: &str,
         value: serde_json::Value,
         updated_by: &str,
-    ) -> Result<u32> {
+    ) -> Result<()> {
         let now = Utc::now();
         let value_str =
             serde_json::to_string(&value).context("failed to serialize value")?;
@@ -211,7 +206,6 @@ impl MemoryRepository for MemoryRepositoryImpl {
             r#"
             UPDATE memories
             SET value = ?,
-                version = version + 1,
                 updated_by = ?,
                 updated_at = ?
             WHERE namespace = ? AND key = ? AND is_deleted = 0
@@ -234,20 +228,7 @@ impl MemoryRepository for MemoryRepositoryImpl {
             );
         }
 
-        // Get the new version
-        let row = sqlx::query!(
-            r#"
-            SELECT version FROM memories
-            WHERE namespace = ? AND key = ?
-            "#,
-            namespace,
-            key
-        )
-        .fetch_one(&self.pool)
-        .await
-        .context("failed to fetch updated version")?;
-
-        Ok(row.version as u32)
+        Ok(())
     }
 
     async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
@@ -271,55 +252,6 @@ impl MemoryRepository for MemoryRepositoryImpl {
         Ok(())
     }
 
-    async fn get_version(&self, namespace: &str, key: &str, version: u32) -> Result<Option<Memory>> {
-        let version_i64 = version as i64;
-        let row = sqlx::query!(
-            r#"
-            SELECT id, namespace, key, value, memory_type, version, is_deleted,
-                   metadata, created_by, updated_by, created_at, updated_at
-            FROM memories
-            WHERE namespace = ? AND key = ? AND version = ?
-            "#,
-            namespace,
-            key,
-            version_i64
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .context("failed to query memory version")?;
-
-        match row {
-            Some(r) => {
-                let memory = Memory {
-                    id: r.id.context("missing id from database")?,
-                    namespace: r.namespace,
-                    key: r.key,
-                    value: serde_json::from_str(&r.value)
-                        .context("failed to deserialize value")?,
-                    memory_type: r
-                        .memory_type
-                        .parse()
-                        .context("failed to parse memory_type")?,
-                    version: r.version as u32,
-                    is_deleted: r.is_deleted != 0,
-                    metadata: r
-                        .metadata
-                        .as_ref()
-                        .and_then(|m| serde_json::from_str(m).ok()),
-                    created_by: r.created_by,
-                    updated_by: r.updated_by,
-                    created_at: DateTime::parse_from_rfc3339(&r.created_at)
-                        .context("failed to parse created_at")?
-                        .with_timezone(&Utc),
-                    updated_at: DateTime::parse_from_rfc3339(&r.updated_at)
-                        .context("failed to parse updated_at")?
-                        .with_timezone(&Utc),
-                };
-                Ok(Some(memory))
-            }
-            None => Ok(None),
-        }
-    }
 
     async fn count(&self, namespace_prefix: &str, memory_type: Option<MemoryType>) -> Result<usize> {
         let namespace_pattern = format!("{}%", namespace_prefix);
@@ -353,54 +285,8 @@ impl MemoryRepository for MemoryRepositoryImpl {
         Ok(count as usize)
     }
 
-    async fn list_versions(&self, namespace: &str, key: &str) -> Result<Vec<Memory>> {
-        let rows = sqlx::query_as::<_, (i64, String, String, String, String, i64, i64, Option<String>, String, String, String, String)>(
-            r#"
-            SELECT id, namespace, key, value, memory_type, version, is_deleted,
-                   metadata, created_by, updated_by, created_at, updated_at
-            FROM memories
-            WHERE namespace = ? AND key = ?
-            ORDER BY version ASC
-            "#
-        )
-        .bind(namespace)
-        .bind(key)
-        .fetch_all(&self.pool)
-        .await
-        .context("failed to list memory versions")?;
-
-        let memories: Result<Vec<Memory>> = rows
-            .into_iter()
-            .map(|(id, namespace, key, value, memory_type, version, is_deleted, metadata, created_by, updated_by, created_at, updated_at)| {
-                Ok(Memory {
-                    id,
-                    namespace,
-                    key,
-                    value: serde_json::from_str(&value)
-                        .context("failed to deserialize value")?,
-                    memory_type: memory_type
-                        .parse()
-                        .context("failed to parse memory_type")?,
-                    version: version as u32,
-                    is_deleted: is_deleted != 0,
-                    metadata: metadata
-                        .as_ref()
-                        .and_then(|m| serde_json::from_str(m).ok()),
-                    created_by,
-                    updated_by,
-                    created_at: DateTime::parse_from_rfc3339(&created_at)
-                        .context("failed to parse created_at")?
-                        .with_timezone(&Utc),
-                    updated_at: DateTime::parse_from_rfc3339(&updated_at)
-                        .context("failed to parse updated_at")?
-                        .with_timezone(&Utc),
-                })
-            })
-            .collect();
-
-        memories
-    }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -449,7 +335,6 @@ mod tests {
         assert_eq!(retrieved.key, "theme");
         assert_eq!(retrieved.value, json!({"color": "dark"}));
         assert_eq!(retrieved.memory_type, MemoryType::Semantic);
-        assert_eq!(retrieved.version, 1);
         assert!(!retrieved.is_deleted);
 
         pool.close().await;
@@ -486,7 +371,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(updated.value, json!("fr"));
-        assert_eq!(updated.version, 2); // Version incremented
         assert_eq!(updated.updated_by, "bob");
 
         pool.close().await;

@@ -343,7 +343,6 @@ pub fn format_memory_table(memories: &[crate::cli::models::Memory]) -> String {
         Cell::new("Namespace").add_attribute(Attribute::Bold),
         Cell::new("Key").add_attribute(Attribute::Bold),
         Cell::new("Type").add_attribute(Attribute::Bold),
-        Cell::new("Version").add_attribute(Attribute::Bold),
         Cell::new("Created By").add_attribute(Attribute::Bold),
         Cell::new("Updated").add_attribute(Attribute::Bold),
     ]);
@@ -355,7 +354,6 @@ pub fn format_memory_table(memories: &[crate::cli::models::Memory]) -> String {
             Cell::new(truncate_text(&memory.namespace, 30)),
             Cell::new(truncate_text(&memory.key, 20)),
             Cell::new(format!("{}", memory.memory_type)),
-            Cell::new(memory.version.to_string()),
             Cell::new(truncate_text(&memory.created_by, 15)),
             Cell::new(updated_str),
         ]);

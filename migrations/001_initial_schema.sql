@@ -163,7 +163,6 @@ CREATE TABLE IF NOT EXISTS memories (
     key TEXT NOT NULL,
     value TEXT NOT NULL,  -- JSON
     memory_type TEXT NOT NULL CHECK(memory_type IN ('semantic', 'episodic', 'procedural')),
-    version INTEGER NOT NULL DEFAULT 1,
     is_deleted INTEGER NOT NULL DEFAULT 0 CHECK(is_deleted IN (0, 1)),
     metadata TEXT,  -- JSON
     created_by TEXT NOT NULL,

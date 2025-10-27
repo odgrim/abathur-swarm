@@ -86,7 +86,6 @@ pub struct Memory {
     pub key: String,
     pub value: serde_json::Value,
     pub memory_type: MemoryType,
-    pub version: u32,
     pub created_by: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

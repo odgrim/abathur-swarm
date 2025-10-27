@@ -110,29 +110,6 @@ impl MemoryService {
             .context("Failed to retrieve memory")
     }
 
-    /// Get a specific version of a memory
-    ///
-    /// # Arguments
-    /// * `namespace` - The hierarchical namespace
-    /// * `key` - The key within the namespace
-    /// * `version` - The version number to retrieve
-    ///
-    /// # Returns
-    /// * `Ok(Some(Memory))` - The specific version if found
-    /// * `Ok(None)` - If not found
-    /// * `Err(_)` - If query fails
-    #[instrument(skip(self), err)]
-    pub async fn get_version(
-        &self,
-        namespace: &str,
-        key: &str,
-        version: u32,
-    ) -> Result<Option<Memory>> {
-        self.repo
-            .get_version(namespace, key, version)
-            .await
-            .context("Failed to retrieve memory version")
-    }
 
     /// Search memories by namespace prefix and optional type
     ///
@@ -179,10 +156,9 @@ impl MemoryService {
             .context("Failed to search memories")
     }
 
-    /// Update a memory (creates a new version)
+    /// Update a memory
     ///
-    /// Creates a new version of the memory with the updated value.
-    /// The version number is automatically incremented.
+    /// Updates the memory with a new value.
     ///
     /// # Arguments
     /// * `namespace` - The hierarchical namespace
@@ -191,7 +167,7 @@ impl MemoryService {
     /// * `updated_by` - Identifier of who is updating
     ///
     /// # Returns
-    /// * `Ok(u32)` - The new version number
+    /// * `Ok(())` - If update succeeds
     /// * `Err(_)` - If update fails or memory not found
     ///
     /// # Errors
@@ -206,7 +182,7 @@ impl MemoryService {
         key: &str,
         value: Value,
         updated_by: &str,
-    ) -> Result<u32> {
+    ) -> Result<()> {
         // Verify memory exists and is active
         let existing = self
             .repo
@@ -219,7 +195,7 @@ impl MemoryService {
             return Err(anyhow!("Cannot update deleted memory at {namespace}:{key}"));
         }
 
-        // Update via repository (creates new version)
+        // Update via repository
         self.repo
             .update(namespace, key, value, updated_by)
             .await
@@ -280,24 +256,6 @@ impl MemoryService {
             .context("Failed to count memories")
     }
 
-    /// List all versions of a memory
-    ///
-    /// Returns all versions sorted by version number, including deleted versions.
-    ///
-    /// # Arguments
-    /// * `namespace` - The hierarchical namespace
-    /// * `key` - The key within the namespace
-    ///
-    /// # Returns
-    /// * `Ok(Vec<Memory>)` - All versions sorted by version number
-    /// * `Err(_)` - If query fails
-    #[instrument(skip(self), err)]
-    pub async fn list_versions(&self, namespace: &str, key: &str) -> Result<Vec<Memory>> {
-        self.repo
-            .list_versions(namespace, key)
-            .await
-            .context("Failed to list memory versions")
-    }
 }
 
 #[cfg(test)]
@@ -314,7 +272,6 @@ mod tests {
         impl MemoryRepository for MemoryRepo {
             async fn insert(&self, memory: Memory) -> Result<i64>;
             async fn get(&self, namespace: &str, key: &str) -> Result<Option<Memory>>;
-            async fn get_version(&self, namespace: &str, key: &str, version: u32) -> Result<Option<Memory>>;
             async fn search(
                 &self,
                 namespace_prefix: &str,
@@ -327,14 +284,13 @@ mod tests {
                 key: &str,
                 value: Value,
                 updated_by: &str,
-            ) -> Result<u32>;
+            ) -> Result<()>;
             async fn delete(&self, namespace: &str, key: &str) -> Result<()>;
             async fn count(
                 &self,
                 namespace_prefix: &str,
                 memory_type: Option<MemoryType>,
             ) -> Result<usize>;
-            async fn list_versions(&self, namespace: &str, key: &str) -> Result<Vec<Memory>>;
         }
     }
 
@@ -478,7 +434,7 @@ mod tests {
                 eq("updater"),
             )
             .times(1)
-            .returning(|_, _, _, _| Ok(2));
+            .returning(|_, _, _, _| Ok(()));
 
         let service = MemoryService::new(Arc::new(mock_repo));
         let result = service
@@ -486,7 +442,6 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 2);
     }
 
     #[tokio::test]
@@ -588,43 +543,4 @@ mod tests {
         assert_eq!(result.unwrap(), 5);
     }
 
-    #[tokio::test]
-    async fn test_list_versions() {
-        let mut mock_repo = MockMemoryRepo::new();
-        let v1 = create_test_memory();
-        let v2 = v1.with_new_version(json!({"data": "updated"}), "updater".to_string());
-
-        mock_repo
-            .expect_list_versions()
-            .with(eq("test:namespace"), eq("key1"))
-            .times(1)
-            .returning(move |_, _| Ok(vec![v1.clone(), v2.clone()]));
-
-        let service = MemoryService::new(Arc::new(mock_repo));
-        let result = service.list_versions("test:namespace", "key1").await;
-
-        assert!(result.is_ok());
-        let versions = result.unwrap();
-        assert_eq!(versions.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_get_specific_version() {
-        let mut mock_repo = MockMemoryRepo::new();
-        let memory = create_test_memory();
-
-        mock_repo
-            .expect_get_version()
-            .with(eq("test:namespace"), eq("key1"), eq(1))
-            .times(1)
-            .returning(move |_, _, _| Ok(Some(memory.clone())));
-
-        let service = MemoryService::new(Arc::new(mock_repo));
-        let result = service.get_version("test:namespace", "key1", 1).await;
-
-        assert!(result.is_ok());
-        let mem = result.unwrap();
-        assert!(mem.is_some());
-        assert_eq!(mem.unwrap().version, 1);
-    }
 }

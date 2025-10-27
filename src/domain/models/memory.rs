@@ -39,9 +39,9 @@ impl FromStr for MemoryType {
     }
 }
 
-/// Memory entry with versioning and soft delete support
+/// Memory entry with soft delete support
 ///
-/// Supports hierarchical namespaces, versioning, and soft deletes.
+/// Supports hierarchical namespaces and soft deletes.
 /// Values are stored as JSON for flexibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
@@ -59,9 +59,6 @@ pub struct Memory {
 
     /// Type of memory
     pub memory_type: MemoryType,
-
-    /// Version number (increments on updates)
-    pub version: u32,
 
     /// Soft delete flag
     pub is_deleted: bool,
@@ -99,7 +96,6 @@ impl Memory {
             key,
             value,
             memory_type,
-            version: 1,
             is_deleted: false,
             metadata: None,
             created_by: created_by.clone(),
@@ -124,24 +120,6 @@ impl Memory {
         memory
     }
 
-    /// Create a new version of this memory with updated value
-    #[must_use]
-    pub fn with_new_version(&self, value: Value, updated_by: String) -> Self {
-        Self {
-            id: 0, // New entry in database
-            namespace: self.namespace.clone(),
-            key: self.key.clone(),
-            value,
-            memory_type: self.memory_type,
-            version: self.version + 1,
-            is_deleted: false,
-            metadata: self.metadata.clone(),
-            created_by: self.created_by.clone(),
-            updated_by,
-            created_at: self.created_at,
-            updated_at: Utc::now(),
-        }
-    }
 
     /// Check if this memory is deleted
     pub fn is_deleted(&self) -> bool {
@@ -207,31 +185,9 @@ mod tests {
         assert_eq!(memory.namespace, "test:namespace");
         assert_eq!(memory.key, "key1");
         assert_eq!(memory.memory_type, MemoryType::Semantic);
-        assert_eq!(memory.version, 1);
         assert!(!memory.is_deleted);
         assert_eq!(memory.created_by, "user1");
         assert_eq!(memory.updated_by, "user1");
-    }
-
-    #[test]
-    fn test_memory_with_new_version() {
-        let original = Memory::new(
-            "test:namespace".to_string(),
-            "key1".to_string(),
-            json!({"data": "old"}),
-            MemoryType::Semantic,
-            "user1".to_string(),
-        );
-
-        let updated = original.with_new_version(json!({"data": "new"}), "user2".to_string());
-
-        assert_eq!(updated.namespace, original.namespace);
-        assert_eq!(updated.key, original.key);
-        assert_eq!(updated.version, 2);
-        assert_eq!(updated.value, json!({"data": "new"}));
-        assert_eq!(updated.updated_by, "user2");
-        assert_eq!(updated.created_by, "user1");
-        assert!(!updated.is_deleted);
     }
 
     #[test]
@@ -276,7 +232,6 @@ mod tests {
         assert_eq!(memory.namespace, "user:alice:preferences");
         assert_eq!(memory.key, "theme");
         assert_eq!(memory.memory_type, MemoryType::Semantic);
-        assert_eq!(memory.version, 1);
         assert!(!memory.is_deleted());
         assert_eq!(memory.created_by, "alice");
         assert_eq!(memory.updated_by, "alice");

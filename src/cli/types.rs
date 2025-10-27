@@ -144,19 +144,6 @@ pub enum MemoryCommands {
 
         /// Memory key
         key: String,
-
-        /// Specific version to show (optional, defaults to latest)
-        #[arg(short, long)]
-        version: Option<u32>,
-    },
-
-    /// Show version history for a memory
-    Versions {
-        /// Memory namespace
-        namespace: String,
-
-        /// Memory key
-        key: String,
     },
 
     /// Count memories matching criteria
