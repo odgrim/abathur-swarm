@@ -373,6 +373,7 @@ Spawn task-planner to decompose into executable tasks.
         "priority": 7,
         "agent_type": "technical-requirements-specialist",
         "prerequisite_task_ids": [current_task_id],
+        "parent_task_id": current_task_id,  # Track lineage: this agent spawned the tech-requirements-specialist task
         "metadata": {
             "architecture_task_id": current_task_id,
             "requirements_task_id": requirements_task_id,
@@ -477,6 +478,7 @@ Spawn task-planner to decompose into executable tasks for THIS subproject.
             "priority": 8 - subproject['priority'],  # Higher priority for foundational subprojects
             "agent_type": "technical-requirements-specialist",
             "prerequisite_task_ids": prerequisites,
+            "parent_task_id": current_task_id,  # Track lineage: this agent spawned the tech-requirements-specialist task
             "metadata": {
                 "architecture_task_id": current_task_id,
                 "requirements_task_id": requirements_task_id,
@@ -592,13 +594,13 @@ Spawn task-planner to decompose into executable tasks for THIS subproject.
       "integration_strategy": "How components communicate"
     },
     "technology_stack": {
-      "languages": ["Python", "TypeScript"],
-      "frameworks": ["FastAPI", "React"],
+      "languages": ["Rust", "TypeScript"],
+      "frameworks": ["Axum", "React"],
       "databases": ["PostgreSQL", "Redis"],
       "infrastructure": ["Docker", "AWS"],
       "rationale": {
-        "Python": "Why chosen over alternatives",
-        "FastAPI": "Why chosen over alternatives"
+        "Rust": "Why chosen over alternatives",
+        "Axum": "Why chosen over alternatives"
       }
     },
     "decomposition_decision": {

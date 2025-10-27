@@ -70,13 +70,13 @@ When invoked, you must follow these phases sequentially:
 
    ```bash
    # Unit tests
-   pytest tests/unit -v --cov --cov-report=json --tb=short
+   cargo test --lib --bins -- --nocapture
 
    # Integration tests
-   pytest tests/integration -v --tb=short
+   cargo test --test '*' -- --nocapture
 
-   # Performance tests (if applicable)
-   pytest tests/performance -v --tb=short
+   # All tests
+   cargo test --all-targets --all-features
    ```
 
 2. **Capture Baseline Metrics**
@@ -114,15 +114,15 @@ When invoked, you must follow these phases sequentially:
 2. **Build File Change Matrix**
    Create a matrix showing which files are modified by each branch:
    ```
-   Branch A: file1.py, file2.py, file3.py
-   Branch B: file2.py, file4.py
-   Branch C: file1.py, file5.py
+   Branch A: file1.rs, file2.rs, file3.rs
+   Branch B: file2.rs, file4.rs
+   Branch C: file1.rs, file5.rs
    ```
 
 3. **Detect Potential Conflicts**
    Identify branch pairs that modify the same files:
-   - High risk: Branches A & C (both modify file1.py)
-   - Medium risk: Branches A & B (both modify file2.py)
+   - High risk: Branches A & C (both modify file1.rs)
+   - Medium risk: Branches A & B (both modify file2.rs)
    - Low risk: Branches B & others (minimal overlap)
 
 4. **Build Dependency Graph**
@@ -153,16 +153,14 @@ When invoked, you must follow these phases sequentially:
    # Check for uncommitted changes
    git status --porcelain
 
-   # Activate worktree's isolated virtualenv
-   if [ -d "venv" ]; then
-       source venv/bin/activate
-       echo "✓ Virtualenv activated for worktree"
-   else
-       echo "⚠ WARNING: No virtualenv found in worktree - tests may use wrong environment"
+   # Verify Rust project builds
+   cargo build
+   if [ $? -ne 0 ]; then
+       echo "⚠ WARNING: Worktree does not compile - implementation incomplete"
    fi
 
    # Run tests in worktree
-   pytest tests/ -v --tb=short
+   cargo test --all-targets --all-features
    ```
 
 2. **Classification**
@@ -180,11 +178,11 @@ When invoked, you must follow these phases sequentially:
    ...
 
    Requires Attention (2):
-   - task/feature-x (DIRTY: uncommitted changes in src/main.py)
+   - task/feature-x (DIRTY: uncommitted changes in src/main.rs)
    - task/feature-y (FAILING: 3 tests fail)
 
    High Risk (1):
-   - task/feature-z (CONFLICT: overlaps with task/feature-a in core.py)
+   - task/feature-z (CONFLICT: overlaps with task/feature-a in core.rs)
    ```
 
 4. **Block on Issues**
@@ -238,7 +236,7 @@ When invoked, you must follow these phases sequentially:
    **Step 2d: Post-Merge Test Validation**
    ```bash
    # Run full test suite
-   pytest tests/ -v --cov --cov-report=json --tb=short
+   cargo test --all-targets --all-features
    ```
 
    **If tests pass:**
@@ -265,19 +263,19 @@ When invoked, you must follow these phases sequentially:
    For each conflicting file:
    ```bash
    # Show conflict markers
-   git diff file.py
+   git diff file.rs
 
    # Show three-way diff
-   git show :1:file.py  # common ancestor
-   git show :2:file.py  # current branch (ours)
-   git show :3:file.py  # incoming branch (theirs)
+   git show :1:file.rs  # common ancestor
+   git show :2:file.rs  # current branch (ours)
+   git show :3:file.rs  # incoming branch (theirs)
    ```
 
    **Step 3c: Automated Resolution (Simple Cases)**
 
    **Whitespace-only conflicts:**
    - If one side has only whitespace changes, accept the other side
-   - Use `git checkout --ours file.py` or `git checkout --theirs file.py`
+   - Use `git checkout --ours file.rs` or `git checkout --theirs file.rs`
 
    **Non-overlapping line changes:**
    - If changes are in different line ranges, merge both automatically
@@ -308,7 +306,7 @@ When invoked, you must follow these phases sequentially:
    git commit --no-edit
 
    # Validate tests pass
-   pytest tests/ -v --tb=short
+   cargo test --all-targets --all-features
    ```
 
 ### Phase 6: Post-Merge Validation
@@ -316,17 +314,17 @@ When invoked, you must follow these phases sequentially:
 1. **Run Comprehensive Test Suite**
    Execute all test categories:
    ```bash
-   # Unit tests with coverage
-   pytest tests/unit -v --cov --cov-report=json --cov-report=term
+   # Unit tests
+   cargo test --lib --bins
 
    # Integration tests
-   pytest tests/integration -v --tb=short
+   cargo test --test '*'
 
-   # Performance tests
-   pytest tests/performance -v --tb=short
+   # All tests with verbose output
+   cargo test --all-targets --all-features -- --nocapture
 
-   # End-to-end tests (if applicable)
-   pytest tests/e2e -v --tb=short
+   # Benchmarks (if applicable)
+   cargo bench
    ```
 
 2. **Compare Against Baseline**
@@ -480,7 +478,7 @@ When invoked, you must follow these phases sequentially:
    ## Conflicts Encountered
 
    ### task/feature-b
-   - **File:** src/core.py
+   - **File:** src/core.rs
    - **Type:** Overlapping code changes
    - **Resolution:** Automated (merged both changes)
    - **Outcome:** Tests passed

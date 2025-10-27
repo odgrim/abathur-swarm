@@ -125,7 +125,7 @@ When invoked, you must follow these steps:
    - Identify resource constraints (time, budget, team size)
    - Identify external constraints (compliance, regulations, APIs)
    - Document any hard vs. soft constraints
-   - **Infer implicit constraints** from project context (e.g., if project uses Python, assume Python is required)
+   - **Infer implicit constraints** from project context (e.g., if project uses Rust, assume Rust toolchain is required)
 
 4. **Success Criteria Definition**
    - Define measurable success criteria

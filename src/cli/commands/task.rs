@@ -24,8 +24,19 @@ pub async fn handle_submit(
         resolved_deps.push(dep_id);
     }
 
+    // Generate summary from description if not provided
+    // Take first 140 characters (max summary length)
+    let task_summary = summary.unwrap_or_else(|| {
+        if description.len() <= 140 {
+            description.clone()
+        } else {
+            format!("{}...", &description[..137])
+        }
+    });
+
     let task_id = service
         .submit_task(
+            task_summary.clone(),
             description.clone(),
             agent_type.clone(),
             priority,
@@ -35,24 +46,20 @@ pub async fn handle_submit(
         .context("Failed to submit task")?;
 
     if json {
-        let mut output = serde_json::json!({
+        let output = serde_json::json!({
             "task_id": task_id,
+            "summary": task_summary,
             "description": description,
             "agent_type": agent_type,
             "priority": priority,
             "dependencies": resolved_deps,
         });
-        if let Some(summary_text) = &summary {
-            output["summary"] = serde_json::json!(summary_text);
-        }
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         println!("Task submitted successfully!");
         println!("  Task ID: {}", task_id);
+        println!("  Summary: {}", task_summary);
         println!("  Description: {}", description);
-        if let Some(summary_text) = &summary {
-            println!("  Summary: {}", summary_text);
-        }
         println!("  Agent type: {}", agent_type);
         println!("  Priority: {}", priority);
         if !dependencies.is_empty() {
@@ -116,6 +123,7 @@ pub async fn handle_show(service: &TaskQueueServiceAdapter, task_id_prefix: Stri
         println!("Task Details:");
         println!("  ID: {}", task.id);
         println!("  Status: {}", task.status);
+        println!("  Summary: {}", task.summary);
         println!("  Description: {}", task.description);
         println!("  Agent type: {}", task.agent_type);
         println!(

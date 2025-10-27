@@ -25,8 +25,8 @@ async fn main() -> Result<()> {
 
     // For init command, handle separately without database
     if matches!(cli.command, Commands::Init { .. }) {
-        if let Commands::Init { force } = cli.command {
-            init::handle_init(force, cli.json).await?;
+        if let Commands::Init { force, template_repo, skip_clone } = cli.command {
+            init::handle_init(force, &template_repo, skip_clone, cli.json).await?;
         }
         return Ok(());
     }

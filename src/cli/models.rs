@@ -6,6 +6,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: Uuid,
+    pub summary: String,
     pub description: String,
     pub status: TaskStatus,
     pub agent_type: String,

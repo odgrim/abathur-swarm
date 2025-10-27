@@ -40,9 +40,9 @@ if not worktree_path or not task_branch or not feature_branch:
     raise Exception("Missing required validation context: worktree_path, task_branch, or feature_branch")
 ```
 
-### Step 2: Navigate to Worktree and Activate Virtualenv
+### Step 2: Navigate to Worktree and Verify Rust Project
 
-Change to the worktree directory and activate its isolated Python environment:
+Change to the worktree directory and verify the Rust project is ready:
 
 ```bash
 # Navigate to worktree
@@ -60,70 +60,61 @@ git status --porcelain
 - Enqueue remediation task asking implementation agent to commit changes
 - Exit validation
 
-**Step 2a: Activate Worktree's Virtualenv**
+**Step 2a: Verify Rust Project Builds**
 
-**CRITICAL**: You MUST activate the worktree's isolated virtualenv before running any tests to prevent environment pollution:
+**CRITICAL**: You MUST verify the Rust project compiles before running tests:
 
 ```bash
-# Check if virtualenv exists in worktree
-if [ -d "{worktree_path}/venv" ]; then
-    # Activate worktree-specific virtualenv
-    source {worktree_path}/venv/bin/activate
+# Build the project to ensure it compiles
+cargo build
 
-    # Verify we're using worktree's Python
-    which python
-    which pytest
-else
-    # Virtualenv missing - report error
-    echo "ERROR: Virtualenv not found at {worktree_path}/venv"
-    echo "Implementation agent did not create isolated virtualenv"
+# Capture build exit code
+build_exit_code=$?
+
+if [ $build_exit_code -ne 0 ]; then
+    echo "ERROR: Project does not compile"
+    echo "Implementation agent must fix compilation errors"
     exit 1
 fi
 ```
 
-**If virtualenv is missing:**
-- Report error: "Worktree missing isolated virtualenv at {worktree_path}/venv"
-- Enqueue remediation task asking implementation agent to create virtualenv
+**If build fails:**
+- Report error: "Worktree has compilation errors - implementation task did not produce working code"
+- Enqueue remediation task asking implementation agent to fix compilation errors
 - Exit validation
 
 **Why this is critical:**
-- Without virtualenv activation, tests run in the wrong Python environment
-- Dependencies from main worktree pollute test execution
-- Tests may pass/fail incorrectly due to wrong package versions
-- Causes dependency conflicts across worktrees
+- Rust projects must compile before tests can run
+- Build errors indicate incomplete or broken implementation
+- Dependencies must resolve correctly
+- All type checking happens at compile time
 
 ### Step 3: Run Comprehensive Test Suite
 
 Execute all relevant tests for the completed work:
 
-**Step 3a: Run Type Checking**
+**Step 3a: Run Linter (Clippy)**
 ```bash
-# Run mypy type checking (if Python project)
-mypy src/ --strict --show-error-codes --pretty
+# Run clippy linter with all warnings as errors
+cargo clippy --all-targets --all-features -- -D warnings
 
 # Capture exit code and output
-type_check_exit_code=$?
+clippy_exit_code=$?
 ```
 
-**Step 3b: Run Linters**
+**Step 3b: Run Formatter Check**
 ```bash
-# Run configured linters (e.g., ruff for Python)
-ruff check src/ tests/
-
-# Run formatter check
-black --check src/ tests/
-
-# Run import sorting check
-isort --check-only src/ tests/
+# Run rustfmt to verify formatting
+cargo fmt --all -- --check
 
 # Capture exit codes
-linter_exit_code=$?
+fmt_exit_code=$?
 ```
 
 **Step 3c: Run Unit Tests**
 ```bash
-# Run unit tests with coverage
-pytest tests/unit -v --cov=src --cov-report=term-missing --cov-report=json --tb=short
+# Run unit tests with output
+cargo test --lib --bins -- --nocapture
 
 # Capture results
 unit_test_exit_code=$?
@@ -132,7 +123,7 @@ unit_test_exit_code=$?
 **Step 3d: Run Integration Tests (if applicable)**
 ```bash
 # Run integration tests
-pytest tests/integration -v --tb=short
+cargo test --test '*' -- --nocapture
 
 # Capture results
 integration_test_exit_code=$?
@@ -142,39 +133,36 @@ integration_test_exit_code=$?
 
 Evaluate all test outputs to determine validation status:
 
-```python
-validation_results = {
-    "type_checking": {
-        "passed": type_check_exit_code == 0,
-        "exit_code": type_check_exit_code,
-        "errors": parse_mypy_output(mypy_output)
+```bash
+# Analyze all exit codes to determine validation status
+validation_results_json=$(cat <<EOF
+{
+    "clippy": {
+        "passed": $([ $clippy_exit_code -eq 0 ] && echo "true" || echo "false"),
+        "exit_code": $clippy_exit_code
     },
-    "linting": {
-        "passed": linter_exit_code == 0,
-        "exit_code": linter_exit_code,
-        "violations": parse_linter_output(linter_output)
+    "formatting": {
+        "passed": $([ $fmt_exit_code -eq 0 ] && echo "true" || echo "false"),
+        "exit_code": $fmt_exit_code
     },
     "unit_tests": {
-        "passed": unit_test_exit_code == 0,
-        "exit_code": unit_test_exit_code,
-        "total": count_total_tests(pytest_output),
-        "failures": count_failed_tests(pytest_output),
-        "coverage": extract_coverage_percentage(coverage_json)
+        "passed": $([ $unit_test_exit_code -eq 0 ] && echo "true" || echo "false"),
+        "exit_code": $unit_test_exit_code
     },
     "integration_tests": {
-        "passed": integration_test_exit_code == 0,
-        "exit_code": integration_test_exit_code,
-        "failures": count_failed_tests(integration_output)
+        "passed": $([ $integration_test_exit_code -eq 0 ] && echo "true" || echo "false"),
+        "exit_code": $integration_test_exit_code
     }
 }
+EOF
+)
 
 # Determine overall validation status
-all_passed = (
-    validation_results["type_checking"]["passed"] and
-    validation_results["linting"]["passed"] and
-    validation_results["unit_tests"]["passed"] and
-    validation_results["integration_tests"]["passed"]
-)
+all_passed=true
+[ $clippy_exit_code -ne 0 ] && all_passed=false
+[ $fmt_exit_code -ne 0 ] && all_passed=false
+[ $unit_test_exit_code -ne 0 ] && all_passed=false
+[ $integration_test_exit_code -ne 0 ] && all_passed=false
 ```
 
 ### Step 5a: Route to Remediation (If Tests Fail)
@@ -199,46 +187,44 @@ The implementation in worktree `{worktree_path}` has failing validation checks a
 
 ## Validation Results
 
-### Type Checking: {"PASS" if validation_results["type_checking"]["passed"] else "FAIL"}
-{format_type_errors(validation_results["type_checking"]["errors"]) if not validation_results["type_checking"]["passed"] else "No errors"}
+### Clippy Linting: [PASS/FAIL based on clippy_exit_code]
+[Output from cargo clippy showing warnings/errors if any]
 
-### Linting: {"PASS" if validation_results["linting"]["passed"] else "FAIL"}
-{format_linting_violations(validation_results["linting"]["violations"]) if not validation_results["linting"]["passed"] else "No violations"}
+### Code Formatting: [PASS/FAIL based on fmt_exit_code]
+[Output from cargo fmt --check showing files needing formatting if any]
 
-### Unit Tests: {"PASS" if validation_results["unit_tests"]["passed"] else "FAIL"}
-- Total Tests: {validation_results["unit_tests"]["total"]}
-- Failures: {validation_results["unit_tests"]["failures"]}
-- Coverage: {validation_results["unit_tests"]["coverage"]}%
+### Unit Tests: [PASS/FAIL based on unit_test_exit_code]
+[Output from cargo test showing test results]
 
-{format_test_failures(validation_results["unit_tests"]) if not validation_results["unit_tests"]["passed"] else "All tests passed"}
-
-### Integration Tests: {"PASS" if validation_results["integration_tests"]["passed"] else "FAIL"}
-{format_test_failures(validation_results["integration_tests"]) if not validation_results["integration_tests"]["passed"] else "All tests passed"}
+### Integration Tests: [PASS/FAIL based on integration_test_exit_code]
+[Output from cargo test showing integration test results]
 
 ## Required Actions
 
 You MUST fix the following issues in the worktree:
 
-1. **Type Errors**: {len(validation_results["type_checking"]["errors"])} errors to fix
-2. **Linter Violations**: {len(validation_results["linting"]["violations"])} violations to fix
-3. **Test Failures**: {validation_results["unit_tests"]["failures"]} unit test failures to fix
-4. **Integration Failures**: {validation_results["integration_tests"]["failures"]} integration test failures to fix
+1. **Clippy Warnings**: Fix all clippy warnings/errors
+2. **Format Issues**: Run `cargo fmt --all` to fix formatting
+3. **Test Failures**: Fix failing unit tests
+4. **Integration Failures**: Fix failing integration tests
 
 ## Instructions
 
 1. Navigate to worktree: `cd {worktree_path}`
 2. Fix all errors listed above
-3. Run tests locally to verify: `pytest tests/ -v`
-4. Commit your fixes to the task branch: `git commit -am "Fix validation errors"`
-5. Mark task as complete
+3. Run tests locally to verify: `cargo test`
+4. Run clippy to verify: `cargo clippy --all-targets --all-features`
+5. Format code: `cargo fmt --all`
+6. Commit your fixes to the task branch: `git commit -am "Fix validation errors"`
+7. Mark task as complete
 
 ## Success Criteria
 
-- All type checking passes (mypy returns exit code 0)
-- All linters pass (ruff, black, isort return exit code 0)
-- All unit tests pass (pytest returns exit code 0)
+- All clippy checks pass (cargo clippy returns exit code 0)
+- Code is properly formatted (cargo fmt --check returns exit code 0)
+- All unit tests pass (cargo test returns exit code 0)
 - All integration tests pass
-- Code coverage meets minimum threshold
+- Code compiles without warnings
 
 After you fix these issues, validation will run again automatically.
 """
@@ -278,7 +264,7 @@ Run validation again after remediation fixes have been applied.
 
 ## Instructions
 1. Navigate to worktree
-2. Run full test suite (mypy, linters, pytest)
+2. Run full test suite (cargo clippy, cargo fmt --check, cargo test)
 3. If tests pass: enqueue merge task
 4. If tests fail: enqueue another remediation task
 
@@ -322,11 +308,11 @@ if all_passed:
 - **Validation Status**: PASSED
 
 ## Validation Results Summary
-- Type Checking: PASS
-- Linting: PASS
-- Unit Tests: {validation_results["unit_tests"]["total"]} tests passed
+- Clippy Linting: PASS
+- Code Formatting: PASS
+- Unit Tests: All tests passed
 - Integration Tests: PASS
-- Code Coverage: {validation_results["unit_tests"]["coverage"]}%
+- Build Status: Success
 
 ## Merge Instructions
 
@@ -348,10 +334,10 @@ git pull --ff-only
 git merge --no-ff {task_branch} -m "Merge {task_branch} into {feature_branch}
 
 Validation passed:
-- Type checking: PASS
-- Linters: PASS
-- Tests: {validation_results["unit_tests"]["total"]} passed
-- Coverage: {validation_results["unit_tests"]["coverage"]}%"
+- Clippy linting: PASS
+- Code formatting: PASS
+- All tests: PASS
+- Build: SUCCESS"
 ```
 
 ### Step 3: Handle Merge Conflicts (If Any)
@@ -359,7 +345,7 @@ Validation passed:
 If merge conflicts occur:
 1. List conflicting files: `git diff --name-only --diff-filter=U`
 2. Resolve conflicts manually
-3. Run tests on feature branch to verify merge: `pytest tests/ -v`
+3. Run tests on feature branch to verify merge: `cargo test`
 4. Complete merge: `git commit`
 
 ### Step 4: Validate Merge on Feature Branch
@@ -367,9 +353,9 @@ If merge conflicts occur:
 After merge, run tests on the feature branch to ensure integration didn't break anything:
 ```bash
 # Run full test suite on feature branch
-pytest tests/ -v --cov=src --cov-report=term-missing
-mypy src/ --strict
-ruff check src/ tests/
+cargo test --all-targets --all-features
+cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
 ```
 
 ### Step 5: Clean Up Worktree
@@ -434,8 +420,8 @@ memory_add({
         "worktree_path": worktree_path,
         "task_branch": task_branch,
         "feature_branch": feature_branch,
-        "type_checking": validation_results["type_checking"],
-        "linting": validation_results["linting"],
+        "clippy": validation_results["clippy"],
+        "formatting": validation_results["formatting"],
         "unit_tests": validation_results["unit_tests"],
         "integration_tests": validation_results["integration_tests"],
         "next_action": "merge" if all_passed else "remediation"
@@ -480,22 +466,21 @@ memory_add({
 ## Configuration
 
 **Test Commands (Customize per project):**
-- Type checking: `mypy src/ --strict`
-- Linting: `ruff check src/ tests/`
-- Formatting: `black --check src/ tests/`
-- Import sorting: `isort --check-only src/ tests/`
-- Unit tests: `pytest tests/unit -v --cov=src`
-- Integration tests: `pytest tests/integration -v`
+- Linting: `cargo clippy --all-targets --all-features -- -D warnings`
+- Formatting: `cargo fmt --all -- --check`
+- Unit tests: `cargo test --lib --bins`
+- Integration tests: `cargo test --test '*'`
+- All tests: `cargo test --all-targets --all-features`
 
 **Thresholds:**
-- Minimum code coverage: 80%
-- Linter violations: 0
-- Type errors: 0
+- Clippy warnings: 0
+- Format violations: 0
+- Compilation errors: 0
 - Test failures: 0
 
 **Timeouts:**
-- Type checking: 300 seconds
-- Linting: 120 seconds
+- Clippy: 300 seconds
+- Formatting check: 60 seconds
 - Unit tests: 600 seconds
 - Integration tests: 900 seconds
 
@@ -510,19 +495,17 @@ memory_add({
   },
   "deliverables": {
     "validation_results": {
-      "type_checking": {
+      "clippy": {
         "passed": true,
-        "errors": []
+        "warnings": []
       },
-      "linting": {
+      "formatting": {
         "passed": true,
         "violations": []
       },
       "unit_tests": {
         "passed": true,
-        "total": 150,
-        "failures": 0,
-        "coverage": 87.5
+        "failures": 0
       },
       "integration_tests": {
         "passed": true,

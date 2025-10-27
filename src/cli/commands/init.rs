@@ -4,12 +4,14 @@
 //! - Creating configuration directory (.abathur)
 //! - Copying default config template
 //! - Running database migrations
+//! - Cloning template repository (if needed)
 //! - Copying agent templates from template directory
 
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 /// Default configuration template content
 const DEFAULT_CONFIG_TEMPLATE: &str = r#"# Abathur Configuration
@@ -186,6 +188,54 @@ async fn run_migrations(force: bool) -> Result<()> {
     Ok(())
 }
 
+/// Clone template repository from GitHub
+fn clone_template_repo(repo_url: &str, force: bool) -> Result<()> {
+    let current_dir = std::env::current_dir()
+        .context("Failed to get current directory")?;
+
+    let template_dir = current_dir.join("template");
+
+    // Check if template directory already exists
+    if template_dir.exists() {
+        if force {
+            println!("Removing existing template directory...");
+            fs::remove_dir_all(&template_dir)
+                .context("Failed to remove existing template directory")?;
+        } else {
+            println!("✓ Template directory already exists: {}", template_dir.display());
+            return Ok(());
+        }
+    }
+
+    println!("Cloning template repository from {}...", repo_url);
+
+    // Clone the repository using git command
+    let output = Command::new("git")
+        .arg("clone")
+        .arg("--depth")
+        .arg("1") // Shallow clone to save bandwidth
+        .arg(repo_url)
+        .arg(&template_dir)
+        .output()
+        .context("Failed to execute git clone command. Is git installed?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to clone template repository: {}", stderr);
+    }
+
+    // Remove .git directory from cloned template
+    let git_dir = template_dir.join(".git");
+    if git_dir.exists() {
+        fs::remove_dir_all(&git_dir)
+            .context("Failed to remove .git directory from template")?;
+    }
+
+    println!("✓ Cloned template repository to {}", template_dir.display());
+
+    Ok(())
+}
+
 /// Copy agent templates from template directory to .abathur/agents
 fn copy_agent_templates(force: bool) -> Result<()> {
     let current_dir = std::env::current_dir()
@@ -240,7 +290,7 @@ fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf, force: bool) -> Result<()> {
 }
 
 /// Handle init command
-pub async fn handle_init(force: bool, json_output: bool) -> Result<()> {
+pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, json_output: bool) -> Result<()> {
     if json_output {
         let output = json!({
             "status": "initializing",
@@ -280,7 +330,14 @@ pub async fn handle_init(force: bool, json_output: bool) -> Result<()> {
     // Step 3: Run migrations
     run_migrations(force).await?;
 
-    // Step 4: Copy agent templates
+    // Step 4: Clone template repository (if not skipped)
+    if !skip_clone {
+        clone_template_repo(template_repo, force)?;
+    } else {
+        println!("⚠ Skipping template repository clone");
+    }
+
+    // Step 5: Copy agent templates
     copy_agent_templates(force)?;
 
     if json_output {

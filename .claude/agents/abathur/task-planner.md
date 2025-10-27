@@ -165,7 +165,7 @@ When invoked, you must follow these steps:
 4. **Agent Needs Analysis and Creation Planning**
    **CRITICAL**: You must first determine which agents are needed and CREATE missing agents before assigning implementation tasks.
 
-   **DO NOT use generic agent names like "python-backend-developer" or "general-purpose".**
+   **DO NOT use generic agent names like "rust-backend-developer" or "general-purpose".**
 
    **IMPORTANT**: The MCP task_enqueue tool will REJECT tasks with generic agent types. You MUST use valid, hyperspecialized agent types.
 
@@ -196,7 +196,7 @@ When invoked, you must follow these steps:
    **When to create worktrees:**
    - For ALL implementation tasks that will modify source code files (not for agent-creation tasks)
    - For tasks assigned to implementation agents (domain-model-specialist, api-specialist, testing-specialist, etc.)
-   - For tasks that will create or edit .py, .js, .ts, .java, etc. files
+   - For tasks that will create or edit .rs, .toml, .js, .ts, etc. files
 
    **When NOT to create worktrees:**
    - Agent-creation tasks (they only create .md files in .claude/agents/)
@@ -204,10 +204,8 @@ When invoked, you must follow these steps:
    - Documentation-only tasks
 
    **Worktree creation process with validation:**
-   ```python
-   import subprocess
-   import os
-   from datetime import datetime
+   ```bash
+   # Rust project - no virtualenv needed, just worktree isolation
 
    # CRITICAL: Extract feature_branch from task metadata or description
    # The technical-requirements-specialist passes this in metadata
@@ -249,35 +247,21 @@ When invoked, you must follow these steps:
            print(f"✗ ERROR: Worktree directory not found at: {worktree_path}")
            raise Exception(f"Worktree creation failed - directory missing: {worktree_path}")
 
-       # 🚨 CRITICAL: Create isolated virtualenv in worktree
-       # This prevents dependency conflicts across worktrees
-       print(f"Creating isolated virtualenv in {worktree_path}...")
-       venv_result = Bash(
-           command=f'python3 -m venv "{worktree_path}/venv"',
-           description=f"Create isolated virtualenv in worktree {task_id}"
+       # 🚨 CRITICAL: Build Rust project in worktree to verify setup
+       # This ensures dependencies are resolved and project compiles
+       print(f"Building Rust project in {worktree_path}...")
+       build_result = Bash(
+           command=f'cd "{worktree_path}" && cargo build',
+           description=f"Build Rust project in worktree {task_id}",
+           timeout=300000  # 5 minutes for dependency download and build
        )
 
-       if venv_result.exit_code == 0:
-           print(f"✓ Virtualenv created at: {worktree_path}/venv")
-
-           # Install dependencies in the isolated virtualenv
-           print(f"Installing dependencies in worktree virtualenv...")
-           install_result = Bash(
-               command=f'cd "{worktree_path}" && source venv/bin/activate && pip install --upgrade pip && poetry install',
-               description=f"Install dependencies in worktree {task_id} virtualenv",
-               timeout=300000  # 5 minutes for dependency installation
-           )
-
-           if install_result.exit_code == 0:
-               print(f"✓ Dependencies installed in worktree virtualenv")
-           else:
-               print(f"⚠ WARNING: Dependency installation failed (exit code {install_result.exit_code})")
-               print(f"Error output: {install_result.stderr}")
-               print(f"Implementation agent will need to install dependencies manually")
+       if build_result.exit_code == 0:
+           print(f"✓ Rust project built successfully in worktree")
        else:
-           print(f"✗ ERROR: Virtualenv creation failed (exit code {venv_result.exit_code})")
-           print(f"Error output: {venv_result.stderr}")
-           raise Exception(f"Failed to create virtualenv for worktree {task_id}")
+           print(f"⚠ WARNING: Cargo build failed (exit code {build_result.exit_code})")
+           print(f"Error output: {build_result.stderr}")
+           print(f"Implementation agent will need to fix build errors")
 
    else:
        print(f"✗ ERROR: git worktree add failed with exit code {result.exit_code}")
@@ -384,35 +368,35 @@ When invoked, you must follow these steps:
    - Timestamps use seconds precision (no milliseconds) for cleaner branch names
 
    Example suggested_agents structure:
-   ```python
-   suggested_agents = {
+   ```json
+   {
        "domain_models": {
-           "suggested_agent_type": "python-domain-model-specialist",
-           "expertise": "Python domain model implementation following Clean Architecture",
+           "suggested_agent_type": "rust-domain-models-specialist",
+           "expertise": "Rust domain model implementation following Clean Architecture",
            "responsibilities": ["Implement domain models", "Write unit tests", "Domain logic"],
            "tools_needed": ["Read", "Write", "Bash"],
-           "task_types": ["domain model classes", "value objects", "domain services"]
+           "task_types": ["domain model structs", "value objects", "domain services"]
        },
        "repositories": {
-           "suggested_agent_type": "python-repository-specialist",
-           "expertise": "Python repository pattern implementation",
+           "suggested_agent_type": "rust-repository-specialist",
+           "expertise": "Rust repository pattern implementation",
            "responsibilities": ["Implement repository pattern", "Database integration"],
            "tools_needed": ["Read", "Write", "Bash"],
-           "task_types": ["repository classes", "database queries", "ORM mappings"]
+           "task_types": ["repository traits", "database queries", "sqlx implementations"]
        },
        "apis": {
-           "suggested_agent_type": "python-api-implementation-specialist",
-           "expertise": "Python API implementation with FastAPI/Flask",
+           "suggested_agent_type": "rust-api-implementation-specialist",
+           "expertise": "Rust API implementation with Axum/Actix",
            "responsibilities": ["Implement API endpoints", "Request/response handling"],
            "tools_needed": ["Read", "Write", "Bash"],
            "task_types": ["API endpoints", "route handlers", "middleware"]
        },
        "testing": {
-           "suggested_agent_type": "python-testing-specialist",
-           "expertise": "Python testing with pytest",
+           "suggested_agent_type": "rust-testing-specialist",
+           "expertise": "Rust testing with cargo test",
            "responsibilities": ["Write unit tests", "Write integration tests"],
            "tools_needed": ["Read", "Write", "Bash"],
-           "task_types": ["unit tests", "integration tests", "test fixtures"]
+           "task_types": ["unit tests", "integration tests", "test modules"]
        }
    }
    ```
@@ -428,11 +412,11 @@ When invoked, you must follow these steps:
    **IMPORTANT**: If step 4 identified missing agents, you MUST create them BEFORE creating implementation tasks.
 
    For each missing agent, spawn an agent-creator task with rich context:
-   ```python
+   ```bash
    # CRITICAL: Use the exact suggested_agent_type as the agent name
    # This ensures the agent-creator creates a file with the exact name
    # that will be used in implementation task assignments
-   expected_agent_name = suggested_agent_type  # e.g., "python-cli-typer-specialist"
+   expected_agent_name = suggested_agent_type  # e.g., "rust-clap-cli-specialist"
 
    agent_creation_context = f"""
 # Create Specialized Agent: {expected_agent_name}
@@ -512,27 +496,26 @@ After creating the agent file, verify:
    3. Add the agent-creation task ID to prerequisites if the agent had to be created
    4. Use the exact hyperspecialized agent name (either existing or newly created)
    5. **🚨 Include worktree information for implementation tasks (from step 5) 🚨**
-   6. Provide comprehensive task context
+   6. **🚨 Set parent_task_id to YOUR current task ID to track lineage (which task spawned which) 🚨**
+   7. Provide comprehensive task context
 
-   This ensures implementation tasks wait for their required agents to be created first and work in isolated worktrees.
+   This ensures implementation tasks wait for their required agents to be created first, work in isolated worktrees, and track lineage relationships.
 
    **BAD Example (DO NOT DO THIS):**
-   ```python
-   # ❌ BAD: Insufficient context AND generic agent type
-   task_enqueue({
-       "description": "Implement TaskQueue class",
-       "agent_type": "python-backend-developer",  # ❌ Generic agent type!
+   ```json
+   {
+       "description": "Implement TaskQueue struct",
+       "agent_type": "rust-backend-developer",
        "source": "task-planner"
-   })
-   # The implementation agent has no idea what methods to implement,
-   # what the requirements are, or how to verify success!
+   }
    ```
+   The implementation agent has no idea what methods to implement, what the requirements are, or how to verify success!
 
    **GOOD Example (DO THIS):**
-   ```python
-   # ✅ GOOD: Comprehensive context AND hyperspecialized agent with agent-creation dependency
+   ```bash
+   # Comprehensive context AND hyperspecialized agent with agent-creation dependency
    task_id = "task-001-domain-model"
-   task_description = f"""
+   task_description = """
 # Implement TaskQueue Domain Model Class
 
 ## Context
@@ -564,40 +547,40 @@ memory_get({{
 ```
 
 ## Implementation Requirements
-Create the TaskQueue domain model class at: {worktree_info[task_id]['worktree_path']}/src/abathur/domain/models/queue.py
+Create the TaskQueue domain model struct at: {worktree_info[task_id]['worktree_path']}/src/domain/models/queue.rs
 
-Required attributes:
-- queue_id: str
-- tasks: List[Task]
-- max_priority: int
-- created_at: datetime
+Required fields:
+- queue_id: String
+- tasks: Vec<Task>
+- max_priority: u8
+- created_at: DateTime<Utc>
 
 Required methods:
-- enqueue(task: Task) -> None
-- dequeue() -> Optional[Task]
-- peek() -> Optional[Task]
-- is_empty() -> bool
+- enqueue(&mut self, task: Task)
+- dequeue(&mut self) -> Option<Task>
+- peek(&self) -> Option<&Task>
+- is_empty(&self) -> bool
 
 ## Dependencies
 - Depends on: TASK-000 (Task domain model must exist first)
 - Depended on by: TASK-002 (QueueRepository needs this model)
 
 ## Acceptance Criteria
-1. Class follows Clean Architecture (no infrastructure dependencies)
-2. All methods have type hints and docstrings
-3. Methods raise appropriate domain exceptions
+1. Struct follows Clean Architecture (no infrastructure dependencies)
+2. All methods have proper documentation comments
+3. Methods return appropriate Result types for error handling
 4. Unit tests achieve >90% coverage
-5. Passes mypy strict type checking
+5. Passes cargo clippy with no warnings
 
 ## Testing Requirements
-- Create test file: tests/unit/domain/models/test_queue.py
+- Create test module in: src/domain/models/queue.rs (use #[cfg(test)] mod tests)
 - Test all public methods
 - Test edge cases (empty queue, single item, etc.)
-- Test exception scenarios
+- Test error scenarios
 
 ## Success Criteria
-- All tests pass
-- Type checking passes
+- All tests pass (cargo test)
+- Linting passes (cargo clippy)
 - Code review approved
 - Documented in domain model docs
 
@@ -614,6 +597,10 @@ Required methods:
        # Agent had to be created - add agent-creation task as prerequisite
        prerequisites.append(agent_creation_task_ids["domain_models"])
 
+   # Get your current task ID to use as parent_task_id
+   # This creates the lineage tracking (spawning relationship)
+   current_task_id = get_current_task_id()  # Your task ID as the parent
+
    task_enqueue({
        "description": task_description,
        "source": "task-planner",
@@ -621,6 +608,7 @@ Required methods:
        "agent_type": domain_agent_type,  # ✅ Hyperspecialized agent!
        "estimated_duration_seconds": 1200,
        "prerequisite_task_ids": prerequisites,  # ✅ Includes agent-creation if needed!
+       "parent_task_id": current_task_id,  # ✅ CRITICAL: Record who spawned this task (lineage)!
        "input_data": {
            "worktree_path": worktree_info[task_id]['worktree_path'],
            "branch_name": worktree_info[task_id]['branch_name']
@@ -769,21 +757,21 @@ task_enqueue({{
 
    **Validation Task Requirements**:
    - Must depend on ALL implementation and testing tasks (use prerequisite_task_ids)
-   - Must run mypy type checking across the entire codebase
-   - Must run all configured linters (ruff, black, etc.)
-   - Must verify all tests pass (pytest with full coverage)
+   - Must run cargo clippy linting across the entire codebase
+   - Must run cargo fmt to verify formatting
+   - Must verify all tests pass (cargo test with coverage)
    - Must be the FINAL task before feature completion
-   - Should use python-testing-specialist or python-code-quality-specialist agent
+   - Should use rust-testing-specialist or rust-code-quality-specialist agent
 
    **Validation Task Template**:
-   ```python
+   ```bash
    # Collect all implementation task IDs to use as prerequisites
    all_implementation_task_ids = [
        task_id for task_id in created_task_ids
        if task_metadata[task_id].get("task_type") in ["implementation", "testing", "integration"]
    ]
 
-   validation_task_description = f"""
+   validation_task_description = """
 # Final Code Quality Validation
 
 ## Context
@@ -792,43 +780,42 @@ NO task can be marked as complete until this validation passes.
 
 ## Critical Responsibility
 Ensure all code quality checks pass before considering the feature complete:
-1. Run mypy type checking on entire codebase
-2. Run all linters (ruff, black, isort, etc.)
-3. Run full test suite with pytest
+1. Run cargo clippy linting on entire codebase
+2. Run cargo fmt to verify formatting
+3. Run full test suite with cargo test
 4. Verify test coverage meets minimum thresholds (>80%)
 5. Report any failures that need fixing
 
 ## Validation Checklist
 
-### Type Checking (mypy)
+### Linter Validation (clippy)
 ```bash
-# Run mypy on all source code
-mypy src/abathur --strict
+# Run clippy on all source code
+cargo clippy --all-targets --all-features -- -D warnings
 
-# Verify exit code is 0 (no type errors)
-# If failures exist, list all type errors with file:line references
+# Verify exit code is 0 (no clippy warnings/errors)
+# If failures exist, list all issues with file:line references
 ```
 
-**Success Criteria**: Zero mypy errors, all type hints valid
+**Success Criteria**: Zero clippy warnings, all code follows Rust best practices
 
-### Linter Validation
+### Format Validation
 ```bash
-# Run ruff linter
-ruff check src/ tests/
+# Run cargo fmt check (no changes needed)
+cargo fmt --all -- --check
 
-# Run black formatter check (no changes needed)
-black --check src/ tests/
-
-# Run isort import sorting check
-isort --check-only src/ tests/
+# Verify exit code is 0 (code is properly formatted)
 ```
 
-**Success Criteria**: Zero linter errors, code follows style guide
+**Success Criteria**: Zero formatting issues, code follows rustfmt style guide
 
 ### Test Validation
 ```bash
 # Run full test suite
-pytest tests/ -v --cov=src/abathur --cov-report=term-missing
+cargo test --all-targets --all-features
+
+# Run with coverage (using cargo-tarpaulin or similar)
+cargo tarpaulin --out Xml --output-dir coverage
 
 # Verify:
 # - All tests pass (exit code 0)
@@ -844,23 +831,23 @@ If ANY validation check fails:
 1. **DO NOT mark tasks as complete**
 2. Document all failures with specific error messages
 3. Create follow-up tasks to fix each category of failures:
-   - Type errors: Create task for python-code-editor-specialist to fix type hints
-   - Linter errors: Create task for python-code-editor-specialist to fix style issues
-   - Test failures: Create task for python-testing-specialist to fix failing tests
+   - Clippy warnings: Create task for rust-code-editor-specialist to fix linting issues
+   - Format errors: Create task for rust-code-editor-specialist to run cargo fmt
+   - Test failures: Create task for rust-testing-specialist to fix failing tests
 4. Report validation failures in task output
 5. Block feature completion until all fixes are implemented
 
 ## Success Criteria
-- mypy passes with zero errors
-- All linters pass with zero violations
+- cargo clippy passes with zero warnings
+- cargo fmt passes (code is properly formatted)
 - All tests pass (100% pass rate)
 - Test coverage meets or exceeds 80%
 - No regressions in existing code
 
 ## Deliverable
 Provide detailed validation report with:
-- mypy results (pass/fail, error count, specific errors if any)
-- Linter results (pass/fail, violation count, specific violations if any)
+- clippy results (pass/fail, warning count, specific warnings if any)
+- fmt results (pass/fail, files needing formatting if any)
 - Test results (pass/fail, total tests, failures, coverage percentage)
 - Overall validation status (PASS/FAIL)
 - List of follow-up tasks created (if validation failed)
@@ -874,8 +861,8 @@ This task depends on completion of ALL implementation tasks:
 """
 
    # Determine appropriate validation agent
-   # Use python-testing-specialist if it exists, otherwise use suggested quality agent
-   validation_agent_type = "python-testing-specialist"  # Default
+   # Use rust-testing-specialist if it exists, otherwise use suggested quality agent
+   validation_agent_type = "rust-testing-specialist"  # Default
    if "quality_assurance" in suggested_agents:
        validation_agent_type = suggested_agents["quality_assurance"]["suggested_agent_type"]
 
@@ -945,10 +932,10 @@ This task depends on completion of ALL implementation tasks:
 - **🚨 ALWAYS include worktree information in task descriptions and input_data for implementation tasks 🚨**
 - **🚨 ALWAYS create per-task validation tasks (step 8a) for each implementation task with a worktree 🚨**
 - **🚨 Validation tasks create the test-then-route workflow: implementation → validation → (merge OR remediation) 🚨**
-- **🚨 ALWAYS create a final validation task (step 9) that runs mypy, linters, and tests 🚨**
+- **🚨 ALWAYS create a final validation task (step 9) that runs cargo clippy, cargo fmt, and cargo test 🚨**
 - **🚨 NEVER mark a feature complete until the validation task passes 🚨**
-- **NEVER use generic agent types like "python-backend-developer", "general-purpose", or "implementation-specialist"**
-- **ALWAYS use hyperspecialized agent names from suggested_agents (e.g., "python-domain-model-specialist")**
+- **NEVER use generic agent types like "rust-backend-developer", "general-purpose", or "implementation-specialist"**
+- **ALWAYS use hyperspecialized agent names from suggested_agents (e.g., "rust-domain-models-specialist")**
 - **ALWAYS provide rich context in every task description**:
   - Memory namespace references for technical specs
   - Specific implementation requirements (attributes, methods, interfaces)

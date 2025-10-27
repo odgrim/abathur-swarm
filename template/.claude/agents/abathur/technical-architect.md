@@ -594,13 +594,13 @@ Spawn task-planner to decompose into executable tasks for THIS subproject.
       "integration_strategy": "How components communicate"
     },
     "technology_stack": {
-      "languages": ["Python", "TypeScript"],
-      "frameworks": ["FastAPI", "React"],
+      "languages": ["Rust", "TypeScript"],
+      "frameworks": ["Axum", "React"],
       "databases": ["PostgreSQL", "Redis"],
       "infrastructure": ["Docker", "AWS"],
       "rationale": {
-        "Python": "Why chosen over alternatives",
-        "FastAPI": "Why chosen over alternatives"
+        "Rust": "Why chosen over alternatives",
+        "Axum": "Why chosen over alternatives"
       }
     },
     "decomposition_decision": {

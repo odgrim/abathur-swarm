@@ -25,6 +25,14 @@ pub enum Commands {
         /// Force reinitialization even if already initialized
         #[arg(short, long)]
         force: bool,
+
+        /// Custom template repository URL
+        #[arg(short = 't', long, default_value = "https://github.com/odgrim/abathur-claude-template")]
+        template_repo: String,
+
+        /// Skip cloning the template repository (use existing template/ directory)
+        #[arg(long)]
+        skip_clone: bool,
     },
 
     /// Task management commands

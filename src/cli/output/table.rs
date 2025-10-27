@@ -270,7 +270,7 @@ pub fn format_task_table(tasks: &[crate::cli::models::Task]) -> String {
     let formatter = TableFormatter::new();
     let domain_tasks: Vec<Task> = tasks.iter().map(|t| Task {
         id: t.id,
-        summary: t.description.clone(),
+        summary: t.summary.clone(),
         description: t.description.clone(),
         agent_type: t.agent_type.clone(),
         priority: t.base_priority,

@@ -125,6 +125,11 @@ impl TaskQueueService {
             .await
             .context("Failed to insert task into repository")?;
 
+        // 8. Re-resolve dependencies in case this new task completes dependencies for other tasks
+        // This handles the case where tasks were submitted out of order
+        self.resolve_dependencies().await
+            .context("Failed to resolve dependencies after task submission")?;
+
         Ok(task.id)
     }
 
@@ -397,7 +402,22 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
     }
 
     async fn update_task_status(&self, task_id: Uuid, status: TaskStatus) -> Result<()> {
-        self.update_status(task_id, status).await
+        self.update_status(task_id, status).await?;
+
+        // If task is now completed, re-resolve dependencies for dependent tasks
+        if status == TaskStatus::Completed {
+            let dependent_tasks = self.get_dependent_tasks(task_id).await?;
+            if !dependent_tasks.is_empty() {
+                info!(
+                    "Task {} completed, re-resolving dependencies for {} dependent tasks",
+                    task_id,
+                    dependent_tasks.len()
+                );
+                self.resolve_dependencies().await?;
+            }
+        }
+
+        Ok(())
     }
 
     async fn update_task_priority(&self, task_id: Uuid, priority: f64) -> Result<()> {
@@ -420,11 +440,25 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
             .context("Failed to fetch task")?;
 
         task.status = TaskStatus::Failed;
-        task.error_message = Some(error_message);
+        task.error_message = Some(error_message.clone());
         self.repo
             .update(&task)
             .await
-            .context("Failed to mark task as failed")
+            .context("Failed to mark task as failed")?;
+
+        // Re-resolve dependencies to ensure dependent tasks remain blocked
+        let dependent_tasks = self.get_dependent_tasks(task_id).await?;
+        if !dependent_tasks.is_empty() {
+            warn!(
+                "Task {} failed with error: '{}'. {} dependent tasks will remain blocked",
+                task_id,
+                error_message,
+                dependent_tasks.len()
+            );
+            self.resolve_dependencies().await?;
+        }
+
+        Ok(())
     }
 
     async fn get_next_ready_task(&self) -> Result<Option<Task>> {
@@ -456,6 +490,8 @@ mod tests {
             async fn get_by_feature_branch(&self, feature_branch: &str) -> Result<Vec<Task>, DatabaseError>;
             async fn get_dependents(&self, dependency_id: Uuid) -> Result<Vec<Task>, DatabaseError>;
             async fn get_by_session(&self, session_id: Uuid) -> Result<Vec<Task>, DatabaseError>;
+            async fn update_status(&self, id: Uuid, status: TaskStatus) -> Result<(), DatabaseError>;
+            async fn get_by_parent(&self, parent_id: Uuid) -> Result<Vec<Task>, DatabaseError>;
         }
     }
 
@@ -467,8 +503,10 @@ mod tests {
     async fn test_submit_simple_task() {
         let mut mock_repo = MockTaskRepo::new();
 
-        // Expect list to return empty (no existing tasks)
-        mock_repo.expect_list().returning(|_| Ok(vec![]));
+        // Expect list to return empty (no existing tasks) - called twice:
+        // 1. During validation
+        // 2. During resolve_dependencies after insert
+        mock_repo.expect_list().times(2).returning(|_| Ok(vec![]));
 
         // Expect insert to be called once
         mock_repo.expect_insert().times(1).returning(|_| Ok(()));
@@ -494,10 +532,13 @@ mod tests {
         let mut main_task = create_test_task("Main task");
         main_task.dependencies = Some(vec![dep_task.id]);
 
-        // Expect list to return the dependency task
+        // Expect list to return the dependency task - called twice:
+        // 1. During validation
+        // 2. During resolve_dependencies after insert
         let dep_task_clone = dep_task.clone();
         mock_repo
             .expect_list()
+            .times(2)
             .returning(move |_| Ok(vec![dep_task_clone.clone()]));
 
         // Expect insert
@@ -730,5 +771,69 @@ mod tests {
 
         let result = service.submit(task).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_dependencies_after_task_completion() {
+        let mut mock_repo = MockTaskRepo::new();
+
+        // Create task1 (dependency)
+        let mut task1 = create_test_task("Task 1");
+        task1.status = TaskStatus::Running;
+        let task1_id = task1.id;
+
+        // Create task2 (depends on task1)
+        let mut task2 = create_test_task("Task 2");
+        task2.dependencies = Some(vec![task1_id]);
+        task2.status = TaskStatus::Blocked;
+        let task2_id = task2.id;
+
+        // Mock get_dependents to return task2 when task1 completes
+        let task2_clone = task2.clone();
+        mock_repo
+            .expect_get_dependents()
+            .with(eq(task1_id))
+            .returning(move |_| Ok(vec![task2_clone.clone()]));
+
+        // Mock get for task1 status update
+        let task1_clone = task1.clone();
+        mock_repo
+            .expect_get()
+            .with(eq(task1_id))
+            .returning(move |_| Ok(Some(task1_clone.clone())));
+
+        // Mock update for task1 status change to Completed
+        mock_repo
+            .expect_update()
+            .times(1)
+            .returning(|_| Ok(()));
+
+        // Mock list to return both tasks for dependency resolution
+        let mut completed_task1 = task1.clone();
+        completed_task1.status = TaskStatus::Completed;
+        let all_tasks = vec![completed_task1.clone(), task2.clone()];
+        mock_repo
+            .expect_list()
+            .returning(move |_| Ok(all_tasks.clone()));
+
+        // Mock update for task2 when it transitions to Ready
+        mock_repo
+            .expect_update()
+            .times(1)
+            .returning(|t| {
+                assert_eq!(t.status, TaskStatus::Ready);
+                Ok(())
+            });
+
+        let service = TaskQueueService::new(
+            Arc::new(mock_repo),
+            DependencyResolver::new(),
+            PriorityCalculator::new(),
+        );
+
+        // Complete task1 via the trait method
+        use crate::domain::ports::TaskQueueService as TaskQueueServiceTrait;
+        let result = service.update_task_status(task1_id, TaskStatus::Completed).await;
+        assert!(result.is_ok());
     }
 }

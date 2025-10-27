@@ -19,13 +19,14 @@ impl TaskQueueServiceAdapter {
     /// Submit a new task to the queue
     pub async fn submit_task(
         &self,
+        summary: String,
         description: String,
         agent_type: String,
         priority: u8,
         dependencies: Vec<Uuid>,
     ) -> Result<Uuid> {
         // Create domain task
-        let mut task = DomainTask::new(description.clone(), description.clone());
+        let mut task = DomainTask::new(summary, description);
         task.agent_type = agent_type;
         task.priority = priority;
         if !dependencies.is_empty() {
@@ -276,6 +277,7 @@ impl TaskQueueServiceAdapter {
 fn convert_domain_to_cli_task(domain_task: DomainTask) -> CliTask {
     CliTask {
         id: domain_task.id,
+        summary: domain_task.summary,
         description: domain_task.description,
         status: convert_domain_to_cli_status(domain_task.status),
         agent_type: domain_task.agent_type,

@@ -30,6 +30,7 @@ impl TaskQueueService {
     /// Submit a new task to the queue
     pub async fn submit_task(
         &self,
+        summary: String,
         description: String,
         agent_type: String,
         priority: u8,
@@ -46,6 +47,7 @@ impl TaskQueueService {
 
         let task = Task {
             id: task_id,
+            summary,
             description,
             status,
             agent_type,
@@ -118,7 +120,7 @@ impl TaskQueueService {
     /// Retry a failed task
     pub async fn retry_task(&self, task_id: Uuid) -> Result<Uuid> {
         // First, get and validate the original task
-        let (description, agent_type, base_priority, dependencies) = {
+        let (summary, description, agent_type, base_priority, dependencies) = {
             let tasks = self.tasks.lock().await;
             let original_task = tasks
                 .iter()
@@ -135,6 +137,7 @@ impl TaskQueueService {
 
             // Clone the data we need before releasing the lock
             (
+                original_task.summary.clone(),
                 original_task.description.clone(),
                 original_task.agent_type.clone(),
                 original_task.base_priority,
@@ -143,7 +146,7 @@ impl TaskQueueService {
         }; // Lock is released here
 
         // Create a new task with the same parameters
-        self.submit_task(description, agent_type, base_priority, dependencies)
+        self.submit_task(summary, description, agent_type, base_priority, dependencies)
             .await
     }
 
