@@ -52,10 +52,10 @@ impl TableFormatter {
             let summary = truncate_text(&task.summary, 40);
 
             let status_cell = if self.use_colors {
-                Cell::new(&task.status.to_string())
+                Cell::new(task.status.to_string())
                     .fg(status_color(&task.status))
             } else {
-                Cell::new(&format!("{} {}", status_icon(&task.status), task.status))
+                Cell::new(format!("{} {}", status_icon(&task.status), task.status))
             };
 
             let priority_cell = if self.use_colors {
@@ -99,10 +99,10 @@ impl TableFormatter {
             let id_short = &agent.id.to_string()[..8];
 
             let status_cell = if self.use_colors {
-                Cell::new(&agent.status.to_string())
+                Cell::new(agent.status.to_string())
                     .fg(agent_status_color(&agent.status))
             } else {
-                Cell::new(&format!("{} {}", agent_status_icon(&agent.status), agent.status))
+                Cell::new(format!("{} {}", agent_status_icon(&agent.status), agent.status))
             };
 
             let task_id = agent.current_task_id
@@ -261,6 +261,127 @@ fn truncate_text(text: &str, max_len: usize) -> String {
         text.to_string()
     } else {
         format!("{}...", &text[..max_len.saturating_sub(3)])
+    }
+}
+
+/// Format a task list as a table (convenience function for backward compatibility)
+pub fn format_task_table(tasks: &[crate::cli::models::Task]) -> String {
+    // Convert CLI tasks to domain tasks for formatting
+    let formatter = TableFormatter::new();
+    let domain_tasks: Vec<Task> = tasks.iter().map(|t| Task {
+        id: t.id,
+        summary: t.description.clone(),
+        description: t.description.clone(),
+        agent_type: t.agent_type.clone(),
+        priority: t.base_priority,
+        calculated_priority: t.computed_priority,
+        status: match t.status {
+            crate::cli::models::TaskStatus::Pending => TaskStatus::Pending,
+            crate::cli::models::TaskStatus::Blocked => TaskStatus::Blocked,
+            crate::cli::models::TaskStatus::Ready => TaskStatus::Ready,
+            crate::cli::models::TaskStatus::Running => TaskStatus::Running,
+            crate::cli::models::TaskStatus::Completed => TaskStatus::Completed,
+            crate::cli::models::TaskStatus::Failed => TaskStatus::Failed,
+            crate::cli::models::TaskStatus::Cancelled => TaskStatus::Cancelled,
+        },
+        dependencies: None,
+        dependency_type: crate::domain::models::task::DependencyType::Sequential,
+        dependency_depth: 0,
+        input_data: None,
+        result_data: None,
+        error_message: None,
+        retry_count: 0,
+        max_retries: 3,
+        max_execution_timeout_seconds: 3600,
+        submitted_at: t.created_at,
+        started_at: t.started_at,
+        completed_at: t.completed_at,
+        last_updated_at: t.updated_at,
+        created_by: None,
+        parent_task_id: None,
+        session_id: None,
+        source: crate::domain::models::task::TaskSource::Human,
+        deadline: None,
+        estimated_duration_seconds: None,
+        feature_branch: None,
+        task_branch: None,
+        worktree_path: None,
+    }).collect();
+
+    formatter.format_tasks(&domain_tasks)
+}
+
+/// Format queue stats as a table (convenience function for backward compatibility)
+pub fn format_queue_stats_table(stats: &crate::cli::models::QueueStats) -> String {
+    let mut table = Table::new();
+    table.load_preset(presets::UTF8_FULL);
+
+    table.set_header(vec![
+        Cell::new("Metric").add_attribute(Attribute::Bold),
+        Cell::new("Count").add_attribute(Attribute::Bold),
+    ]);
+
+    table.add_row(vec!["Total", &stats.total.to_string()]);
+    table.add_row(vec!["Pending", &stats.pending.to_string()]);
+    table.add_row(vec!["Blocked", &stats.blocked.to_string()]);
+    table.add_row(vec!["Ready", &stats.ready.to_string()]);
+    table.add_row(vec!["Running", &stats.running.to_string()]);
+    table.add_row(vec!["Completed", &stats.completed.to_string()]);
+    table.add_row(vec!["Failed", &stats.failed.to_string()]);
+    table.add_row(vec!["Cancelled", &stats.cancelled.to_string()]);
+
+    table.to_string()
+}
+
+/// Format a memory list as a table (convenience function for CLI)
+pub fn format_memory_table(memories: &[crate::cli::models::Memory]) -> String {
+    let mut table = Table::new();
+    table.load_preset(presets::UTF8_FULL);
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+
+    table.set_header(vec![
+        Cell::new("Namespace").add_attribute(Attribute::Bold),
+        Cell::new("Key").add_attribute(Attribute::Bold),
+        Cell::new("Type").add_attribute(Attribute::Bold),
+        Cell::new("Version").add_attribute(Attribute::Bold),
+        Cell::new("Created By").add_attribute(Attribute::Bold),
+        Cell::new("Updated").add_attribute(Attribute::Bold),
+    ]);
+
+    for memory in memories {
+        let updated_str = format_relative_time(&memory.updated_at);
+
+        table.add_row(vec![
+            Cell::new(truncate_text(&memory.namespace, 30)),
+            Cell::new(truncate_text(&memory.key, 20)),
+            Cell::new(format!("{}", memory.memory_type)),
+            Cell::new(memory.version.to_string()),
+            Cell::new(truncate_text(&memory.created_by, 15)),
+            Cell::new(updated_str),
+        ]);
+    }
+
+    table.to_string()
+}
+
+/// Format relative time (e.g., "2 hours ago")
+fn format_relative_time(datetime: &chrono::DateTime<chrono::Utc>) -> String {
+    let now = chrono::Utc::now();
+    let duration = now.signed_duration_since(*datetime);
+
+    if duration.num_seconds() < 60 {
+        "just now".to_string()
+    } else if duration.num_minutes() < 60 {
+        let mins = duration.num_minutes();
+        format!("{} min{} ago", mins, if mins == 1 { "" } else { "s" })
+    } else if duration.num_hours() < 24 {
+        let hours = duration.num_hours();
+        format!("{} hour{} ago", hours, if hours == 1 { "" } else { "s" })
+    } else if duration.num_days() < 30 {
+        let days = duration.num_days();
+        format!("{} day{} ago", days, if days == 1 { "" } else { "s" })
+    } else {
+        datetime.format("%Y-%m-%d").to_string()
     }
 }
 

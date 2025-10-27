@@ -46,6 +46,23 @@ impl std::fmt::Display for TaskStatus {
     }
 }
 
+impl std::str::FromStr for TaskStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "pending" => Ok(TaskStatus::Pending),
+            "blocked" => Ok(TaskStatus::Blocked),
+            "ready" => Ok(TaskStatus::Ready),
+            "running" => Ok(TaskStatus::Running),
+            "completed" => Ok(TaskStatus::Completed),
+            "failed" => Ok(TaskStatus::Failed),
+            "cancelled" => Ok(TaskStatus::Cancelled),
+            _ => Err(format!("Unknown task status: {}", s)),
+        }
+    }
+}
+
 /// Queue statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueStats {
@@ -57,4 +74,20 @@ pub struct QueueStats {
     pub completed: usize,
     pub failed: usize,
     pub cancelled: usize,
+}
+
+// Re-export MemoryType from domain models
+pub use crate::domain::models::MemoryType;
+
+/// Memory entry for CLI display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Memory {
+    pub namespace: String,
+    pub key: String,
+    pub value: serde_json::Value,
+    pub memory_type: MemoryType,
+    pub version: u32,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }

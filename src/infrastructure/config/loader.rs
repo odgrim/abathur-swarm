@@ -49,25 +49,21 @@ impl ConfigLoader {
     ///
     /// Precedence (lowest to highest):
     /// 1. Programmatic defaults (Serialized)
-    /// 2. .abathur/config.yaml (template defaults)
-    /// 3. ~/.abathur/config.yaml (user overrides)
-    /// 4. .abathur/local.yaml (project overrides)
-    /// 5. Environment variables (ABATHUR_* prefix)
+    /// 2. .abathur/config.yaml (project config, created by init)
+    /// 3. .abathur/local.yaml (project local overrides, optional)
+    /// 4. Environment variables (ABATHUR_* prefix, highest priority)
+    ///
+    /// Note: Configuration is always project-local (pwd/.abathur/)
+    /// to support multiple swarms per machine with different projects.
     pub fn load() -> Result<Config> {
-        let home_config_path = dirs::home_dir()
-            .unwrap_or_default()
-            .join(".abathur/config.yaml");
-
         let config: Config = Figment::new()
             // 1. Start with programmatic defaults
             .merge(Serialized::defaults(Config::default()))
-            // 2. Merge template defaults (optional)
-            .merge(Yaml::file(".abathur/config.yaml").nested())
-            // 3. Merge user config (optional)
-            .merge(Yaml::file(home_config_path).nested())
-            // 4. Merge project local config (optional)
-            .merge(Yaml::file(".abathur/local.yaml").nested())
-            // 5. Merge environment variables (highest priority)
+            // 2. Merge project config (primary config, created by init)
+            .merge(Yaml::file(".abathur/config.yaml"))
+            // 3. Merge project local overrides (optional, for dev/test overrides)
+            .merge(Yaml::file(".abathur/local.yaml"))
+            // 4. Merge environment variables (highest priority)
             .merge(Env::prefixed("ABATHUR_").split("__"))
             .extract()
             .context("Failed to extract configuration from figment")?;

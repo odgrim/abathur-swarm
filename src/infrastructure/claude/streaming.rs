@@ -153,7 +153,7 @@ impl Stream for SseStreamParser {
             // Need more data - poll inner stream
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    let chunk = String::from_utf8_lossy(&bytes);
+                    let chunk = String::from_utf8_lossy(bytes.as_ref());
                     self.buffer.push_str(&chunk);
                     continue;
                 }

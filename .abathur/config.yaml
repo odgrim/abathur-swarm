@@ -1,6 +1,6 @@
-# Abathur Configuration Template
-# Override any setting by creating .abathur/local.yaml in your project
-# or setting environment variables with ABATHUR_ prefix
+# Abathur Configuration
+# Override settings by editing this file or setting environment variables
+# with ABATHUR_ prefix
 #
 # Example environment variables:
 #   export ABATHUR_MAX_AGENTS=20
@@ -13,7 +13,7 @@ max_agents: 10
 
 # Database configuration
 database:
-  # Path to SQLite database file
+  # Path to SQLite database file (project-local)
   path: ".abathur/abathur.db"
 
   # Maximum number of database connections in pool

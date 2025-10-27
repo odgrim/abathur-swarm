@@ -29,7 +29,7 @@ impl MemoryRepositoryImpl {
 
 #[async_trait]
 impl MemoryRepository for MemoryRepositoryImpl {
-    async fn add(&self, memory: Memory) -> Result<()> {
+    async fn insert(&self, memory: Memory) -> Result<i64> {
         let value_json = serde_json::to_string(&memory.value).context("failed to serialize value")?;
         let memory_type_str = memory.memory_type.to_string();
         let metadata_json = memory
@@ -41,7 +41,7 @@ impl MemoryRepository for MemoryRepositoryImpl {
         let version_i64 = memory.version as i64;
         let is_deleted_i64 = memory.is_deleted as i64;
 
-        sqlx::query!(
+        let result = sqlx::query!(
             r#"
             INSERT INTO memories (
                 namespace, key, value, memory_type, version, is_deleted,
@@ -65,7 +65,7 @@ impl MemoryRepository for MemoryRepositoryImpl {
         .await
         .context("failed to insert memory")?;
 
-        Ok(())
+        Ok(result.last_insert_rowid())
     }
 
     async fn get(&self, namespace: &str, key: &str) -> Result<Option<Memory>> {
@@ -120,9 +120,11 @@ impl MemoryRepository for MemoryRepositoryImpl {
         &self,
         namespace_prefix: &str,
         memory_type: Option<MemoryType>,
+        limit: usize,
     ) -> Result<Vec<Memory>> {
         // Build LIKE pattern for namespace prefix matching
         let namespace_pattern = format!("{}%", namespace_prefix);
+        let limit_i64 = limit as i64;
 
         // Use dynamic query since we have conditional parameters
         let rows: Vec<_> = if let Some(mem_type) = memory_type {
@@ -134,10 +136,12 @@ impl MemoryRepository for MemoryRepositoryImpl {
                 FROM memories
                 WHERE namespace LIKE ? AND memory_type = ? AND is_deleted = 0
                 ORDER BY namespace, key
+                LIMIT ?
                 "#
             )
             .bind(&namespace_pattern)
             .bind(&memory_type_str)
+            .bind(limit_i64)
             .fetch_all(&self.pool)
             .await
             .context("failed to search memories with type filter")?
@@ -149,9 +153,11 @@ impl MemoryRepository for MemoryRepositoryImpl {
                 FROM memories
                 WHERE namespace LIKE ? AND is_deleted = 0
                 ORDER BY namespace, key
+                LIMIT ?
                 "#
             )
             .bind(&namespace_pattern)
+            .bind(limit_i64)
             .fetch_all(&self.pool)
             .await
             .context("failed to search memories")?
@@ -195,7 +201,7 @@ impl MemoryRepository for MemoryRepositoryImpl {
         key: &str,
         value: serde_json::Value,
         updated_by: &str,
-    ) -> Result<()> {
+    ) -> Result<u32> {
         let now = Utc::now();
         let value_str =
             serde_json::to_string(&value).context("failed to serialize value")?;
@@ -228,7 +234,20 @@ impl MemoryRepository for MemoryRepositoryImpl {
             );
         }
 
-        Ok(())
+        // Get the new version
+        let row = sqlx::query!(
+            r#"
+            SELECT version FROM memories
+            WHERE namespace = ? AND key = ?
+            "#,
+            namespace,
+            key
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("failed to fetch updated version")?;
+
+        Ok(row.version as u32)
     }
 
     async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
@@ -250,6 +269,136 @@ impl MemoryRepository for MemoryRepositoryImpl {
         }
 
         Ok(())
+    }
+
+    async fn get_version(&self, namespace: &str, key: &str, version: u32) -> Result<Option<Memory>> {
+        let version_i64 = version as i64;
+        let row = sqlx::query!(
+            r#"
+            SELECT id, namespace, key, value, memory_type, version, is_deleted,
+                   metadata, created_by, updated_by, created_at, updated_at
+            FROM memories
+            WHERE namespace = ? AND key = ? AND version = ?
+            "#,
+            namespace,
+            key,
+            version_i64
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to query memory version")?;
+
+        match row {
+            Some(r) => {
+                let memory = Memory {
+                    id: r.id.context("missing id from database")?,
+                    namespace: r.namespace,
+                    key: r.key,
+                    value: serde_json::from_str(&r.value)
+                        .context("failed to deserialize value")?,
+                    memory_type: r
+                        .memory_type
+                        .parse()
+                        .context("failed to parse memory_type")?,
+                    version: r.version as u32,
+                    is_deleted: r.is_deleted != 0,
+                    metadata: r
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| serde_json::from_str(m).ok()),
+                    created_by: r.created_by,
+                    updated_by: r.updated_by,
+                    created_at: DateTime::parse_from_rfc3339(&r.created_at)
+                        .context("failed to parse created_at")?
+                        .with_timezone(&Utc),
+                    updated_at: DateTime::parse_from_rfc3339(&r.updated_at)
+                        .context("failed to parse updated_at")?
+                        .with_timezone(&Utc),
+                };
+                Ok(Some(memory))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn count(&self, namespace_prefix: &str, memory_type: Option<MemoryType>) -> Result<usize> {
+        let namespace_pattern = format!("{}%", namespace_prefix);
+
+        let count: i64 = if let Some(mem_type) = memory_type {
+            let memory_type_str = mem_type.to_string();
+            sqlx::query_scalar(
+                r#"
+                SELECT COUNT(*) FROM memories
+                WHERE namespace LIKE ? AND memory_type = ? AND is_deleted = 0
+                "#
+            )
+            .bind(&namespace_pattern)
+            .bind(&memory_type_str)
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to count memories with type filter")?
+        } else {
+            sqlx::query_scalar(
+                r#"
+                SELECT COUNT(*) FROM memories
+                WHERE namespace LIKE ? AND is_deleted = 0
+                "#
+            )
+            .bind(&namespace_pattern)
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to count memories")?
+        };
+
+        Ok(count as usize)
+    }
+
+    async fn list_versions(&self, namespace: &str, key: &str) -> Result<Vec<Memory>> {
+        let rows = sqlx::query_as::<_, (i64, String, String, String, String, i64, i64, Option<String>, String, String, String, String)>(
+            r#"
+            SELECT id, namespace, key, value, memory_type, version, is_deleted,
+                   metadata, created_by, updated_by, created_at, updated_at
+            FROM memories
+            WHERE namespace = ? AND key = ?
+            ORDER BY version ASC
+            "#
+        )
+        .bind(namespace)
+        .bind(key)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to list memory versions")?;
+
+        let memories: Result<Vec<Memory>> = rows
+            .into_iter()
+            .map(|(id, namespace, key, value, memory_type, version, is_deleted, metadata, created_by, updated_by, created_at, updated_at)| {
+                Ok(Memory {
+                    id,
+                    namespace,
+                    key,
+                    value: serde_json::from_str(&value)
+                        .context("failed to deserialize value")?,
+                    memory_type: memory_type
+                        .parse()
+                        .context("failed to parse memory_type")?,
+                    version: version as u32,
+                    is_deleted: is_deleted != 0,
+                    metadata: metadata
+                        .as_ref()
+                        .and_then(|m| serde_json::from_str(m).ok()),
+                    created_by,
+                    updated_by,
+                    created_at: DateTime::parse_from_rfc3339(&created_at)
+                        .context("failed to parse created_at")?
+                        .with_timezone(&Utc),
+                    updated_at: DateTime::parse_from_rfc3339(&updated_at)
+                        .context("failed to parse updated_at")?
+                        .with_timezone(&Utc),
+                })
+            })
+            .collect();
+
+        memories
     }
 }
 
@@ -273,7 +422,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_add_and_get_memory() {
+    async fn test_insert_and_get_memory() {
         let pool = setup_test_db().await;
         let repo = MemoryRepositoryImpl::new(pool.clone());
 
@@ -285,9 +434,9 @@ mod tests {
             "alice".to_string(),
         );
 
-        repo.add(memory.clone())
+        repo.insert(memory.clone())
             .await
-            .expect("failed to add memory");
+            .expect("failed to insert memory");
 
         let retrieved = repo
             .get("user:alice:preferences", "theme")
@@ -319,7 +468,7 @@ mod tests {
             "bob".to_string(),
         );
 
-        repo.add(memory).await.expect("failed to add memory");
+        repo.insert(memory).await.expect("failed to insert memory");
 
         repo.update(
             "user:bob:settings",
@@ -374,11 +523,11 @@ mod tests {
         ];
 
         for memory in memories {
-            repo.add(memory).await.expect("failed to add memory");
+            repo.insert(memory).await.expect("failed to insert memory");
         }
 
         let results = repo
-            .search("user:alice", None)
+            .search("user:alice", None, 100)
             .await
             .expect("failed to search memories");
 
@@ -409,11 +558,11 @@ mod tests {
             "test".to_string(),
         );
 
-        repo.add(semantic).await.expect("failed to add semantic");
-        repo.add(episodic).await.expect("failed to add episodic");
+        repo.insert(semantic).await.expect("failed to insert semantic");
+        repo.insert(episodic).await.expect("failed to insert episodic");
 
         let results = repo
-            .search("test:", Some(MemoryType::Semantic))
+            .search("test:", Some(MemoryType::Semantic), 100)
             .await
             .expect("failed to search");
 
@@ -436,7 +585,7 @@ mod tests {
             "test".to_string(),
         );
 
-        repo.add(memory).await.expect("failed to add memory");
+        repo.insert(memory).await.expect("failed to insert memory");
 
         // Soft delete
         repo.delete("test:ns", "key")
@@ -479,7 +628,7 @@ mod tests {
             "test".to_string(),
         );
 
-        repo.add(memory).await.expect("failed to add memory");
+        repo.insert(memory).await.expect("failed to insert memory");
         repo.delete("test:ns", "key")
             .await
             .expect("failed to delete");
@@ -515,10 +664,10 @@ mod tests {
             "test".to_string(),
         );
 
-        repo.add(memory1).await.expect("failed to add first memory");
+        repo.insert(memory1).await.expect("failed to insert first memory");
 
         // Second insert with same namespace+key should fail
-        let result = repo.add(memory2).await;
+        let result = repo.insert(memory2).await;
         assert!(result.is_err());
 
         pool.close().await;

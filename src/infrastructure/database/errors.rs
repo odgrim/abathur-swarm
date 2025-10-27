@@ -28,4 +28,7 @@ pub enum DatabaseError {
 
     #[error("Validation error: {0}")]
     ValidationError(String),
+
+    #[error("Anyhow error: {0}")]
+    AnyhowError(#[from] anyhow::Error),
 }

@@ -56,10 +56,10 @@ impl Default for ClaudeClientConfig {
 /// - Compression support (gzip/brotli)
 /// - Structured error handling
 pub struct ClaudeClient {
-    http_client: ReqwestClient,
-    base_url: String,
-    rate_limiter: Arc<TokenBucketRateLimiter>,
-    retry_policy: RetryPolicy,
+    pub(crate) http_client: ReqwestClient,
+    pub(crate) base_url: String,
+    pub(crate) rate_limiter: Arc<TokenBucketRateLimiter>,
+    pub(crate) retry_policy: RetryPolicy,
 }
 
 impl ClaudeClient {
@@ -113,8 +113,6 @@ impl ClaudeClient {
         let http_client = ReqwestClient::builder()
             .pool_max_idle_per_host(10)
             .timeout(Duration::from_secs(config.timeout_secs))
-            .gzip(true)
-            .brotli(true)
             .tcp_nodelay(true)
             .default_headers(headers)
             .build()

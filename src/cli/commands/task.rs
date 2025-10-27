@@ -3,13 +3,14 @@ use uuid::Uuid;
 
 use crate::cli::models::TaskStatus;
 use crate::cli::output::table::{format_queue_stats_table, format_task_table};
-use crate::cli::service::TaskQueueService;
+use crate::cli::service::TaskQueueServiceAdapter;
 
 /// Handle task submit command
 pub async fn handle_submit(
-    service: &TaskQueueService,
+    service: &TaskQueueServiceAdapter,
     description: String,
     agent_type: String,
+    summary: Option<String>,
     priority: u8,
     dependencies: Vec<Uuid>,
     json: bool,
@@ -25,18 +26,24 @@ pub async fn handle_submit(
         .context("Failed to submit task")?;
 
     if json {
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "task_id": task_id,
             "description": description,
             "agent_type": agent_type,
             "priority": priority,
             "dependencies": dependencies,
         });
+        if let Some(summary_text) = &summary {
+            output["summary"] = serde_json::json!(summary_text);
+        }
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         println!("Task submitted successfully!");
         println!("  Task ID: {}", task_id);
         println!("  Description: {}", description);
+        if let Some(summary_text) = &summary {
+            println!("  Summary: {}", summary_text);
+        }
         println!("  Agent type: {}", agent_type);
         println!("  Priority: {}", priority);
         if !dependencies.is_empty() {
@@ -49,7 +56,7 @@ pub async fn handle_submit(
 
 /// Handle task list command
 pub async fn handle_list(
-    service: &TaskQueueService,
+    service: &TaskQueueServiceAdapter,
     status_filter: Option<TaskStatus>,
     limit: usize,
     json: bool,
@@ -76,7 +83,7 @@ pub async fn handle_list(
 }
 
 /// Handle task show command
-pub async fn handle_show(service: &TaskQueueService, task_id: Uuid, json: bool) -> Result<()> {
+pub async fn handle_show(service: &TaskQueueServiceAdapter, task_id: Uuid, json: bool) -> Result<()> {
     let task = service
         .get_task(task_id)
         .await
@@ -134,49 +141,89 @@ pub async fn handle_show(service: &TaskQueueService, task_id: Uuid, json: bool) 
     Ok(())
 }
 
-/// Handle task cancel command
-pub async fn handle_cancel(service: &TaskQueueService, task_id: Uuid, json: bool) -> Result<()> {
-    service
-        .cancel_task(task_id)
-        .await
-        .context(format!("Failed to cancel task {}", task_id))?;
-
-    if json {
-        let output = serde_json::json!({
-            "task_id": task_id,
-            "status": "cancelled",
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("Task {} cancelled successfully.", task_id);
+/// Handle task update command
+pub async fn handle_update(
+    service: &TaskQueueServiceAdapter,
+    task_ids: Vec<Uuid>,
+    status: Option<String>,
+    priority: Option<u8>,
+    agent_type: Option<String>,
+    add_dependency: Vec<Uuid>,
+    remove_dependency: Vec<Uuid>,
+    retry: bool,
+    cancel: bool,
+    json: bool,
+) -> Result<()> {
+    // Validate that at least one update operation is specified
+    if status.is_none()
+        && priority.is_none()
+        && agent_type.is_none()
+        && add_dependency.is_empty()
+        && remove_dependency.is_empty()
+        && !retry
+        && !cancel
+    {
+        return Err(anyhow::anyhow!(
+            "At least one update operation must be specified (--status, --priority, --agent-type, --add-dependency, --remove-dependency, --retry, or --cancel)"
+        ));
     }
 
-    Ok(())
-}
+    let mut results = Vec::new();
+    let mut errors = Vec::new();
 
-/// Handle task retry command
-pub async fn handle_retry(service: &TaskQueueService, task_id: Uuid, json: bool) -> Result<()> {
-    let new_task_id = service
-        .retry_task(task_id)
-        .await
-        .context(format!("Failed to retry task {}", task_id))?;
+    // Update each task
+    for task_id in &task_ids {
+        let result = service
+            .update_task(
+                *task_id,
+                status.as_deref(),
+                priority,
+                agent_type.clone(),
+                add_dependency.clone(),
+                remove_dependency.clone(),
+                retry,
+                cancel,
+            )
+            .await;
+
+        match result {
+            Ok(()) => results.push(*task_id),
+            Err(e) => errors.push((*task_id, e)),
+        }
+    }
 
     if json {
         let output = serde_json::json!({
-            "original_task_id": task_id,
-            "new_task_id": new_task_id,
+            "successful": results,
+            "failed": errors.iter().map(|(id, e)| {
+                serde_json::json!({
+                    "task_id": id,
+                    "error": e.to_string()
+                })
+            }).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        println!("Task {} retried successfully.", task_id);
-        println!("  New task ID: {}", new_task_id);
+        if !results.is_empty() {
+            println!("Successfully updated {} task(s):", results.len());
+            for task_id in results {
+                println!("  - {}", task_id);
+            }
+        }
+
+        if !errors.is_empty() {
+            println!("\nFailed to update {} task(s):", errors.len());
+            for (task_id, error) in errors {
+                println!("  - {}: {}", task_id, error);
+            }
+        }
     }
 
     Ok(())
 }
 
 /// Handle task status command
-pub async fn handle_status(service: &TaskQueueService, json: bool) -> Result<()> {
+pub async fn handle_status(service: &TaskQueueServiceAdapter, json: bool) -> Result<()> {
     let stats = service
         .get_queue_stats()
         .await

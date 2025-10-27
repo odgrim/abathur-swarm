@@ -1,8 +1,14 @@
+mod swarm_service;
+mod task_service_adapter;
+
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use uuid::Uuid;
 
 use super::models::{QueueStats, Task, TaskStatus};
+
+pub use swarm_service::SwarmService;
+pub use task_service_adapter::TaskQueueServiceAdapter;
 
 /// Mock task queue service for CLI development
 /// This will be replaced with the actual service layer implementation
@@ -172,6 +178,118 @@ impl TaskQueueService {
 }
 
 impl Default for TaskQueueService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Mock memory service for CLI development
+/// This will be replaced with the actual service layer implementation
+pub struct MemoryService {
+    // In a real implementation, this would connect to the database
+    // For now, we'll use in-memory storage for demonstration
+    memories: std::sync::Arc<tokio::sync::Mutex<Vec<crate::domain::models::Memory>>>,
+}
+
+impl MemoryService {
+    pub fn new() -> Self {
+        Self {
+            memories: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Search memories by namespace prefix and type
+    pub async fn search(
+        &self,
+        namespace_prefix: &str,
+        memory_type: Option<crate::domain::models::MemoryType>,
+        limit: Option<usize>,
+    ) -> Result<Vec<crate::domain::models::Memory>> {
+        let memories = self.memories.lock().await;
+        let limit = limit.unwrap_or(50);
+
+        let filtered: Vec<_> = memories
+            .iter()
+            .filter(|m| {
+                let namespace_matches = m.namespace.starts_with(namespace_prefix);
+                let type_matches = memory_type.map_or(true, |mt| m.memory_type == mt);
+                let is_active = m.is_active();
+                namespace_matches && type_matches && is_active
+            })
+            .take(limit)
+            .cloned()
+            .collect();
+
+        Ok(filtered)
+    }
+
+    /// Get latest version of a memory
+    pub async fn get(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<crate::domain::models::Memory>> {
+        let memories = self.memories.lock().await;
+        Ok(memories
+            .iter()
+            .filter(|m| m.namespace == namespace && m.key == key && m.is_active())
+            .max_by_key(|m| m.version)
+            .cloned())
+    }
+
+    /// Get specific version of a memory
+    pub async fn get_version(
+        &self,
+        namespace: &str,
+        key: &str,
+        version: u32,
+    ) -> Result<Option<crate::domain::models::Memory>> {
+        let memories = self.memories.lock().await;
+        Ok(memories
+            .iter()
+            .find(|m| m.namespace == namespace && m.key == key && m.version == version)
+            .cloned())
+    }
+
+    /// List all versions of a memory
+    pub async fn list_versions(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Vec<crate::domain::models::Memory>> {
+        let memories = self.memories.lock().await;
+        let mut versions: Vec<_> = memories
+            .iter()
+            .filter(|m| m.namespace == namespace && m.key == key)
+            .cloned()
+            .collect();
+
+        versions.sort_by_key(|m| m.version);
+        Ok(versions)
+    }
+
+    /// Count memories matching criteria
+    pub async fn count(
+        &self,
+        namespace_prefix: &str,
+        memory_type: Option<crate::domain::models::MemoryType>,
+    ) -> Result<usize> {
+        let memories = self.memories.lock().await;
+        let count = memories
+            .iter()
+            .filter(|m| {
+                let namespace_matches = m.namespace.starts_with(namespace_prefix);
+                let type_matches = memory_type.map_or(true, |mt| m.memory_type == mt);
+                let is_active = m.is_active();
+                namespace_matches && type_matches && is_active
+            })
+            .count();
+
+        Ok(count)
+    }
+}
+
+impl Default for MemoryService {
     fn default() -> Self {
         Self::new()
     }

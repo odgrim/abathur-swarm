@@ -1,4 +1,7 @@
 use crate::domain::models::Task;
+use crate::domain::ports::PriorityCalculator as PriorityCalculatorTrait;
+use anyhow::Result;
+use async_trait::async_trait;
 use chrono::Utc;
 
 /// Service for calculating dynamic task priorities
@@ -85,6 +88,21 @@ impl PriorityCalculator {
     pub fn update_task_priority(&self, task: &mut Task, dependency_depth: u32) {
         task.calculated_priority = self.calculate(task, dependency_depth);
         task.dependency_depth = dependency_depth;
+    }
+}
+
+// Implement the domain trait for the service
+#[async_trait]
+impl PriorityCalculatorTrait for PriorityCalculator {
+    async fn calculate_priority(&self, task: &Task) -> Result<f64> {
+        Ok(self.calculate(task, task.dependency_depth))
+    }
+
+    async fn recalculate_priorities(&self, tasks: &[Task]) -> Result<Vec<(uuid::Uuid, f64)>> {
+        Ok(tasks
+            .iter()
+            .map(|task| (task.id, self.calculate(task, task.dependency_depth)))
+            .collect())
     }
 }
 

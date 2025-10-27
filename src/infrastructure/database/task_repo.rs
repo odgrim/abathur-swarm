@@ -1,6 +1,6 @@
 use crate::domain::models::{Task, TaskStatus};
-use crate::domain::ports::errors::DatabaseError;
 use crate::domain::ports::task_repository::{TaskFilters, TaskRepository};
+use crate::infrastructure::database::DatabaseError;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
@@ -284,7 +284,7 @@ impl TaskRepository for TaskRepositoryImpl {
         Ok(())
     }
 
-    async fn list(&self, filters: TaskFilters) -> Result<Vec<Task>, DatabaseError> {
+    async fn list(&self, filters: &TaskFilters) -> Result<Vec<Task>, DatabaseError> {
         // Build dynamic query based on filters
         let mut query = String::from("SELECT * FROM tasks WHERE 1=1");
         let mut bindings: Vec<String> = Vec::new();
@@ -339,7 +339,7 @@ impl TaskRepository for TaskRepositoryImpl {
         tasks
     }
 
-    async fn count(&self, filters: TaskFilters) -> Result<i64, DatabaseError> {
+    async fn count(&self, filters: &TaskFilters) -> Result<i64, DatabaseError> {
         let mut query = String::from("SELECT COUNT(*) as count FROM tasks WHERE 1=1");
         let mut bindings: Vec<String> = Vec::new();
 
@@ -456,6 +456,58 @@ impl TaskRepository for TaskRepositoryImpl {
             "#,
         )
         .bind(parent_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        let tasks: Result<Vec<Task>, DatabaseError> =
+            rows.iter().map(|row| self.row_to_task(row)).collect();
+
+        tasks
+    }
+
+    async fn get_dependents(&self, dependency_id: Uuid) -> Result<Vec<Task>, DatabaseError> {
+        // Query tasks where the dependencies JSON array contains the dependency_id
+        let dependency_str = dependency_id.to_string();
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM tasks
+            WHERE dependencies IS NOT NULL
+            AND dependencies LIKE ?
+            ORDER BY calculated_priority DESC, submitted_at ASC
+            "#,
+        )
+        .bind(format!("%{}%", dependency_str))
+        .fetch_all(&self.pool)
+        .await?;
+
+        // Filter to ensure we have exact matches (not substring matches)
+        let all_tasks: Vec<Task> = rows
+            .iter()
+            .map(|row| self.row_to_task(row))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let tasks: Vec<Task> = all_tasks
+            .into_iter()
+            .filter(|task| {
+                task.dependencies
+                    .as_ref()
+                    .map(|deps| deps.contains(&dependency_id))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        Ok(tasks)
+    }
+
+    async fn get_by_session(&self, session_id: Uuid) -> Result<Vec<Task>, DatabaseError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM tasks
+            WHERE session_id = ?
+            ORDER BY calculated_priority DESC, submitted_at ASC
+            "#,
+        )
+        .bind(session_id.to_string())
         .fetch_all(&self.pool)
         .await?;
 

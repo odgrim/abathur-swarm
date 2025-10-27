@@ -199,6 +199,41 @@ pub trait TaskRepository: Send + Sync {
     /// - `DatabaseError::QueryFailed`: Database query execution failed
     /// - `DatabaseError::ParseError`: Failed to deserialize task data
     async fn get_by_session(&self, session_id: Uuid) -> Result<Vec<Task>, DatabaseError>;
+
+    /// Update a task's status efficiently.
+    ///
+    /// This updates only the status field and the last_updated_at timestamp,
+    /// without requiring a full task update.
+    ///
+    /// # Arguments
+    /// * `id` - The UUID of the task
+    /// * `status` - The new status
+    ///
+    /// # Returns
+    /// * `Ok(())` on successful update
+    /// * `Err(DatabaseError)` on failure
+    ///
+    /// # Errors
+    /// - `DatabaseError::NotFound`: Task with the given ID doesn't exist
+    /// - `DatabaseError::QueryFailed`: Database query execution failed
+    async fn update_status(&self, id: Uuid, status: TaskStatus) -> Result<(), DatabaseError>;
+
+    /// Get tasks by parent task ID.
+    ///
+    /// Returns all tasks that have the specified task as their parent,
+    /// useful for hierarchical task management and subtask tracking.
+    ///
+    /// # Arguments
+    /// * `parent_id` - The UUID of the parent task
+    ///
+    /// # Returns
+    /// * `Ok(Vec<Task>)` - List of child tasks (may be empty)
+    /// * `Err(DatabaseError)` on query failure
+    ///
+    /// # Errors
+    /// - `DatabaseError::QueryFailed`: Database query execution failed
+    /// - `DatabaseError::ParseError`: Failed to deserialize task data
+    async fn get_by_parent(&self, parent_id: Uuid) -> Result<Vec<Task>, DatabaseError>;
 }
 
 /// Filter criteria for task queries.
@@ -241,6 +276,12 @@ pub struct TaskFilters {
 
     /// Filter by feature branch name
     pub feature_branch: Option<String>,
+
+    /// Filter by session ID
+    pub session_id: Option<uuid::Uuid>,
+
+    /// Exclude tasks with this status
+    pub exclude_status: Option<TaskStatus>,
 
     /// Maximum number of results to return
     pub limit: Option<usize>,

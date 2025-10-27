@@ -174,7 +174,7 @@ impl TaskCoordinator {
 
         if task.status != new_status {
             self.task_queue
-                .update_task_status(task_id, new_status.clone())
+                .update_task_status(task_id, new_status)
                 .await
                 .context("Failed to update task status")?;
 
@@ -183,8 +183,8 @@ impl TaskCoordinator {
                 .status_tx
                 .send(TaskStatusUpdate {
                     task_id,
-                    old_status: task.status.clone(),
-                    new_status: new_status.clone(),
+                    old_status: task.status,
+                    new_status,
                 })
                 .await;
 
@@ -210,6 +210,39 @@ impl TaskCoordinator {
             .get_next_ready_task()
             .await
             .context("Failed to get next ready task")
+    }
+
+    /// Mark a task as running
+    ///
+    /// Updates the task status to Running when an agent begins execution.
+    /// This is called by the orchestrator when spawning an agent worker.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - UUID of the task to mark as running
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Task marked as running successfully
+    /// * `Err` - If task not found or database error
+    #[instrument(skip(self), fields(task_id = %task_id))]
+    pub async fn mark_task_running(&self, task_id: Uuid) -> Result<()> {
+        self.task_queue
+            .update_task_status(task_id, TaskStatus::Running)
+            .await
+            .context("Failed to mark task as running")?;
+
+        // Notify status change
+        let _ = self
+            .status_tx
+            .send(TaskStatusUpdate {
+                task_id,
+                old_status: TaskStatus::Ready,
+                new_status: TaskStatus::Running,
+            })
+            .await;
+
+        Ok(())
     }
 
     /// Handle task completion and trigger dependent tasks

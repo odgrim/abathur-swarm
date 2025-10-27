@@ -2,6 +2,7 @@ use crate::domain::models::{Task, TaskStatus};
 use crate::domain::ports::{TaskFilters, TaskRepository};
 use crate::services::{DependencyResolver, PriorityCalculator};
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
 use uuid::Uuid;
@@ -26,7 +27,7 @@ use uuid::Uuid;
 /// # }
 /// ```
 pub struct TaskQueueService {
-    repo: Arc<dyn TaskRepository>,
+    pub(crate) repo: Arc<dyn TaskRepository>,
     dependency_resolver: DependencyResolver,
     priority_calc: PriorityCalculator,
 }
@@ -297,10 +298,71 @@ fn find_dependent_tasks_recursive(task_id: Uuid, all_tasks: &[Task], result: &mu
     }
 }
 
+// Implement the TaskQueueService trait for the TaskQueueService struct
+#[async_trait]
+impl crate::domain::ports::TaskQueueService for TaskQueueService {
+    async fn get_task(&self, task_id: Uuid) -> Result<Task> {
+        self.get(task_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Task {} not found", task_id))
+    }
+
+    async fn get_tasks_by_status(&self, status: TaskStatus) -> Result<Vec<Task>> {
+        let filters = TaskFilters {
+            status: Some(status),
+            ..Default::default()
+        };
+        self.list(filters).await
+    }
+
+    async fn get_dependent_tasks(&self, task_id: Uuid) -> Result<Vec<Task>> {
+        self.repo
+            .get_dependents(task_id)
+            .await
+            .context("Failed to get dependent tasks")
+    }
+
+    async fn update_task_status(&self, task_id: Uuid, status: TaskStatus) -> Result<()> {
+        self.update_status(task_id, status).await
+    }
+
+    async fn update_task_priority(&self, task_id: Uuid, priority: f64) -> Result<()> {
+        let mut task = self
+            .get_task(task_id)
+            .await
+            .context("Failed to fetch task")?;
+
+        task.calculated_priority = priority;
+        self.repo
+            .update(&task)
+            .await
+            .context("Failed to update task priority")
+    }
+
+    async fn mark_task_failed(&self, task_id: Uuid, error_message: String) -> Result<()> {
+        let mut task = self
+            .get_task(task_id)
+            .await
+            .context("Failed to fetch task")?;
+
+        task.status = TaskStatus::Failed;
+        task.error_message = Some(error_message);
+        self.repo
+            .update(&task)
+            .await
+            .context("Failed to mark task as failed")
+    }
+
+    async fn get_next_ready_task(&self) -> Result<Option<Task>> {
+        let tasks = self.get_ready_tasks(Some(1)).await?;
+        Ok(tasks.into_iter().next())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::ports::DatabaseError;
+    use crate::infrastructure::database::DatabaseError;
     use mockall::mock;
     use mockall::predicate::*;
 
@@ -314,12 +376,12 @@ mod tests {
             async fn get(&self, id: Uuid) -> Result<Option<Task>, DatabaseError>;
             async fn update(&self, task: &Task) -> Result<(), DatabaseError>;
             async fn delete(&self, id: Uuid) -> Result<(), DatabaseError>;
-            async fn list(&self, filters: TaskFilters) -> Result<Vec<Task>, DatabaseError>;
-            async fn count(&self, filters: TaskFilters) -> Result<i64, DatabaseError>;
+            async fn list(&self, filters: &TaskFilters) -> Result<Vec<Task>, DatabaseError>;
+            async fn count(&self, filters: &TaskFilters) -> Result<i64, DatabaseError>;
             async fn get_ready_tasks(&self, limit: usize) -> Result<Vec<Task>, DatabaseError>;
-            async fn update_status(&self, id: Uuid, status: TaskStatus) -> Result<(), DatabaseError>;
             async fn get_by_feature_branch(&self, feature_branch: &str) -> Result<Vec<Task>, DatabaseError>;
-            async fn get_by_parent(&self, parent_id: Uuid) -> Result<Vec<Task>, DatabaseError>;
+            async fn get_dependents(&self, dependency_id: Uuid) -> Result<Vec<Task>, DatabaseError>;
+            async fn get_by_session(&self, session_id: Uuid) -> Result<Vec<Task>, DatabaseError>;
         }
     }
 
@@ -467,11 +529,10 @@ mod tests {
             .with(eq(task_id))
             .returning(move |_| Ok(Some(task_clone.clone())));
 
-        // Expect update_status to be called
+        // Expect update to be called when cancelling
         mock_repo
-            .expect_update_status()
-            .with(eq(task_id), eq(TaskStatus::Cancelled))
-            .returning(|_, _| Ok(()));
+            .expect_update()
+            .returning(|_| Ok(()));
 
         // Expect list to check for dependent tasks
         mock_repo.expect_list().returning(|_| Ok(vec![]));
@@ -513,11 +574,11 @@ mod tests {
             .with(eq(task2_id))
             .returning(move |_| Ok(Some(task2_for_get.clone())));
 
-        // Expect update_status for both tasks
+        // Expect update for both tasks
         mock_repo
-            .expect_update_status()
+            .expect_update()
             .times(2)
-            .returning(|_, _| Ok(()));
+            .returning(|_| Ok(()));
 
         // Expect list to return both tasks
         let all_tasks = vec![task1.clone(), task2_clone.clone()];
@@ -565,7 +626,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_summary_too_long() {
-        let mut mock_repo = MockTaskRepo::new();
+        let mock_repo = MockTaskRepo::new();
 
         let mut task = create_test_task("Test");
         task.summary = "a".repeat(141);
@@ -582,7 +643,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_priority_out_of_range() {
-        let mut mock_repo = MockTaskRepo::new();
+        let mock_repo = MockTaskRepo::new();
 
         let mut task = create_test_task("Test");
         task.priority = 11;

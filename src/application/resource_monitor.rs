@@ -6,31 +6,19 @@ use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tokio::time::interval;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Resource limits configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceLimits {
-    /// Maximum CPU usage percentage (0.0-100.0)
-    pub max_cpu_percent: f32,
-
-    /// Maximum memory usage in MB
+    /// Maximum memory usage in MB (for tracking only, no enforced throttling)
     pub max_memory_mb: u64,
-
-    /// CPU usage percentage that triggers throttling (0.0-100.0)
-    pub cpu_throttle_threshold: f32,
-
-    /// Memory usage in MB that triggers throttling
-    pub memory_throttle_threshold_mb: u64,
 }
 
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
-            max_cpu_percent: 80.0,
             max_memory_mb: 4096,
-            cpu_throttle_threshold: 70.0,
-            memory_throttle_threshold_mb: 3072,
         }
     }
 }
@@ -44,12 +32,6 @@ pub struct ResourceStatus {
     /// Current memory usage in MB
     pub memory_mb: u64,
 
-    /// Whether current usage is within configured limits
-    pub within_limits: bool,
-
-    /// Whether throttling should be applied
-    pub should_throttle: bool,
-
     /// Timestamp of the measurement
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
@@ -59,15 +41,6 @@ pub struct ResourceStatus {
 pub enum ResourceEvent {
     /// Resource status update
     StatusUpdate(ResourceStatus),
-
-    /// Resource limits exceeded
-    LimitsExceeded { cpu_percent: f32, memory_mb: u64 },
-
-    /// Throttling activated
-    ThrottlingActivated { reason: String },
-
-    /// Throttling deactivated
-    ThrottlingDeactivated,
 
     /// Monitor shutdown
     Shutdown,
@@ -170,11 +143,9 @@ impl ResourceMonitor {
 
         let handle = tokio::spawn(async move {
             let mut check_interval = interval(interval_duration);
-            let mut previous_throttle_state = false;
 
             info!(
                 interval_secs = interval_duration.as_secs(),
-                cpu_limit = limits.max_cpu_percent,
                 memory_limit_mb = limits.max_memory_mb,
                 "Resource monitor started"
             );
@@ -193,17 +164,9 @@ impl ResourceMonitor {
                             let cpu_percent = sys.global_cpu_usage();
                             let memory_mb = sys.used_memory() / 1024 / 1024;
 
-                            let within_limits = cpu_percent <= limits.max_cpu_percent
-                                && memory_mb <= limits.max_memory_mb;
-
-                            let should_throttle = cpu_percent >= limits.cpu_throttle_threshold
-                                || memory_mb >= limits.memory_throttle_threshold_mb;
-
                             ResourceStatus {
                                 cpu_percent,
                                 memory_mb,
-                                within_limits,
-                                should_throttle,
                                 timestamp: chrono::Utc::now(),
                             }
                         };
@@ -217,46 +180,9 @@ impl ResourceMonitor {
                         // Broadcast status update
                         let _ = event_tx.send(ResourceEvent::StatusUpdate(status.clone()));
 
-                        // Check for limits exceeded
-                        if !status.within_limits {
-                            warn!(
-                                cpu_percent = status.cpu_percent,
-                                memory_mb = status.memory_mb,
-                                cpu_limit = limits.max_cpu_percent,
-                                memory_limit_mb = limits.max_memory_mb,
-                                "Resource limits exceeded"
-                            );
-
-                            let _ = event_tx.send(ResourceEvent::LimitsExceeded {
-                                cpu_percent: status.cpu_percent,
-                                memory_mb: status.memory_mb,
-                            });
-                        }
-
-                        // Handle throttling state changes
-                        if status.should_throttle && !previous_throttle_state {
-                            let reason = if status.cpu_percent >= limits.cpu_throttle_threshold {
-                                format!("CPU usage {}% exceeds threshold {}%",
-                                    status.cpu_percent, limits.cpu_throttle_threshold)
-                            } else {
-                                format!("Memory usage {}MB exceeds threshold {}MB",
-                                    status.memory_mb, limits.memory_throttle_threshold_mb)
-                            };
-
-                            info!(%reason, "Throttling activated");
-                            let _ = event_tx.send(ResourceEvent::ThrottlingActivated { reason });
-                        } else if !status.should_throttle && previous_throttle_state {
-                            info!("Throttling deactivated");
-                            let _ = event_tx.send(ResourceEvent::ThrottlingDeactivated);
-                        }
-
-                        previous_throttle_state = status.should_throttle;
-
                         debug!(
                             cpu_percent = status.cpu_percent,
                             memory_mb = status.memory_mb,
-                            within_limits = status.within_limits,
-                            should_throttle = status.should_throttle,
                             "Resource check completed"
                         );
                     }
@@ -285,20 +211,6 @@ impl ResourceMonitor {
         status.clone()
     }
 
-    /// Check if resources are within configured limits
-    pub async fn within_limits(&self) -> bool {
-        let status = self.current_status.read().await;
-        status.as_ref().map(|s| s.within_limits).unwrap_or(true)
-    }
-
-    /// Check if adaptive throttling should be applied
-    ///
-    /// Returns true if resource usage exceeds throttle thresholds,
-    /// indicating that concurrent operations should be reduced.
-    pub async fn should_throttle(&self) -> bool {
-        let status = self.current_status.read().await;
-        status.as_ref().map(|s| s.should_throttle).unwrap_or(false)
-    }
 
     /// Subscribe to resource events
     ///
@@ -319,17 +231,9 @@ impl ResourceMonitor {
         let cpu_percent = sys.global_cpu_usage();
         let memory_mb = sys.used_memory() / 1024 / 1024;
 
-        let within_limits =
-            cpu_percent <= self.limits.max_cpu_percent && memory_mb <= self.limits.max_memory_mb;
-
-        let should_throttle = cpu_percent >= self.limits.cpu_throttle_threshold
-            || memory_mb >= self.limits.memory_throttle_threshold_mb;
-
         let status = ResourceStatus {
             cpu_percent,
             memory_mb,
-            within_limits,
-            should_throttle,
             timestamp: chrono::Utc::now(),
         };
 
@@ -363,10 +267,7 @@ impl ResourceMonitor {
 impl From<crate::domain::models::ResourceLimitsConfig> for ResourceLimits {
     fn from(config: crate::domain::models::ResourceLimitsConfig) -> Self {
         Self {
-            max_cpu_percent: 80.0, // Default CPU limit
             max_memory_mb: config.total_memory_mb,
-            cpu_throttle_threshold: 70.0, // Default throttle threshold
-            memory_throttle_threshold_mb: (config.total_memory_mb as f64 * 0.75) as u64,
         }
     }
 }
