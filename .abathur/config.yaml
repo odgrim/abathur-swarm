@@ -72,3 +72,36 @@ resource_limits:
 
   # Total memory limit across all agents in MB
   total_memory_mb: 4096
+
+# LLM Substrate configuration
+# Abathur supports multiple LLM backends (substrates)
+substrates:
+  # Default substrate to use (claude-code, anthropic-api)
+  default_substrate: "claude-code"
+
+  # List of enabled substrates
+  enabled:
+    - "claude-code"
+    # - "anthropic-api"  # Uncomment to enable Anthropic API
+
+  # Claude Code CLI configuration (default substrate)
+  # Requires: claude CLI to be installed and authenticated
+  # No API key needed - uses Claude Code's auth
+  claude_code:
+    claude_path: "claude"
+    timeout_secs: 300
+
+  # Anthropic API configuration (optional substrate)
+  # Requires: ANTHROPIC_API_KEY environment variable or api_key below
+  anthropic_api:
+    enabled: false
+    # api_key: "sk-..."  # Optional: defaults to ANTHROPIC_API_KEY env var
+    model: "claude-3-5-sonnet-20241022"
+
+  # Agent type to substrate mappings (optional)
+  # Maps specific agent types to preferred substrates
+  # If not specified, uses default_substrate
+  agent_mappings: {}
+    # Example mappings:
+    # rust-specialist: "claude-code"
+    # requirements-gatherer: "anthropic-api"

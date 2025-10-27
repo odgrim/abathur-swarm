@@ -11,6 +11,7 @@
 
 pub mod agent_repository;
 pub mod claude_client;
+pub mod llm_substrate;
 pub mod logger;
 pub mod mcp_client;
 pub mod memory_repository;
@@ -23,6 +24,10 @@ pub use agent_repository::AgentRepository;
 pub use claude_client::{
     ClaudeClient, ClaudeError, ClaudeRequest, ClaudeResponse, ContentBlock, Message, MessageChunk,
     MessageRequest, MessageResponse, TokenUsage, Usage,
+};
+pub use llm_substrate::{
+    ExecutionParameters, HealthStatus, LlmSubstrate, StopReason, SubstrateError, SubstrateRequest,
+    SubstrateResponse, TokenUsage as SubstrateTokenUsage,
 };
 pub use logger::{Level, Logger};
 pub use mcp_client::{

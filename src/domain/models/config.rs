@@ -31,6 +31,10 @@ pub struct Config {
     /// Resource limits per agent
     #[serde(default)]
     pub resource_limits: ResourceLimitsConfig,
+
+    /// LLM substrate configurations
+    #[serde(default)]
+    pub substrates: SubstratesConfig,
 }
 
 const fn default_max_agents() -> usize {
@@ -47,6 +51,7 @@ impl Default for Config {
             retry: RetryConfig::default(),
             mcp_servers: vec![],
             resource_limits: ResourceLimitsConfig::default(),
+            substrates: SubstratesConfig::default(),
         }
     }
 }
@@ -234,6 +239,123 @@ impl Default for ResourceLimitsConfig {
         Self {
             per_agent_memory_mb: default_per_agent_memory_mb(),
             total_memory_mb: default_total_memory_mb(),
+        }
+    }
+}
+
+/// LLM Substrates configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SubstratesConfig {
+    /// Default substrate to use if agent type has no mapping
+    #[serde(default = "default_substrate")]
+    pub default_substrate: String,
+
+    /// Enabled substrate types
+    #[serde(default = "default_enabled_substrates")]
+    pub enabled: Vec<String>,
+
+    /// Claude Code substrate configuration
+    #[serde(default)]
+    pub claude_code: ClaudeCodeSubstrateConfig,
+
+    /// Anthropic API substrate configuration
+    #[serde(default)]
+    pub anthropic_api: AnthropicApiSubstrateConfig,
+
+    /// Agent type to substrate mappings
+    /// Maps agent type patterns to specific substrates
+    #[serde(default)]
+    pub agent_mappings: std::collections::HashMap<String, String>,
+}
+
+fn default_substrate() -> String {
+    "claude-code".to_string()
+}
+
+fn default_enabled_substrates() -> Vec<String> {
+    vec!["claude-code".to_string()]
+}
+
+impl Default for SubstratesConfig {
+    fn default() -> Self {
+        Self {
+            default_substrate: default_substrate(),
+            enabled: default_enabled_substrates(),
+            claude_code: ClaudeCodeSubstrateConfig::default(),
+            anthropic_api: AnthropicApiSubstrateConfig::default(),
+            agent_mappings: std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// Claude Code substrate configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ClaudeCodeSubstrateConfig {
+    /// Path to claude CLI executable
+    #[serde(default = "default_claude_path")]
+    pub claude_path: String,
+
+    /// Working directory for claude execution
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+
+    /// Default timeout in seconds
+    #[serde(default = "default_claude_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_claude_path() -> String {
+    "claude".to_string()
+}
+
+fn default_claude_timeout() -> u64 {
+    300
+}
+
+impl Default for ClaudeCodeSubstrateConfig {
+    fn default() -> Self {
+        Self {
+            claude_path: default_claude_path(),
+            working_dir: None,
+            timeout_secs: default_claude_timeout(),
+        }
+    }
+}
+
+/// Anthropic API substrate configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AnthropicApiSubstrateConfig {
+    /// Enable Anthropic API substrate
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// API key (can also be set via ANTHROPIC_API_KEY env var)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
+    /// Model to use
+    #[serde(default = "default_anthropic_model")]
+    pub model: String,
+
+    /// Base URL for API (for testing/proxies)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+fn default_anthropic_model() -> String {
+    "claude-3-5-sonnet-20241022".to_string()
+}
+
+impl Default for AnthropicApiSubstrateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key: None,
+            model: default_anthropic_model(),
+            base_url: None,
         }
     }
 }

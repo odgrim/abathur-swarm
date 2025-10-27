@@ -7,7 +7,6 @@ use crate::application::{
     task_coordinator::TaskCoordinator, SwarmOrchestrator,
 };
 use crate::cli::service::{SwarmService, TaskQueueServiceAdapter};
-use crate::infrastructure::claude::{ClaudeClientAdapter, ClaudeClientConfig};
 use crate::infrastructure::config::ConfigLoader;
 use crate::infrastructure::database::{AgentRepositoryImpl, TaskRepositoryImpl};
 use crate::infrastructure::mcp::mock_client::MockMcpClient;
@@ -225,15 +224,35 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
             priority_calc.clone(),
         ));
 
-    // Initialize Claude client
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .context("ANTHROPIC_API_KEY environment variable not set")?;
+    // Initialize substrate registry from config
+    eprintln!("Initializing LLM substrates...");
+    let substrate_registry = Arc::new(
+        crate::infrastructure::substrates::SubstrateRegistry::from_config(&config)
+            .await
+            .context("Failed to initialize substrate registry")?,
+    );
 
-    let claude_client: Arc<dyn crate::domain::ports::ClaudeClient> =
-        Arc::new(ClaudeClientAdapter::new(ClaudeClientConfig {
-            api_key,
-            ..Default::default()
-        })?);
+    // Check if at least one substrate is healthy
+    eprintln!("Checking substrate health...");
+    if !substrate_registry.is_any_substrate_healthy().await {
+        anyhow::bail!(
+            "No healthy substrates available. Available substrates: {:?}\n\
+             Please ensure at least one substrate is properly configured:\n\
+             - For Claude Code: Install and authenticate the claude CLI\n\
+             - For Anthropic API: Set ANTHROPIC_API_KEY environment variable",
+            substrate_registry.available_substrates()
+        );
+    }
+
+    eprintln!("Substrate registry initialized successfully");
+    let health_status = substrate_registry.health_check_all().await;
+    for (id, status) in health_status {
+        eprintln!("  {} Substrate '{}': {:?}",
+            if matches!(status, Ok(crate::domain::ports::HealthStatus::Healthy)) { "✓" } else { "✗" },
+            id,
+            status
+        );
+    }
 
     // Initialize MCP client (mock for now)
     let mcp_client: Arc<dyn crate::domain::ports::McpClient> =
@@ -251,7 +270,8 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
         priority_calc_arc,
     ));
 
-    let agent_executor = Arc::new(AgentExecutor::new(claude_client, mcp_client));
+    // Create AgentExecutor with substrate registry
+    let agent_executor = Arc::new(AgentExecutor::new(substrate_registry.clone(), mcp_client));
 
     let resource_monitor = Arc::new(ResourceMonitor::new(config.resource_limits.clone().into()));
 

@@ -15,3 +15,4 @@ pub mod claude;
 pub mod config;
 pub mod database;
 pub mod mcp;
+pub mod substrates;
