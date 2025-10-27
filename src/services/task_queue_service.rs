@@ -77,7 +77,7 @@ impl TaskQueueService {
         // 2. Fetch all tasks to validate dependencies
         let all_tasks = self
             .repo
-            .list(TaskFilters::default())
+            .list(&TaskFilters::default())
             .await
             .context("Failed to fetch existing tasks")?;
 
@@ -137,7 +137,7 @@ impl TaskQueueService {
     #[instrument(skip(self), err)]
     pub async fn list(&self, filters: TaskFilters) -> Result<Vec<Task>> {
         self.repo
-            .list(filters)
+            .list(&filters)
             .await
             .context("Failed to list tasks")
     }
@@ -153,7 +153,7 @@ impl TaskQueueService {
     #[instrument(skip(self), err)]
     pub async fn cancel(&self, id: Uuid) -> Result<()> {
         // 1. Get the task to cancel
-        let task = self
+        let mut task = self
             .repo
             .get(id)
             .await
@@ -171,8 +171,9 @@ impl TaskQueueService {
         }
 
         // 2. Cancel this task
+        task.status = TaskStatus::Cancelled;
         self.repo
-            .update_status(id, TaskStatus::Cancelled)
+            .update(&task)
             .await
             .context("Failed to update task status")?;
 
@@ -181,7 +182,7 @@ impl TaskQueueService {
         // 3. Find and cancel all dependent tasks
         let all_tasks = self
             .repo
-            .list(TaskFilters::default())
+            .list(&TaskFilters::default())
             .await
             .context("Failed to fetch all tasks")?;
 
@@ -190,12 +191,13 @@ impl TaskQueueService {
 
         for dep_id in to_cancel {
             // Only cancel if not already completed/cancelled
-            if let Ok(Some(dep_task)) = self.repo.get(dep_id).await {
+            if let Ok(Some(mut dep_task)) = self.repo.get(dep_id).await {
                 if dep_task.status != TaskStatus::Completed
                     && dep_task.status != TaskStatus::Cancelled
                 {
+                    dep_task.status = TaskStatus::Cancelled;
                     self.repo
-                        .update_status(dep_id, TaskStatus::Cancelled)
+                        .update(&dep_task)
                         .await
                         .context("Failed to cancel dependent task")?;
 
@@ -254,8 +256,16 @@ impl TaskQueueService {
     /// - Database errors
     #[instrument(skip(self), err)]
     pub async fn update_status(&self, id: Uuid, status: TaskStatus) -> Result<()> {
+        let mut task = self
+            .repo
+            .get(id)
+            .await
+            .context("Failed to fetch task")?
+            .ok_or_else(|| anyhow::anyhow!("Task {} not found", id))?;
+
+        task.status = status;
         self.repo
-            .update_status(id, status)
+            .update(&task)
             .await
             .context("Failed to update task status")
     }
@@ -270,7 +280,7 @@ impl TaskQueueService {
     #[instrument(skip(self), err)]
     pub async fn count(&self, filters: TaskFilters) -> Result<i64> {
         self.repo
-            .count(filters)
+            .count(&filters)
             .await
             .context("Failed to count tasks")
     }

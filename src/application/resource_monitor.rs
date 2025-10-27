@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use sysinfo::{CpuRefreshKind, MemoryRefreshKind, ProcessRefreshKind, RefreshKind, System};
+use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tokio::time::interval;
@@ -86,10 +86,9 @@ pub enum ResourceEvent {
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```
 /// use abathur::application::ResourceMonitor;
 /// use abathur::domain::models::ResourceLimitsConfig;
-/// use std::time::Duration;
 ///
 /// # async fn example() -> anyhow::Result<()> {
 /// let limits = ResourceLimitsConfig::default();
@@ -135,8 +134,7 @@ impl ResourceMonitor {
         // Create system with minimal refresh kind for efficiency
         let refresh_kind = RefreshKind::new()
             .with_cpu(CpuRefreshKind::everything())
-            .with_memory(MemoryRefreshKind::everything())
-            .with_processes(ProcessRefreshKind::new());
+            .with_memory(MemoryRefreshKind::everything());
 
         let system = System::new_with_specifics(refresh_kind);
 
@@ -188,11 +186,11 @@ impl ResourceMonitor {
                         // Refresh system info
                         let status = {
                             let mut sys = system.write().await;
-                            sys.refresh_cpu_usage();
+                            sys.refresh_cpu_all();
                             sys.refresh_memory();
 
                             // Calculate current usage
-                            let cpu_percent = sys.global_cpu_info().cpu_usage();
+                            let cpu_percent = sys.global_cpu_usage();
                             let memory_mb = sys.used_memory() / 1024 / 1024;
 
                             let within_limits = cpu_percent <= limits.max_cpu_percent
@@ -315,10 +313,10 @@ impl ResourceMonitor {
     /// Useful for on-demand status updates outside the periodic interval.
     pub async fn check_resources(&self) -> Result<ResourceStatus> {
         let mut sys = self.system.write().await;
-        sys.refresh_cpu_usage();
+        sys.refresh_cpu_all();
         sys.refresh_memory();
 
-        let cpu_percent = sys.global_cpu_info().cpu_usage();
+        let cpu_percent = sys.global_cpu_usage();
         let memory_mb = sys.used_memory() / 1024 / 1024;
 
         let within_limits =

@@ -1,11 +1,7 @@
-//! Terminal output formatting utilities
+//! CLI output formatting module
 //!
-//! This module provides utilities for formatting CLI output including:
-//! - Table rendering (using comfy-table)
-//! - Tree visualization
-//! - Progress bars and spinners (using indicatif)
+//! Provides various output formatters for terminal display.
 
-pub mod progress;
+pub mod table;
 
-// Re-export commonly used items
-pub use progress::{MultiProgressManager, ProgressBarExt, create_progress_bar, create_spinner};
+pub use table::TableFormatter;

@@ -207,6 +207,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_task_error_not_found_display() {
+        let task_id = Uuid::new_v4();
+        let err = TaskError::TaskNotFound(task_id);
+        assert_eq!(err.to_string(), format!("Task not found: {task_id}"));
+    }
+
+    #[test]
     fn test_task_error_invalid_priority_display() {
         let err = TaskError::InvalidPriority(15);
         assert_eq!(err.to_string(), "Invalid priority: 15 (must be 0-10)");

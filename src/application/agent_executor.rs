@@ -1,6 +1,5 @@
 use crate::domain::models::Config;
-use crate::domain::ports::{ClaudeClient, McpClient, Message, MessageRequest};
-use crate::infrastructure::mcp::McpError;
+use crate::domain::ports::{ClaudeClient, ClaudeError, ClaudeRequest, McpClient, McpError};
 use anyhow::Result;
 use serde_json::Value;
 use std::fmt::Write as _;
@@ -66,8 +65,12 @@ pub enum ExecutionError {
     #[error("Timeout executing task {task_id} after {timeout_secs}s")]
     Timeout { task_id: Uuid, timeout_secs: u64 },
 
-    #[error("Claude API error for task {task_id}: {message}")]
-    ClaudeError { task_id: Uuid, message: String },
+    #[error("Claude API error for task {task_id}: {source}")]
+    ClaudeError {
+        task_id: Uuid,
+        #[source]
+        source: ClaudeError,
+    },
 
     #[error("MCP tool error for task {task_id}: {source}")]
     McpError {
@@ -266,45 +269,34 @@ impl AgentExecutor {
         let prompt = Self::build_prompt(&ctx);
 
         // Execute Claude API request
-        let request = MessageRequest {
-            model: "claude-3-5-sonnet-20241022".to_string(),
-            messages: vec![Message {
-                role: "user".to_string(),
-                content: prompt,
-            }],
-            max_tokens: 4096,
+        let request = ClaudeRequest {
+            task_id: ctx.task_id,
+            agent_type: ctx.agent_type.clone(),
+            prompt,
+            max_tokens: Some(4096),
             temperature: Some(0.7),
-            system: Some(format!("You are a {} agent.", ctx.agent_type)),
         };
 
         let response = self
             .claude_client
-            .send_message(request)
+            .execute(request)
             .await
-            .map_err(|err| ExecutionError::ClaudeError {
+            .map_err(|source| ExecutionError::ClaudeError {
                 task_id: ctx.task_id,
-                message: err.to_string(),
+                source,
             })?;
 
         tracing::info!(
             task_id = %ctx.task_id,
             input_tokens = response.usage.input_tokens,
             output_tokens = response.usage.output_tokens,
-            stop_reason = ?response.stop_reason,
+            stop_reason = %response.stop_reason,
             "Claude API call completed"
         );
 
         // TODO: Parse response for MCP tool calls and execute them
         // For now, return the Claude response directly
-        // Extract text from content blocks
-        let content = response
-            .content
-            .iter()
-            .filter_map(|block| block.text.clone())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        Ok(content)
+        Ok(response.content)
     }
 
     /// Build prompt for Claude based on execution context
@@ -324,31 +316,29 @@ impl AgentExecutor {
     /// Check if an error is retryable
     ///
     /// Retryable errors:
-    /// - Claude API errors (rate limits, network issues, server errors)
-    /// - MCP connection errors
-    /// - Timeout errors
+    /// - `RateLimitExceeded`
+    /// - `NetworkError`
+    /// - `ConnectionError`
+    /// - Timeout
     ///
     /// Non-retryable errors:
-    /// - Invalid configuration
-    /// - Execution failures
-    ///
-    /// Note: With the new error handling, we conservatively treat most
-    /// Claude API errors as retryable. The HTTP client adapter should
-    /// provide more specific error types in the future.
+    /// - `InvalidApiKey`
+    /// - `InvalidArguments`
+    /// - `ServerNotFound`
+    /// - `ToolNotFound`
     const fn is_retryable_error(err: &ExecutionError) -> bool {
         match err {
-            ExecutionError::ClaudeError { .. } => {
-                // TODO: Parse error message to determine if retryable
-                // For now, conservatively retry all Claude errors
-                true
-            }
+            ExecutionError::ClaudeError { source, .. } => matches!(
+                source,
+                ClaudeError::RateLimitExceeded(_)
+                    | ClaudeError::NetworkError(_)
+                    | ClaudeError::Timeout
+            ),
             ExecutionError::McpError { source, .. } => {
-                matches!(source, McpError::CommunicationError(_) | McpError::HealthCheckTimeout(_))
+                matches!(source, McpError::ConnectionError(_) | McpError::Timeout)
             }
             ExecutionError::Timeout { .. } => true,
-            ExecutionError::InvalidConfig(_) => false,
-            ExecutionError::ExecutionFailed(_) => false,
-            ExecutionError::MaxRetriesExceeded { .. } => false,
+            _ => false,
         }
     }
 }
@@ -357,8 +347,8 @@ impl AgentExecutor {
 mod tests {
     use super::*;
     use crate::domain::ports::{
-        ClaudeClient, ContentBlock, McpClient, Message, MessageRequest, MessageResponse, Resource,
-        Tool, Usage,
+        ClaudeClient, ClaudeError, ClaudeRequest, ClaudeResponse, McpClient, McpError,
+        McpToolRequest, McpToolResponse,
     };
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -390,21 +380,37 @@ mod tests {
 
     #[async_trait]
     impl ClaudeClient for MockClaudeClient {
-        async fn send_message(
-            &self,
-            _request: MessageRequest,
-        ) -> crate::domain::ports::claude_client::Result<MessageResponse> {
+        async fn execute(&self, request: ClaudeRequest) -> Result<ClaudeResponse, ClaudeError> {
             let count = self.call_count.fetch_add(1, Ordering::SeqCst);
 
             if self.should_fail && count < self.fail_count {
-                return Err("Mock rate limit error".into());
+                return Err(ClaudeError::RateLimitExceeded(
+                    "Mock rate limit".to_string(),
+                ));
             }
 
+            Ok(ClaudeResponse {
+                task_id: request.task_id,
+                content: "Mock response".to_string(),
+                stop_reason: "end_turn".to_string(),
+                usage: crate::domain::ports::TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                },
+            })
+        }
+
+        async fn send_message(
+            &self,
+            _request: crate::domain::ports::MessageRequest,
+        ) -> Result<crate::domain::ports::MessageResponse, ClaudeError> {
+            use crate::domain::ports::{ContentBlock, MessageResponse, Usage};
+
             Ok(MessageResponse {
-                id: "msg_123".to_string(),
+                id: "mock-msg-id".to_string(),
                 content: vec![ContentBlock {
                     content_type: "text".to_string(),
-                    text: Some("Mock response".to_string()),
+                    text: Some("Mock message response".to_string()),
                 }],
                 stop_reason: Some("end_turn".to_string()),
                 usage: Usage {
@@ -416,19 +422,29 @@ mod tests {
 
         async fn stream_message(
             &self,
-            _request: MessageRequest,
-        ) -> crate::domain::ports::claude_client::Result<
-            std::pin::Pin<
-                Box<
-                    dyn futures::Stream<
-                            Item = crate::domain::ports::claude_client::Result<
-                                crate::domain::ports::MessageChunk,
-                            >,
-                        > + Send,
-                >,
+            _request: crate::domain::ports::MessageRequest,
+        ) -> Result<
+            Box<
+                dyn futures::Stream<Item = Result<crate::domain::ports::MessageChunk, ClaudeError>>
+                    + Send
+                    + Unpin,
             >,
+            ClaudeError,
         > {
-            unimplemented!("Streaming not used in tests")
+            use crate::domain::ports::MessageChunk;
+            use futures::stream;
+
+            // Create a simple mock stream with one chunk
+            let chunks = vec![Ok(MessageChunk {
+                delta: Some("Mock streaming response".to_string()),
+                stop_reason: Some("end_turn".to_string()),
+            })];
+
+            Ok(Box::new(stream::iter(chunks)))
+        }
+
+        async fn health_check(&self) -> Result<(), ClaudeError> {
+            Ok(())
         }
     }
 
@@ -437,28 +453,80 @@ mod tests {
 
     #[async_trait]
     impl McpClient for MockMcpClient {
-        async fn list_tools(&self, _server: &str) -> Result<Vec<Tool>> {
-            Ok(vec![Tool {
-                name: "test_tool".to_string(),
-                description: "A test tool".to_string(),
-                input_schema: serde_json::json!({}),
-            }])
+        async fn invoke_tool(&self, request: McpToolRequest) -> Result<McpToolResponse, McpError> {
+            Ok(McpToolResponse {
+                task_id: request.task_id,
+                result: serde_json::json!({"success": true}),
+                is_error: false,
+            })
         }
 
-        async fn call_tool(&self, _server: &str, _tool: &str, _args: Value) -> Result<Value> {
+        async fn call_tool(
+            &self,
+            _server: &str,
+            _tool: &str,
+            _args: serde_json::Value,
+        ) -> Result<serde_json::Value, McpError> {
             Ok(serde_json::json!({"success": true}))
         }
 
-        async fn list_resources(&self, _server: &str) -> Result<Vec<Resource>> {
-            Ok(vec![Resource {
-                uri: "test://resource".to_string(),
-                name: "Test Resource".to_string(),
+        async fn list_tools(
+            &self,
+            _server_name: &str,
+        ) -> Result<Vec<crate::domain::ports::ToolInfo>, McpError> {
+            use crate::domain::ports::ToolInfo;
+
+            Ok(vec![
+                ToolInfo {
+                    name: "tool1".to_string(),
+                    description: Some("Mock tool 1".to_string()),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {}
+                    }),
+                },
+                ToolInfo {
+                    name: "tool2".to_string(),
+                    description: Some("Mock tool 2".to_string()),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {}
+                    }),
+                },
+            ])
+        }
+
+        async fn read_resource(
+            &self,
+            _server: &str,
+            uri: &str,
+        ) -> Result<crate::domain::ports::ResourceContent, McpError> {
+            use crate::domain::ports::ResourceContent;
+
+            Ok(ResourceContent {
+                uri: uri.to_string(),
+                mime_type: Some("text/plain".to_string()),
+                text: Some("Mock resource content".to_string()),
+                blob: None,
+            })
+        }
+
+        async fn list_resources(
+            &self,
+            _server: &str,
+        ) -> Result<Vec<crate::domain::ports::ResourceInfo>, McpError> {
+            use crate::domain::ports::ResourceInfo;
+
+            Ok(vec![ResourceInfo {
+                uri: "mock://resource1".to_string(),
+                name: "Mock Resource".to_string(),
+                description: Some("A mock resource for testing".to_string()),
                 mime_type: Some("text/plain".to_string()),
             }])
         }
 
-        async fn read_resource(&self, _server: &str, _uri: &str) -> Result<String> {
-            Ok("test resource content".to_string())
+        async fn health_check(&self, _server_name: &str) -> Result<(), McpError> {
+            Ok(())
         }
     }
 
@@ -549,12 +617,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_retryable_error() {
-        // Claude errors are retryable (conservatively)
+        // Rate limit is retryable
         let err = ExecutionError::ClaudeError {
             task_id: Uuid::new_v4(),
-            message: "Rate limit exceeded".to_string(),
+            source: ClaudeError::RateLimitExceeded("test".to_string()),
         };
         assert!(AgentExecutor::is_retryable_error(&err));
+
+        // Invalid API key is NOT retryable
+        let err = ExecutionError::ClaudeError {
+            task_id: Uuid::new_v4(),
+            source: ClaudeError::InvalidApiKey,
+        };
+        assert!(!AgentExecutor::is_retryable_error(&err));
 
         // Timeout is retryable
         let err = ExecutionError::Timeout {
@@ -562,9 +637,5 @@ mod tests {
             timeout_secs: 60,
         };
         assert!(AgentExecutor::is_retryable_error(&err));
-
-        // Invalid config is NOT retryable
-        let err = ExecutionError::InvalidConfig("Bad config".to_string());
-        assert!(!AgentExecutor::is_retryable_error(&err));
     }
 }

@@ -33,11 +33,7 @@ pub mod services;
 
 // Re-export commonly used types for convenience
 pub use application::{
-    ConvergenceStrategy, LoopExecutor, LoopState, ResourceEvent, ResourceLimits, ResourceMonitor,
-    ResourceStatus, TaskCoordinator, TaskStatusUpdate,
-};
-pub use cli::output::progress::{
-    MultiProgressManager, ProgressBarExt, create_progress_bar, create_spinner,
+    ConvergenceStrategy, LoopExecutor, LoopState, TaskCoordinator, TaskStatusUpdate,
 };
 pub use domain::models::{
     Agent, AgentStatus, Config, DatabaseConfig, DependencyType, LoggingConfig, McpServerConfig,
@@ -45,7 +41,7 @@ pub use domain::models::{
     TaskStatus,
 };
 pub use domain::ports::{
-    AgentRepository, ClaudeClient, DatabaseError, MemoryRepository, PriorityCalculator,
+    AgentRepository, ClaudeClient, MemoryRepository, PriorityCalculator,
     TaskFilters, TaskQueueService, TaskRepository,
 };
 pub use infrastructure::config::{ConfigError, ConfigLoader};

@@ -11,7 +11,6 @@
 
 pub mod agent_repository;
 pub mod claude_client;
-pub mod errors;
 pub mod logger;
 pub mod mcp_client;
 pub mod memory_repository;
@@ -22,11 +21,13 @@ pub mod task_repository;
 
 pub use agent_repository::AgentRepository;
 pub use claude_client::{
-    ClaudeClient, ContentBlock, Message, MessageChunk, MessageRequest, MessageResponse, Usage,
+    ClaudeClient, ClaudeError, ClaudeRequest, ClaudeResponse, ContentBlock, Message, MessageChunk,
+    MessageRequest, MessageResponse, TokenUsage, Usage,
 };
-pub use errors::DatabaseError;
 pub use logger::{Level, Logger};
-pub use mcp_client::{McpClient, Resource, Tool};
+pub use mcp_client::{
+    McpClient, McpError, McpToolRequest, McpToolResponse, ResourceContent, ResourceInfo, ToolInfo,
+};
 pub use memory_repository::MemoryRepository;
 pub use priority_calculator::PriorityCalculator;
 pub use session_repository::SessionRepository;

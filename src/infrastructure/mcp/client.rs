@@ -49,9 +49,12 @@
 //! }
 //! ```
 
-use crate::domain::ports::mcp_client::{McpClient, Resource, Tool};
+use crate::domain::ports::mcp_client::{
+    McpClient, McpError as DomainMcpError, McpToolRequest, McpToolResponse, ResourceContent,
+    ResourceInfo, ToolInfo,
+};
 use crate::infrastructure::mcp::{
-    error::{McpError, Result},
+    error::{McpError as InfraMcpError, Result as InfraResult},
     health_monitor::HealthMonitor,
     server_manager::{McpServerManager, StdioTransport},
 };
@@ -60,6 +63,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use uuid::Uuid;
 
 /// MCP client implementation
 ///

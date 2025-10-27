@@ -13,12 +13,15 @@
 //! - `health_monitor` - Background health checking and auto-restart
 //! - `error` - MCP-specific error types
 
-pub mod client;
+// Temporarily disabled - needs to be updated for new port trait interface
+// pub mod client;
 pub mod error;
-pub mod health_monitor;
-pub mod server_manager;
+// pub mod health_monitor;
+pub mod mock_client;
+// pub mod server_manager;
 
-pub use client::McpClientImpl;
+// pub use client::McpClientImpl;
 pub use error::{McpError, Result};
-pub use health_monitor::HealthMonitor;
-pub use server_manager::{McpServerManager, StdioTransport};
+// pub use health_monitor::HealthMonitor;
+pub use mock_client::MockMcpClient;
+// pub use server_manager::{McpServerManager, StdioTransport};
