@@ -1,11 +1,12 @@
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
 use std::str::FromStr;
 
 /// Type of memory storage
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum MemoryType {
     /// Semantic memory - facts and knowledge
@@ -43,7 +44,7 @@ impl FromStr for MemoryType {
 ///
 /// Supports hierarchical namespaces and soft deletes.
 /// Values are stored as JSON for flexibility.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Memory {
     /// Auto-incrementing database ID
     pub id: i64,

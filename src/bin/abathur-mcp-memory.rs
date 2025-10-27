@@ -26,7 +26,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use rmcp::{
     handler::server::wrapper::Parameters, model::ServerInfo, tool, tool_handler, tool_router,
-    ErrorData as McpError, ServerHandler, ServiceExt,
+    ErrorData as McpError, Json, ServerHandler, ServiceExt,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -106,6 +106,15 @@ struct MemoryDeleteRequest {
     key: String,
 }
 
+/// Search results
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct MemorySearchResult {
+    /// Number of memories found
+    count: usize,
+    /// List of memories
+    memories: Vec<Memory>,
+}
+
 /// Memory MCP Server implementation
 #[derive(Clone)]
 struct MemoryServer {
@@ -132,7 +141,7 @@ impl MemoryServer {
         let memory_type: MemoryType = params
             .memory_type
             .parse()
-            .map_err(|e| McpError::invalid_params(format!("Invalid memory_type: {}", e)))?;
+            .map_err(|e| McpError::invalid_params(format!("Invalid memory_type: {}", e), None))?;
 
         let memory = Memory::new(
             params.namespace,
@@ -152,7 +161,7 @@ impl MemoryServer {
                 Err(McpError::internal_error(format!(
                     "Failed to add memory: {}",
                     e
-                )))
+                ), None))
             }
         }
     }
@@ -162,7 +171,7 @@ impl MemoryServer {
     async fn memory_get(
         &self,
         params: Parameters<MemoryGetRequest>,
-    ) -> Result<serde_json::Value, McpError> {
+    ) -> Result<Json<Memory>, McpError> {
         let params = params.0;
 
         match self
@@ -172,19 +181,18 @@ impl MemoryServer {
         {
             Ok(Some(memory)) => {
                 info!("Memory found: {}", memory.namespace_path());
-                serde_json::to_value(&memory)
-                    .map_err(|e| McpError::internal_error(format!("Serialization error: {}", e)))
+                Ok(Json(memory))
             }
             Ok(None) => Err(McpError::invalid_params(format!(
                 "Memory not found: {}:{}",
                 params.namespace, params.key
-            ))),
+            ), None)),
             Err(e) => {
                 error!("Failed to get memory: {}", e);
                 Err(McpError::internal_error(format!(
                     "Failed to get memory: {}",
                     e
-                )))
+                ), None))
             }
         }
     }
@@ -194,7 +202,7 @@ impl MemoryServer {
     async fn memory_search(
         &self,
         params: Parameters<MemorySearchRequest>,
-    ) -> Result<serde_json::Value, McpError> {
+    ) -> Result<Json<MemorySearchResult>, McpError> {
         let params = params.0;
 
         let memory_type: Option<MemoryType> = params
@@ -209,18 +217,17 @@ impl MemoryServer {
         {
             Ok(memories) => {
                 info!("Found {} memories", memories.len());
-                serde_json::to_value(&serde_json::json!({
-                    "count": memories.len(),
-                    "memories": memories
+                Ok(Json(MemorySearchResult {
+                    count: memories.len(),
+                    memories,
                 }))
-                .map_err(|e| McpError::internal_error(format!("Serialization error: {}", e)))
             }
             Err(e) => {
                 error!("Failed to search memories: {}", e);
                 Err(McpError::internal_error(format!(
                     "Failed to search memories: {}",
                     e
-                )))
+                ), None))
             }
         }
     }
@@ -255,7 +262,7 @@ impl MemoryServer {
                 Err(McpError::internal_error(format!(
                     "Failed to update memory: {}",
                     e
-                )))
+                ), None))
             }
         }
     }
@@ -285,7 +292,7 @@ impl MemoryServer {
                 Err(McpError::internal_error(format!(
                     "Failed to delete memory: {}",
                     e
-                )))
+                ), None))
             }
         }
     }
@@ -295,8 +302,18 @@ impl MemoryServer {
 impl ServerHandler for MemoryServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            name: "abathur-memory".to_string(),
-            version: "1.0.0".to_string(),
+            protocol_version: rmcp::model::ProtocolVersion::default(),
+            capabilities: rmcp::model::ServerCapabilities::default(),
+            server_info: rmcp::model::Implementation {
+                name: "abathur-memory".to_string(),
+                title: Some("Abathur Memory Management Server".to_string()),
+                version: "1.0.0".to_string(),
+                icons: None,
+                website_url: None,
+            },
+            instructions: Some(
+                "Memory management server for Abathur. Use tools to add, get, search, update, and delete memory entries.".to_string()
+            ),
         }
     }
 }
@@ -341,12 +358,14 @@ async fn main() -> Result<()> {
     info!("MCP server ready, listening on stdio");
 
     // Run server with stdio transport
-    server
-        .serve(rmcp::transport::io::stdio())
+    let (stdin, stdout) = (tokio::io::stdin(), tokio::io::stdout());
+    let _running = server
+        .serve((stdin, stdout))
         .await
-        .map_err(|_| anyhow::anyhow!("Server initialization failed"))?
-        .wait()
-        .await;
+        .map_err(|_| anyhow::anyhow!("Server initialization failed"))?;
+
+    // Keep running until interrupted
+    tokio::signal::ctrl_c().await?;
 
     Ok(())
 }

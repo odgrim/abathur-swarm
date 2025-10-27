@@ -11,6 +11,10 @@ venv/
 *.db-shm
 *.db-wal
 design_docs/Chapter*
+
+# Claude
+.mcp.json
+
 # Documentation
 site/
 

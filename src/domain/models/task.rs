@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -7,7 +8,7 @@ use uuid::Uuid;
 use crate::domain::error::TaskError;
 
 /// Task lifecycle states
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
     Pending, // Submitted, dependencies not yet checked
@@ -51,7 +52,7 @@ impl FromStr for TaskStatus {
 }
 
 /// Origin of task submission
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskSource {
     Human,
@@ -86,7 +87,7 @@ impl FromStr for TaskSource {
 }
 
 /// Type of dependency relationship
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum DependencyType {
     Sequential, // B depends on A completing
@@ -115,8 +116,9 @@ impl FromStr for DependencyType {
 }
 
 /// Represents a unit of work in the task queue
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Task {
+    #[schemars(with = "String")]
     pub id: Uuid,
     pub summary: String,
     pub description: String,
@@ -124,6 +126,7 @@ pub struct Task {
     pub priority: u8,
     pub calculated_priority: f64,
     pub status: TaskStatus,
+    #[schemars(with = "Option<Vec<String>>")]
     pub dependencies: Option<Vec<Uuid>>,
     pub dependency_type: DependencyType,
     pub dependency_depth: u32,
@@ -138,7 +141,9 @@ pub struct Task {
     pub completed_at: Option<DateTime<Utc>>,
     pub last_updated_at: DateTime<Utc>,
     pub created_by: Option<String>,
+    #[schemars(with = "Option<String>")]
     pub parent_task_id: Option<Uuid>,
+    #[schemars(with = "Option<String>")]
     pub session_id: Option<Uuid>,
     pub source: TaskSource,
     pub deadline: Option<DateTime<Utc>>,
