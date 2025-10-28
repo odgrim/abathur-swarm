@@ -303,7 +303,9 @@ impl ServerHandler for MemoryServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: rmcp::model::ProtocolVersion::default(),
-            capabilities: rmcp::model::ServerCapabilities::default(),
+            capabilities: rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
             server_info: rmcp::model::Implementation {
                 name: "abathur-memory".to_string(),
                 title: Some("Abathur Memory Management Server".to_string()),

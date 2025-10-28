@@ -4,11 +4,13 @@
 //! using tokio async concurrency primitives.
 
 use crate::application::agent_executor::{AgentExecutor, ExecutionContext};
+use crate::application::mcp_process_manager::McpProcessManager;
 use crate::application::resource_monitor::ResourceMonitor;
 use crate::application::task_coordinator::TaskCoordinator;
 use crate::domain::models::{Config, Task};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, RwLock, Semaphore};
 use tokio::task::JoinHandle;
@@ -145,6 +147,9 @@ pub struct SwarmOrchestrator {
     resource_monitor: Arc<ResourceMonitor>,
     config: Config,
 
+    // MCP server process management
+    mcp_manager: Arc<RwLock<McpProcessManager>>,
+
     // Communication channels
     agent_event_tx: mpsc::Sender<AgentEvent>,
     agent_event_rx: Arc<RwLock<Option<mpsc::Receiver<AgentEvent>>>>,
@@ -165,15 +170,20 @@ impl SwarmOrchestrator {
     /// * `agent_executor` - Agent task executor
     /// * `resource_monitor` - System resource monitor
     /// * `config` - Application configuration
+    /// * `db_path` - Path to SQLite database for MCP servers
     pub fn new(
         max_agents: usize,
         task_coordinator: Arc<TaskCoordinator>,
         agent_executor: Arc<AgentExecutor>,
         resource_monitor: Arc<ResourceMonitor>,
         config: Config,
+        db_path: PathBuf,
     ) -> Self {
         let (agent_event_tx, agent_event_rx) = mpsc::channel(1000);
         let (shutdown_tx, _) = broadcast::channel(1);
+
+        // Initialize MCP process manager
+        let mcp_manager = McpProcessManager::new(db_path);
 
         Self {
             state: Arc::new(RwLock::new(SwarmState::Stopped)),
@@ -186,6 +196,7 @@ impl SwarmOrchestrator {
             agent_executor,
             resource_monitor,
             config,
+            mcp_manager: Arc::new(RwLock::new(mcp_manager)),
             agent_event_tx,
             agent_event_rx: Arc::new(RwLock::new(Some(agent_event_rx))),
             shutdown_tx,
@@ -197,9 +208,10 @@ impl SwarmOrchestrator {
     /// Start the swarm orchestrator
     ///
     /// Initializes:
-    /// 1. Resource monitoring background task
-    /// 2. Task polling and distribution loop
-    /// 3. Agent event processing loop
+    /// 1. MCP servers (memory and task queue)
+    /// 2. Resource monitoring background task
+    /// 3. Task polling and distribution loop
+    /// 4. Agent event processing loop
     pub async fn start(&mut self) -> Result<()> {
         let mut state = self.state.write().await;
         if *state != SwarmState::Stopped {
@@ -210,6 +222,17 @@ impl SwarmOrchestrator {
         drop(state);
 
         info!(max_agents = *self.max_agents.read().await, "Starting swarm orchestrator");
+
+        // Start MCP servers first
+        info!("Starting MCP servers");
+        self.mcp_manager
+            .write()
+            .await
+            .start()
+            .await
+            .context("Failed to start MCP servers")?;
+
+        info!("MCP servers started successfully");
 
         // Start resource monitoring (5 second interval)
         let resource_handle = self
@@ -239,6 +262,7 @@ impl SwarmOrchestrator {
     /// 2. Wait for active tasks to complete (with 30s timeout)
     /// 3. Cancel remaining tasks
     /// 4. Shutdown resource monitoring
+    /// 5. Shutdown MCP servers
     pub async fn stop(&mut self) -> Result<()> {
         let mut state = self.state.write().await;
         if *state == SwarmState::Stopped {
@@ -305,6 +329,17 @@ impl SwarmOrchestrator {
         if let Some(handle) = self.resource_monitor_handle.write().await.take() {
             handle.await??;
         }
+
+        // Shutdown MCP servers
+        info!("Stopping MCP servers");
+        self.mcp_manager
+            .write()
+            .await
+            .stop()
+            .await
+            .context("Failed to stop MCP servers")?;
+
+        info!("MCP servers stopped successfully");
 
         let mut state = self.state.write().await;
         *state = SwarmState::Stopped;

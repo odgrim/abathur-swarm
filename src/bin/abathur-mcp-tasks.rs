@@ -431,7 +431,9 @@ impl ServerHandler for TaskServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: rmcp::model::ProtocolVersion::default(),
-            capabilities: rmcp::model::ServerCapabilities::default(),
+            capabilities: rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
             server_info: rmcp::model::Implementation {
                 name: "abathur-tasks".to_string(),
                 title: Some("Abathur Task Queue Management Server".to_string()),

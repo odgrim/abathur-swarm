@@ -280,21 +280,22 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
 
     eprintln!("All dependencies initialized, creating SwarmOrchestrator");
 
-    // Create and start SwarmOrchestrator
+    // Create and start SwarmOrchestrator with MCP server management
     let mut orchestrator = SwarmOrchestrator::new(
         max_agents,
         task_coordinator,
         agent_executor,
         resource_monitor,
         config,
+        db_path, // Pass database path for MCP servers
     );
 
-    eprintln!("Starting SwarmOrchestrator...");
+    eprintln!("Starting SwarmOrchestrator (including MCP servers)...");
 
     orchestrator.start().await
         .context("Failed to start SwarmOrchestrator")?;
 
-    eprintln!("SwarmOrchestrator started successfully");
+    eprintln!("SwarmOrchestrator started successfully (MCP servers running)");
 
     // Run forever until interrupted
     // The orchestrator runs its background tasks automatically
