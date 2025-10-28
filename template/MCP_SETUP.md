@@ -1,13 +1,11 @@
 # Abathur MCP Server Setup
 
-This template includes configuration for two Abathur MCP servers:
+This template includes configuration for two Abathur MCP servers implemented in Rust:
 
 ## Memory MCP Server
 
 Gives Claude agents access to:
 - **Long-term memory** - Store and retrieve facts, preferences, and learnings
-- **Session management** - Track conversation history and state
-- **Semantic document search** - Find relevant documents using natural language
 
 ## Task Queue MCP Server
 
@@ -19,87 +17,52 @@ Gives Claude agents access to:
 
 ## Quick Start
 
-### 1. Configure Claude Desktop
+### 1. Build the MCP Servers
 
-Copy the MCP configuration to your Claude Desktop config:
-
-**macOS/Linux:**
-```bash
-# Location: ~/Library/Application Support/Claude/claude_desktop_config.json
-cat .claude/mcp_config.json
-```
-
-**Windows:**
-```bash
-# Location: %APPDATA%\Claude\claude_desktop_config.json
-type .claude\mcp_config.json
-```
-
-Add the `abathur-memory` server to your `mcpServers` section.
-
-### 2. Start the Servers
-
-#### Option A: Auto-start with Swarm/Loop (Recommended)
-
-Both servers start automatically when you run:
+The MCP servers are implemented in Rust for performance and reliability:
 
 ```bash
-abathur swarm start
-abathur loop start <task-id>
+cargo build --release --bin abathur-mcp-memory --bin abathur-mcp-tasks
 ```
 
-Use `--no-mcp` to disable auto-start if needed.
+This creates two binaries:
+- `target/release/abathur-mcp-memory` - Memory management server
+- `target/release/abathur-mcp-tasks` - Task queue management server
 
-#### Option B: Standalone Servers
+### 2. Project Configuration
 
-Start the servers manually:
+The project's `.mcp.json` file is already configured to use the Rust binaries:
 
-**Memory Server:**
+```json
+{
+  "mcpServers": {
+    "abathur-memory": {
+      "command": "./target/release/abathur-mcp-memory",
+      "args": ["--db-path", ".abathur/abathur.db"]
+    },
+    "abathur-task-queue": {
+      "command": "./target/release/abathur-mcp-tasks",
+      "args": ["--db-path", ".abathur/abathur.db"]
+    }
+  }
+}
+```
+
+Claude Code automatically picks up this configuration when running in the project directory.
+
+### 3. Manual Testing (Optional)
+
+Test the servers directly:
+
 ```bash
-# Foreground (for testing)
-abathur mcp start-memory --foreground
+# Memory server (runs in foreground, expects stdio MCP protocol)
+./target/release/abathur-mcp-memory --db-path .abathur/abathur.db
 
-# Background
-abathur mcp start-memory
-
-# Check status
-abathur mcp status-memory
-
-# Stop
-abathur mcp stop-memory
+# Task queue server (runs in foreground, expects stdio MCP protocol)
+./target/release/abathur-mcp-tasks --db-path .abathur/abathur.db
 ```
 
-**Task Queue Server:**
-```bash
-# Foreground (for testing)
-python -m abathur.mcp.task_queue_server --db-path ./abathur.db
-
-# Background
-python -m abathur.mcp.task_queue_server_manager start --db-path ./abathur.db
-
-# Check status
-python -m abathur.mcp.task_queue_server_manager status
-
-# Stop
-python -m abathur.mcp.task_queue_server_manager stop
-```
-
-#### Option C: Direct Python
-
-**Memory Server:**
-```bash
-# Using Python module
-python -m abathur.mcp.memory_server --db-path ./abathur.db
-
-# Using CLI entry point (after installation)
-abathur-mcp --db-path ./abathur.db
-```
-
-**Task Queue Server:**
-```bash
-# Using Python module
-python -m abathur.mcp.task_queue_server --db-path ./abathur.db
-```
+**Note:** The servers communicate via stdio using the MCP protocol. They will wait for JSON-RPC messages on stdin and respond on stdout. Claude Code handles this automatically.
 
 ## Available Tools
 
@@ -137,33 +100,18 @@ python -m abathur.mcp.task_queue_server --db-path ./abathur.db
 
 ### Agent Definition with Memory
 
-Create an agent that uses memory tools in `.claude/agents/memory-aware-agent.yaml`:
+Create an agent that uses memory tools in `.claude/agents/memory-aware-agent.md`:
 
-```yaml
-name: memory-aware-agent
-description: Agent with long-term memory capabilities
-system_prompt: |
-  You are a memory-aware agent. You have access to tools for:
-  - Storing and retrieving long-term memories
-  - Managing conversation sessions
-  - Searching documents semantically
+```markdown
+You are a memory-aware agent. You have access to tools for:
+- Storing and retrieving long-term memories
 
-  Use these tools to:
-  1. Remember user preferences (memory_add with type='semantic')
-  2. Recall past conversations (memory_search)
-  3. Find relevant documentation (document_semantic_search)
-  4. Track session state (session_get_state, session_set_state)
+Use these tools to:
+1. Remember user preferences (memory_add with type='semantic')
+2. Recall past conversations (memory_search)
 
-  Always check for existing memories before asking the user.
-  Store important learnings for future conversations.
-
-tools:
-  - memory_add
-  - memory_get
-  - memory_search
-  - session_get_state
-  - session_set_state
-  - document_semantic_search
+Always check for existing memories before asking the user.
+Store important learnings for future conversations.
 ```
 
 ### Memory Storage Pattern
@@ -204,18 +152,6 @@ Agents should use hierarchical namespaces:
 }
 ```
 
-**Semantic document search:**
-```json
-{
-  "tool": "document_semantic_search",
-  "arguments": {
-    "query_text": "memory management patterns",
-    "namespace": "docs:architecture",
-    "limit": 5
-  }
-}
-```
-
 ### Task Queue Pattern
 
 Agents use the task queue for managing complex workflows:
@@ -225,12 +161,11 @@ Agents use the task queue for managing complex workflows:
 {
   "tool": "task_enqueue",
   "arguments": {
+    "summary": "Analyze requirements",
     "description": "Analyze requirements for new feature",
-    "source": "agent_planner",
     "agent_type": "requirements-gatherer",
-    "base_priority": 8,
-    "prerequisites": [],
-    "deadline": "2025-12-31T23:59:59Z"
+    "priority": 8,
+    "dependencies": null
   }
 }
 ```
@@ -240,11 +175,11 @@ Agents use the task queue for managing complex workflows:
 {
   "tool": "task_enqueue",
   "arguments": {
+    "summary": "Implement feature",
     "description": "Implement feature based on analysis",
-    "source": "agent_implementation",
     "agent_type": "implementation-specialist",
-    "base_priority": 7,
-    "prerequisites": ["task-uuid-from-previous-task"]
+    "priority": 7,
+    "dependencies": ["task-uuid-from-previous-task"]
   }
 }
 ```
@@ -273,13 +208,14 @@ Agents use the task queue for managing complex workflows:
 
 ```
 ┌─────────────────────────┐
-│   Claude Agent/Desktop  │
+│     Claude Code         │
 └───────────┬─────────────┘
             │ MCP Protocol (stdio)
             │
 ┌───────────▼─────────────┐
-│  Abathur Memory Server  │
-│  - 12 MCP Tools         │
+│  Rust MCP Servers       │
+│  - abathur-mcp-memory   │
+│  - abathur-mcp-tasks    │
 │  - Error Handling       │
 │  - Structured Logging   │
 └───────────┬─────────────┘
@@ -287,15 +223,14 @@ Agents use the task queue for managing complex workflows:
 ┌───────────▼─────────────┐
 │  Service Layer          │
 │  - MemoryService        │
-│  - SessionService       │
-│  - DocumentIndexService │
+│  - TaskQueueService     │
 └───────────┬─────────────┘
             │
 ┌───────────▼─────────────┐
 │  SQLite Database        │
 │  - memory_entries       │
-│  - sessions             │
-│  - document_embeddings  │
+│  - tasks                │
+│  - task_dependencies    │
 └─────────────────────────┘
 ```
 
@@ -303,21 +238,22 @@ Agents use the task queue for managing complex workflows:
 
 ### Server Not Starting
 
-1. Check Python version: `python --version` (requires 3.10+)
-2. Verify installation: `pip list | grep mcp`
-3. Check logs: `tail -f ~/.abathur/logs/abathur.log`
+1. Build the binaries: `cargo build --release --bin abathur-mcp-memory --bin abathur-mcp-tasks`
+2. Verify binaries exist: `ls -la target/release/abathur-mcp-*`
+3. Check logs: Set `RUST_LOG=debug` in `.mcp.json` and check stderr
 
-### Tools Not Visible in Claude Desktop
+### Tools Not Visible in Claude Code
 
-1. Restart Claude Desktop
-2. Check MCP config syntax: `cat ~/Library/Application\ Support/Claude/claude_desktop_config.json | jq`
-3. Verify server is running: `abathur mcp status-memory`
+1. Verify `.mcp.json` exists in project root
+2. Check config syntax: `cat .mcp.json | jq`
+3. Rebuild if binaries are missing: `cargo build --release`
+4. Restart Claude Code session
 
 ### Database Errors
 
-1. Check database path is correct
-2. Ensure database is initialized: `abathur init`
-3. Verify database permissions: `ls -l abathur.db`
+1. Verify database exists: `ls -la .abathur/abathur.db`
+2. Check database permissions: `ls -l .abathur/abathur.db`
+3. Reinitialize if needed: The servers will run migrations automatically on startup
 
 ## Security Notes
 
@@ -330,52 +266,52 @@ Agents use the task queue for managing complex workflows:
 
 ### Custom Database Path
 
-```bash
-abathur mcp start-memory --db-path /custom/path/abathur.db
-```
-
-### Multiple Projects
-
-Use separate databases for different projects:
+Edit `.mcp.json` to use a custom database path:
 
 ```json
 {
   "mcpServers": {
-    "abathur-project-a": {
-      "command": "abathur-mcp",
-      "args": ["--db-path", "/projects/a/abathur.db"]
-    },
-    "abathur-project-b": {
-      "command": "abathur-mcp",
-      "args": ["--db-path", "/projects/b/abathur.db"]
+    "abathur-memory": {
+      "command": "./target/release/abathur-mcp-memory",
+      "args": ["--db-path", "/custom/path/abathur.db"]
     }
   }
 }
 ```
 
-### Performance Tuning
+### Environment Variables
 
-For large databases (1000+ documents), consider:
+Add environment variables to `.mcp.json`:
 
-1. **Index Optimization:** Ensure all indexes are created
-2. **Embedding Cache:** Use consistent embedding model
-3. **Query Limits:** Set reasonable limits (default: 50 for memory, 10 for docs)
+```json
+{
+  "mcpServers": {
+    "abathur-memory": {
+      "command": "./target/release/abathur-mcp-memory",
+      "args": ["--db-path", ".abathur/abathur.db"],
+      "env": {
+        "RUST_LOG": "debug",
+        "RUST_BACKTRACE": "1"
+      }
+    }
+  }
+}
+```
 
 ## Next Steps
 
-1. Configure Claude Desktop with the MCP server
-2. Test with: `abathur mcp start-memory --foreground`
-3. Create memory-aware agent definitions
-4. Run swarm with memory: `abathur swarm start`
-5. Review stored memories: Browse database or use `memory_search` tool
+1. Build the MCP servers: `cargo build --release --bin abathur-mcp-memory --bin abathur-mcp-tasks`
+2. The `.mcp.json` configuration is already set up
+3. Claude Code will automatically connect to the servers
+4. Use the MCP tools in your agents and workflows
 
 ## Resources
 
 - [MCP Documentation](https://github.com/anthropics/mcp)
-- [Abathur MCP Server Source](/src/abathur/mcp/memory_server.py)
+- [Abathur MCP Memory Server Source](/src/bin/abathur-mcp-memory.rs)
+- [Abathur MCP Tasks Server Source](/src/bin/abathur-mcp-tasks.rs)
 - [Example Agents](.claude/agents/)
-- [Database Schema](/design_docs/phase2_tech_specs/ddl-memory-tables.sql)
 
 ---
 
-**Generated by Abathur Template**
+**Abathur Swarm - Rust Implementation**

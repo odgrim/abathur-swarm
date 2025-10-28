@@ -8,7 +8,7 @@
 //! - Copying agent templates from template directory
 
 use anyhow::{Context, Result};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -281,6 +281,77 @@ fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// Merge Abathur MCP server configuration into Claude Code's MCP settings
+fn merge_mcp_config(force: bool) -> Result<()> {
+    let current_dir = std::env::current_dir()
+        .context("Failed to get current directory")?;
+
+    let template_mcp_file = current_dir.join("template/.mcp.json");
+
+    // Check if template MCP file exists
+    if !template_mcp_file.exists() {
+        println!("⚠ Template MCP configuration not found: {}", template_mcp_file.display());
+        println!("  Skipping MCP server configuration");
+        return Ok(());
+    }
+
+    // Read template MCP configuration
+    let template_content = fs::read_to_string(&template_mcp_file)
+        .context("Failed to read template MCP configuration")?;
+
+    // Replace placeholders with actual paths
+    let project_root = current_dir.to_string_lossy();
+    let configured_content = template_content.replace("{{ABATHUR_PROJECT_ROOT}}", &project_root);
+
+    let template_mcp: Value = serde_json::from_str(&configured_content)
+        .context("Failed to parse template MCP configuration")?;
+
+    // Determine project-local MCP config path (repo root)
+    let mcp_config_path = current_dir.join(".mcp.json");
+
+    // Create parent directory if it doesn't exist
+    if let Some(parent) = mcp_config_path.parent() {
+        fs::create_dir_all(parent)
+            .context("Failed to create Claude Code config directory")?;
+    }
+
+    // Read existing MCP config or create new one
+    let mut existing_mcp: Value = if mcp_config_path.exists() {
+        let existing_content = fs::read_to_string(&mcp_config_path)
+            .context("Failed to read existing MCP configuration")?;
+        serde_json::from_str(&existing_content)
+            .context("Failed to parse existing MCP configuration")?
+    } else {
+        json!({ "mcpServers": {} })
+    };
+
+    // Merge configurations
+    if let (Some(existing_servers), Some(template_servers)) = (
+        existing_mcp.get_mut("mcpServers").and_then(|v| v.as_object_mut()),
+        template_mcp.get("mcpServers").and_then(|v| v.as_object())
+    ) {
+        for (key, value) in template_servers {
+            if existing_servers.contains_key(key) && !force {
+                println!("✓ MCP server '{}' already configured (use --force to override)", key);
+            } else {
+                existing_servers.insert(key.clone(), value.clone());
+                println!("✓ Added MCP server '{}'", key);
+            }
+        }
+    }
+
+    // Write merged configuration
+    let merged_content = serde_json::to_string_pretty(&existing_mcp)
+        .context("Failed to serialize MCP configuration")?;
+
+    fs::write(&mcp_config_path, merged_content)
+        .context("Failed to write MCP configuration")?;
+
+    println!("✓ Merged MCP server configuration into {}", mcp_config_path.display());
+
+    Ok(())
+}
+
 /// Handle init command
 pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, json_output: bool) -> Result<()> {
     if json_output {
@@ -331,6 +402,9 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
 
     // Step 5: Copy agent templates
     copy_agent_templates(force)?;
+
+    // Step 6: Merge MCP server configuration
+    merge_mcp_config(force)?;
 
     if json_output {
         let output = json!({
