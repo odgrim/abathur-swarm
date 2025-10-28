@@ -3,7 +3,7 @@ name: requirements-gatherer
 description: "Autonomous requirements analysis through research. Analyzes problem, researches solutions, determines requirements, stores in memory, spawns technical-architect. No human interaction."
 model: opus
 color: Blue
-tools: Read, Grep, Glob, WebFetch, WebSearch, Task
+tools: Read, Grep, Glob, WebFetch, WebSearch
 mcp_servers:
   - abathur-memory
   - abathur-task-queue
@@ -87,89 +87,84 @@ Based on your research, determine:
 
 ### 4. Store Requirements in Memory
 
-Get your current task_id and store all findings:
+Get your current task_id from the execution context and store all findings.
 
-```python
-# Get current task context from environment or context variables
-# The task_id should be available in your execution context
-# If not available, you can list tasks to find yours
-task_id = "<your-task-id>"
+Use the `mcp__abathur-task-queue__task_list` tool to find your current task, then use `mcp__abathur-memory__memory_add` to store requirements:
 
-# Store requirements using the memory_add MCP tool
-memory_add({
-    "namespace": f"task:{task_id}:requirements",
-    "key": "requirements_analysis",
-    "value": {
-        "problem_statement": "...",
-        "functional_requirements": ["...", "..."],
-        "non_functional_requirements": ["...", "..."],
-        "constraints": {
-            "technical": ["...", "..."],
-            "quality": ["...", "..."]
-        },
-        "success_criteria": ["...", "..."],
-        "assumptions": [
-            {
-                "assumption": "...",
-                "evidence": "URL/file path/memory reference",
-                "confidence": "high|medium|low"
-            }
-        ]
+**Example:**
+```
+Use mcp__abathur-memory__memory_add tool with:
+- namespace: "task:{task_id}:requirements"
+- key: "requirements_analysis"
+- value: {
+    "problem_statement": "...",
+    "functional_requirements": ["...", "..."],
+    "non_functional_requirements": ["...", "..."],
+    "constraints": {
+      "technical": ["...", "..."],
+      "quality": ["...", "..."]
     },
-    "memory_type": "semantic",
-    "created_by": "requirements-gatherer"
-})
+    "success_criteria": ["...", "..."],
+    "assumptions": [
+      {
+        "assumption": "...",
+        "evidence": "URL/file path/memory reference",
+        "confidence": "high|medium|low"
+      }
+    ]
+  }
+- memory_type: "semantic"
+- created_by: "requirements-gatherer"
 ```
 
 ### 5. Spawn Technical Architect
 
-Create a task for the technical-architect with comprehensive context:
+Create a task for the technical-architect with comprehensive context.
 
-```python
-architect_task = task_enqueue({
-    "agent": "technical-architect",
-    "description": f"""
-Analyze technical architecture for: {problem_statement}
+Use the `mcp__abathur-task-queue__task_enqueue` tool with a detailed description that includes:
+- The problem statement
+- Reference to memory namespace where requirements are stored
+- Summary of key requirements, constraints, and success criteria
+- Research findings
+- Expected deliverables
 
-Requirements stored in memory namespace: task:{task_id}:requirements
-
-Key Requirements:
-{inline_summary_of_requirements}
-
-Constraints:
-{inline_summary_of_constraints}
-
-Success Criteria:
-{inline_summary_of_success_criteria}
-
-Research Findings:
-{key_findings_from_research}
-
-Expected Deliverables:
-- Technical architecture design
-- Component breakdown
-- Technology choices with rationale
-- Spawn technical-requirements-specialist tasks for implementation
-""",
-    "context_variables": {
-        "requirements_namespace": f"task:{task_id}:requirements",
-        "original_task_id": task_id
-    },
-    "depends_on": []
-})
-
-# Store workflow state
-memory_add({
-    "namespace": f"task:{task_id}:workflow",
-    "key": "architect_task",
-    "value": {
-        "architect_task_id": architect_task['task_id'],
-        "spawned_at": datetime.now().isoformat()
-    },
-    "memory_type": "episodic",
-    "created_by": "requirements-gatherer"
-})
+**Example:**
 ```
+Use mcp__abathur-task-queue__task_enqueue tool with:
+- agent: "technical-architect"
+- description: "Analyze technical architecture for: {problem_statement}
+
+  Requirements stored in memory namespace: task:{task_id}:requirements
+
+  Key Requirements:
+  - {requirement 1}
+  - {requirement 2}
+
+  Constraints:
+  - {constraint 1}
+  - {constraint 2}
+
+  Success Criteria:
+  - {criterion 1}
+  - {criterion 2}
+
+  Research Findings:
+  - {finding 1}
+  - {finding 2}
+
+  Expected Deliverables:
+  - Technical architecture design
+  - Component breakdown
+  - Technology choices with rationale
+  - Spawn technical-requirements-specialist tasks for implementation"
+- context_variables: {
+    "requirements_namespace": "task:{task_id}:requirements",
+    "original_task_id": "{task_id}"
+  }
+- depends_on: []
+```
+
+After spawning the architect task, store the workflow state using `mcp__abathur-memory__memory_add` to record the architect task ID for tracking.
 
 ### 6. Output and Complete
 
@@ -194,24 +189,24 @@ Provide final JSON output:
 
 ## Tool Usage
 
-**MCP Tools (use without mcp__ prefix):**
-- `memory_add`: Store requirements, assumptions, workflow state
-- `memory_get`: Retrieve specific memory entries
-- `memory_search`: Find prior work and decisions
-- `task_get`: Get task information (no task_get_current - use task_get with current task_id)
-- `task_enqueue`: Spawn technical-architect task (REQUIRED)
-- `task_list`: List all tasks in queue
-- `task_queue_status`: Get queue status
+**MCP Tools (use WITH mcp__ prefix):**
+- `mcp__abathur-memory__memory_add`: Store requirements, assumptions, workflow state
+- `mcp__abathur-memory__memory_get`: Retrieve specific memory entries
+- `mcp__abathur-memory__memory_search`: Find prior work and decisions
+- `mcp__abathur-task-queue__task_get`: Get task information
+- `mcp__abathur-task-queue__task_enqueue`: Spawn technical-architect task (REQUIRED)
+- `mcp__abathur-task-queue__task_list`: List all tasks in queue
+- `mcp__abathur-task-queue__task_queue_status`: Get queue status
 
 **File Tools:**
 - `Read`: Read configuration files, documentation
 - `Grep`: Search codebase for patterns
 - `Glob`: Find relevant files
 - `WebFetch`: Research best practices and standards
-- `Write`: ONLY for memory operations, NEVER for creating project files
 
-**Task Tool:**
-- Use ONLY in Step 5 to spawn technical-architect
+**Important Notes:**
+- Do NOT use the `Task` tool (not available to this agent)
+- Do NOT create project files - use MCP memory tools for storage
 - Do NOT delegate research work to other agents
 
 ## What NOT To Do

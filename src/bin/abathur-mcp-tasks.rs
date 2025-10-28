@@ -495,13 +495,13 @@ async fn main() -> Result<()> {
 
     // Run server with stdio transport
     let (stdin, stdout) = (tokio::io::stdin(), tokio::io::stdout());
-    let _running = server
+    let service = server
         .serve((stdin, stdout))
         .await
-        .map_err(|_| anyhow::anyhow!("Server initialization failed"))?;
+        .context("Failed to initialize MCP server")?;
 
-    // Keep running until interrupted
-    tokio::signal::ctrl_c().await?;
+    // Keep running until the connection is closed
+    service.waiting().await.context("Server error during execution")?;
 
     Ok(())
 }
