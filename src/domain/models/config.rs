@@ -28,10 +28,6 @@ pub struct Config {
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
 
-    /// Resource limits per agent
-    #[serde(default)]
-    pub resource_limits: ResourceLimitsConfig,
-
     /// LLM substrate configurations
     #[serde(default)]
     pub substrates: SubstratesConfig,
@@ -50,7 +46,6 @@ impl Default for Config {
             rate_limit: RateLimitConfig::default(),
             retry: RetryConfig::default(),
             mcp_servers: vec![],
-            resource_limits: ResourceLimitsConfig::default(),
             substrates: SubstratesConfig::default(),
         }
     }
@@ -211,36 +206,6 @@ pub struct McpServerConfig {
     /// Environment variables
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
-}
-
-/// Resource limits configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ResourceLimitsConfig {
-    /// Memory limit per agent in MB
-    #[serde(default = "default_per_agent_memory_mb")]
-    pub per_agent_memory_mb: u64,
-
-    /// Total memory limit in MB
-    #[serde(default = "default_total_memory_mb")]
-    pub total_memory_mb: u64,
-}
-
-const fn default_per_agent_memory_mb() -> u64 {
-    512
-}
-
-const fn default_total_memory_mb() -> u64 {
-    4096
-}
-
-impl Default for ResourceLimitsConfig {
-    fn default() -> Self {
-        Self {
-            per_agent_memory_mb: default_per_agent_memory_mb(),
-            total_memory_mb: default_total_memory_mb(),
-        }
-    }
 }
 
 /// LLM Substrates configuration

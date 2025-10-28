@@ -61,11 +61,11 @@ pub enum ResourceEvent {
 ///
 /// ```
 /// use abathur::application::ResourceMonitor;
-/// use abathur::domain::models::ResourceLimitsConfig;
+/// use abathur::application::resource_monitor::ResourceLimits;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// let limits = ResourceLimitsConfig::default();
-/// let monitor = ResourceMonitor::new(limits.into());
+/// let limits = ResourceLimits::default();
+/// let monitor = ResourceMonitor::new(limits);
 ///
 /// // Start background monitoring
 /// let handle = monitor.start(Duration::from_secs(5)).await?;
@@ -261,14 +261,6 @@ impl ResourceMonitor {
     /// Get resource limits configuration
     pub fn get_limits(&self) -> &ResourceLimits {
         &self.limits
-    }
-}
-
-impl From<crate::domain::models::ResourceLimitsConfig> for ResourceLimits {
-    fn from(config: crate::domain::models::ResourceLimitsConfig) -> Self {
-        Self {
-            max_memory_mb: config.total_memory_mb,
-        }
     }
 }
 

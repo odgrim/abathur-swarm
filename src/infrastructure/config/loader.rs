@@ -154,25 +154,7 @@ impl ConfigLoader {
             }
         }
 
-        // Validate resource limits
-        if config.resource_limits.per_agent_memory_mb == 0 {
-            return Err(ConfigError::ValidationFailed(
-                "per_agent_memory_mb must be greater than 0".to_string(),
-            ));
-        }
-
-        if config.resource_limits.total_memory_mb == 0 {
-            return Err(ConfigError::ValidationFailed(
-                "total_memory_mb must be greater than 0".to_string(),
-            ));
-        }
-
-        if config.resource_limits.per_agent_memory_mb > config.resource_limits.total_memory_mb {
-            return Err(ConfigError::ValidationFailed(format!(
-                "per_agent_memory_mb ({}) cannot exceed total_memory_mb ({})",
-                config.resource_limits.per_agent_memory_mb, config.resource_limits.total_memory_mb
-            )));
-        }
+        // Resource limits validation removed - using defaults in ResourceMonitor
 
         Ok(())
     }
@@ -182,7 +164,7 @@ impl ConfigLoader {
 mod tests {
     use super::*;
     use crate::domain::models::config::{
-        DatabaseConfig, LoggingConfig, RateLimitConfig, ResourceLimitsConfig, RetryConfig,
+        DatabaseConfig, LoggingConfig, RateLimitConfig, RetryConfig,
     };
     use std::env;
 

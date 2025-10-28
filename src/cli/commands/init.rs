@@ -80,14 +80,6 @@ mcp_servers:
       - "-y"
       - "@modelcontextprotocol/server-github"
     env: {}
-
-# Resource limits per agent
-resource_limits:
-  # Memory limit per agent in MB
-  per_agent_memory_mb: 512
-
-  # Total memory limit across all agents in MB
-  total_memory_mb: 4096
 "#;
 
 /// Get the Abathur config directory path (project-local)

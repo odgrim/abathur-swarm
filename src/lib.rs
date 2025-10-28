@@ -37,7 +37,7 @@ pub use application::{
 };
 pub use domain::models::{
     Agent, AgentStatus, Config, DatabaseConfig, DependencyType, LoggingConfig, McpServerConfig,
-    Memory, MemoryType, RateLimitConfig, ResourceLimitsConfig, RetryConfig, Task, TaskSource,
+    Memory, MemoryType, RateLimitConfig, RetryConfig, Task, TaskSource,
     TaskStatus,
 };
 pub use domain::ports::{

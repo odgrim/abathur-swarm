@@ -188,42 +188,48 @@ impl SwarmService {
     pub async fn stop(&self) -> Result<()> {
         let mut state = Self::read_state()?;
 
-        if state.state == "Stopped" {
-            return Ok(()); // Already stopped
+        // Check if there's actually a PID to stop
+        let Some(pid) = state.pid else {
+            anyhow::bail!("No swarm orchestrator is running (no PID found)");
+        };
+
+        // Check if the process is actually alive
+        if !Self::is_process_alive(pid) {
+            // PID exists but process is dead - clean up state
+            state.state = "Stopped".to_string();
+            state.pid = None;
+            Self::write_state(&state)?;
+            anyhow::bail!("No swarm orchestrator is running (PID {} not found)", pid);
         }
 
-        // Try to kill the process if PID exists
-        if let Some(pid) = state.pid {
+        // Process is alive, try to kill it
+        #[cfg(unix)]
+        {
+            use std::process::Command;
+            // Send SIGTERM for graceful shutdown
+            let _ = Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status();
+
+            // Wait briefly for graceful shutdown
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            // Force kill if still alive
             if Self::is_process_alive(pid) {
-                #[cfg(unix)]
-                {
-                    use std::process::Command;
-                    // Send SIGTERM for graceful shutdown
-                    let _ = Command::new("kill")
-                        .arg("-TERM")
-                        .arg(pid.to_string())
-                        .status();
-
-                    // Wait briefly for graceful shutdown
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-                    // Force kill if still alive
-                    if Self::is_process_alive(pid) {
-                        let _ = Command::new("kill")
-                            .arg("-KILL")
-                            .arg(pid.to_string())
-                            .status();
-                    }
-                }
-
-                #[cfg(windows)]
-                {
-                    use std::process::Command;
-                    let _ = Command::new("taskkill")
-                        .args(&["/PID", &pid.to_string(), "/F"])
-                        .status();
-                }
+                let _ = Command::new("kill")
+                    .arg("-KILL")
+                    .arg(pid.to_string())
+                    .status();
             }
+        }
+
+        #[cfg(windows)]
+        {
+            use std::process::Command;
+            let _ = Command::new("taskkill")
+                .args(&["/PID", &pid.to_string(), "/F"])
+                .status();
         }
 
         state.state = "Stopped".to_string();

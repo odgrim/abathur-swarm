@@ -273,7 +273,10 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
     // Create AgentExecutor with substrate registry
     let agent_executor = Arc::new(AgentExecutor::new(substrate_registry.clone(), mcp_client));
 
-    let resource_monitor = Arc::new(ResourceMonitor::new(config.resource_limits.clone().into()));
+    // Create resource monitor with default limits (monitoring only, no enforcement)
+    let resource_monitor = Arc::new(ResourceMonitor::new(
+        crate::application::resource_monitor::ResourceLimits::default()
+    ));
 
     eprintln!("All dependencies initialized, creating SwarmOrchestrator");
 

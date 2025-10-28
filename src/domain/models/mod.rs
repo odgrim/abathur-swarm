@@ -14,7 +14,7 @@ pub mod task;
 pub use agent::{Agent, AgentStatus};
 pub use agent_contract::AgentContractRegistry;
 pub use config::{
-    Config, DatabaseConfig, LoggingConfig, McpServerConfig, RateLimitConfig, ResourceLimitsConfig,
+    Config, DatabaseConfig, LoggingConfig, McpServerConfig, RateLimitConfig,
     RetryConfig,
 };
 pub use memory::{Memory, MemoryType};
