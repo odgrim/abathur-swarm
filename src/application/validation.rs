@@ -2,7 +2,6 @@
 ///!
 ///! Provides validation functions for enforcing agent contracts and spawning
 ///! validation/remediation tasks based on validation requirements.
-
 use crate::application::task_coordinator::TaskCoordinator;
 use crate::domain::models::{AgentContractRegistry, Task, ValidationRequirement, WorkflowState};
 use anyhow::{Context, Result};
@@ -229,8 +228,7 @@ Follow the task-salvage-specialist agent guidelines for detailed procedures.
 
     salvage_task.agent_type = "task-salvage-specialist".to_string();
     salvage_task.priority = 9; // High priority - blocks workflow
-    salvage_task.parent_task_id = failed_task.parent_task_id;
-    salvage_task.dependencies = Some(vec![failed_task_id]);
+    salvage_task.parent_task_id = Some(failed_task_id); // Set failed task as parent, not dependency
     salvage_task.validation_requirement = ValidationRequirement::None; // Don't validate the salvager
 
     let salvage_task_id = task_coordinator.submit_task(salvage_task).await?;
