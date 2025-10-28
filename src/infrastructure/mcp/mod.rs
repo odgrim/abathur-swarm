@@ -1,27 +1,24 @@
 //! MCP (Model Context Protocol) infrastructure module
 //!
-//! Provides integration with MCP servers via stdio transport, including:
-//! - Server lifecycle management
-//! - Health monitoring with auto-restart
-//! - JSON-RPC communication
-//! - Error handling
+//! Provides MCP client implementations:
+//! - `DirectMcpClient` - For internal agents (in-process, efficient)
+//! - `MockMcpClient` - For testing
+//! - Stdio clients - For external clients (Claude Code, IDEs)
 //!
-//! # Components
+//! # Design Philosophy
 //!
-//! - `client` - High-level MCP client implementing the McpClient trait
-//! - `server_manager` - Server process lifecycle management
-//! - `health_monitor` - Background health checking and auto-restart
-//! - `error` - MCP-specific error types
+//! **For Internal Agents (hundreds):**
+//! Use `DirectMcpClient` which calls services directly without spawning processes.
+//! This avoids resource exhaustion and provides efficient shared access.
+//!
+//! **For External Clients (few):**
+//! Use stdio MCP servers that external tools spawn per `.mcp.json` config.
+//! Each external client gets its own isolated server instance.
 
-// Temporarily disabled - needs to be updated for new port trait interface
-// pub mod client;
+pub mod direct_client;
 pub mod error;
-// pub mod health_monitor;
 pub mod mock_client;
-// pub mod server_manager;
 
-// pub use client::McpClientImpl;
+pub use direct_client::DirectMcpClient;
 pub use error::{McpError, Result};
-// pub use health_monitor::HealthMonitor;
 pub use mock_client::MockMcpClient;
-// pub use server_manager::{McpServerManager, StdioTransport};

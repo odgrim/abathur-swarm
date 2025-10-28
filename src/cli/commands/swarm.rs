@@ -8,9 +8,9 @@ use crate::application::{
 };
 use crate::cli::service::{SwarmService, TaskQueueServiceAdapter};
 use crate::infrastructure::config::ConfigLoader;
-use crate::infrastructure::database::{AgentRepositoryImpl, TaskRepositoryImpl};
-use crate::infrastructure::mcp::mock_client::MockMcpClient;
-use crate::services::{DependencyResolver, PriorityCalculator, TaskQueueService as TaskQueueServiceImpl};
+use crate::infrastructure::database::{AgentRepositoryImpl, MemoryRepositoryImpl, TaskRepositoryImpl};
+use crate::infrastructure::mcp::DirectMcpClient;
+use crate::services::{DependencyResolver, MemoryService, PriorityCalculator, TaskQueueService as TaskQueueServiceImpl};
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::sync::Arc;
@@ -210,6 +210,7 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
 
     // Initialize repositories
     let task_repo = Arc::new(TaskRepositoryImpl::new(pool.clone()));
+    let memory_repo = Arc::new(MemoryRepositoryImpl::new(pool.clone()));
     let _agent_repo = Arc::new(AgentRepositoryImpl::new(pool.clone()));
 
     // Initialize dependency resolver and priority calculator early
@@ -223,6 +224,8 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
             dependency_resolver.clone(),
             priority_calc.clone(),
         ));
+
+    let memory_service = Arc::new(MemoryService::new(memory_repo));
 
     // Initialize substrate registry from config
     eprintln!("Initializing LLM substrates...");
@@ -254,9 +257,18 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
         );
     }
 
-    // Initialize MCP client (mock for now)
-    let mcp_client: Arc<dyn crate::domain::ports::McpClient> =
-        Arc::new(MockMcpClient);
+    // Initialize direct MCP client for internal agents
+    // This provides efficient in-process access to memory and task services
+    // without spawning separate MCP server processes
+    eprintln!("Initializing direct MCP client for agents...");
+    let mcp_client: Arc<dyn crate::domain::ports::McpClient> = Arc::new(DirectMcpClient::new(
+        memory_service,
+        Arc::new(TaskQueueServiceImpl::new(
+            task_repo.clone(),
+            dependency_resolver.clone(),
+            priority_calc.clone(),
+        )),
+    ));
 
     // Wrap for trait objects
     let dependency_resolver_arc = Arc::new(dependency_resolver);
@@ -280,22 +292,24 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
 
     eprintln!("All dependencies initialized, creating SwarmOrchestrator");
 
-    // Create and start SwarmOrchestrator with MCP server management
+    // Create and start SwarmOrchestrator
+    // Agents use DirectMcpClient for efficient in-process service access
     let mut orchestrator = SwarmOrchestrator::new(
         max_agents,
         task_coordinator,
         agent_executor,
         resource_monitor,
         config,
-        db_path, // Pass database path for MCP servers
     );
 
-    eprintln!("Starting SwarmOrchestrator (including MCP servers)...");
+    eprintln!("Starting SwarmOrchestrator...");
 
     orchestrator.start().await
         .context("Failed to start SwarmOrchestrator")?;
 
-    eprintln!("SwarmOrchestrator started successfully (MCP servers running)");
+    eprintln!("SwarmOrchestrator started successfully");
+    eprintln!("  - Agents use direct in-process service access (no separate MCP processes)");
+    eprintln!("  - External clients (Claude Code) can spawn stdio MCP servers via .mcp.json");
 
     // Run forever until interrupted
     // The orchestrator runs its background tasks automatically
