@@ -73,6 +73,10 @@ impl TaskQueueService for MockTaskQueue {
         Ok(vec![])
     }
 
+    async fn get_children_by_parent(&self, _parent_id: Uuid) -> Result<Vec<Task>> {
+        Ok(vec![])
+    }
+
     async fn update_task_status(&self, task_id: Uuid, status: TaskStatus) -> Result<()> {
         let mut tasks = self.tasks.lock().unwrap();
         if let Some(task) = tasks.get_mut(&task_id) {

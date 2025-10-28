@@ -386,7 +386,7 @@ impl TaskCoordinator {
     /// Vector of child tasks
     pub async fn get_child_tasks(&self, parent_task_id: Uuid) -> Result<Vec<Task>> {
         self.task_queue
-            .get_dependent_tasks(parent_task_id)
+            .get_children_by_parent(parent_task_id)
             .await
             .context("Failed to get child tasks")
     }
@@ -579,6 +579,15 @@ mod tests {
                         .as_ref()
                         .is_some_and(|deps| deps.contains(&task_id))
                 })
+                .cloned()
+                .collect())
+        }
+
+        async fn get_children_by_parent(&self, parent_id: Uuid) -> Result<Vec<Task>> {
+            let tasks = self.tasks.lock().unwrap();
+            Ok(tasks
+                .values()
+                .filter(|t| t.parent_task_id == Some(parent_id))
                 .cloned()
                 .collect())
         }

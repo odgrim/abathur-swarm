@@ -60,6 +60,22 @@ pub trait TaskQueueService: Send + Sync {
     /// * `Err` - If database error
     async fn get_dependent_tasks(&self, task_id: Uuid) -> Result<Vec<Task>>;
 
+    /// Get all child tasks spawned by a parent task
+    ///
+    /// Returns tasks where parent_task_id matches the given task ID.
+    /// This is used for contract validation to verify that agents spawned
+    /// the required child tasks.
+    ///
+    /// # Arguments
+    ///
+    /// * `parent_id` - UUID of the parent task
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<Task>)` - List of child tasks spawned by the parent
+    /// * `Err` - If database error
+    async fn get_children_by_parent(&self, parent_id: Uuid) -> Result<Vec<Task>>;
+
     /// Update the status of a task
     ///
     /// # Arguments

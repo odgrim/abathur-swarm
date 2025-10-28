@@ -67,6 +67,9 @@ struct TaskEnqueueRequest {
     /// Type of dependency relationship
     #[serde(default = "default_dependency_type")]
     dependency_type: String,
+    /// Parent task ID (if this is a child task spawned by another task)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_task_id: Option<String>,
 }
 
 fn default_agent_type() -> String {
@@ -211,6 +214,12 @@ impl TaskServer {
             .dependency_type
             .parse::<DependencyType>()
             .unwrap_or(DependencyType::Sequential);
+
+        if let Some(parent_id_str) = params.parent_task_id {
+            let parent_id = Uuid::parse_str(&parent_id_str)
+                .map_err(|e| McpError::invalid_params(format!("Invalid parent_task_id UUID: {}", e), None))?;
+            task.parent_task_id = Some(parent_id);
+        }
 
         match self.task_service.submit(task).await {
             Ok(task_id) => {

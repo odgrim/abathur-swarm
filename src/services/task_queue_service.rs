@@ -401,6 +401,13 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
             .context("Failed to get dependent tasks")
     }
 
+    async fn get_children_by_parent(&self, parent_id: Uuid) -> Result<Vec<Task>> {
+        self.repo
+            .get_by_parent(parent_id)
+            .await
+            .context("Failed to get children by parent")
+    }
+
     async fn update_task_status(&self, task_id: Uuid, status: TaskStatus) -> Result<()> {
         self.update_status(task_id, status).await?;
 
