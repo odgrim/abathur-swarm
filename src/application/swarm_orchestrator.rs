@@ -61,6 +61,8 @@ enum AgentEvent {
         task_id: Uuid,
         error: String,
     },
+    /// Agent execution complete, validation requested
+    ValidationRequested { agent_id: Uuid, task_id: Uuid },
 }
 
 /// Swarm orchestrator with concurrent task processing
@@ -446,6 +448,17 @@ impl SwarmOrchestrator {
                                     error!(error = ?e, %task_id, "Failed to handle task failure");
                                 }
                             }
+                            AgentEvent::ValidationRequested { agent_id, task_id } => {
+                                info!(%agent_id, %task_id, "Validation requested for task");
+
+                                // Remove worker from tracking
+                                workers.write().await.remove(&agent_id);
+
+                                // Task is now AwaitingValidation status
+                                // Validation task will run via normal task queue
+                                // Don't increment completed counter yet - wait for validation
+                                info!(%task_id, "Task awaiting validation, validation task will run next");
+                            }
                         }
                     }
 
@@ -525,14 +538,77 @@ impl SwarmOrchestrator {
             // Execute task
             let result = agent_executor.execute(ctx).await;
 
-            // Send completion event
+            // Determine event based on execution result and validation requirements
             let event = match result {
-                Ok(_output) => AgentEvent::TaskCompleted { agent_id, task_id },
-                Err(e) => AgentEvent::TaskFailed {
-                    agent_id,
-                    task_id,
-                    error: e.to_string(),
-                },
+                Ok(_output) => {
+                    // Check if this agent type requires validation
+                    use crate::domain::models::AgentContractRegistry;
+                    use crate::application::validation::{validate_task_completion, spawn_validation_task, ValidationResult};
+
+                    let validation_req = AgentContractRegistry::get_validation_requirement(&task.agent_type);
+
+                    match validation_req {
+                        crate::domain::models::ValidationRequirement::None => {
+                            // No validation required - mark as completed
+                            info!(%task_id, agent_type = %task.agent_type, "No validation required");
+                            AgentEvent::TaskCompleted { agent_id, task_id }
+                        }
+
+                        crate::domain::models::ValidationRequirement::Contract { .. } => {
+                            // Run inline contract validation
+                            info!(%task_id, agent_type = %task.agent_type, "Running contract validation");
+                            match validate_task_completion(task_id, &task, &task_coordinator).await {
+                                Ok(ValidationResult::Passed) => {
+                                    info!(%task_id, "Contract validation passed");
+                                    AgentEvent::TaskCompleted { agent_id, task_id }
+                                }
+                                Ok(ValidationResult::Failed { reason }) => {
+                                    error!(%task_id, reason = %reason, "Contract validation failed");
+                                    AgentEvent::TaskFailed {
+                                        agent_id,
+                                        task_id,
+                                        error: format!("Contract validation failed: {}", reason),
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(%task_id, error = ?e, "Validation error");
+                                    AgentEvent::TaskFailed {
+                                        agent_id,
+                                        task_id,
+                                        error: format!("Validation error: {}", e),
+                                    }
+                                }
+                            }
+                        }
+
+                        crate::domain::models::ValidationRequirement::Testing { .. } => {
+                            // Spawn validation task for test-based validation
+                            info!(%task_id, agent_type = %task.agent_type, "Spawning validation task");
+                            match spawn_validation_task(task_id, &task, &task_coordinator).await {
+                                Ok(validation_task_id) => {
+                                    info!(%task_id, %validation_task_id, "Validation task spawned");
+                                    AgentEvent::ValidationRequested { agent_id, task_id }
+                                }
+                                Err(e) => {
+                                    error!(%task_id, error = ?e, "Failed to spawn validation task");
+                                    AgentEvent::TaskFailed {
+                                        agent_id,
+                                        task_id,
+                                        error: format!("Failed to spawn validation: {}", e),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!(%task_id, error = ?e, "Task execution failed");
+                    AgentEvent::TaskFailed {
+                        agent_id,
+                        task_id,
+                        error: e.to_string(),
+                    }
+                }
             };
 
             // Send event (don't fail if receiver dropped during shutdown)

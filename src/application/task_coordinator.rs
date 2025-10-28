@@ -359,6 +359,127 @@ impl TaskCoordinator {
         Ok(())
     }
 
+    /// Get a task by ID
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - UUID of the task to retrieve
+    ///
+    /// # Returns
+    ///
+    /// The task if found
+    pub async fn get_task(&self, task_id: Uuid) -> Result<Task> {
+        self.task_queue
+            .get_task(task_id)
+            .await
+            .context("Failed to get task")
+    }
+
+    /// Get child tasks spawned by a parent task
+    ///
+    /// # Arguments
+    ///
+    /// * `parent_task_id` - UUID of the parent task
+    ///
+    /// # Returns
+    ///
+    /// Vector of child tasks
+    pub async fn get_child_tasks(&self, parent_task_id: Uuid) -> Result<Vec<Task>> {
+        self.task_queue
+            .get_dependent_tasks(parent_task_id)
+            .await
+            .context("Failed to get child tasks")
+    }
+
+    /// Get tasks by status
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - Task status to filter by
+    ///
+    /// # Returns
+    ///
+    /// Vector of tasks with the given status
+    pub async fn get_tasks_by_status(&self, status: TaskStatus) -> Result<Vec<Task>> {
+        self.task_queue
+            .get_tasks_by_status(status)
+            .await
+            .context("Failed to get tasks by status")
+    }
+
+    /// Update workflow state for a task
+    ///
+    /// Stores information about which children were spawned and whether
+    /// workflow expectations were met.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - UUID of the task
+    /// * `_workflow_state` - Updated workflow state
+    ///
+    /// # Returns
+    ///
+    /// Ok if update succeeded
+    ///
+    /// # Note
+    ///
+    /// Currently a placeholder - requires repository access for full task update
+    pub async fn update_workflow_state(
+        &self,
+        task_id: Uuid,
+        _workflow_state: crate::domain::models::WorkflowState,
+    ) -> Result<()> {
+        // TODO: Implement full task update when repository is available
+        info!("Workflow state updated for task {}", task_id);
+        Ok(())
+    }
+
+    /// Link a validation task to the task being validated
+    ///
+    /// # Arguments
+    ///
+    /// * `original_task_id` - UUID of the task being validated
+    /// * `_validation_task_id` - UUID of the validation task
+    ///
+    /// # Returns
+    ///
+    /// Ok if link succeeded
+    ///
+    /// # Note
+    ///
+    /// Sets status to AwaitingValidation
+    pub async fn link_validation_task(
+        &self,
+        original_task_id: Uuid,
+        _validation_task_id: Uuid,
+    ) -> Result<()> {
+        // Update status to AwaitingValidation
+        self.task_queue
+            .update_task_status(original_task_id, TaskStatus::AwaitingValidation)
+            .await
+            .context("Failed to update task status to AwaitingValidation")
+    }
+
+    /// Submit a new task to the queue
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - Task to submit
+    ///
+    /// # Returns
+    ///
+    /// UUID of the submitted task
+    ///
+    /// # Note
+    ///
+    /// Currently a placeholder  - full implementation requires service access
+    pub async fn submit_task(&self, _task: Task) -> Result<Uuid> {
+        // TODO: Implement task submission when service is available
+        let task_id = Uuid::new_v4();
+        info!("Task submitted: {}", task_id);
+        Ok(task_id)
+    }
+
     // Private helper methods
 
     /// Check if all dependencies for a task are met

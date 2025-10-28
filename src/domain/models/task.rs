@@ -11,12 +11,15 @@ use crate::domain::error::TaskError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
-    Pending, // Submitted, dependencies not yet checked
-    Blocked, // Waiting for dependencies
-    Ready,   // Dependencies met, ready for execution
-    Running,
-    Completed,
-    Failed,
+    Pending,            // Submitted, dependencies not yet checked
+    Blocked,            // Waiting for dependencies
+    Ready,              // Dependencies met, ready for execution
+    Running,            // Currently executing
+    AwaitingValidation, // Execution complete, validation task spawned
+    ValidationRunning,  // Validation task is executing
+    ValidationFailed,   // Validation found issues (triggers remediation)
+    Completed,          // Fully complete (validated if required)
+    Failed,             // Task execution failed
     Cancelled,
 }
 
@@ -27,6 +30,9 @@ impl fmt::Display for TaskStatus {
             Self::Blocked => write!(f, "blocked"),
             Self::Ready => write!(f, "ready"),
             Self::Running => write!(f, "running"),
+            Self::AwaitingValidation => write!(f, "awaiting_validation"),
+            Self::ValidationRunning => write!(f, "validation_running"),
+            Self::ValidationFailed => write!(f, "validation_failed"),
             Self::Completed => write!(f, "completed"),
             Self::Failed => write!(f, "failed"),
             Self::Cancelled => write!(f, "cancelled"),
@@ -43,6 +49,9 @@ impl FromStr for TaskStatus {
             "blocked" => Ok(Self::Blocked),
             "ready" => Ok(Self::Ready),
             "running" => Ok(Self::Running),
+            "awaiting_validation" | "awaitingvalidation" => Ok(Self::AwaitingValidation),
+            "validation_running" | "validationrunning" => Ok(Self::ValidationRunning),
+            "validation_failed" | "validationfailed" => Ok(Self::ValidationFailed),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
@@ -115,6 +124,68 @@ impl FromStr for DependencyType {
     }
 }
 
+/// Types of validation requirements for tasks
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ValidationRequirement {
+    /// No validation needed (e.g., research, documentation)
+    None,
+
+    /// Contract validation (e.g., workflow agents spawning children)
+    Contract {
+        must_spawn_children: bool,
+        expected_child_types: Vec<String>,
+        min_children: usize,
+    },
+
+    /// Test-based validation (e.g., code implementation)
+    Testing {
+        validator_agent: String,
+        test_commands: Vec<String>,
+        worktree_required: bool,
+        max_remediation_cycles: usize,
+    },
+}
+
+impl Default for ValidationRequirement {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+/// Workflow state tracking for parent-child task relationships
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowState {
+    /// Child tasks spawned by this task
+    #[schemars(with = "Vec<String>")]
+    pub children_spawned: Vec<Uuid>,
+
+    /// Agent types of spawned children
+    pub spawned_agent_types: Vec<String>,
+
+    /// Whether workflow expectations were met
+    pub expectations_met: bool,
+
+    /// Timestamp when workflow state was last updated
+    pub last_updated: Option<DateTime<Utc>>,
+}
+
+/// Workflow expectations for tasks that must spawn children
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct WorkflowExpectations {
+    /// Whether this task must spawn at least one child
+    pub must_spawn_child: bool,
+
+    /// Expected agent types for children
+    pub expected_child_types: Vec<String>,
+
+    /// Minimum number of children required
+    pub min_children: usize,
+
+    /// Maximum number of children allowed (None = unlimited)
+    pub max_children: Option<usize>,
+}
+
 /// Represents a unit of work in the task queue
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Task {
@@ -151,6 +222,33 @@ pub struct Task {
     pub feature_branch: Option<String>,
     pub task_branch: Option<String>,
     pub worktree_path: Option<String>,
+
+    // Validation and workflow tracking fields
+    /// Validation requirement for this task
+    #[serde(default)]
+    pub validation_requirement: ValidationRequirement,
+
+    /// ID of the validation task (if spawned)
+    #[schemars(with = "Option<String>")]
+    pub validation_task_id: Option<Uuid>,
+
+    /// ID of the task being validated (if this is a validation task)
+    #[schemars(with = "Option<String>")]
+    pub validating_task_id: Option<Uuid>,
+
+    /// Number of remediation cycles so far
+    #[serde(default)]
+    pub remediation_count: u32,
+
+    /// Whether this task is a remediation task
+    #[serde(default)]
+    pub is_remediation: bool,
+
+    /// Workflow state (what children were spawned)
+    pub workflow_state: Option<WorkflowState>,
+
+    /// Expected workflow behavior
+    pub workflow_expectations: Option<WorkflowExpectations>,
 }
 
 impl Task {
@@ -187,6 +285,13 @@ impl Task {
             feature_branch: None,
             task_branch: None,
             worktree_path: None,
+            validation_requirement: ValidationRequirement::None,
+            validation_task_id: None,
+            validating_task_id: None,
+            remediation_count: 0,
+            is_remediation: false,
+            workflow_state: None,
+            workflow_expectations: None,
         }
     }
 

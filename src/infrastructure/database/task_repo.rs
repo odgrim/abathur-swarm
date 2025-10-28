@@ -86,6 +86,35 @@ impl TaskRepositoryImpl {
             feature_branch: row.get("feature_branch"),
             task_branch: row.get("task_branch"),
             worktree_path: row.get("worktree_path"),
+
+            // Validation and workflow tracking fields
+            validation_requirement: row
+                .get::<Option<String>, _>("validation_requirement")
+                .as_ref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default(),
+            validation_task_id: row
+                .get::<Option<String>, _>("validation_task_id")
+                .as_ref()
+                .and_then(|s| Uuid::parse_str(s).ok()),
+            validating_task_id: row
+                .get::<Option<String>, _>("validating_task_id")
+                .as_ref()
+                .and_then(|s| Uuid::parse_str(s).ok()),
+            remediation_count: row
+                .get::<Option<i64>, _>("remediation_count")
+                .unwrap_or(0) as u32,
+            is_remediation: row
+                .get::<Option<i64>, _>("is_remediation")
+                .unwrap_or(0) != 0,
+            workflow_state: row
+                .get::<Option<String>, _>("workflow_state")
+                .as_ref()
+                .and_then(|s| serde_json::from_str(s).ok()),
+            workflow_expectations: row
+                .get::<Option<String>, _>("workflow_expectations")
+                .as_ref()
+                .and_then(|s| serde_json::from_str(s).ok()),
         })
     }
 }
@@ -118,6 +147,17 @@ impl TaskRepository for TaskRepositoryImpl {
         let source = task.source.to_string();
         let deadline = task.deadline.as_ref().map(|dt| dt.to_rfc3339());
 
+        // Validation and workflow tracking fields
+        let validation_requirement = serde_json::to_string(&task.validation_requirement).ok();
+        let validation_task_id = task.validation_task_id.as_ref().map(|id| id.to_string());
+        let validating_task_id = task.validating_task_id.as_ref().map(|id| id.to_string());
+        let workflow_state = task.workflow_state
+            .as_ref()
+            .and_then(|s| serde_json::to_string(s).ok());
+        let workflow_expectations = task.workflow_expectations
+            .as_ref()
+            .and_then(|e| serde_json::to_string(e).ok());
+
         sqlx::query!(
             r#"
             INSERT INTO tasks (
@@ -127,9 +167,11 @@ impl TaskRepository for TaskRepositoryImpl {
                 max_execution_timeout_seconds, submitted_at, started_at, completed_at,
                 last_updated_at, created_by, parent_task_id, session_id, source,
                 deadline, estimated_duration_seconds, feature_branch, task_branch,
-                worktree_path
+                worktree_path, validation_requirement, validation_task_id,
+                validating_task_id, remediation_count, is_remediation,
+                workflow_state, workflow_expectations
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             id,
             task.summary,
@@ -159,7 +201,14 @@ impl TaskRepository for TaskRepositoryImpl {
             task.estimated_duration_seconds,
             task.feature_branch,
             task.task_branch,
-            task.worktree_path
+            task.worktree_path,
+            validation_requirement,
+            validation_task_id,
+            validating_task_id,
+            task.remediation_count,
+            task.is_remediation,
+            workflow_state,
+            workflow_expectations
         )
         .execute(&self.pool)
         .await?;
@@ -208,6 +257,17 @@ impl TaskRepository for TaskRepositoryImpl {
         let source = task.source.to_string();
         let deadline = task.deadline.as_ref().map(|dt| dt.to_rfc3339());
 
+        // Validation and workflow tracking fields
+        let validation_requirement = serde_json::to_string(&task.validation_requirement).ok();
+        let validation_task_id = task.validation_task_id.as_ref().map(|id| id.to_string());
+        let validating_task_id = task.validating_task_id.as_ref().map(|id| id.to_string());
+        let workflow_state = task.workflow_state
+            .as_ref()
+            .and_then(|s| serde_json::to_string(s).ok());
+        let workflow_expectations = task.workflow_expectations
+            .as_ref()
+            .and_then(|e| serde_json::to_string(e).ok());
+
         sqlx::query!(
             r#"
             UPDATE tasks SET
@@ -237,7 +297,14 @@ impl TaskRepository for TaskRepositoryImpl {
                 estimated_duration_seconds = ?,
                 feature_branch = ?,
                 task_branch = ?,
-                worktree_path = ?
+                worktree_path = ?,
+                validation_requirement = ?,
+                validation_task_id = ?,
+                validating_task_id = ?,
+                remediation_count = ?,
+                is_remediation = ?,
+                workflow_state = ?,
+                workflow_expectations = ?
             WHERE id = ?
             "#,
             task.summary,
@@ -267,6 +334,13 @@ impl TaskRepository for TaskRepositoryImpl {
             task.feature_branch,
             task.task_branch,
             task.worktree_path,
+            validation_requirement,
+            validation_task_id,
+            validating_task_id,
+            task.remediation_count,
+            task.is_remediation,
+            workflow_state,
+            workflow_expectations,
             id
         )
         .execute(&self.pool)

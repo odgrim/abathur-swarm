@@ -207,6 +207,9 @@ fn status_color(status: &TaskStatus) -> Color {
     match status {
         TaskStatus::Completed => Color::Green,
         TaskStatus::Running => Color::Cyan,
+        TaskStatus::AwaitingValidation => Color::Yellow,
+        TaskStatus::ValidationRunning => Color::Cyan,
+        TaskStatus::ValidationFailed => Color::Red,
         TaskStatus::Failed => Color::Red,
         TaskStatus::Cancelled => Color::DarkGrey,
         TaskStatus::Ready => Color::Yellow,
@@ -220,6 +223,9 @@ fn status_icon(status: &TaskStatus) -> &'static str {
     match status {
         TaskStatus::Completed => "✓",
         TaskStatus::Running => "⟳",
+        TaskStatus::AwaitingValidation => "⧗",
+        TaskStatus::ValidationRunning => "⟳",
+        TaskStatus::ValidationFailed => "✗",
         TaskStatus::Failed => "✗",
         TaskStatus::Cancelled => "⊘",
         TaskStatus::Ready => "●",
@@ -306,6 +312,13 @@ pub fn format_task_table(tasks: &[crate::cli::models::Task]) -> String {
         feature_branch: None,
         task_branch: None,
         worktree_path: None,
+        validation_requirement: crate::domain::models::task::ValidationRequirement::None,
+        validation_task_id: None,
+        validating_task_id: None,
+        remediation_count: 0,
+        is_remediation: false,
+        workflow_state: None,
+        workflow_expectations: None,
     }).collect();
 
     formatter.format_tasks(&domain_tasks)

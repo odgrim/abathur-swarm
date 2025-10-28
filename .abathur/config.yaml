@@ -65,14 +65,6 @@ mcp_servers:
       - "@modelcontextprotocol/server-github"
     env: {}
 
-# Resource limits per agent
-resource_limits:
-  # Memory limit per agent in MB
-  per_agent_memory_mb: 512
-
-  # Total memory limit across all agents in MB
-  total_memory_mb: 4096
-
 # LLM Substrate configuration
 # Abathur supports multiple LLM backends (substrates)
 substrates:

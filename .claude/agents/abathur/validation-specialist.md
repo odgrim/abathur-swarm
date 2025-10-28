@@ -525,3 +525,61 @@ memory_add({
   }
 }
 ```
+
+## CRITICAL: Task Status Updates
+
+**IMPORTANT**: After routing to either merge or remediation, you MUST update the original task status:
+
+### If Validation Passed (Routing to Merge):
+```bash
+# Update original task status to Completed
+# This signals the task coordinator that validation succeeded
+# Note: This will be done automatically by the orchestrator when merge completes
+```
+
+### If Validation Failed (Routing to Remediation):
+```bash
+# The original task status is already set to ValidationFailed by the orchestrator
+# The remediation task will be a new task that references the original
+# When remediation completes, a new validation cycle will begin
+```
+
+## Validation Flow Summary
+
+```
+Implementation Task (rust-specialist)
+         ↓ completes
+   AwaitingValidation
+         ↓ (validation task spawned)
+   ValidationRunning
+         ↓
+    ┌─────────┴─────────┐
+    │                   │
+Tests Pass        Tests Fail
+    │                   │
+    ↓                   ↓
+Spawn Merge      Spawn Remediation
+    │                   │
+    ↓                   ↓
+Completed        ValidationFailed
+                         │
+                    (new cycle)
+                         ↓
+                  Remediation Task
+                         ↓
+                  ValidationRunning
+                         ↓
+                     (repeat)
+```
+
+## Integration with Validation System
+
+This agent is part of the validation pattern where:
+1. Implementation agents complete their work
+2. Orchestrator spawns validation-specialist automatically
+3. You (validation-specialist) run tests and route
+4. Either merge (success) or remediation (failure)
+5. Remediation creates new implementation task with fixes
+6. New task goes through same validation cycle (max 3 cycles)
+
+Your routing decision determines the next step in the workflow.

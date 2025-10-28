@@ -200,6 +200,9 @@ impl TaskQueueServiceAdapter {
                 DomainTaskStatus::Blocked => stats.blocked += 1,
                 DomainTaskStatus::Ready => stats.ready += 1,
                 DomainTaskStatus::Running => stats.running += 1,
+                DomainTaskStatus::AwaitingValidation |
+                DomainTaskStatus::ValidationRunning => stats.running += 1, // Count validation as running
+                DomainTaskStatus::ValidationFailed => stats.failed += 1, // Count validation failures as failed
                 DomainTaskStatus::Completed => stats.completed += 1,
                 DomainTaskStatus::Failed => stats.failed += 1,
                 DomainTaskStatus::Cancelled => stats.cancelled += 1,
@@ -298,6 +301,9 @@ fn convert_domain_to_cli_status(status: DomainTaskStatus) -> CliTaskStatus {
         DomainTaskStatus::Blocked => CliTaskStatus::Blocked,
         DomainTaskStatus::Ready => CliTaskStatus::Ready,
         DomainTaskStatus::Running => CliTaskStatus::Running,
+        DomainTaskStatus::AwaitingValidation |
+        DomainTaskStatus::ValidationRunning => CliTaskStatus::Running, // Map validation statuses to Running
+        DomainTaskStatus::ValidationFailed => CliTaskStatus::Failed, // Map validation failure to Failed
         DomainTaskStatus::Completed => CliTaskStatus::Completed,
         DomainTaskStatus::Failed => CliTaskStatus::Failed,
         DomainTaskStatus::Cancelled => CliTaskStatus::Cancelled,
