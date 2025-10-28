@@ -435,7 +435,7 @@ impl ServerHandler for TaskServer {
                 .enable_tools()
                 .build(),
             server_info: rmcp::model::Implementation {
-                name: "abathur-tasks".to_string(),
+                name: "abathur-task-queue".to_string(),
                 title: Some("Abathur Task Queue Management Server".to_string()),
                 version: "1.0.0".to_string(),
                 icons: None,
