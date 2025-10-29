@@ -104,12 +104,12 @@ impl AgentMetadata {
     /// Returns the value as-is if it's already a full model ID.
     ///
     /// # Returns
-    /// The full Claude model ID (e.g., "claude-opus-4-20250514")
+    /// The full Claude model ID (e.g., "claude-opus-4-1-20250514")
     pub fn get_model_id(&self) -> String {
         match self.model.as_str() {
-            "opus" => "claude-opus-4-20250514".to_string(),
+            "opus" => "claude-opus-4-1-20250514".to_string(),
             "sonnet" => "claude-sonnet-4-5-20250929".to_string(),
-            "haiku" => "claude-3-5-haiku-20241022".to_string(),
+            "haiku" => "claude-haiku-4-5-20250929".to_string(),
             // If it's already a full model ID or unknown, return as-is
             _ => self.model.clone(),
         }
@@ -309,13 +309,13 @@ mcp_servers:
             mcp_servers: vec![],
         };
 
-        assert_eq!(meta.get_model_id(), "claude-opus-4-20250514");
+        assert_eq!(meta.get_model_id(), "claude-opus-4-1-20250514");
 
         meta.model = "sonnet".to_string();
         assert_eq!(meta.get_model_id(), "claude-sonnet-4-5-20250929");
 
         meta.model = "haiku".to_string();
-        assert_eq!(meta.get_model_id(), "claude-3-5-haiku-20241022");
+        assert_eq!(meta.get_model_id(), "claude-haiku-4-5-20250929");
 
         // Full model ID should pass through
         meta.model = "claude-custom-model-123".to_string();
