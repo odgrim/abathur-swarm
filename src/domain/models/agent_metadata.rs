@@ -98,22 +98,37 @@ impl AgentMetadata {
         Ok(frontmatter_lines.join("\n"))
     }
 
-    /// Get the full Claude model ID from the model field
+    /// Extract content after frontmatter from markdown
     ///
-    /// Maps short names (opus, sonnet, haiku) to full model IDs.
-    /// Returns the value as-is if it's already a full model ID.
+    /// Gets the markdown content that should be used as the agent's system prompt.
+    ///
+    /// # Arguments
+    /// * `content` - Markdown file content
     ///
     /// # Returns
-    /// The full Claude model ID (e.g., "claude-opus-4-1-20250805")
-    pub fn get_model_id(&self) -> String {
-        match self.model.as_str() {
-            "opus" => "claude-opus-4-1-20250805".to_string(),
-            "sonnet" => "claude-sonnet-4-5-20250929".to_string(),
-            "haiku" => "claude-haiku-4-5-20251001".to_string(),
-            // If it's already a full model ID or unknown, return as-is
-            _ => self.model.clone(),
+    /// * `Ok(String)` - Content after frontmatter
+    /// * `Err` - No frontmatter found or invalid format
+    pub fn extract_prompt_content(content: &str) -> Result<String> {
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Check if file starts with ---
+        if lines.is_empty() || lines[0] != "---" {
+            anyhow::bail!("Markdown file does not start with frontmatter delimiter (---)");
+        }
+
+        // Find the closing ---
+        let end_index = lines.iter().skip(1).position(|&line| line == "---")
+            .context("No closing frontmatter delimiter (---) found")?;
+
+        // Extract content after the second --- (end_index+2 because we skipped 1)
+        let content_start = end_index + 2;
+        if content_start < lines.len() {
+            Ok(lines[content_start..].join("\n").trim().to_string())
+        } else {
+            Ok(String::new())
         }
     }
+
 }
 
 /// Agent metadata registry
@@ -229,24 +244,53 @@ impl AgentMetadataRegistry {
         anyhow::bail!("Agent file not found for: {}", agent_type)
     }
 
-    /// Get model ID for an agent type
+    /// Get the file path for an agent
     ///
-    /// Returns the full Claude model ID for the agent, or a default if not found.
+    /// Searches for the agent file in known subdirectories.
+    ///
+    /// # Arguments
+    /// * `agent_type` - The agent type name
+    ///
+    /// # Returns
+    /// * `Ok(PathBuf)` - Path to the agent markdown file
+    /// * `Err` - Agent file not found
+    pub fn get_agent_file_path(&self, agent_type: &str) -> Result<PathBuf> {
+        // Try common subdirectories
+        let subdirs = ["abathur", "workers", ""];
+
+        for subdir in &subdirs {
+            let path = if subdir.is_empty() {
+                self.agents_dir.join(format!("{}.md", agent_type))
+            } else {
+                self.agents_dir.join(subdir).join(format!("{}.md", agent_type))
+            };
+
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        anyhow::bail!("Agent file not found for: {}", agent_type)
+    }
+
+    /// Get model for an agent type
+    ///
+    /// Returns the model name for the agent, or a default if not found.
     ///
     /// # Arguments
     /// * `agent_type` - The agent type
     ///
     /// # Returns
-    /// The full Claude model ID
+    /// The model name (e.g., "opus", "sonnet", "haiku")
     pub fn get_model_id(&mut self, agent_type: &str) -> String {
         self.get(agent_type)
-            .map(|meta| meta.get_model_id())
+            .map(|meta| meta.model.clone())
             .unwrap_or_else(|| {
                 tracing::warn!(
                     "No metadata found for agent type '{}', defaulting to sonnet",
                     agent_type
                 );
-                "claude-sonnet-4-5-20250929".to_string()
+                "sonnet".to_string()
             })
     }
 }
@@ -299,8 +343,8 @@ mcp_servers:
     }
 
     #[test]
-    fn test_model_id_mapping() {
-        let mut meta = AgentMetadata {
+    fn test_model_field() {
+        let meta = AgentMetadata {
             name: "test".to_string(),
             description: None,
             model: "opus".to_string(),
@@ -309,16 +353,56 @@ mcp_servers:
             mcp_servers: vec![],
         };
 
-        assert_eq!(meta.get_model_id(), "claude-opus-4-1-20250805");
+        // Model field should be returned as-is
+        assert_eq!(meta.model, "opus");
 
-        meta.model = "sonnet".to_string();
-        assert_eq!(meta.get_model_id(), "claude-sonnet-4-5-20250929");
+        let meta_sonnet = AgentMetadata {
+            name: "test".to_string(),
+            description: None,
+            model: "sonnet".to_string(),
+            color: None,
+            tools: vec![],
+            mcp_servers: vec![],
+        };
 
-        meta.model = "haiku".to_string();
-        assert_eq!(meta.get_model_id(), "claude-haiku-4-5-20251001");
+        assert_eq!(meta_sonnet.model, "sonnet");
+    }
 
-        // Full model ID should pass through
-        meta.model = "claude-custom-model-123".to_string();
-        assert_eq!(meta.get_model_id(), "claude-custom-model-123");
+    #[test]
+    fn test_extract_prompt_content() {
+        let markdown = r#"---
+name: test-agent
+description: "A test agent"
+model: opus
+---
+
+# Agent Instructions
+
+This is the agent body.
+It has multiple lines.
+
+## Section 2
+
+More content here.
+"#;
+
+        let content = AgentMetadata::extract_prompt_content(markdown).unwrap();
+        assert!(content.contains("# Agent Instructions"));
+        assert!(content.contains("This is the agent body"));
+        assert!(content.contains("More content here"));
+        assert!(!content.contains("---"));
+        assert!(!content.contains("name: test-agent"));
+    }
+
+    #[test]
+    fn test_extract_prompt_content_empty() {
+        let markdown = r#"---
+name: test-agent
+model: opus
+---
+"#;
+
+        let content = AgentMetadata::extract_prompt_content(markdown).unwrap();
+        assert_eq!(content, "");
     }
 }

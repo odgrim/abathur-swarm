@@ -1,41 +1,14 @@
 {
   "mcpServers": {
     "abathur-memory": {
-      "command": "./target/release/abathur-mcp-memory",
-      "args": [
-        "--db-path",
-        ".abathur/abathur.db"
-      ],
-      "env": {
-        "RUST_LOG": "info"
-      },
-      "description": "Abathur memory management server - provides access to long-term memory operations",
-      "tools": [
-        "memory_add",
-        "memory_get",
-        "memory_search",
-        "memory_update",
-        "memory_delete"
-      ]
+      "url": "http://127.0.0.1:45678",
+      "transport": "http",
+      "description": "Abathur memory management MCP server"
     },
     "abathur-task-queue": {
-      "command": "./target/release/abathur-mcp-tasks",
-      "args": [
-        "--db-path",
-        ".abathur/abathur.db"
-      ],
-      "env": {
-        "RUST_LOG": "info"
-      },
-      "description": "Abathur task queue management server - provides access to task enqueueing, monitoring, and dependency management",
-      "tools": [
-        "task_enqueue",
-        "task_list",
-        "task_get",
-        "task_queue_status",
-        "task_cancel",
-        "task_execution_plan"
-      ]
+      "url": "http://127.0.0.1:45679",
+      "transport": "http",
+      "description": "Abathur task queue management MCP server"
     }
   }
 }

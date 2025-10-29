@@ -1,6 +1,6 @@
 # Abathur MCP Server Setup
 
-This template includes configuration for two Abathur MCP servers implemented in Rust:
+This template includes configuration for two Abathur MCP servers implemented in Rust using HTTP transport:
 
 ## Memory MCP Server
 
@@ -19,50 +19,38 @@ Gives Claude agents access to:
 
 ### 1. Build the MCP Servers
 
-The MCP servers are implemented in Rust for performance and reliability:
+The MCP servers are implemented in Rust with HTTP transport for concurrent access:
 
 ```bash
-cargo build --release --bin abathur-mcp-memory --bin abathur-mcp-tasks
+cargo build --release --bin abathur-mcp-memory-http --bin abathur-mcp-tasks-http
 ```
 
 This creates two binaries:
-- `target/release/abathur-mcp-memory` - Memory management server
-- `target/release/abathur-mcp-tasks` - Task queue management server
+- `target/release/abathur-mcp-memory-http` - Memory management server (HTTP)
+- `target/release/abathur-mcp-tasks-http` - Task queue management server (HTTP)
 
-### 2. Project Configuration
+### 2. Server Architecture
 
-The project's `.mcp.json` file is already configured to use the Rust binaries:
+The servers use HTTP transport for concurrent access by multiple agents:
 
-```json
-{
-  "mcpServers": {
-    "abathur-memory": {
-      "command": "./target/release/abathur-mcp-memory",
-      "args": ["--db-path", ".abathur/abathur.db"]
-    },
-    "abathur-task-queue": {
-      "command": "./target/release/abathur-mcp-tasks",
-      "args": ["--db-path", ".abathur/abathur.db"]
-    }
-  }
-}
-```
+- **Memory Server**: Runs on port 45678
+- **Task Queue Server**: Runs on port 45679
 
-Claude Code automatically picks up this configuration when running in the project directory.
+These servers are automatically started by the swarm orchestrator when you run `abathur swarm`.
 
 ### 3. Manual Testing (Optional)
 
 Test the servers directly:
 
 ```bash
-# Memory server (runs in foreground, expects stdio MCP protocol)
-./target/release/abathur-mcp-memory --db-path .abathur/abathur.db
+# Memory server (HTTP on port 45678)
+./target/release/abathur-mcp-memory-http --db-path .abathur/abathur.db --port 45678
 
-# Task queue server (runs in foreground, expects stdio MCP protocol)
-./target/release/abathur-mcp-tasks --db-path .abathur/abathur.db
+# Task queue server (HTTP on port 45679)
+./target/release/abathur-mcp-tasks-http --db-path .abathur/abathur.db --port 45679
 ```
 
-**Note:** The servers communicate via stdio using the MCP protocol. They will wait for JSON-RPC messages on stdin and respond on stdout. Claude Code handles this automatically.
+**Note:** The servers provide HTTP endpoints for MCP operations, allowing concurrent access from multiple agents without process/connection overhead.
 
 ## Available Tools
 
@@ -208,14 +196,14 @@ Agents use the task queue for managing complex workflows:
 
 ```
 ┌─────────────────────────┐
-│     Claude Code         │
+│   Swarm Orchestrator    │
 └───────────┬─────────────┘
-            │ MCP Protocol (stdio)
+            │ HTTP (concurrent)
             │
 ┌───────────▼─────────────┐
 │  Rust MCP Servers       │
-│  - abathur-mcp-memory   │
-│  - abathur-mcp-tasks    │
+│  - memory-http :45678   │
+│  - tasks-http :45679    │
 │  - Error Handling       │
 │  - Structured Logging   │
 └───────────┬─────────────┘
@@ -238,16 +226,17 @@ Agents use the task queue for managing complex workflows:
 
 ### Server Not Starting
 
-1. Build the binaries: `cargo build --release --bin abathur-mcp-memory --bin abathur-mcp-tasks`
-2. Verify binaries exist: `ls -la target/release/abathur-mcp-*`
-3. Check logs: Set `RUST_LOG=debug` in `.mcp.json` and check stderr
+1. Build the binaries: `cargo build --release --bin abathur-mcp-memory-http --bin abathur-mcp-tasks-http`
+2. Verify binaries exist: `ls -la target/release/abathur-mcp-*-http`
+3. Check server logs in the swarm orchestrator output
+4. Verify ports 45678 and 45679 are not in use: `lsof -i :45678 -i :45679`
 
-### Tools Not Visible in Claude Code
+### Connection Issues
 
-1. Verify `.mcp.json` exists in project root
-2. Check config syntax: `cat .mcp.json | jq`
+1. Ensure servers are running (started by swarm orchestrator)
+2. Check that the HTTP servers are listening: `curl http://localhost:45678/health`
 3. Rebuild if binaries are missing: `cargo build --release`
-4. Restart Claude Code session
+4. Check for port conflicts
 
 ### Database Errors
 
@@ -257,59 +246,46 @@ Agents use the task queue for managing complex workflows:
 
 ## Security Notes
 
-- **Database Access:** The MCP server has full read/write access to the database
-- **Network Exposure:** Server uses stdio (local only), no network exposure
+- **Database Access:** The MCP servers have full read/write access to the database
+- **Network Exposure:** Servers listen on localhost only (127.0.0.1:45678, 127.0.0.1:45679)
 - **Memory Scope:** Tools can access all memories in the database
 - **Audit Trail:** All operations are logged to the audit table
+- **Concurrent Access:** HTTP transport allows safe concurrent access from multiple agents
 
 ## Advanced Configuration
 
-### Custom Database Path
+### Custom Ports and Database Path
 
-Edit `.mcp.json` to use a custom database path:
+The HTTP servers support custom configuration via command-line arguments:
 
-```json
-{
-  "mcpServers": {
-    "abathur-memory": {
-      "command": "./target/release/abathur-mcp-memory",
-      "args": ["--db-path", "/custom/path/abathur.db"]
-    }
-  }
-}
+```bash
+# Custom database path
+./target/release/abathur-mcp-memory-http --db-path /custom/path/abathur.db --port 45678
+
+# Custom port
+./target/release/abathur-mcp-memory-http --db-path .abathur/abathur.db --port 8080
 ```
 
 ### Environment Variables
 
-Add environment variables to `.mcp.json`:
+Set environment variables for debugging:
 
-```json
-{
-  "mcpServers": {
-    "abathur-memory": {
-      "command": "./target/release/abathur-mcp-memory",
-      "args": ["--db-path", ".abathur/abathur.db"],
-      "env": {
-        "RUST_LOG": "debug",
-        "RUST_BACKTRACE": "1"
-      }
-    }
-  }
-}
+```bash
+RUST_LOG=debug ./target/release/abathur-mcp-memory-http --db-path .abathur/abathur.db --port 45678
 ```
 
 ## Next Steps
 
-1. Build the MCP servers: `cargo build --release --bin abathur-mcp-memory --bin abathur-mcp-tasks`
-2. The `.mcp.json` configuration is already set up
-3. Claude Code will automatically connect to the servers
+1. Build the MCP servers: `cargo build --release --bin abathur-mcp-memory-http --bin abathur-mcp-tasks-http`
+2. Run the swarm orchestrator: `abathur swarm` (automatically starts HTTP servers)
+3. The servers will be available on ports 45678 (memory) and 45679 (tasks)
 4. Use the MCP tools in your agents and workflows
 
 ## Resources
 
 - [MCP Documentation](https://github.com/anthropics/mcp)
-- [Abathur MCP Memory Server Source](/src/bin/abathur-mcp-memory.rs)
-- [Abathur MCP Tasks Server Source](/src/bin/abathur-mcp-tasks.rs)
+- [Abathur MCP Memory Server Source](/src/bin/abathur-mcp-memory-http.rs)
+- [Abathur MCP Tasks Server Source](/src/bin/abathur-mcp-tasks-http.rs)
 - [Example Agents](.claude/agents/)
 
 ---

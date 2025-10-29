@@ -285,7 +285,7 @@ impl AgentExecutor {
             "Starting task execution"
         );
 
-        // Load agent metadata to determine model
+        // Load agent metadata to determine model (opus, sonnet, haiku, etc.)
         let model = self
             .agent_metadata_registry
             .lock()

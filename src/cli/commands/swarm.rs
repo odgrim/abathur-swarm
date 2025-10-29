@@ -179,7 +179,20 @@ pub async fn handle_status(
 ///
 /// This function runs in the background process and initializes all dependencies.
 pub async fn handle_daemon(max_agents: usize) -> Result<()> {
-    // Initialize simple logging (eprintln for now)
+    // Initialize tracing for daemon mode
+    // This enables all our debug/info logs to be captured
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr) // Write to stderr so it can be captured
+                .with_ansi(false) // Disable colors for log files
+        )
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    tracing::info!("Starting Abathur swarm daemon with max_agents={}", max_agents);
     eprintln!("Starting Abathur swarm daemon with max_agents={}", max_agents);
 
     // Load configuration
@@ -207,6 +220,54 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
         .context("Failed to connect to database")?;
 
     eprintln!("Database connection established");
+
+    // Spawn HTTP MCP servers for concurrent access
+    eprintln!("Starting HTTP MCP servers...");
+
+    // Spawn memory HTTP server on port 45678
+    let memory_server_path = std::env::current_exe()
+        .context("Failed to get current executable path")?
+        .parent()
+        .context("Failed to get executable directory")?
+        .join("abathur-mcp-memory-http");
+
+    let mut memory_server = tokio::process::Command::new(&memory_server_path)
+        .arg("--db-path")
+        .arg(db_path.to_str().context("Invalid database path")?)
+        .arg("--port")
+        .arg("45678")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to spawn memory HTTP MCP server")?;
+
+    eprintln!("Memory HTTP MCP server started on port 45678");
+
+    // Spawn tasks HTTP server on port 45679
+    let tasks_server_path = std::env::current_exe()
+        .context("Failed to get current executable path")?
+        .parent()
+        .context("Failed to get executable directory")?
+        .join("abathur-mcp-tasks-http");
+
+    let mut tasks_server = tokio::process::Command::new(&tasks_server_path)
+        .arg("--db-path")
+        .arg(db_path.to_str().context("Invalid database path")?)
+        .arg("--port")
+        .arg("45679")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to spawn tasks HTTP MCP server")?;
+
+    eprintln!("Tasks HTTP MCP server started on port 45679");
+
+    // Give servers a moment to start listening
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    eprintln!("HTTP MCP servers ready for connections");
 
     // Initialize repositories
     let task_repo = Arc::new(TaskRepositoryImpl::new(pool.clone()));
@@ -344,6 +405,21 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
         .context("Failed to stop SwarmOrchestrator")?;
 
     eprintln!("SwarmOrchestrator stopped successfully");
+
+    // Kill HTTP MCP servers
+    eprintln!("Stopping HTTP MCP servers...");
+
+    if let Err(e) = memory_server.kill().await {
+        eprintln!("Warning: Failed to kill memory server: {}", e);
+    } else {
+        eprintln!("Memory HTTP MCP server stopped");
+    }
+
+    if let Err(e) = tasks_server.kill().await {
+        eprintln!("Warning: Failed to kill tasks server: {}", e);
+    } else {
+        eprintln!("Tasks HTTP MCP server stopped");
+    }
 
     Ok(())
 }
