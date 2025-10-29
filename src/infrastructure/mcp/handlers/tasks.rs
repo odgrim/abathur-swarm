@@ -1,126 +1,37 @@
-//! HTTP MCP server for Abathur task queue management
+//! Task queue MCP tool handlers
 //!
-//! This MCP server exposes task queue management operations via HTTP transport.
-//! It listens on port 45679 and handles JSON-RPC requests.
+//! Implements handlers for task-related MCP tools
 
-use abathur_cli::{
-    domain::{
-        models::{DependencyType, Task, TaskStatus},
-        ports::TaskFilters,
-    },
-    infrastructure::database::{connection::DatabaseConnection, task_repo::TaskRepositoryImpl},
-    services::{DependencyResolver, PriorityCalculator, TaskQueueService},
+use crate::domain::models::{DependencyType, Task, TaskStatus};
+use crate::domain::ports::TaskFilters;
+use crate::infrastructure::mcp::types::{
+    JsonRpcError, JsonRpcRequest, JsonRpcResponse, TaskCancelRequest, TaskEnqueueRequest,
+    TaskExecutionPlanRequest, TaskGetRequest, TaskListRequest,
 };
-use anyhow::{Context, Result};
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::post,
-    Json, Router,
-};
-use clap::Parser;
-use serde::{Deserialize, Serialize};
+use crate::services::TaskQueueService;
+use axum::{extract::State, Json};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::{debug, error, info};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
-#[derive(Parser, Debug)]
-#[command(name = "abathur-mcp-tasks-http")]
-#[command(about = "HTTP MCP server for Abathur task queue management")]
-struct Args {
-    /// Path to SQLite database file
-    #[arg(long, default_value = ".abathur/abathur.db")]
-    db_path: String,
-
-    /// Port to listen on
-    #[arg(long, default_value = "45679")]
-    port: u16,
-}
-
-/// JSON-RPC 2.0 request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct JsonRpcRequest {
-    jsonrpc: String,
-    id: Option<Value>,
-    method: String,
-    params: Option<Value>,
-}
-
-/// JSON-RPC 2.0 response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct JsonRpcResponse {
-    jsonrpc: String,
-    id: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<JsonRpcError>,
-}
-
-/// JSON-RPC 2.0 error
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct JsonRpcError {
-    code: i32,
-    message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<Value>,
-}
-
-impl IntoResponse for JsonRpcResponse {
-    fn into_response(self) -> Response {
-        (StatusCode::OK, Json(self)).into_response()
-    }
-}
-
-/// Application state
+/// Application state for tasks server
 #[derive(Clone)]
-struct AppState {
-    task_service: Arc<TaskQueueService>,
+pub struct TasksAppState {
+    pub task_service: Arc<TaskQueueService>,
 }
 
-/// Request parameters for enqueuing a task
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TaskEnqueueRequest {
-    summary: String,
-    description: String,
-    #[serde(default = "default_agent_type")]
-    agent_type: String,
-    #[serde(default = "default_priority")]
-    priority: u8,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    dependencies: Option<Vec<String>>,
-    #[serde(default = "default_dependency_type")]
-    dependency_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    parent_task_id: Option<String>,
-}
-
-fn default_agent_type() -> String {
-    "requirements-gatherer".to_string()
-}
-
-fn default_priority() -> u8 {
-    5
-}
-
-fn default_dependency_type() -> String {
-    "sequential".to_string()
-}
-
-async fn handle_request(
-    State(state): State<AppState>,
+pub async fn handle_tasks_request(
+    State(state): State<TasksAppState>,
     Json(request): Json<JsonRpcRequest>,
 ) -> JsonRpcResponse {
     debug!("Received request: method={}", request.method);
     let id = request.id.clone();
 
     match request.method.as_str() {
-        "initialize" => handle_initialize(id),
-        "tools/list" => handle_list_tools(id),
-        "tools/call" => handle_tool_call(state, request).await,
+        "initialize" => handle_tasks_initialize(id),
+        "tools/list" => handle_tasks_list_tools(id),
+        "tools/call" => handle_tasks_tool_call(state, request).await,
         _ => JsonRpcResponse {
             jsonrpc: "2.0".to_string(),
             id,
@@ -134,7 +45,7 @@ async fn handle_request(
     }
 }
 
-fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
+fn handle_tasks_initialize(id: Option<Value>) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: "2.0".to_string(),
         id,
@@ -152,7 +63,7 @@ fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
     }
 }
 
-fn handle_list_tools(id: Option<Value>) -> JsonRpcResponse {
+fn handle_tasks_list_tools(id: Option<Value>) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: "2.0".to_string(),
         id,
@@ -233,7 +144,7 @@ fn handle_list_tools(id: Option<Value>) -> JsonRpcResponse {
     }
 }
 
-async fn handle_tool_call(state: AppState, request: JsonRpcRequest) -> JsonRpcResponse {
+async fn handle_tasks_tool_call(state: TasksAppState, request: JsonRpcRequest) -> JsonRpcResponse {
     let id = request.id.clone();
 
     let params = match request.params {
@@ -347,11 +258,6 @@ async fn task_enqueue(service: &TaskQueueService, arguments: Value) -> Result<St
 }
 
 async fn task_get(service: &TaskQueueService, arguments: Value) -> Result<String, String> {
-    #[derive(Deserialize)]
-    struct TaskGetRequest {
-        task_id: String,
-    }
-
     let params: TaskGetRequest =
         serde_json::from_value(arguments).map_err(|e| format!("Invalid parameters: {}", e))?;
 
@@ -374,20 +280,6 @@ async fn task_get(service: &TaskQueueService, arguments: Value) -> Result<String
 }
 
 async fn task_list(service: &TaskQueueService, arguments: Value) -> Result<String, String> {
-    #[derive(Deserialize)]
-    struct TaskListRequest {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        status: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        agent_type: Option<String>,
-        #[serde(default = "default_limit")]
-        limit: usize,
-    }
-
-    fn default_limit() -> usize {
-        50
-    }
-
     let params: TaskListRequest =
         serde_json::from_value(arguments).map_err(|e| format!("Invalid parameters: {}", e))?;
 
@@ -461,11 +353,6 @@ async fn task_queue_status(service: &TaskQueueService) -> Result<String, String>
 }
 
 async fn task_cancel(service: &TaskQueueService, arguments: Value) -> Result<String, String> {
-    #[derive(Deserialize)]
-    struct TaskCancelRequest {
-        task_id: String,
-    }
-
     let params: TaskCancelRequest =
         serde_json::from_value(arguments).map_err(|e| format!("Invalid parameters: {}", e))?;
 
@@ -492,12 +379,6 @@ async fn task_execution_plan(
     service: &TaskQueueService,
     arguments: Value,
 ) -> Result<String, String> {
-    #[derive(Deserialize)]
-    struct TaskExecutionPlanRequest {
-        #[serde(default)]
-        include_completed: bool,
-    }
-
     let params: TaskExecutionPlanRequest =
         serde_json::from_value(arguments).map_err(|e| format!("Invalid parameters: {}", e))?;
 
@@ -545,57 +426,4 @@ async fn task_execution_plan(
             error!("Failed to generate execution plan: {}", e);
             format!("Failed to generate execution plan: {}", e)
         })
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr)
-                .with_ansi(false),
-        )
-        .with(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
-    let args = Args::parse();
-
-    info!("Starting Abathur Task Queue HTTP MCP server");
-    info!("Database path: {}", args.db_path);
-    info!("Port: {}", args.port);
-
-    let database_url = format!("sqlite:{}", args.db_path);
-    let db = DatabaseConnection::new(&database_url)
-        .await
-        .context("Failed to connect to database")?;
-
-    db.migrate()
-        .await
-        .context("Failed to run database migrations")?;
-
-    let task_repo = Arc::new(TaskRepositoryImpl::new(db.pool().clone()));
-    let dependency_resolver = DependencyResolver::new();
-    let priority_calc = PriorityCalculator::new();
-    let task_service = Arc::new(TaskQueueService::new(
-        task_repo.clone(),
-        dependency_resolver,
-        priority_calc,
-    ));
-
-    info!("Database initialized successfully");
-
-    let state = AppState { task_service };
-
-    let app = Router::new()
-        .route("/", post(handle_request))
-        .with_state(state);
-
-    let addr = format!("127.0.0.1:{}", args.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-
-    info!("HTTP MCP server listening on {}", addr);
-
-    axum::serve(listener, app).await?;
-
-    Ok(())
 }

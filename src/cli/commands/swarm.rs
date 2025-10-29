@@ -9,8 +9,7 @@ use crate::application::{
 use crate::cli::service::{SwarmService, TaskQueueServiceAdapter};
 use crate::infrastructure::config::ConfigLoader;
 use crate::infrastructure::database::{AgentRepositoryImpl, MemoryRepositoryImpl, TaskRepositoryImpl};
-use crate::infrastructure::mcp::DirectMcpClient;
-use crate::services::{DependencyResolver, MemoryService, PriorityCalculator, TaskQueueService as TaskQueueServiceImpl};
+use crate::services::{DependencyResolver, PriorityCalculator, TaskQueueService as TaskQueueServiceImpl};
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::sync::Arc;
@@ -224,14 +223,14 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
     // Spawn HTTP MCP servers for concurrent access
     eprintln!("Starting HTTP MCP servers...");
 
-    // Spawn memory HTTP server on port 45678
-    let memory_server_path = std::env::current_exe()
-        .context("Failed to get current executable path")?
-        .parent()
-        .context("Failed to get executable directory")?
-        .join("abathur-mcp-memory-http");
+    // Get the abathur binary path
+    let abathur_path = std::env::current_exe()
+        .context("Failed to get current executable path")?;
 
-    let mut memory_server = tokio::process::Command::new(&memory_server_path)
+    // Spawn memory HTTP server on port 45678
+    let mut memory_server = tokio::process::Command::new(&abathur_path)
+        .arg("mcp")
+        .arg("memory-http")
         .arg("--db-path")
         .arg(db_path.to_str().context("Invalid database path")?)
         .arg("--port")
@@ -245,13 +244,9 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
     eprintln!("Memory HTTP MCP server started on port 45678");
 
     // Spawn tasks HTTP server on port 45679
-    let tasks_server_path = std::env::current_exe()
-        .context("Failed to get current executable path")?
-        .parent()
-        .context("Failed to get executable directory")?
-        .join("abathur-mcp-tasks-http");
-
-    let mut tasks_server = tokio::process::Command::new(&tasks_server_path)
+    let mut tasks_server = tokio::process::Command::new(&abathur_path)
+        .arg("mcp")
+        .arg("tasks-http")
         .arg("--db-path")
         .arg(db_path.to_str().context("Invalid database path")?)
         .arg("--port")
@@ -271,7 +266,7 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
 
     // Initialize repositories
     let task_repo = Arc::new(TaskRepositoryImpl::new(pool.clone()));
-    let memory_repo = Arc::new(MemoryRepositoryImpl::new(pool.clone()));
+    let _memory_repo = Arc::new(MemoryRepositoryImpl::new(pool.clone()));
     let _agent_repo = Arc::new(AgentRepositoryImpl::new(pool.clone()));
 
     // Initialize dependency resolver and priority calculator early
@@ -285,8 +280,6 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
             dependency_resolver.clone(),
             priority_calc.clone(),
         ));
-
-    let memory_service = Arc::new(MemoryService::new(memory_repo));
 
     // Initialize substrate registry from config
     eprintln!("Initializing LLM substrates...");
@@ -318,18 +311,7 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
         );
     }
 
-    // Initialize direct MCP client for internal agents
-    // This provides efficient in-process access to memory and task services
-    // without spawning separate MCP server processes
-    eprintln!("Initializing direct MCP client for agents...");
-    let mcp_client: Arc<dyn crate::domain::ports::McpClient> = Arc::new(DirectMcpClient::new(
-        memory_service,
-        Arc::new(TaskQueueServiceImpl::new(
-            task_repo.clone(),
-            dependency_resolver.clone(),
-            priority_calc.clone(),
-        )),
-    ));
+    eprintln!("External agents will connect via HTTP MCP servers (ports 45678, 45679)");
 
     // Initialize agent metadata registry
     eprintln!("Loading agent metadata...");
@@ -364,7 +346,6 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
     // Create AgentExecutor with substrate registry and agent metadata
     let agent_executor = Arc::new(AgentExecutor::new(
         substrate_registry.clone(),
-        mcp_client,
         agent_metadata_registry,
     ));
 
@@ -391,8 +372,8 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
         .context("Failed to start SwarmOrchestrator")?;
 
     eprintln!("SwarmOrchestrator started successfully");
-    eprintln!("  - Agents use direct in-process service access (no separate MCP processes)");
-    eprintln!("  - External clients (Claude Code) can spawn stdio MCP servers via .mcp.json");
+    eprintln!("  - Agents connect to LLM substrates (Claude Code CLI or Anthropic API)");
+    eprintln!("  - External clients can access memory/tasks via HTTP MCP servers (ports 45678, 45679)");
 
     // Run forever until interrupted
     // The orchestrator runs its background tasks automatically

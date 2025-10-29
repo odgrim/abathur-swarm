@@ -1,6 +1,6 @@
 use crate::domain::models::{AgentMetadataRegistry, Config};
 use crate::domain::ports::{
-    ExecutionParameters, McpClient, McpError,
+    ExecutionParameters,
     SubstrateError, SubstrateRequest,
 };
 use crate::infrastructure::substrates::SubstrateRegistry;
@@ -76,13 +76,6 @@ pub enum ExecutionError {
         source: SubstrateError,
     },
 
-    #[error("MCP tool error for task {task_id}: {source}")]
-    McpError {
-        task_id: Uuid,
-        #[source]
-        source: McpError,
-    },
-
     #[error("Max retries ({max_retries}) exceeded for task {task_id}: {last_error}")]
     MaxRetriesExceeded {
         task_id: Uuid,
@@ -101,22 +94,17 @@ pub enum ExecutionError {
 ///
 /// Orchestrates:
 /// - LLM substrate routing based on agent type
-/// - MCP tool invocations for actions
 /// - Timeout enforcement
 /// - Retry logic for transient failures
 /// - Comprehensive error handling
+///
+/// Note: MCP tool access is handled by the substrates themselves (Claude Code, API),
+/// not by the agent executor. External LLM instances connect to HTTP MCP servers.
 pub struct AgentExecutor {
     /// Substrate registry for LLM interactions
     ///
     /// Routes tasks to appropriate LLM substrate based on agent type
     substrate_registry: Arc<SubstrateRegistry>,
-
-    /// MCP client for tool invocations
-    ///
-    /// Reserved for future MCP tool integration. Currently, the `execute_inner`
-    /// method has a TODO to implement MCP tool call parsing and execution.
-    #[allow(dead_code)]
-    mcp_client: Arc<dyn McpClient>,
 
     /// Agent metadata registry for loading agent configuration
     ///
@@ -129,16 +117,13 @@ impl AgentExecutor {
     ///
     /// # Arguments
     /// * `substrate_registry` - Registry for routing to LLM substrates
-    /// * `mcp_client` - Client for MCP tool invocations
     /// * `agent_metadata_registry` - Registry for loading agent metadata
     pub fn new(
         substrate_registry: Arc<SubstrateRegistry>,
-        mcp_client: Arc<dyn McpClient>,
         agent_metadata_registry: Arc<Mutex<AgentMetadataRegistry>>,
     ) -> Self {
         Self {
             substrate_registry,
-            mcp_client,
             agent_metadata_registry,
         }
     }
@@ -267,9 +252,10 @@ impl AgentExecutor {
     /// Orchestrates:
     /// 1. Route to appropriate LLM substrate based on agent type
     /// 2. Execute task via substrate
-    /// 3. Parse response for any MCP tool calls
-    /// 4. Execute MCP tools if requested
-    /// 5. Return final result
+    /// 3. Return result
+    ///
+    /// Note: MCP tool invocations are handled by the substrate (Claude Code, API),
+    /// not by the executor. External LLM instances can access MCP tools via HTTP servers.
     ///
     /// # Arguments
     /// * `ctx` - Execution context
@@ -335,8 +321,8 @@ impl AgentExecutor {
             "Substrate execution completed"
         );
 
-        // TODO: Parse response for MCP tool calls and execute them
-        // For now, return the substrate response directly
+        // Return the substrate response
+        // Note: MCP tool access is handled by the substrate itself
         Ok(response.content)
     }
 
@@ -360,7 +346,6 @@ impl AgentExecutor {
     /// - `RateLimitExceeded`
     /// - `NetworkError`
     /// - `Unavailable`
-    /// - `ConnectionError`
     /// - Timeout
     ///
     /// Non-retryable errors:
@@ -376,9 +361,6 @@ impl AgentExecutor {
                     | SubstrateError::Unavailable(_)
                     | SubstrateError::Timeout(_)
             ),
-            ExecutionError::McpError { source, .. } => {
-                matches!(source, McpError::ConnectionError(_) | McpError::Timeout)
-            }
             ExecutionError::Timeout { .. } => true,
             _ => false,
         }
@@ -584,8 +566,10 @@ mod tests {
     #[tokio::test]
     async fn test_successful_execution() {
         let registry = create_mock_registry();
-        let mcp_client = Arc::new(MockMcpClient);
-        let executor = AgentExecutor::new(registry, mcp_client);
+        let metadata_registry = Arc::new(Mutex::new(AgentMetadataRegistry::new(
+            &std::path::PathBuf::from("/tmp")
+        )));
+        let executor = AgentExecutor::new(registry, metadata_registry);
 
         let ctx = create_test_context();
         let result = executor.execute(ctx).await;
@@ -597,8 +581,10 @@ mod tests {
     #[tokio::test]
     async fn test_timeout_behavior() {
         let registry = create_mock_registry();
-        let mcp_client = Arc::new(MockMcpClient);
-        let executor = AgentExecutor::new(registry, mcp_client);
+        let metadata_registry = Arc::new(Mutex::new(AgentMetadataRegistry::new(
+            &std::path::PathBuf::from("/tmp")
+        )));
+        let executor = AgentExecutor::new(registry, metadata_registry);
 
         let ctx = create_test_context();
         let timeout_duration = Duration::from_millis(1); // Very short timeout
@@ -617,8 +603,10 @@ mod tests {
     async fn test_retry_logic_with_transient_errors() {
         // Registry with substrate that fails twice, then succeeds
         let registry = create_mock_registry_with_failures(2);
-        let mcp_client = Arc::new(MockMcpClient);
-        let executor = AgentExecutor::new(registry.clone(), mcp_client);
+        let metadata_registry = Arc::new(Mutex::new(AgentMetadataRegistry::new(
+            &std::path::PathBuf::from("/tmp")
+        )));
+        let executor = AgentExecutor::new(registry.clone(), metadata_registry);
 
         let mut ctx = create_test_context();
         ctx.config.retry.max_retries = 3;
@@ -637,8 +625,10 @@ mod tests {
     async fn test_max_retries_exceeded() {
         // Registry with substrate that always fails
         let registry = create_mock_registry_with_failures(10);
-        let mcp_client = Arc::new(MockMcpClient);
-        let executor = AgentExecutor::new(registry.clone(), mcp_client);
+        let metadata_registry = Arc::new(Mutex::new(AgentMetadataRegistry::new(
+            &std::path::PathBuf::from("/tmp")
+        )));
+        let executor = AgentExecutor::new(registry.clone(), metadata_registry);
 
         let mut ctx = create_test_context();
         ctx.config.retry.max_retries = 2;

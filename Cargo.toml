@@ -11,14 +11,6 @@ path = "src/lib.rs"
 name = "abathur"
 path = "src/main.rs"
 
-[[bin]]
-name = "abathur-mcp-memory-http"
-path = "src/bin/abathur-mcp-memory-http.rs"
-
-[[bin]]
-name = "abathur-mcp-tasks-http"
-path = "src/bin/abathur-mcp-tasks-http.rs"
-
 [dependencies]
 anyhow = "1.0.100"
 async-trait = "0.1.83"

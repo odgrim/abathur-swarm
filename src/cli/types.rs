@@ -46,6 +46,10 @@ pub enum Commands {
     /// Swarm orchestration commands
     #[command(subcommand)]
     Swarm(SwarmCommands),
+
+    /// MCP server commands (for internal use)
+    #[command(subcommand)]
+    Mcp(McpCommands),
 }
 
 #[derive(Subcommand)]
@@ -240,25 +244,26 @@ pub enum LoopCommands {
 
 #[derive(Subcommand)]
 pub enum McpCommands {
-    /// List MCP servers
-    List,
+    /// Run HTTP MCP server for memory management
+    MemoryHttp {
+        /// Path to SQLite database file
+        #[arg(long, default_value = ".abathur/abathur.db")]
+        db_path: String,
 
-    /// Start an MCP server
-    Start {
-        /// Server name
-        server_name: String,
+        /// Port to listen on
+        #[arg(long, default_value = "45678")]
+        port: u16,
     },
 
-    /// Stop an MCP server
-    Stop {
-        /// Server name
-        server_name: String,
-    },
+    /// Run HTTP MCP server for task queue management
+    TasksHttp {
+        /// Path to SQLite database file
+        #[arg(long, default_value = ".abathur/abathur.db")]
+        db_path: String,
 
-    /// Restart an MCP server
-    Restart {
-        /// Server name
-        server_name: String,
+        /// Port to listen on
+        #[arg(long, default_value = "45679")]
+        port: u16,
     },
 }
 

@@ -2,9 +2,9 @@
 
 use abathur_cli::{
     cli::{
-        commands::{init, memory, swarm, task},
+        commands::{init, mcp, memory, swarm, task},
         service::{MemoryServiceAdapter, TaskQueueServiceAdapter},
-        Cli, Commands, MemoryCommands, MemoryType, SwarmCommands, TaskCommands,
+        Cli, Commands, McpCommands, MemoryCommands, MemoryType, SwarmCommands, TaskCommands,
     },
     infrastructure::{
         config::ConfigLoader,
@@ -34,6 +34,14 @@ async fn main() -> Result<()> {
     // For swarm daemon mode, handle separately (it manages its own database connection)
     if let Commands::Swarm(SwarmCommands::Start { __daemon: true, max_agents }) = cli.command {
         return swarm::handle_daemon(max_agents).await;
+    }
+
+    // For MCP server commands, handle separately (they don't need the service layer)
+    if let Commands::Mcp(mcp_cmd) = cli.command {
+        return match mcp_cmd {
+            McpCommands::MemoryHttp { db_path, port } => mcp::handle_memory_http(db_path, port).await,
+            McpCommands::TasksHttp { db_path, port } => mcp::handle_tasks_http(db_path, port).await,
+        };
     }
 
     // Load configuration
@@ -72,6 +80,10 @@ async fn main() -> Result<()> {
         Commands::Init { .. } => {
             // Already handled above
             unreachable!("Init command should be handled before this point");
+        }
+        Commands::Mcp(_) => {
+            // Already handled above
+            unreachable!("MCP commands should be handled before this point");
         }
         Commands::Task(task_cmd) => match task_cmd {
             TaskCommands::Submit {

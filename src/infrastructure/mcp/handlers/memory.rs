@@ -1,140 +1,35 @@
-//! HTTP MCP server for Abathur memory management
+//! Memory MCP tool handlers
 //!
-//! This MCP server exposes memory management operations via HTTP transport.
-//! It listens on port 45678 and handles JSON-RPC requests.
+//! Implements handlers for memory-related MCP tools
 
-use abathur_cli::{
-    domain::models::{Memory, MemoryType},
-    infrastructure::database::{connection::DatabaseConnection, memory_repo::MemoryRepositoryImpl},
-    services::MemoryService,
+use crate::domain::models::{Memory, MemoryType};
+use crate::infrastructure::mcp::types::{
+    JsonRpcError, JsonRpcRequest, JsonRpcResponse, MemoryAddRequest, MemoryDeleteRequest,
+    MemoryGetRequest, MemorySearchRequest, MemoryUpdateRequest,
 };
-use anyhow::{Context, Result};
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::post,
-    Json, Router,
-};
-use clap::Parser;
-use serde::{Deserialize, Serialize};
+use crate::services::MemoryService;
+use axum::{extract::State, Json};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::{debug, error, info};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-#[derive(Parser, Debug)]
-#[command(name = "abathur-mcp-memory-http")]
-#[command(about = "HTTP MCP server for Abathur memory management")]
-struct Args {
-    /// Path to SQLite database file
-    #[arg(long, default_value = ".abathur/abathur.db")]
-    db_path: String,
-
-    /// Port to listen on
-    #[arg(long, default_value = "45678")]
-    port: u16,
-}
-
-/// JSON-RPC 2.0 request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct JsonRpcRequest {
-    jsonrpc: String,
-    id: Option<Value>,
-    method: String,
-    params: Option<Value>,
-}
-
-/// JSON-RPC 2.0 response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct JsonRpcResponse {
-    jsonrpc: String,
-    id: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<JsonRpcError>,
-}
-
-/// JSON-RPC 2.0 error
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct JsonRpcError {
-    code: i32,
-    message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<Value>,
-}
-
-impl IntoResponse for JsonRpcResponse {
-    fn into_response(self) -> Response {
-        (StatusCode::OK, Json(self)).into_response()
-    }
-}
-
-/// Application state
+/// Application state for memory server
 #[derive(Clone)]
-struct AppState {
-    memory_service: Arc<MemoryService>,
+pub struct MemoryAppState {
+    pub memory_service: Arc<MemoryService>,
 }
 
-/// Request parameters for adding a memory
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MemoryAddRequest {
-    namespace: String,
-    key: String,
-    value: Value,
-    memory_type: String,
-    created_by: String,
-}
-
-/// Request parameters for getting a memory
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MemoryGetRequest {
-    namespace: String,
-    key: String,
-}
-
-/// Request parameters for searching memories
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MemorySearchRequest {
-    namespace_prefix: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    memory_type: Option<String>,
-    #[serde(default = "default_limit")]
-    limit: usize,
-}
-
-fn default_limit() -> usize {
-    50
-}
-
-/// Request parameters for updating a memory
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MemoryUpdateRequest {
-    namespace: String,
-    key: String,
-    value: Value,
-    updated_by: String,
-}
-
-/// Request parameters for deleting a memory
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MemoryDeleteRequest {
-    namespace: String,
-    key: String,
-}
-
-async fn handle_request(
-    State(state): State<AppState>,
+pub async fn handle_memory_request(
+    State(state): State<MemoryAppState>,
     Json(request): Json<JsonRpcRequest>,
 ) -> JsonRpcResponse {
     debug!("Received request: method={}", request.method);
     let id = request.id.clone();
 
     match request.method.as_str() {
-        "initialize" => handle_initialize(id),
-        "tools/list" => handle_list_tools(id),
-        "tools/call" => handle_tool_call(state, request).await,
+        "initialize" => handle_memory_initialize(id),
+        "tools/list" => handle_memory_list_tools(id),
+        "tools/call" => handle_memory_tool_call(state, request).await,
         _ => JsonRpcResponse {
             jsonrpc: "2.0".to_string(),
             id,
@@ -148,7 +43,7 @@ async fn handle_request(
     }
 }
 
-fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
+fn handle_memory_initialize(id: Option<Value>) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: "2.0".to_string(),
         id,
@@ -166,7 +61,7 @@ fn handle_initialize(id: Option<Value>) -> JsonRpcResponse {
     }
 }
 
-fn handle_list_tools(id: Option<Value>) -> JsonRpcResponse {
+fn handle_memory_list_tools(id: Option<Value>) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: "2.0".to_string(),
         id,
@@ -244,7 +139,7 @@ fn handle_list_tools(id: Option<Value>) -> JsonRpcResponse {
     }
 }
 
-async fn handle_tool_call(state: AppState, request: JsonRpcRequest) -> JsonRpcResponse {
+async fn handle_memory_tool_call(state: MemoryAppState, request: JsonRpcRequest) -> JsonRpcResponse {
     let id = request.id.clone();
 
     let params = match request.params {
@@ -438,51 +333,4 @@ async fn memory_delete(service: &MemoryService, arguments: Value) -> Result<Stri
             error!("Failed to delete memory: {}", e);
             format!("Failed to delete memory: {}", e)
         })
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr)
-                .with_ansi(false),
-        )
-        .with(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
-    let args = Args::parse();
-
-    info!("Starting Abathur Memory HTTP MCP server");
-    info!("Database path: {}", args.db_path);
-    info!("Port: {}", args.port);
-
-    let database_url = format!("sqlite:{}", args.db_path);
-    let db = DatabaseConnection::new(&database_url)
-        .await
-        .context("Failed to connect to database")?;
-
-    db.migrate()
-        .await
-        .context("Failed to run database migrations")?;
-
-    let memory_repo = Arc::new(MemoryRepositoryImpl::new(db.pool().clone()));
-    let memory_service = Arc::new(MemoryService::new(memory_repo));
-
-    info!("Database initialized successfully");
-
-    let state = AppState { memory_service };
-
-    let app = Router::new()
-        .route("/", post(handle_request))
-        .with_state(state);
-
-    let addr = format!("127.0.0.1:{}", args.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-
-    info!("HTTP MCP server listening on {}", addr);
-
-    axum::serve(listener, app).await?;
-
-    Ok(())
 }

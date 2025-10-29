@@ -1,24 +1,21 @@
 //! MCP (Model Context Protocol) infrastructure module
 //!
-//! Provides MCP client implementations:
-//! - `DirectMcpClient` - For internal agents (in-process, efficient)
+//! Provides MCP client implementations and HTTP servers:
 //! - `MockMcpClient` - For testing
-//! - Stdio clients - For external clients (Claude Code, IDEs)
+//! - HTTP servers for memory and task queue management
 //!
 //! # Design Philosophy
 //!
-//! **For Internal Agents (hundreds):**
-//! Use `DirectMcpClient` which calls services directly without spawning processes.
-//! This avoids resource exhaustion and provides efficient shared access.
-//!
-//! **For External Clients (few):**
-//! Use stdio MCP servers that external tools spawn per `.mcp.json` config.
-//! Each external client gets its own isolated server instance.
+//! MCP server access is provided via HTTP servers for external clients.
+//! External LLM instances (Claude Code, Anthropic API) connect to HTTP MCP servers
+//! on ports 45678 (memory) and 45679 (tasks).
 
-pub mod direct_client;
 pub mod error;
+pub mod handlers;
+pub mod http_server;
 pub mod mock_client;
+pub mod types;
 
-pub use direct_client::DirectMcpClient;
 pub use error::{McpError, Result};
+pub use http_server::{start_memory_server, start_tasks_server};
 pub use mock_client::MockMcpClient;
