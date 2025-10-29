@@ -181,7 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_message_start_event() {
-        let sse_data = r#"data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet-20241022","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}
+        let sse_data = r#"data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-5-20250929","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}
 
 "#;
 
@@ -238,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_parse_multiple_events() {
-        let sse_data = r#"data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet-20241022","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}
+        let sse_data = r#"data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-5-20250929","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}
 
 data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}
 

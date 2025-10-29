@@ -18,7 +18,7 @@ async fn test_successful_message_request() {
                 "text": "Hello! How can I help you?"
             }
         ],
-        "model": "claude-3-5-sonnet-20241022",
+        "model": "claude-sonnet-4-5-20250929",
         "stop_reason": "end_turn",
         "stop_sequence": null,
         "usage": {
@@ -49,7 +49,7 @@ async fn test_successful_message_request() {
 
     // Send request
     let request = MessageRequest::simple_message(
-        "claude-3-5-sonnet-20241022".to_string(),
+        "claude-sonnet-4-5-20250929".to_string(),
         "Hello!".to_string(),
         1024,
     );
@@ -72,7 +72,7 @@ async fn test_retry_on_500_error() {
         "type": "message",
         "role": "assistant",
         "content": [{"type": "text", "text": "Success after retry"}],
-        "model": "claude-3-5-sonnet-20241022",
+        "model": "claude-sonnet-4-5-20250929",
         "stop_reason": "end_turn",
         "stop_sequence": null,
         "usage": {"input_tokens": 5, "output_tokens": 10}
@@ -105,7 +105,7 @@ async fn test_retry_on_500_error() {
     let client = ClaudeClient::new(config).unwrap();
 
     let request = MessageRequest::simple_message(
-        "claude-3-5-sonnet-20241022".to_string(),
+        "claude-sonnet-4-5-20250929".to_string(),
         "Test retry".to_string(),
         512,
     );
@@ -123,7 +123,7 @@ async fn test_retry_on_rate_limit() {
         "type": "message",
         "role": "assistant",
         "content": [{"type": "text", "text": "Success after rate limit"}],
-        "model": "claude-3-5-sonnet-20241022",
+        "model": "claude-sonnet-4-5-20250929",
         "stop_reason": "end_turn",
         "stop_sequence": null,
         "usage": {"input_tokens": 5, "output_tokens": 10}
@@ -156,7 +156,7 @@ async fn test_retry_on_rate_limit() {
     let client = ClaudeClient::new(config).unwrap();
 
     let request = MessageRequest::simple_message(
-        "claude-3-5-sonnet-20241022".to_string(),
+        "claude-sonnet-4-5-20250929".to_string(),
         "Test rate limit".to_string(),
         512,
     );
@@ -188,7 +188,7 @@ async fn test_no_retry_on_400_error() {
     let client = ClaudeClient::new(config).unwrap();
 
     let request = MessageRequest::simple_message(
-        "claude-3-5-sonnet-20241022".to_string(),
+        "claude-sonnet-4-5-20250929".to_string(),
         "Test bad request".to_string(),
         512,
     );
@@ -222,7 +222,7 @@ async fn test_no_retry_on_401_error() {
     let client = ClaudeClient::new(config).unwrap();
 
     let request = MessageRequest::simple_message(
-        "claude-3-5-sonnet-20241022".to_string(),
+        "claude-sonnet-4-5-20250929".to_string(),
         "Test".to_string(),
         512,
     );
@@ -254,7 +254,7 @@ async fn test_max_retries_exceeded() {
     let client = ClaudeClient::new(config).unwrap();
 
     let request = MessageRequest::simple_message(
-        "claude-3-5-sonnet-20241022".to_string(),
+        "claude-sonnet-4-5-20250929".to_string(),
         "Test max retries".to_string(),
         512,
     );
@@ -276,7 +276,7 @@ async fn test_rate_limiter_enforcement() {
         "type": "message",
         "role": "assistant",
         "content": [{"type": "text", "text": "Test"}],
-        "model": "claude-3-5-sonnet-20241022",
+        "model": "claude-sonnet-4-5-20250929",
         "stop_reason": "end_turn",
         "stop_sequence": null,
         "usage": {"input_tokens": 5, "output_tokens": 5}
@@ -301,7 +301,7 @@ async fn test_rate_limiter_enforcement() {
     let client = ClaudeClient::new(config).unwrap();
 
     let request = MessageRequest::simple_message(
-        "claude-3-5-sonnet-20241022".to_string(),
+        "claude-sonnet-4-5-20250929".to_string(),
         "Test".to_string(),
         128,
     );
@@ -333,7 +333,7 @@ async fn test_request_headers() {
         "type": "message",
         "role": "assistant",
         "content": [{"type": "text", "text": "OK"}],
-        "model": "claude-3-5-sonnet-20241022",
+        "model": "claude-sonnet-4-5-20250929",
         "stop_reason": "end_turn",
         "stop_sequence": null,
         "usage": {"input_tokens": 1, "output_tokens": 1}
@@ -360,7 +360,7 @@ async fn test_request_headers() {
     let client = ClaudeClient::new(config).unwrap();
 
     let request = MessageRequest::simple_message(
-        "claude-3-5-sonnet-20241022".to_string(),
+        "claude-sonnet-4-5-20250929".to_string(),
         "Test".to_string(),
         128,
     );

@@ -39,7 +39,7 @@ impl Default for AnthropicApiConfig {
     fn default() -> Self {
         Self {
             api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-            model: "claude-3-5-sonnet-20241022".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
             base_url: None,
             timeout_secs: 300,
         }
@@ -191,7 +191,7 @@ mod tests {
         unsafe { std::env::remove_var("ANTHROPIC_API_KEY"); }
 
         let config = AnthropicApiConfig::default();
-        assert_eq!(config.model, "claude-3-5-sonnet-20241022");
+        assert_eq!(config.model, "claude-sonnet-4-5-20250929");
         assert_eq!(config.timeout_secs, 300);
     }
 

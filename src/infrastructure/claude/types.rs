@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Request to send a message to Claude
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageRequest {
-    /// The model to use (e.g., "claude-3-5-sonnet-20241022")
+    /// The model to use (e.g., "claude-sonnet-4-5-20250929")
     pub model: String,
 
     /// Input messages (conversation history + new message)
@@ -146,7 +146,7 @@ impl MessageRequest {
     /// use abathur::infrastructure::claude::types::MessageRequest;
     ///
     /// let request = MessageRequest::simple_message(
-    ///     "claude-3-5-sonnet-20241022".to_string(),
+    ///     "claude-sonnet-4-5-20250929".to_string(),
     ///     "Hello, Claude!".to_string(),
     ///     1024,
     /// );
@@ -174,13 +174,13 @@ mod tests {
     #[test]
     fn test_simple_message_request_serialization() {
         let request = MessageRequest::simple_message(
-            "claude-3-5-sonnet-20241022".to_string(),
+            "claude-sonnet-4-5-20250929".to_string(),
             "Hello!".to_string(),
             100,
         );
 
         let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("\"model\":\"claude-3-5-sonnet-20241022\""));
+        assert!(json.contains("\"model\":\"claude-sonnet-4-5-20250929\""));
         assert!(json.contains("\"role\":\"user\""));
         assert!(json.contains("\"max_tokens\":100"));
     }
@@ -197,7 +197,7 @@ mod tests {
                     "text": "Hello! How can I help?"
                 }
             ],
-            "model": "claude-3-5-sonnet-20241022",
+            "model": "claude-sonnet-4-5-20250929",
             "stop_reason": "end_turn",
             "stop_sequence": null,
             "usage": {
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn test_optional_fields_omitted() {
         let request = MessageRequest::simple_message(
-            "claude-3-5-sonnet-20241022".to_string(),
+            "claude-sonnet-4-5-20250929".to_string(),
             "Test".to_string(),
             100,
         );

@@ -44,7 +44,7 @@ pub struct TokenUsage {
 /// # Examples
 /// ```ignore
 /// let request = MessageRequest {
-///     model: "claude-3-5-sonnet-20241022".to_string(),
+///     model: "claude-sonnet-4-5-20250929".to_string(),
 ///     messages: vec![
 ///         Message {
 ///             role: "user".to_string(),
@@ -58,7 +58,7 @@ pub struct TokenUsage {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageRequest {
-    /// The model to use (e.g., "claude-3-5-sonnet-20241022")
+    /// The model to use (e.g., "claude-sonnet-4-5-20250929")
     pub model: String,
 
     /// The conversational messages (user/assistant turns)
@@ -212,7 +212,7 @@ pub enum ClaudeError {
 ///
 /// // Low-level API (detailed)
 /// let response = client.send_message(MessageRequest {
-///     model: "claude-3-5-sonnet-20241022".to_string(),
+///     model: "claude-sonnet-4-5-20250929".to_string(),
 ///     messages: vec![
 ///         Message {
 ///             role: "user".to_string(),
@@ -275,7 +275,7 @@ pub trait ClaudeClient: Send + Sync {
     /// # Examples
     /// ```ignore
     /// let response = client.send_message(MessageRequest {
-    ///     model: "claude-3-5-sonnet-20241022".to_string(),
+    ///     model: "claude-sonnet-4-5-20250929".to_string(),
     ///     messages: vec![Message {
     ///         role: "user".to_string(),
     ///         content: "Explain async Rust".to_string(),

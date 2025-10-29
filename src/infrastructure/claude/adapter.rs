@@ -124,7 +124,7 @@ impl ClaudeClientPort for ClaudeClientAdapter {
 
         // Convert high-level request to message request
         let infra_request = InfraMessageRequest {
-            model: request.model.clone().unwrap_or_else(|| "claude-3-5-sonnet-20241022".to_string()),
+            model: request.model.clone().unwrap_or_else(|| "claude-sonnet-4-5-20250929".to_string()),
             messages: vec![InfraMessage {
                 role: "user".to_string(),
                 content: MessageContent::Text(request.prompt.clone()),
@@ -277,7 +277,7 @@ impl ClaudeClientPort for ClaudeClientAdapter {
 
         // Send a minimal request to verify connectivity
         let health_request = InfraMessageRequest {
-            model: "claude-3-5-sonnet-20241022".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
             messages: vec![InfraMessage {
                 role: "user".to_string(),
                 content: MessageContent::Text("ping".to_string()),
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn test_message_request_conversion() {
         let domain_req = DomainMessageRequest {
-            model: "claude-3-5-sonnet-20241022".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
             messages: vec![DomainMessage {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
@@ -343,7 +343,7 @@ mod tests {
             content: vec![InfraContentBlock::Text {
                 text: "Hello!".to_string(),
             }],
-            model: "claude-3-5-sonnet-20241022".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
             stop_reason: Some("end_turn".to_string()),
             stop_sequence: None,
             usage: InfraUsage {

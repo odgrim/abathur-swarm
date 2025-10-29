@@ -311,7 +311,7 @@ pub struct AnthropicApiSubstrateConfig {
 }
 
 fn default_anthropic_model() -> String {
-    "claude-3-5-sonnet-20241022".to_string()
+    "claude-sonnet-4-5-20250929".to_string()
 }
 
 impl Default for AnthropicApiSubstrateConfig {

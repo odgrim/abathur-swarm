@@ -150,7 +150,7 @@ impl ClaudeClient {
     /// let client = ClaudeClient::new(config)?;
     ///
     /// let request = MessageRequest::simple_message(
-    ///     "claude-3-5-sonnet-20241022".to_string(),
+    ///     "claude-sonnet-4-5-20250929".to_string(),
     ///     "Hello, Claude!".to_string(),
     ///     1024,
     /// );
