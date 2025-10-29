@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod agent_contract;
+pub mod agent_metadata;
 pub mod config;
 pub mod memory;
 pub mod queue;
@@ -13,6 +14,7 @@ pub mod task;
 
 pub use agent::{Agent, AgentStatus};
 pub use agent_contract::AgentContractRegistry;
+pub use agent_metadata::{AgentMetadata, AgentMetadataRegistry};
 pub use config::{
     Config, DatabaseConfig, LoggingConfig, McpServerConfig, RateLimitConfig,
     RetryConfig,

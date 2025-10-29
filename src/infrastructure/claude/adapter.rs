@@ -124,14 +124,14 @@ impl ClaudeClientPort for ClaudeClientAdapter {
 
         // Convert high-level request to message request
         let infra_request = InfraMessageRequest {
-            model: "claude-3-5-sonnet-20241022".to_string(), // Default model
+            model: request.model.clone().unwrap_or_else(|| "claude-3-5-sonnet-20241022".to_string()),
             messages: vec![InfraMessage {
                 role: "user".to_string(),
                 content: MessageContent::Text(request.prompt.clone()),
             }],
             max_tokens: request.max_tokens.unwrap_or(4096),
             system: None,
-            temperature: request.temperature.map(|t| t),
+            temperature: request.temperature,
             tools: None,
             metadata: None,
         };

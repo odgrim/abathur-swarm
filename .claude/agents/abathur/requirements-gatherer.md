@@ -88,13 +88,70 @@ Parse the task description:
 
 ### 2. Research Solutions
 
+**🚨 CRITICAL: How to Explore Project Structure**
+
+You MUST use the correct tools to explore the project. **NEVER use Read on a directory path** - it will fail with "EISDIR" error.
+
+**Correct Approach:**
+1. **Use Glob to discover files** (find what exists):
+   ```
+   - Glob("README.md") - find readme
+   - Glob("Cargo.toml") - find Rust project config
+   - Glob("package.json") - find Node.js project config
+   - Glob("**/*.rs") - find all Rust source files
+   - Glob("**/*.py") - find all Python files
+   - Glob("**/*.md") - find all documentation
+   - Glob(".claude/agents/**/*.md") - find agent definitions
+   ```
+
+2. **Use Read on specific FILES** (read the files you found):
+   ```
+   - Read("README.md") - read the readme
+   - Read("Cargo.toml") - read project config
+   - Read("src/main.rs") - read source file
+   ```
+
+3. **Use Grep to search content** (find patterns across files):
+   ```
+   - Grep("struct", type="rust") - find all structs
+   - Grep("class", type="py") - find all classes
+   - Grep("function.*export", glob="**/*.ts") - find exports
+   ```
+
+**❌ WRONG - Will Cause EISDIR Error:**
+```
+Read("/Users/odgrim/dev/home/agentics/abathur-swarm") ❌ DIRECTORY PATH
+```
+
+**✅ CORRECT - Will Work:**
+```
+Glob("**/*.md")  ✅ Find files
+Read("/Users/odgrim/dev/home/agentics/abathur-swarm/README.md")  ✅ Specific file
+```
+
+**Project Exploration Pattern:**
+```
+Step 1: Find key files with Glob
+  - Glob("README.md")
+  - Glob("**/Cargo.toml")
+  - Glob("**/*.md")
+
+Step 2: Read the files you found
+  - Read each file path returned by Glob
+
+Step 3: Search for patterns with Grep
+  - Grep to find specific code patterns
+```
+
 **Web Research** (use WebFetch directly):
 - Search for best practices in the problem domain
 - Research industry standards and patterns
 - Find common approaches to similar problems
 
 **Codebase Analysis** (use Grep/Read/Glob directly):
-- Search for similar features in the codebase
+- **First use Glob** to discover files (never Read a directory!)
+- **Then use Read** on specific files found by Glob
+- **Use Grep** to search for patterns across multiple files
 - Identify existing patterns and conventions
 - Extract technical constraints from configuration files
 - Review test patterns to infer quality requirements
@@ -257,11 +314,16 @@ Provide final JSON output:
 - `mcp__abathur-task-queue__task_queue_status`: Get queue status
 
 **Research Tools:**
-- `Read`: Read configuration files, documentation
+- `Read`: Read configuration files, documentation (**FILES ONLY - never directories!**)
 - `Grep`: Search codebase for patterns
-- `Glob`: Find relevant files
+- `Glob`: Find relevant files (use this FIRST to discover what files exist)
 - `WebFetch`: Research best practices and standards
 - `WebSearch`: Search the web for information
+
+**🚨 CRITICAL: Read Tool Usage**
+- ✅ **CORRECT**: `Read("path/to/file.rs")` - specific file path
+- ❌ **WRONG**: `Read("path/to/directory")` - will fail with EISDIR error
+- Always use `Glob` first to find files, then `Read` the specific file paths
 
 **❌ FORBIDDEN Tools (DO NOT USE - THEY WILL CAUSE FAILURE):**
 
@@ -308,6 +370,11 @@ Even though you may see instructions in the system prompt about using a "Task" t
 - Do NOT spawn tasks for other agents to research
 - Do NOT invoke agents to gather information
 - Do your own research using your tools
+
+**Never Read Directories:**
+- ❌ Do NOT use `Read("/path/to/directory")` - will fail with EISDIR
+- ✅ Use `Glob("**/*.ext")` to find files, then `Read` specific files
+- The Read tool only works on FILES, not directories
 
 ## Success Checklist
 

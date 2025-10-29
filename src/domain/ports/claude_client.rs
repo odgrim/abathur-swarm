@@ -12,6 +12,7 @@ pub struct ClaudeRequest {
     pub task_id: Uuid,
     pub agent_type: String,
     pub prompt: String,
+    pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
 }

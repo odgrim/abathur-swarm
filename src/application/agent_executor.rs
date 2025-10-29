@@ -1,4 +1,4 @@
-use crate::domain::models::Config;
+use crate::domain::models::{AgentMetadataRegistry, Config};
 use crate::domain::ports::{
     ExecutionParameters, McpClient, McpError,
     SubstrateError, SubstrateRequest,
@@ -7,7 +7,7 @@ use crate::infrastructure::substrates::SubstrateRegistry;
 use anyhow::Result;
 use serde_json::Value;
 use std::fmt::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::timeout;
 use uuid::Uuid;
@@ -117,6 +117,11 @@ pub struct AgentExecutor {
     /// method has a TODO to implement MCP tool call parsing and execution.
     #[allow(dead_code)]
     mcp_client: Arc<dyn McpClient>,
+
+    /// Agent metadata registry for loading agent configuration
+    ///
+    /// Used to determine which model to use for each agent type
+    agent_metadata_registry: Arc<Mutex<AgentMetadataRegistry>>,
 }
 
 impl AgentExecutor {
@@ -125,10 +130,16 @@ impl AgentExecutor {
     /// # Arguments
     /// * `substrate_registry` - Registry for routing to LLM substrates
     /// * `mcp_client` - Client for MCP tool invocations
-    pub fn new(substrate_registry: Arc<SubstrateRegistry>, mcp_client: Arc<dyn McpClient>) -> Self {
+    /// * `agent_metadata_registry` - Registry for loading agent metadata
+    pub fn new(
+        substrate_registry: Arc<SubstrateRegistry>,
+        mcp_client: Arc<dyn McpClient>,
+        agent_metadata_registry: Arc<Mutex<AgentMetadataRegistry>>,
+    ) -> Self {
         Self {
             substrate_registry,
             mcp_client,
+            agent_metadata_registry,
         }
     }
 
@@ -274,6 +285,20 @@ impl AgentExecutor {
             "Starting task execution"
         );
 
+        // Load agent metadata to determine model
+        let model = self
+            .agent_metadata_registry
+            .lock()
+            .unwrap()
+            .get_model_id(&ctx.agent_type);
+
+        tracing::debug!(
+            task_id = %ctx.task_id,
+            agent_type = %ctx.agent_type,
+            model = %model,
+            "Using model for agent type"
+        );
+
         // Build prompt
         let prompt = Self::build_prompt(&ctx);
 
@@ -284,6 +309,7 @@ impl AgentExecutor {
             prompt,
             context: ctx.input_data.clone(),
             parameters: ExecutionParameters {
+                model: Some(model),
                 max_tokens: Some(4096),
                 temperature: Some(0.7),
                 timeout_secs: None, // Handled by outer timeout

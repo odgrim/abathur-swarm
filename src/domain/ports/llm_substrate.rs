@@ -36,6 +36,10 @@ pub struct SubstrateRequest {
 /// Parameters for controlling LLM execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionParameters {
+    /// Model to use (e.g., "claude-opus-4-20250514", "claude-sonnet-4-5-20250929")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
     /// Maximum tokens to generate (if applicable)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
@@ -56,6 +60,7 @@ pub struct ExecutionParameters {
 impl Default for ExecutionParameters {
     fn default() -> Self {
         Self {
+            model: None, // Will be determined by agent metadata
             max_tokens: Some(4096),
             temperature: Some(0.7),
             timeout_secs: Some(300), // 5 minutes default

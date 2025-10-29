@@ -270,6 +270,24 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
         )),
     ));
 
+    // Initialize agent metadata registry
+    eprintln!("Loading agent metadata...");
+    let agents_dir = std::env::current_dir()
+        .context("Failed to get current directory")?
+        .join(".claude/agents");
+
+    let mut metadata_registry = crate::domain::models::AgentMetadataRegistry::new(&agents_dir);
+    if agents_dir.exists() {
+        if let Err(e) = metadata_registry.load_all() {
+            eprintln!("Warning: Failed to load some agent metadata: {}", e);
+        } else {
+            eprintln!("Agent metadata loaded successfully");
+        }
+    } else {
+        eprintln!("Warning: Agent directory not found at {}", agents_dir.display());
+    }
+    let agent_metadata_registry = Arc::new(std::sync::Mutex::new(metadata_registry));
+
     // Wrap for trait objects
     let dependency_resolver_arc = Arc::new(dependency_resolver);
     let priority_calc_arc: Arc<dyn crate::domain::ports::PriorityCalculator> =
@@ -282,8 +300,12 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
         priority_calc_arc,
     ));
 
-    // Create AgentExecutor with substrate registry
-    let agent_executor = Arc::new(AgentExecutor::new(substrate_registry.clone(), mcp_client));
+    // Create AgentExecutor with substrate registry and agent metadata
+    let agent_executor = Arc::new(AgentExecutor::new(
+        substrate_registry.clone(),
+        mcp_client,
+        agent_metadata_registry,
+    ));
 
     // Create resource monitor with default limits (monitoring only, no enforcement)
     let resource_monitor = Arc::new(ResourceMonitor::new(

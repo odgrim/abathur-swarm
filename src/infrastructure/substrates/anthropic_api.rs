@@ -98,6 +98,7 @@ impl AnthropicApiSubstrate {
             task_id: request.task_id,
             agent_type: request.agent_type.clone(),
             prompt: request.prompt.clone(),
+            model: request.parameters.model.clone(),
             max_tokens: request.parameters.max_tokens,
             temperature: request.parameters.temperature,
         }
