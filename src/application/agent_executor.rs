@@ -286,7 +286,7 @@ impl AgentExecutor {
         );
 
         // Build prompt
-        let prompt = Self::build_prompt(&ctx);
+        let prompt = self.build_prompt(&ctx);
 
         // Create substrate request
         let request = SubstrateRequest {
@@ -327,8 +327,66 @@ impl AgentExecutor {
     }
 
     /// Build prompt for Claude based on execution context
-    fn build_prompt(ctx: &ExecutionContext) -> String {
-        let mut prompt = format!(
+    ///
+    /// Loads the agent definition markdown and includes it as the system prompt,
+    /// matching the Python implementation's behavior.
+    fn build_prompt(&self, ctx: &ExecutionContext) -> String {
+        use crate::domain::models::AgentMetadata;
+
+        let mut prompt = String::new();
+
+        // Load the full agent definition content (after frontmatter)
+        if let Ok(agent_file_path) = self
+            .agent_metadata_registry
+            .lock()
+            .unwrap()
+            .get_agent_file_path(&ctx.agent_type)
+        {
+            // Read the agent file and extract the prompt content
+            match std::fs::read_to_string(&agent_file_path) {
+                Ok(file_content) => {
+                    match AgentMetadata::extract_prompt_content(&file_content) {
+                        Ok(agent_prompt) => {
+                            // Add the full agent definition as system prompt
+                            let _ = write!(prompt, "{}\n\n", agent_prompt);
+
+                            tracing::debug!(
+                                task_id = %ctx.task_id,
+                                agent_type = %ctx.agent_type,
+                                agent_prompt_length = agent_prompt.len(),
+                                "Loaded agent definition"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %ctx.task_id,
+                                agent_type = %ctx.agent_type,
+                                error = %e,
+                                "Failed to extract agent prompt content, using basic prompt"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %ctx.task_id,
+                        agent_type = %ctx.agent_type,
+                        error = %e,
+                        "Failed to read agent file, using basic prompt"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                task_id = %ctx.task_id,
+                agent_type = %ctx.agent_type,
+                "Could not find agent file, using basic prompt"
+            );
+        }
+
+        // Add task context (matching Python's user_message)
+        let _ = write!(
+            prompt,
             "You are a {} agent.\n\nTask: {}\n",
             ctx.agent_type, ctx.description
         );
