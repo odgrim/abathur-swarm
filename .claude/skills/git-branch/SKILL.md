@@ -1,20 +1,20 @@
 ---
-name: git-worktree
-description: Create and manage git worktrees in .abathur directory with isolated virtual environments for parallel development
-version: 1.0.0
+name: git-branch
+description: Create and manage git worktrees in .abathur directory for parallel branch development
+version: 3.0.0
 ---
 
-# git-worktree Skill
+# git-branch Skill
 
-This skill provides standardized commands for creating and managing git worktrees with isolated Python virtual environments. Worktrees enable parallel development on multiple branches without switching contexts or stashing changes.
+This skill provides standardized commands for creating and managing git worktrees. Worktrees enable parallel development on multiple branches without switching contexts or stashing changes.
 
 ## When to Use This Skill
 
 - Creating a new feature branch for isolated development
 - Working on multiple features/bugs simultaneously
-- Testing changes in isolation without affecting main development environment
-- Reviewing PRs locally with full environment setup
-- Experimenting with dependency changes without affecting main venv
+- Testing changes in isolation without affecting main development
+- Reviewing PRs locally with full setup
+- Experimenting with changes without affecting main branch
 
 ## Worktree Organization
 
@@ -22,32 +22,29 @@ All worktrees are created in the `.abathur/` directory with the following struct
 
 ```
 .abathur/
-├── features/                  # Feature branch worktrees (created by technical-requirements-specialist)
-│   ├── task-queue-enhancements/   # Feature worktree for entire feature
-│   │   ├── src/               # Source code (git worktree)
-│   │   ├── tests/             # Tests
-│   │   └── pyproject.toml     # Dependencies
-│   └── memory-service/        # Another feature worktree
-│       └── ...
-├── worktrees/                 # Task-specific worktrees (created by task-planner)
+├── features/                  # Feature branch worktrees
+│   ├── user-authentication/   # Feature worktree for entire feature
+│   │   └── [project files]    # Full git working tree
+│   └── api-redesign/          # Another feature worktree
+│       └── [project files]
+├── worktrees/                 # Task-specific worktrees
 │   ├── task-001-domain-model/ # Individual task worktree
-│   │   ├── src/               # Source code (git worktree)
-│   │   └── ...
+│   │   └── [project files]
 │   └── task-002-api/          # Another task worktree
-│       └── ...
+│       └── [project files]
 └── [legacy single worktrees]  # Old-style worktrees (deprecated)
     ├── feature-auth/
     └── bugfix-memory-leak/
 ```
 
 **Worktree Hierarchy:**
-- **Feature Worktrees** (`.abathur/features/`): Created by `technical-requirements-specialist` for entire features
+- **Feature Worktrees** (`.abathur/features/`): For entire features
   - Branch: `feature/feature-name`
   - Purpose: Main working directory for a feature
   - Contains all changes for the feature
   - Eventually merges to `main`
 
-- **Task Worktrees** (`.abathur/worktrees/`): Created by `task-planner` for individual tasks
+- **Task Worktrees** (`.abathur/worktrees/`): For individual tasks
   - Branch: `feature/{feature-name}/task/{task-name}/{YYYY-MM-DD-HH-MM-SS}`
   - Purpose: Isolated work for a single atomic task
   - Merges into the feature branch (not main)
@@ -61,7 +58,7 @@ Creates a feature branch as a git worktree for all work related to a feature:
 
 ```bash
 # Create feature worktree
-FEATURE_NAME="task-queue-enhancements"
+FEATURE_NAME="user-authentication"
 FEATURE_BRANCH="feature/$FEATURE_NAME"
 WORKTREE_PATH=".abathur/features/$FEATURE_NAME"
 
@@ -73,6 +70,9 @@ git worktree add -b "$FEATURE_BRANCH" "$WORKTREE_PATH"
 
 # Verify creation
 test -d "$WORKTREE_PATH" && echo "Feature worktree created at $WORKTREE_PATH"
+
+# Navigate to worktree and start working
+cd "$WORKTREE_PATH"
 ```
 
 ### Create Task Worktree (for individual task)
@@ -81,7 +81,7 @@ Creates a task-specific worktree that branches from a feature branch:
 
 ```bash
 # Create task worktree from feature branch
-FEATURE_BRANCH="feature/task-queue-enhancements"
+FEATURE_BRANCH="feature/user-authentication"
 TASK_NAME="domain-model"
 TIMESTAMP=$(date +%Y-%m-%d-%H-%M-%S)
 TASK_BRANCH="$FEATURE_BRANCH/task/$TASK_NAME/$TIMESTAMP"
@@ -95,11 +95,14 @@ git worktree add -b "$TASK_BRANCH" "$WORKTREE_PATH" "$FEATURE_BRANCH"
 
 # Verify creation
 test -d "$WORKTREE_PATH" && echo "Task worktree created at $WORKTREE_PATH"
+
+# Navigate to worktree and start working
+cd "$WORKTREE_PATH"
 ```
 
-### Create New Worktree with Virtual Environment (Legacy)
+### Create New Worktree (Legacy)
 
-Creates a new git worktree and sets up an isolated Python virtual environment:
+Creates a new git worktree with a new branch:
 
 ```bash
 # Create worktree from current branch
@@ -109,14 +112,8 @@ WORKTREE_PATH=".abathur/${BRANCH_NAME//\//-}"
 # Create worktree and new branch
 git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH"
 
-# Create isolated virtualenv
-python3 -m venv "$WORKTREE_PATH/venv"
-
-# Activate and install dependencies
-source "$WORKTREE_PATH/venv/bin/activate"
+# Navigate to worktree
 cd "$WORKTREE_PATH"
-pip install --upgrade pip
-poetry install
 ```
 
 ### Create Worktree from Existing Branch
@@ -128,12 +125,8 @@ WORKTREE_PATH=".abathur/${BRANCH_NAME//\//-}"
 
 git worktree add "$WORKTREE_PATH" "$BRANCH_NAME"
 
-# Set up virtualenv
-python3 -m venv "$WORKTREE_PATH/venv"
-source "$WORKTREE_PATH/venv/bin/activate"
+# Navigate to worktree
 cd "$WORKTREE_PATH"
-pip install --upgrade pip
-poetry install
 ```
 
 ### List All Worktrees
@@ -145,9 +138,6 @@ git worktree list
 ### Remove Worktree
 
 ```bash
-# Deactivate virtualenv first if active
-deactivate 2>/dev/null || true
-
 # Remove worktree (use relative path or full path)
 WORKTREE_PATH=".abathur/feature-new-feature"
 git worktree remove "$WORKTREE_PATH"
@@ -159,10 +149,9 @@ git worktree remove --force "$WORKTREE_PATH"
 ### Switch to Worktree
 
 ```bash
-# Navigate to worktree and activate its virtualenv
+# Navigate to worktree
 WORKTREE_PATH=".abathur/feature-new-feature"
 cd "$WORKTREE_PATH"
-source venv/bin/activate
 ```
 
 ### Prune Deleted Worktrees
@@ -183,19 +172,12 @@ WORKTREE_PATH=".abathur/${BRANCH_NAME//\//-}"
 
 git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH"
 
-# Step 2: Set up isolated environment
-python3 -m venv "$WORKTREE_PATH/venv"
-source "$WORKTREE_PATH/venv/bin/activate"
+# Step 2: Navigate to worktree
 cd "$WORKTREE_PATH"
 
-# Step 3: Install dependencies
-pip install --upgrade pip
-poetry install
-
-# Step 4: Verify setup
-which python  # Should point to worktree venv
+# Step 3: Verify setup
 git branch    # Should show feature branch
-pytest -n auto tests/unit/  # Run tests to verify setup
+git status    # Check worktree state
 
 # Now you can develop in isolation!
 ```
@@ -208,38 +190,28 @@ BRANCH_NAME="feature/memory-leak-fix"
 WORKTREE_PATH=".abathur/${BRANCH_NAME//\//-}"
 
 git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH"
-python3 -m venv "$WORKTREE_PATH/venv"
 
-# Activate and setup
+# Navigate to worktree
 cd "$WORKTREE_PATH"
-source venv/bin/activate
-pip install --upgrade pip
-poetry install
-
-# Install additional debug tools in this venv only
-pip install memory-profiler pytest-memray
 
 # Work on the fix...
+# Make changes, commit, test
 ```
 
-### Testing Dependency Updates
+### Testing Experimental Changes
 
 ```bash
 # Create experimental worktree
-BRANCH_NAME="experiment/upgrade-pydantic"
+BRANCH_NAME="experiment/new-approach"
 WORKTREE_PATH=".abathur/${BRANCH_NAME//\//-}"
 
 git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH"
 cd "$WORKTREE_PATH"
-python3 -m venv venv
-source venv/bin/activate
 
-# Install with updated dependencies
-pip install --upgrade pip
-poetry add pydantic@^3.0.0  # Experimental upgrade
-
-# Test if everything works
-pytest -n auto
+# Make experimental changes...
+git status
+git add .
+git commit -m "Experimental approach"
 
 # If successful, merge. If not, just remove worktree!
 ```
@@ -254,16 +226,10 @@ git fetch origin pull/123/head:pr-123
 WORKTREE_PATH=".abathur/pr-123"
 git worktree add "$WORKTREE_PATH" pr-123
 
-# Setup environment
+# Navigate and review
 cd "$WORKTREE_PATH"
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-poetry install
-
-# Review and test the PR
-pytest -n auto
-# ... review code, run manual tests, etc.
+git status
+# Review code, test changes, etc.
 
 # When done, remove worktree
 cd ../..
@@ -277,7 +243,7 @@ git worktree remove "$WORKTREE_PATH"
 WORKTREE_PATH=".abathur/feature-user-authentication"
 
 # Make sure you're not in the worktree directory
-cd /Users/odgrim/dev/home/agentics/abathur
+cd "$(git rev-parse --show-toplevel)"
 
 # Remove worktree
 git worktree remove "$WORKTREE_PATH"
@@ -291,17 +257,14 @@ git branch -d feature/user-authentication
 ### Remove Single Worktree
 
 ```bash
-# Step 1: Deactivate virtualenv if currently active
-deactivate 2>/dev/null || true
+# Step 1: Navigate away from worktree directory
+cd "$(git rev-parse --show-toplevel)"
 
-# Step 2: Navigate away from worktree directory
-cd /Users/odgrim/dev/home/agentics/abathur
-
-# Step 3: Remove the worktree
+# Step 2: Remove the worktree
 WORKTREE_PATH=".abathur/feature-new-feature"
 git worktree remove "$WORKTREE_PATH"
 
-# Step 4 (Optional): Delete the branch if merged
+# Step 3 (Optional): Delete the branch if merged
 git branch -d feature/new-feature
 
 # If the branch is not merged yet but you want to delete it anyway
@@ -434,7 +397,7 @@ git branch --merged main | grep -v "^\*" | grep -v "main"
 #!/bin/bash
 # Save as: scripts/cleanup-worktrees.sh
 
-echo "🧹 Cleaning up merged worktrees..."
+echo "Cleaning up merged worktrees..."
 
 # Update main branch
 git checkout main
@@ -457,7 +420,7 @@ done
 # Prune stale references
 git worktree prune
 
-echo "✅ Cleanup complete! Removed $removed_count worktrees."
+echo "Cleanup complete! Removed $removed_count worktrees."
 echo ""
 echo "Remaining worktrees:"
 git worktree list
@@ -469,46 +432,39 @@ git worktree list
    - Feature branches: `feature/user-auth` → `.abathur/features/user-auth`
    - Task branches: `feature/user-auth/task/add-validation/2025-10-23-14-30-00` → `.abathur/worktrees/add-validation`
 
-2. **Always Create Virtualenv**: Each worktree should have its own `venv/` for true isolation
-
-3. **Use Poetry Install**: Run `poetry install` in each worktree to ensure dependencies match `pyproject.toml`
-
-4. **Check Active Environment**: Use `which python` to verify you're in the correct virtualenv
-
-5. **Cleanup Regularly**: Remove worktrees after merging branches to save disk space
+2. **Cleanup Regularly**: Remove worktrees after merging branches to save disk space
    - Run `git worktree prune` weekly
    - Remove merged branch worktrees immediately after merging
    - Check disk usage periodically with `du -sh .abathur/*`
 
-6. **Test Before Merging**: Always run the test suite in the worktree before merging
+3. **Verify Before Merging**: Always check the worktree state before merging
+   - Use `git status` to see uncommitted changes
+   - Use `git branch` to verify you're on the correct branch
 
-7. **Deactivate Before Removing**: Always deactivate the virtualenv before removing a worktree
+4. **Git Ignore**: The `.abathur/` directory should be in `.gitignore` to prevent committing worktrees
 
-8. **Git Ignore**: The `.abathur/` directory should be in `.gitignore` to prevent committing worktrees
-
-9. **Never Delete Manually**: Always use `git worktree remove`, not `rm -rf`
+5. **Never Delete Manually**: Always use `git worktree remove`, not `rm -rf`
    - Manual deletion leaves stale git references
    - Use `git worktree prune` to clean up if you accidentally deleted manually
 
-10. **Track Active Worktrees**: Use `git worktree list` regularly to see what's active
+6. **Track Active Worktrees**: Use `git worktree list` regularly to see what's active
 
 ## Common Patterns
 
 ### Quick Feature Branch Setup (One Command)
 
 ```bash
-BRANCH="feature/new-api" && WORKTREE=".abathur/${BRANCH//\//-}" && git worktree add -b "$BRANCH" "$WORKTREE" && python3 -m venv "$WORKTREE/venv" && cd "$WORKTREE" && source venv/bin/activate && pip install --upgrade pip && poetry install && echo "✓ Worktree ready at $WORKTREE"
+BRANCH="feature/new-api" && WORKTREE=".abathur/${BRANCH//\//-}" && git worktree add -b "$BRANCH" "$WORKTREE" && cd "$WORKTREE" && echo "Worktree ready at $WORKTREE"
 ```
 
 ### Switch Between Worktrees
 
 ```bash
-# From main repo
-cd .abathur/feature-auth && source venv/bin/activate
+# From main repo to a worktree
+cd .abathur/feature-auth
 
 # Switch to different worktree
-deactivate
-cd ../bugfix-memory && source venv/bin/activate
+cd ../feature-api
 ```
 
 ### List All Active Worktrees
@@ -541,16 +497,6 @@ git worktree list  # Find where it's checked out
 git worktree remove <path>
 ```
 
-### Virtualenv Issues
-
-```bash
-# If virtualenv fails to activate
-# Solution: Recreate it
-rm -rf .abathur/feature-name/venv
-python3 -m venv .abathur/feature-name/venv
-source .abathur/feature-name/venv/bin/activate
-```
-
 ### Disk Space
 
 ```bash
@@ -563,18 +509,7 @@ git worktree list
 git worktree remove .abathur/old-feature
 ```
 
-## Integration with Other Skills
-
-### Running Tests in Worktree
-
-```bash
-# After setting up worktree, use pytest skill
-cd .abathur/feature-new-api
-source venv/bin/activate
-pytest -n auto tests/unit/  # Runs in isolated environment
-```
-
-### Git Operations in Worktree
+## Git Operations in Worktree
 
 ```bash
 # All git commands work normally in worktrees
@@ -583,6 +518,13 @@ git status
 git add .
 git commit -m "Add authentication logic"
 git push origin feature/user-auth
+
+# Check current branch
+git branch
+
+# See differences
+git diff
+git diff --staged
 ```
 
 ## Notes
@@ -591,12 +533,11 @@ git push origin feature/user-auth
 - Worktrees share the same `.git` directory (efficient storage)
 - You cannot check out the same branch in multiple worktrees
 - The `.abathur/` directory should be in `.gitignore`
-- Virtualenvs are isolated per worktree, allowing different package versions
 - Use `git worktree prune` periodically to clean up deleted worktree references
 
 ## Safety
 
-- Always deactivate virtualenv before removing worktree: `deactivate`
 - Never delete `.abathur/` directories manually without using `git worktree remove`
-- Verify you're in the correct worktree before committing: `git branch` and `which python`
+- Verify you're in the correct worktree before committing: `git branch`
 - Backup important work before removing worktrees
+- Each worktree is independent with its own working directory
