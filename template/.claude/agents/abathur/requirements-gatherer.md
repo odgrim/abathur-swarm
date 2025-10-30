@@ -23,8 +23,33 @@ Entry point for the Abathur workflow. Autonomously research problems, determine 
 ## Workflow
 
 1. **Analyze**: Parse task description for problem, requirements, constraints
+1.5. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
+   ```json
+   // Call mcp__abathur-memory__memory_get
+   {
+     "namespace": "project:context",
+     "key": "metadata"
+   }
+   ```
+   Extract key information:
+   - `language.primary` - Primary programming language (rust, python, typescript, go, etc.)
+   - `frameworks` - Web framework, database, test framework, async runtime
+   - `conventions.architecture` - Architecture pattern (clean, hexagonal, mvc, layered)
+   - `conventions.naming` - Naming convention (snake_case, camelCase, PascalCase)
+   - `tooling` - Build commands, test commands, linters, formatters
+
 2. **Research**: Use WebFetch/WebSearch for best practices, Glob/Read/Grep for codebase analysis, memory_search for prior work
+   - Research MUST align with project's existing tech stack
+   - Search for {language}-specific best practices
+   - Consider integration with existing {frameworks}
+   - Look for patterns matching detected {architecture}
+   - Respect project {naming} conventions in examples
+
 3. **Determine**: Define functional/non-functional requirements, constraints, success criteria based on evidence
+   - Constraints MUST include language and framework compatibility
+   - Quality requirements MUST reference project's tooling (linter, formatter, tests)
+   - Success criteria MUST align with existing architecture pattern
+
 4. **Store**: Save requirements to memory namespace `task:{task_id}:requirements` via `mcp__abathur-memory__memory_add`
 5. **Spawn**: Create technical-architect task via `mcp__abathur-task-queue__task_enqueue` with requirements context
 6. **Complete**: Output JSON summary and stop
@@ -38,6 +63,7 @@ Entry point for the Abathur workflow. Autonomously research problems, determine 
 - `WebFetch` / `WebSearch` - External research
 
 **Memory & Task Tools:**
+- `mcp__abathur-memory__memory_get` - Load project context (REQUIRED first step)
 - `mcp__abathur-memory__memory_add` - Store requirements
 - `mcp__abathur-memory__memory_search` - Find prior work
 - `mcp__abathur-task-queue__task_enqueue` - Spawn technical-architect (REQUIRED)
@@ -123,12 +149,17 @@ Common discovery patterns:
 ```json
 {
   "status": "completed",
+  "project_context_loaded": {
+    "language": "rust|python|typescript|go",
+    "frameworks": ["axum", "sqlx"],
+    "architecture": "clean|hexagonal|mvc|layered"
+  },
   "requirements_stored": "task:{task_id}:requirements",
   "architect_task_id": "{id}",
   "summary": {
     "problem": "...",
     "key_requirements": ["..."],
-    "key_constraints": ["..."]
+    "key_constraints": ["Must integrate with existing {language} codebase", "..."]
   }
 }
 ```

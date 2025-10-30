@@ -2,7 +2,11 @@
 //!
 //! Thin adapter that delegates to infrastructure setup module.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use crate::domain::models::{Task, TaskSource};
+use crate::domain::ports::TaskRepository;
+use crate::infrastructure::config::ConfigLoader;
+use crate::infrastructure::database::{DatabaseConnection, TaskRepositoryImpl};
 use crate::infrastructure::setup;
 use serde_json::json;
 
@@ -59,6 +63,32 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
         println!("✓ Database initialized: {}", paths.database_file.display());
     }
 
+    // Step 3.5: Enqueue project-context-scanner task
+    let config = ConfigLoader::load().context("Failed to load config")?;
+    let database_url = format!("sqlite:{}", config.database.path);
+    let db = DatabaseConnection::new(&database_url)
+        .await
+        .context("Failed to create database connection")?;
+    let task_repo = TaskRepositoryImpl::new(db.pool().clone());
+
+    // Create the project-context-scanner task with highest priority
+    let mut scanner_task = Task::new(
+        "Scan project context".to_string(),
+        "Initial project scan to detect language, framework, and conventions.".to_string(),
+    );
+    scanner_task.agent_type = "project-context-scanner".to_string();
+    scanner_task.priority = 10; // Highest priority - runs first
+    scanner_task.source = TaskSource::Human;
+
+    // Insert the task into the database
+    task_repo.insert(&scanner_task)
+        .await
+        .context("Failed to enqueue project-context-scanner task")?;
+
+    if !json_output {
+        println!("✓ Enqueued project-context-scanner task (priority: 10)");
+    }
+
     // Step 4: Clone template repository (if not skipped)
     let template_dir = if !skip_clone {
         let dir = setup::clone_template_repo(template_repo, force)?;
@@ -93,7 +123,13 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
             "config_dir": paths.config_dir.display().to_string(),
             "config_file": paths.config_file.display().to_string(),
             "database": paths.database_file.display().to_string(),
-            "agents_dir": paths.agents_dir.display().to_string()
+            "agents_dir": paths.agents_dir.display().to_string(),
+            "initial_task": {
+                "id": scanner_task.id.to_string(),
+                "agent_type": "project-context-scanner",
+                "priority": 10,
+                "summary": "Scan project context"
+            }
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -103,6 +139,10 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
         println!("Configuration: {}", paths.config_file.display());
         println!("Database: {}", paths.database_file.display());
         println!("Agents: {}", paths.agents_dir.display());
+        println!();
+        println!("Initial task enqueued:");
+        println!("  - project-context-scanner (priority: 10)");
+        println!("  - Will run first when swarm starts");
         println!();
         println!("Next steps:");
         println!("  1. Edit your config file to customize settings");
