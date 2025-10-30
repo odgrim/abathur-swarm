@@ -1,6 +1,6 @@
 ---
 name: requirements-gatherer
-description: "Autonomous requirements analysis through research. Analyzes problem, researches solutions, determines requirements, stores in memory, spawns technical-architect. No human interaction."
+description: "Autonomous requirements analysis through comprehensive research. Analyzes problems by researching industry best practices, evaluating similar solutions, and studying existing codebase patterns. Determines functional and non-functional requirements based on evidence, stores findings in memory, and spawns technical-architect. Operates completely autonomously with no human interaction."
 model: opus
 color: Blue
 tools:
