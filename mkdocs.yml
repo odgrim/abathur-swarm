@@ -1,0 +1,203 @@
+# MkDocs Configuration for Abathur Documentation
+# Documentation: https://www.mkdocs.org/
+# Material Theme: https://squidfunk.github.io/mkdocs-material/
+
+# Site Metadata
+site_name: Abathur Documentation
+site_url: https://<username>.github.io/abathur-swarm/
+site_author: Abathur Team
+site_description: Comprehensive documentation for Abathur AI orchestration CLI - task queue, swarm orchestration, and MCP integration
+repo_url: https://github.com/<username>/abathur-swarm
+repo_name: abathur-swarm
+edit_uri: edit/main/docs/
+
+# Theme Configuration
+theme:
+  name: material
+  language: en
+
+  # Color Palette with Dark/Light Mode Toggle
+  palette:
+    # Light Mode
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+
+    # Dark Mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+  # Font Configuration
+  font:
+    text: Roboto
+    code: Roboto Mono
+
+  # Theme Features
+  features:
+    # Navigation Features
+    - navigation.instant           # Instant loading (SPA-like)
+    - navigation.instant.prefetch  # Prefetch pages on hover
+    - navigation.instant.progress  # Progress indicator for loading
+    - navigation.tracking          # Anchor tracking in URL
+    - navigation.tabs              # Top-level sections as tabs
+    - navigation.tabs.sticky       # Tabs remain visible on scroll
+    - navigation.sections          # Group navigation items
+    - navigation.expand            # Expand all sections by default
+    - navigation.path              # Breadcrumb navigation
+    - navigation.indexes           # Section index pages
+    - navigation.top               # Back-to-top button
+    - navigation.footer            # Previous/next navigation in footer
+
+    # Table of Contents
+    - toc.follow                   # Sidebar follows scroll
+    - toc.integrate                # Integrate TOC into navigation
+
+    # Search Features
+    - search.suggest               # Search suggestions
+    - search.highlight             # Highlight search terms
+    - search.share                 # Share search results
+
+    # Header
+    - header.autohide              # Hide header on scroll
+
+    # Content Features
+    - content.code.copy            # Copy button for code blocks
+    - content.code.annotate        # Code annotations
+    - content.tabs.link            # Link content tabs
+
+  # Icons
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+    view: material/eye
+
+# Plugins
+plugins:
+  - search:
+      separator: '[\s\-,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+  - tags:
+      tags_file: tags.md
+
+# Markdown Extensions
+markdown_extensions:
+  # Python Markdown Extensions
+  - abbr                           # Abbreviations
+  - admonition                     # Admonitions (callouts)
+  - attr_list                      # HTML attributes to elements
+  - def_list                       # Definition lists
+  - footnotes                      # Footnotes
+  - md_in_html                     # Markdown in HTML
+  - tables                         # Tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+
+  # PyMdown Extensions
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem               # Better emphasis handling
+  - pymdownx.caret                  # Superscript with ^^
+  - pymdownx.mark                   # Highlighting with ==
+  - pymdownx.tilde                  # Subscript with ~~
+  - pymdownx.critic                 # Critic markup
+  - pymdownx.details                # Collapsible admonitions
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite           # Inline code highlighting
+  - pymdownx.keys                   # Keyboard keys
+  - pymdownx.smartsymbols           # Smart symbols
+  - pymdownx.snippets:
+      auto_append:
+        - includes/abbreviations.md
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+# Navigation Structure (Diátaxis Framework)
+nav:
+  - Home: index.md
+
+  # Getting Started
+  - Getting Started:
+      - getting-started/installation.md
+      - getting-started/quickstart.md
+      - getting-started/configuration.md
+
+  # Tutorials (Learning-Oriented)
+  - Tutorials:
+      - tutorials/index.md
+      - tutorials/first-task.md
+      - tutorials/swarm-orchestration.md
+      - tutorials/loop-execution.md
+      - tutorials/mcp-integration.md
+
+  # How-To Guides (Task-Oriented)
+  - How-To Guides:
+      - how-to/index.md
+      - how-to/task-management.md
+      - how-to/agent-development.md
+      - how-to/memory-system.md
+      - how-to/troubleshooting.md
+
+  # Reference (Information-Oriented)
+  - Reference:
+      - reference/index.md
+      - reference/cli-commands.md
+      - reference/configuration.md
+      - reference/api.md
+      - reference/mcp-servers.md
+
+  # Explanation (Understanding-Oriented)
+  - Explanation:
+      - explanation/index.md
+      - explanation/architecture.md
+      - explanation/design-patterns.md
+      - explanation/task-queue.md
+      - explanation/swarm-orchestration.md
+      - explanation/memory-system.md
+
+  # Contributing
+  - Contributing:
+      - contributing/index.md
+      - contributing/development.md
+      - contributing/testing.md
+      - contributing/style-guide.md
+
+# Extra Configuration
+extra:
+  # Social Links
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/<username>/abathur-swarm
+      name: Abathur on GitHub
+
+  # Versioning (mike integration)
+  version:
+    provider: mike
+    default: latest
+
+  # Analytics (optional - add when ready)
+  # analytics:
+  #   provider: google
+  #   property: G-XXXXXXXXXX
+
+# Copyright
+copyright: Copyright &copy; 2025 Abathur Team
