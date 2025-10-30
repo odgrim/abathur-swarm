@@ -251,25 +251,29 @@ When invoked, you must follow these steps:
    })
    ```
 
-9. **Create Feature Branch as Git Worktree for Implementation**
-   **CRITICAL**: Before spawning task-planners, you MUST create a feature branch AS A GIT WORKTREE (not a regular branch) that all implementation work will merge into.
+9. **Create Feature Branch Using git-branch Skill**
+   **CRITICAL**: Before spawning task-planners, you MUST create a feature branch using the git-branch skill.
 
-   **WHY WORKTREES**: Git worktrees enable multiple working directories from the same repository, allowing concurrent work on multiple features without file conflicts. This is essential for parallel agent execution.
+   **MANDATORY**: Use the Skill tool to invoke the git-branch skill. DO NOT use manual git commands.
 
    ```python
-   import subprocess
-   from datetime import datetime
-   import os
-
    # Generate descriptive feature branch name based on the feature being implemented
    # Extract feature name from requirements or problem domain
    feature_name = derive_feature_name(requirements, problem_domain)  # e.g., "task-queue-enhancements"
    feature_branch_name = f"feature/{feature_name}"
-
-   # Worktree path: .abathur/features/{feature_name}
    worktree_path = f".abathur/features/{feature_name}"
 
-   # Check if worktree already exists
+   # ALWAYS use the git-branch skill instead of manual git commands
+   Skill("git-branch")
+
+   # Then use the skill's documented commands to create the feature worktree:
+   # mkdir -p .abathur/features
+   # CRITICAL: Feature branches fork from main (no third argument means current branch, which should be main)
+   # Task branches will later fork from THIS feature branch
+   # git worktree add -b {feature_branch_name} {worktree_path}
+   # Verify with: git worktree list
+
+   # Check if worktree already exists (after invoking skill)
    check_worktree = Bash(
        command='git worktree list',
        description="List existing git worktrees"
@@ -277,67 +281,11 @@ When invoked, you must follow these steps:
 
    worktree_exists = worktree_path in check_worktree.stdout or feature_branch_name in check_worktree.stdout
 
-   if worktree_exists:
-       # Worktree exists - use it
-       print(f"Feature worktree already exists: {worktree_path} (branch: {feature_branch_name})")
-   else:
-       # Create .abathur/features directory if it doesn't exist
-       mkdir_result = Bash(
-           command='mkdir -p .abathur/features',
-           description="Create .abathur/features directory"
-       )
-
-       if mkdir_result.exit_code != 0:
-           raise Exception(f"Failed to create .abathur/features directory: {mkdir_result.stderr}")
-
-       # Create new feature branch as git worktree from current branch (main)
-       create_worktree = Bash(
-           command=f'git worktree add -b {feature_branch_name} {worktree_path}',
-           description=f"Create feature worktree {feature_branch_name} at {worktree_path}"
-       )
-
-       if create_worktree.exit_code != 0:
-           raise Exception(f"Failed to create feature worktree: {create_worktree.stderr}")
-
-       # Verify worktree was created successfully
-       verify_worktree = Bash(
-           command=f'test -d "{worktree_path}" && echo "EXISTS" || echo "MISSING"',
-           description=f"Verify worktree directory exists"
-       )
-
-       if "EXISTS" not in verify_worktree.stdout:
-           raise Exception(f"Worktree creation failed - directory missing: {worktree_path}")
-
-       print(f"Created feature worktree: {worktree_path} (branch: {feature_branch_name})")
-
-       # Create isolated virtualenv in feature worktree
-       print(f"Creating isolated virtualenv in feature worktree...")
-       venv_result = Bash(
-           command=f'python3 -m venv "{worktree_path}/venv"',
-           description=f"Create isolated virtualenv in feature worktree"
-       )
-
-       if venv_result.exit_code != 0:
-           raise Exception(f"Failed to create virtualenv in feature worktree: {venv_result.stderr}")
-
-       print(f"✓ Virtualenv created at: {worktree_path}/venv")
-
-       # Install dependencies in the isolated virtualenv
-       print(f"Installing dependencies in feature worktree virtualenv...")
-       install_result = Bash(
-           command=f'cd "{worktree_path}" && source venv/bin/activate && pip install --upgrade pip && poetry install',
-           description=f"Install dependencies in feature worktree virtualenv",
-           timeout=300000  # 5 minutes for dependency installation
-       )
-
-       if install_result.exit_code == 0:
-           print(f"✓ Dependencies installed in feature worktree virtualenv")
-       else:
-           print(f"⚠ WARNING: Dependency installation failed (exit code {install_result.exit_code})")
-           print(f"Error output: {install_result.stderr}")
-           print(f"Task-planner will need to handle dependency installation")
+   if not worktree_exists:
+       raise Exception(f"Feature worktree not created. Follow git-branch skill instructions.")
 
    # Get absolute path for worktree
+   import os
    worktree_path_absolute = os.path.abspath(worktree_path)
 
    # Store feature branch AND worktree info for downstream agents
@@ -389,29 +337,29 @@ When invoked, you must follow these steps:
        "key": "suggested_agent_specializations",
        "value": {
            "domain_models": {
-               "suggested_agent_type": "python-domain-model-specialist",
-               "expertise": "Python domain model implementation following Clean Architecture",
+               "suggested_agent_type": "domain-model-specialist",
+               "expertise": "Domain model implementation following Clean Architecture",
                "responsibilities": ["Implement domain models", "Write unit tests", "Domain logic"],
                "tools_needed": ["Read", "Write", "Bash"],
                "task_types": ["domain model classes", "value objects", "domain services"]
            },
            "repositories": {
-               "suggested_agent_type": "python-repository-specialist",
-               "expertise": "Python repository pattern implementation",
+               "suggested_agent_type": "repository-specialist",
+               "expertise": "Repository pattern implementation",
                "responsibilities": ["Implement repository pattern", "Database integration", "Data access layer"],
                "tools_needed": ["Read", "Write", "Bash"],
                "task_types": ["repository classes", "database queries", "ORM mappings"]
            },
            "apis": {
-               "suggested_agent_type": "python-api-implementation-specialist",
-               "expertise": "Python API implementation with FastAPI/Flask",
+               "suggested_agent_type": "api-implementation-specialist",
+               "expertise": "API implementation",
                "responsibilities": ["Implement API endpoints", "Request/response handling", "API validation"],
                "tools_needed": ["Read", "Write", "Bash"],
                "task_types": ["API endpoints", "route handlers", "middleware"]
            },
            "testing": {
-               "suggested_agent_type": "python-testing-specialist",
-               "expertise": "Python testing with pytest",
+               "suggested_agent_type": "testing-specialist",
+               "expertise": "Testing with appropriate test framework",
                "responsibilities": ["Write unit tests", "Write integration tests", "Test fixtures"],
                "tools_needed": ["Read", "Write", "Bash"],
                "task_types": ["unit tests", "integration tests", "test fixtures"]

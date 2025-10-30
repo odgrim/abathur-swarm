@@ -215,7 +215,7 @@ When invoked, you must follow these steps:
 
    **Worktree creation process with validation:**
    ```bash
-   # Rust project - no virtualenv needed, just worktree isolation
+   # Create isolated worktree for task implementation
 
    # CRITICAL: Extract feature_branch from task metadata or description
    # The technical-requirements-specialist passes this in metadata
@@ -676,10 +676,10 @@ You are the validation-specialist. Your job is to:
 
 1. **Navigate to worktree**: `cd {implementation_task_info['worktree_path']}`
 2. **Run comprehensive tests**:
-   - Type checking: `mypy src/ --strict`
-   - Linting: `ruff check src/ tests/`
-   - Unit tests: `pytest tests/unit -v --cov=src`
-   - Integration tests: `pytest tests/integration -v`
+   - Type checking (if applicable)
+   - Linting
+   - Unit tests
+   - Integration tests
 3. **Analyze results**:
    - If ALL tests pass: Enqueue merge task to git-worktree-merge-orchestrator
    - If ANY test fails: Enqueue remediation task back to {implementation_task_info['agent_type']}
@@ -1069,7 +1069,7 @@ implementation_task = task_enqueue({
     "description": """
 # Implement calculate_priority() Function
 
-Write a new `calculate_priority()` function in `src/priority_calculator.py`
+Write a new `calculate_priority()` function in the priority calculator module
 that computes task priority based on deadline, dependencies, and base priority.
 
 ## Branch Information
@@ -1087,7 +1087,7 @@ that computes task priority based on deadline, dependencies, and base priority.
 """,
     "feature_branch": feature_branch_name,  # Parent feature
     "task_branch": task_branch_name,        # Individual task branch
-    "agent_type": "python-implementation-specialist",
+    "agent_type": "implementation-specialist",  # Use appropriate specialist for your language
     "source": "agent_planner",
 })
 
@@ -1232,8 +1232,8 @@ Merge the completed work from task branch into the main feature branch.
     ],
     "validation_task": {
       "task_id": "validation_task_id",
-      "agent_type": "python-testing-specialist",
-      "description": "Final code quality validation (mypy, linters, tests)",
+      "agent_type": "testing-specialist",
+      "description": "Final code quality validation (type checking, linters, tests)",
       "depends_on_all_tasks": true,
       "blocks_completion": true,
       "feature_branch": "feature/descriptive-name"

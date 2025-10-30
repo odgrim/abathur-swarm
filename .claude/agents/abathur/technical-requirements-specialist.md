@@ -337,29 +337,29 @@ When invoked, you must follow these steps:
        "key": "suggested_agent_specializations",
        "value": {
            "domain_models": {
-               "suggested_agent_type": "python-domain-model-specialist",
-               "expertise": "Python domain model implementation following Clean Architecture",
+               "suggested_agent_type": "domain-model-specialist",
+               "expertise": "Domain model implementation following Clean Architecture",
                "responsibilities": ["Implement domain models", "Write unit tests", "Domain logic"],
                "tools_needed": ["Read", "Write", "Bash"],
                "task_types": ["domain model classes", "value objects", "domain services"]
            },
            "repositories": {
-               "suggested_agent_type": "python-repository-specialist",
-               "expertise": "Python repository pattern implementation",
+               "suggested_agent_type": "repository-specialist",
+               "expertise": "Repository pattern implementation",
                "responsibilities": ["Implement repository pattern", "Database integration", "Data access layer"],
                "tools_needed": ["Read", "Write", "Bash"],
                "task_types": ["repository classes", "database queries", "ORM mappings"]
            },
            "apis": {
-               "suggested_agent_type": "python-api-implementation-specialist",
-               "expertise": "Python API implementation with FastAPI/Flask",
+               "suggested_agent_type": "api-implementation-specialist",
+               "expertise": "API implementation",
                "responsibilities": ["Implement API endpoints", "Request/response handling", "API validation"],
                "tools_needed": ["Read", "Write", "Bash"],
                "task_types": ["API endpoints", "route handlers", "middleware"]
            },
            "testing": {
-               "suggested_agent_type": "python-testing-specialist",
-               "expertise": "Python testing with pytest",
+               "suggested_agent_type": "testing-specialist",
+               "expertise": "Testing with appropriate test framework",
                "responsibilities": ["Write unit tests", "Write integration tests", "Test fixtures"],
                "tools_needed": ["Read", "Write", "Bash"],
                "task_types": ["unit tests", "integration tests", "test fixtures"]

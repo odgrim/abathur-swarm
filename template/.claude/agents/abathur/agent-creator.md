@@ -113,7 +113,7 @@ When invoked, you must follow these steps:
 
    **Note on Worktrees**: Agent-creator tasks do NOT need git worktrees because they only create
    .md files in .claude/agents/ directories, not source code. Worktrees are only needed for
-   implementation tasks that modify source code files (.py, .js, .ts, etc.).
+   implementation tasks that modify source code files.
 
 5. **Registry Update and Memory Storage**
    Store created agent information in memory for future reference:

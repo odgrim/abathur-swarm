@@ -1,6 +1,6 @@
 ---
 name: validation-specialist
-description: "Use proactively for validating completed implementation work in git worktrees, running tests, and routing to either remediation or merge based on results. Keywords: testing, validation, quality gate, test results, routing"
+description: "Use proactively for validating completed implementation work, running tests, and routing to either remediation or merge based on results. Keywords: testing, validation, quality gate, test results, routing"
 model: sonnet
 color: Green
 tools: Bash, Read, Grep, Glob, Task

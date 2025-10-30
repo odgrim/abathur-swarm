@@ -184,8 +184,18 @@ When invoked, you must follow these steps:
       - DO NOT attempt to create tasks without agent assignments
    6. **IF missing agents are identified**, you will spawn agent-creator tasks BEFORE implementation tasks (see step 6)
 
-5. **🚨🚨🚨 CRITICAL: Create Git Worktrees for Implementation Tasks 🚨🚨🚨**
+5. **🚨🚨🚨 CRITICAL: Create Git Worktrees Using git-branch Skill 🚨🚨🚨**
    **MANDATORY STEP - DO NOT SKIP**
+
+   **MANDATORY**: Use the git-branch skill to create worktrees. DO NOT use manual git commands.
+
+   Before creating any worktrees, invoke the git-branch skill:
+   ```python
+   # ALWAYS use the skill instead of manual commands
+   Skill("git-branch")
+   ```
+
+   Then follow the skill's documented patterns for creating task worktrees.
 
    To prevent file conflicts when multiple agents work concurrently, you MUST create isolated git worktrees for implementation tasks that modify code.
 
@@ -205,7 +215,7 @@ When invoked, you must follow these steps:
 
    **Worktree creation process with validation:**
    ```bash
-   # Rust project - no virtualenv needed, just worktree isolation
+   # Create isolated worktree for task implementation
 
    # CRITICAL: Extract feature_branch from task metadata or description
    # The technical-requirements-specialist passes this in metadata
@@ -227,7 +237,9 @@ When invoked, you must follow these steps:
    branch_name = f"{feature_branch_name}/task/{task_id}/{timestamp}"
    worktree_path = f".abathur/worktrees/{task_id}"
 
-   # Create worktree using Bash tool - branching from the FEATURE BRANCH (not main!)
+   # Create worktree using git-branch skill patterns (see git-branch skill documentation)
+   # CRITICAL: Create worktree FROM THE FEATURE BRANCH (third argument)
+   # This ensures task branch forks from feature branch, NOT from main
    bash_command = f'git worktree add -b {branch_name} {worktree_path} {feature_branch_name}'
    result = Bash(command=bash_command, description=f"Create worktree for {task_id} from {feature_branch_name}")
 
@@ -664,10 +676,10 @@ You are the validation-specialist. Your job is to:
 
 1. **Navigate to worktree**: `cd {implementation_task_info['worktree_path']}`
 2. **Run comprehensive tests**:
-   - Type checking: `mypy src/ --strict`
-   - Linting: `ruff check src/ tests/`
-   - Unit tests: `pytest tests/unit -v --cov=src`
-   - Integration tests: `pytest tests/integration -v`
+   - Type checking (if applicable)
+   - Linting
+   - Unit tests
+   - Integration tests
 3. **Analyze results**:
    - If ALL tests pass: Enqueue merge task to git-worktree-merge-orchestrator
    - If ANY test fails: Enqueue remediation task back to {implementation_task_info['agent_type']}
@@ -1057,7 +1069,7 @@ implementation_task = task_enqueue({
     "description": """
 # Implement calculate_priority() Function
 
-Write a new `calculate_priority()` function in `src/priority_calculator.py`
+Write a new `calculate_priority()` function in the priority calculator module
 that computes task priority based on deadline, dependencies, and base priority.
 
 ## Branch Information
@@ -1075,7 +1087,7 @@ that computes task priority based on deadline, dependencies, and base priority.
 """,
     "feature_branch": feature_branch_name,  # Parent feature
     "task_branch": task_branch_name,        # Individual task branch
-    "agent_type": "python-implementation-specialist",
+    "agent_type": "implementation-specialist",  # Use appropriate specialist for your language
     "source": "agent_planner",
 })
 
@@ -1220,8 +1232,8 @@ Merge the completed work from task branch into the main feature branch.
     ],
     "validation_task": {
       "task_id": "validation_task_id",
-      "agent_type": "python-testing-specialist",
-      "description": "Final code quality validation (mypy, linters, tests)",
+      "agent_type": "testing-specialist",
+      "description": "Final code quality validation (type checking, linters, tests)",
       "depends_on_all_tasks": true,
       "blocks_completion": true,
       "feature_branch": "feature/descriptive-name"
