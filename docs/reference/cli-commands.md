@@ -2,1048 +2,1068 @@
 
 Complete reference for all Abathur command-line interface commands.
 
-## Synopsis
+## Global Syntax
 
 ```bash
-abathur [GLOBAL_OPTIONS] <COMMAND> [SUBCOMMAND] [OPTIONS] [ARGUMENTS]
+abathur [global-options] <command> [subcommand] [options] [arguments]
 ```
 
 ## Global Options
 
-Global options can be used with any command:
+| Option | Short | Type | Default | Description |
+|--------|-------|------|---------|-------------|
+| `--json` | `-j` | flag | `false` | Output results in JSON format |
+| `--help` | `-h` | flag | - | Display help information |
+| `--version` | `-V` | flag | - | Display version information |
 
-| Option | Description |
-|--------|-------------|
-| `--json` | Output results in JSON format for scripting |
-| `-h, --help` | Display help information |
-| `-V, --version` | Display version information |
+---
 
-## Commands
+## Commands Overview
 
-### init
+- [`init`](#init) - Initialize Abathur configuration and database
+- [`task`](#task-commands) - Task management commands
+- [`memory`](#memory-commands) - Memory management commands
+- [`swarm`](#swarm-commands) - Swarm orchestration commands
+- [`mcp`](#mcp-commands) - MCP server commands (internal use)
+
+---
+
+## `init`
 
 Initialize Abathur configuration and database.
 
-**Usage**:
+### Syntax
+
 ```bash
-abathur init [OPTIONS]
+abathur init [options]
 ```
 
-**Options**:
+### Description
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `-f, --force` | flag | `false` | Force reinitialization even if already initialized |
-| `-t, --template-repo <URL>` | string | `https://github.com/odgrim/abathur-claude-template` | Custom template repository URL |
-| `--skip-clone` | flag | `false` | Skip cloning template repository (use existing template/ directory) |
+Sets up the Abathur environment by:
+- Creating the `.abathur/` directory structure
+- Initializing the SQLite database
+- Running database migrations
+- Cloning the default agent template repository
 
-**Description**:
+### Options
 
-Initializes Abathur by creating the configuration directory, generating the config file, running database migrations, cloning the agent template repository, and setting up MCP server configuration.
+| Option | Short | Type | Default | Description |
+|--------|-------|------|---------|-------------|
+| `--force` | `-f` | flag | `false` | Force reinitialization even if already initialized |
+| `--template-repo` | `-t` | string | `https://github.com/odgrim/abathur-claude-template` | Custom template repository URL |
+| `--skip-clone` | | flag | `false` | Skip cloning template repository (use existing template/ directory) |
 
-**Examples**:
+### Examples
 
-Initialize Abathur with default settings:
+**Basic initialization**:
 ```bash
 abathur init
 ```
 
-Force reinitialize with custom template:
+**Force reinitialize with custom template**:
 ```bash
-abathur init --force --template-repo https://github.com/myuser/my-template
+abathur init --force --template-repo https://github.com/example/custom-template
 ```
 
-Initialize without cloning templates:
+**Initialize without cloning template**:
 ```bash
 abathur init --skip-clone
 ```
 
-Get JSON output:
+### Exit Codes
+
+- `0`: Success
+- `1`: Initialization failed
+- `2`: Database error
+
+### See Also
+
+- [Installation Guide](../getting-started/installation.md)
+- [Configuration Reference](configuration.md)
+
+---
+
+## Task Commands
+
+Manage tasks in the execution queue.
+
+### `task submit`
+
+Submit a new task to the queue.
+
+#### Syntax
+
 ```bash
-abathur --json init
+abathur task submit <description> [options]
 ```
 
-**Output**:
+#### Required Arguments
 
-Success:
-```
-Initializing Abathur...
+- `<description>`: Task description (positional argument)
 
-✓ Created config directory: .abathur
-✓ Created config file: .abathur/config.yaml
-✓ Database initialized: .abathur/abathur.db
-✓ Cloned template repository to template
-✓ Copied agent templates
-✓ Merged MCP server configuration
-
-✓ Abathur initialized successfully!
-
-Configuration: .abathur/config.yaml
-Database: .abathur/abathur.db
-Agents: .claude/agents
-
-Next steps:
-  1. Edit your config file to customize settings
-  2. Set ANTHROPIC_API_KEY environment variable
-  3. Run 'abathur swarm start' to start the orchestrator
-```
-
-## task
-
-Task queue management commands.
-
-### task submit
-
-Submit a new task to the execution queue.
-
-**Usage**:
-```bash
-abathur task submit <DESCRIPTION> [OPTIONS]
-```
-
-**Arguments**:
-
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `<DESCRIPTION>` | Yes | Task description (used as summary if --summary not provided) |
-
-**Options**:
+#### Options
 
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
 | `--agent-type` | `-a` | string | `requirements-gatherer` | Agent type to execute the task |
-| `--summary` | `-s` | string | (auto-generated) | Brief task summary (max 140 characters) |
-| `--priority` | `-p` | integer | `5` | Task priority (0-10, higher = more urgent) |
-| `--dependencies` | `-D` | list | `[]` | Comma-separated task IDs (full UUID or prefix) |
+| `--summary` | `-s` | string | - | Optional brief summary of the task |
+| `--priority` | `-p` | integer (0-10) | `5` | Task priority (higher = more urgent) |
+| `--dependencies` | `-D` | list | `[]` | Comma-separated task IDs or prefixes |
 
-**Description**:
+#### Examples
 
-Submits a new task to the queue for execution by the specified agent type. Tasks can have dependencies that must complete before the task becomes ready. If no summary is provided, the first 140 characters of the description are used.
-
-**Examples**:
-
-Submit a simple task:
+**Basic task submission**:
 ```bash
-abathur task submit "Implement user authentication"
-```
-
-Submit with specific agent and priority:
-```bash
-abathur task submit "Deploy to production" \
-  --agent-type rust-deployment-specialist \
-  --priority 9
-```
-
-Submit with dependencies (using task ID prefixes):
-```bash
-abathur task submit "Integration tests" \
-  --dependencies a1b2c3,d4e5f6 \
-  --priority 7
-```
-
-Submit with custom summary:
-```bash
-abathur task submit "This is a very long description that exceeds the summary limit..." \
-  --summary "Implement feature X"
-```
-
-Get JSON output:
-```bash
-abathur --json task submit "Test task"
+abathur task submit "Implement user authentication feature"
 ```
 
 **Output**:
-
-Standard output:
 ```
-Task submitted successfully!
-  Task ID: 550e8400-e29b-41d4-a716-446655440000
-  Summary: Implement user authentication
-  Description: Implement user authentication
-  Agent type: requirements-gatherer
-  Priority: 5
+Task submitted successfully
+ID: 550e8400-e29b-41d4-a716-446655440000
+Status: pending
+Priority: 5
+Agent Type: requirements-gatherer
 ```
 
-With dependencies:
-```
-Task submitted successfully!
-  Task ID: 550e8400-e29b-41d4-a716-446655440000
-  Summary: Integration tests
-  Description: Integration tests
-  Agent type: requirements-gatherer
-  Priority: 7
-  Dependencies: 2 task(s)
-```
-
-### task list
-
-List tasks in the queue with optional filtering.
-
-**Usage**:
+**High-priority task with specific agent**:
 ```bash
-abathur task list [OPTIONS]
+abathur task submit "Fix critical login bug" \
+  --priority 9 \
+  --agent-type rust-debugging-specialist
 ```
 
-**Options**:
+**Task with dependencies**:
+```bash
+abathur task submit "Deploy to production" \
+  --summary "Production deployment" \
+  --priority 8 \
+  --dependencies "550e8400,a3b4c5d6"
+```
+
+**JSON output**:
+```bash
+abathur --json task submit "Create API endpoint"
+```
+
+**Output**:
+```json
+{
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "pending",
+  "priority": 5,
+  "agent_type": "requirements-gatherer"
+}
+```
+
+#### Exit Codes
+
+- `0`: Success
+- `1`: Invalid arguments
+- `2`: Task creation failed
+- `3`: Database error
+
+---
+
+### `task list`
+
+List tasks in the queue.
+
+#### Syntax
+
+```bash
+abathur task list [options]
+```
+
+#### Options
 
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
-| `--status` | `-s` | string | (none) | Filter by status: `pending`, `blocked`, `ready`, `running`, `completed`, `failed`, `cancelled` |
+| `--status` | `-s` | string | - | Filter by status (pending, ready, running, completed, failed, cancelled, blocked) |
 | `--limit` | `-l` | integer | `50` | Maximum number of tasks to display |
 
-**Description**:
+#### Examples
 
-Lists tasks from the queue with optional status filtering. Results are displayed in a formatted table showing task ID (first 8 characters), status, priority, agent type, and summary.
-
-**Examples**:
-
-List all tasks (up to 50):
+**List all tasks**:
 ```bash
 abathur task list
 ```
 
-List only ready tasks:
-```bash
-abathur task list --status ready
+**Output**:
+```
+ID       Status    Priority  Agent Type              Summary
+550e8400 pending   5         requirements-gatherer   Implement authentication
+a3b4c5d6 running   8         rust-specialist         Fix login bug
+7f8e9d0c completed 5         requirements-gatherer   Create API endpoint
 ```
 
-List failed tasks with higher limit:
+**Filter by status**:
 ```bash
-abathur task list --status failed --limit 100
+abathur task list --status pending
 ```
 
-Get JSON output:
+**Limit results**:
 ```bash
-abathur --json task list
+abathur task list --limit 10
+```
+
+**JSON output**:
+```bash
+abathur --json task list --status running
 ```
 
 **Output**:
-
-Standard output (table format):
-```
-Tasks:
-┌──────────┬──────────┬──────────┬─────────────────────────┬───────────────────────────────┐
-│ ID       │ Status   │ Priority │ Agent Type              │ Summary                       │
-├──────────┼──────────┼──────────┼─────────────────────────┼───────────────────────────────┤
-│ 550e8400 │ Ready    │ 7        │ rust-specialist         │ Implement authentication      │
-│ 661f9511 │ Running  │ 9        │ technical-architect     │ Design system architecture    │
-│ 772fa622 │ Pending  │ 5        │ requirements-gatherer   │ Gather requirements           │
-└──────────┴──────────┴──────────┴─────────────────────────┴───────────────────────────────┘
-
-Showing 3 task(s)
-```
-
-Empty result:
-```
-No tasks found.
+```json
+{
+  "tasks": [
+    {
+      "id": "a3b4c5d6-e29b-41d4-a716-446655440001",
+      "status": "running",
+      "priority": 8,
+      "agent_type": "rust-specialist",
+      "summary": "Fix login bug"
+    }
+  ]
+}
 ```
 
-### task show
+#### Exit Codes
 
-Display detailed information for a specific task.
+- `0`: Success
+- `1`: Invalid arguments
+- `3`: Database error
 
-**Usage**:
+---
+
+### `task show`
+
+Show details for a specific task.
+
+#### Syntax
+
 ```bash
-abathur task show <TASK_ID>
+abathur task show <task_id>
 ```
 
-**Arguments**:
+#### Required Arguments
 
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `<TASK_ID>` | Yes | Task ID (full UUID or prefix - minimum 4 characters) |
+- `<task_id>`: Task ID (full UUID or unique prefix)
 
-**Description**:
+#### Examples
 
-Shows complete details for a specific task including ID, status, summary, description, agent type, priorities (base and computed), timestamps, and dependencies.
-
-**Examples**:
-
-Show task by full UUID:
-```bash
-abathur task show 550e8400-e29b-41d4-a716-446655440000
-```
-
-Show task by prefix:
+**Show full task details**:
 ```bash
 abathur task show 550e8400
 ```
 
-Get JSON output:
+**Output**:
+```
+Task ID: 550e8400-e29b-41d4-a716-446655440000
+Status: pending
+Priority: 5
+Agent Type: requirements-gatherer
+Created: 2025-10-29 14:30:00 UTC
+Updated: 2025-10-29 14:30:00 UTC
+
+Description:
+Implement user authentication feature
+
+Dependencies:
+- None
+
+Dependents:
+- 7f8e9d0c: Deploy to production
+```
+
+**JSON output**:
 ```bash
-abathur --json task show 550e
+abathur --json task show 550e8400
 ```
 
 **Output**:
-
-Standard output:
-```
-Task Details:
-  ID: 550e8400-e29b-41d4-a716-446655440000
-  Status: Running
-  Summary: Implement authentication
-  Description: Implement user authentication with JWT tokens
-  Agent type: rust-specialist
-  Priority: 7 (computed: 7.2)
-  Created at: 2025-10-29 14:30:00 UTC
-  Updated at: 2025-10-29 14:35:00 UTC
-  Started at: 2025-10-29 14:35:00 UTC
-  Dependencies:
-    - 661f9511-e29b-41d4-a716-446655440001
-    - 772fa622-e29b-41d4-a716-446655440002
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "pending",
+  "priority": 5,
+  "agent_type": "requirements-gatherer",
+  "description": "Implement user authentication feature",
+  "created_at": "2025-10-29T14:30:00Z",
+  "updated_at": "2025-10-29T14:30:00Z",
+  "dependencies": [],
+  "dependents": ["7f8e9d0c-e29b-41d4-a716-446655440002"]
+}
 ```
 
-Error (task not found):
-```
-Error: Task 550e not found. Use 'abathur task list' to see available tasks.
-```
+#### Exit Codes
 
-### task update
+- `0`: Success
+- `1`: Task not found
+- `3`: Database error
+
+---
+
+### `task update`
 
 Update one or more tasks.
 
-**Usage**:
+#### Syntax
+
 ```bash
-abathur task update <TASK_IDS> [OPTIONS]
+abathur task update <task_ids> [options]
 ```
 
-**Arguments**:
+#### Required Arguments
 
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `<TASK_IDS>` | Yes | Comma-separated task IDs (full UUID or prefix) |
+- `<task_ids>`: Task ID(s) to update (comma-separated, full UUIDs or prefixes)
 
-**Options**:
+#### Options
 
-| Option | Short | Type | Description |
-|--------|-------|------|-------------|
-| `--status` | `-s` | string | Update task status |
-| `--priority` | `-p` | integer | Update base priority (0-10) |
-| `--agent-type` | `-a` | string | Update agent type |
-| `--add-dependency` | | list | Add dependencies (comma-separated UUIDs or prefixes) |
-| `--remove-dependency` | | list | Remove dependencies (comma-separated UUIDs or prefixes) |
-| `--retry` | | flag | Increment retry count and reset to pending (for failed tasks) |
-| `--cancel` | | flag | Cancel task and cascade to dependents |
+| Option | Short | Type | Default | Description |
+|--------|-------|------|---------|-------------|
+| `--status` | `-s` | string | - | Update task status |
+| `--priority` | `-p` | integer (0-10) | - | Update base priority |
+| `--agent-type` | `-a` | string | - | Update agent type |
+| `--add-dependency` | | list | - | Add dependencies (comma-separated UUIDs or prefixes) |
+| `--remove-dependency` | | list | - | Remove dependencies (comma-separated UUIDs or prefixes) |
+| `--retry` | | flag | `false` | Increment retry count and reset to pending (for failed tasks) |
+| `--cancel` | | flag | `false` | Cancel task and cascade to dependents |
 
-**Description**:
+#### Examples
 
-Updates one or more tasks with specified changes. At least one update operation must be specified. When updating multiple tasks, results show which succeeded and which failed.
-
-!!! warning "Cascading Cancellation"
-    Using `--cancel` will cancel the specified task(s) and all tasks that depend on them. This operation cannot be undone.
-
-**Examples**:
-
-Update task status:
+**Update task status**:
 ```bash
-abathur task update 550e8400 --status completed
+abathur task update 550e8400 --status ready
 ```
 
-Update priority:
+**Update priority**:
 ```bash
-abathur task update 550e --priority 9
+abathur task update 550e8400 --priority 9
 ```
 
-Add dependencies:
+**Change agent type**:
 ```bash
-abathur task update 661f9511 --add-dependency a1b2c3,d4e5f6
+abathur task update 550e8400 --agent-type rust-specialist
 ```
 
-Remove dependencies:
+**Add dependencies**:
 ```bash
-abathur task update 661f --remove-dependency a1b2
+abathur task update 7f8e9d0c --add-dependency 550e8400,a3b4c5d6
 ```
 
-Retry failed task:
+**Remove dependencies**:
 ```bash
-abathur task update 772fa622 --retry
+abathur task update 7f8e9d0c --remove-dependency 550e8400
 ```
 
-Cancel task:
+**Retry failed task**:
 ```bash
-abathur task update 550e --cancel
+abathur task update 550e8400 --retry
 ```
 
-Update multiple tasks:
+**Cancel task and dependents**:
 ```bash
-abathur task update 550e,661f,772f --priority 8
+abathur task update 550e8400 --cancel
+```
+
+**Update multiple tasks**:
+```bash
+abathur task update 550e8400,a3b4c5d6 --priority 8
+```
+
+#### Exit Codes
+
+- `0`: Success
+- `1`: Invalid arguments or task not found
+- `2`: Update failed
+- `3`: Database error
+
+---
+
+### `task status`
+
+Show queue status and statistics.
+
+#### Syntax
+
+```bash
+abathur task status
+```
+
+#### Examples
+
+**Show queue status**:
+```bash
+abathur task status
 ```
 
 **Output**:
-
-Success:
 ```
-Successfully updated 1 task(s):
-  - 550e8400-e29b-41d4-a716-446655440000
-```
+Task Queue Status
 
-Multiple tasks with partial failure:
-```
-Successfully updated 2 task(s):
-  - 550e8400-e29b-41d4-a716-446655440000
-  - 661f9511-e29b-41d4-a716-446655440001
+Total Tasks: 15
+  Pending:   3
+  Ready:     2
+  Running:   1
+  Completed: 7
+  Failed:    1
+  Cancelled: 1
+  Blocked:   0
 
-Failed to update 1 task(s):
-  - 772fa622-e29b-41d4-a716-446655440002: Task not found
+Active Agents: 1/10
 ```
 
-### task status
-
-Display queue status and statistics.
-
-**Usage**:
-```bash
-abathur task status
-```
-
-**Description**:
-
-Shows comprehensive statistics about the task queue including total tasks and breakdown by status (pending, blocked, ready, running, completed, failed, cancelled).
-
-**Examples**:
-
-Get queue status:
-```bash
-abathur task status
-```
-
-Get JSON output:
+**JSON output**:
 ```bash
 abathur --json task status
 ```
 
 **Output**:
-
-Standard output (table format):
+```json
+{
+  "total_tasks": 15,
+  "by_status": {
+    "pending": 3,
+    "ready": 2,
+    "running": 1,
+    "completed": 7,
+    "failed": 1,
+    "cancelled": 1,
+    "blocked": 0
+  },
+  "active_agents": 1,
+  "max_agents": 10
+}
 ```
-Queue Status:
-┌───────────┬───────┐
-│ Status    │ Count │
-├───────────┼───────┤
-│ Total     │ 127   │
-│ Pending   │ 12    │
-│ Blocked   │ 5     │
-│ Ready     │ 8     │
-│ Running   │ 3     │
-│ Completed │ 95    │
-│ Failed    │ 3     │
-│ Cancelled │ 1     │
-└───────────┴───────┘
-```
 
-### task resolve
+#### Exit Codes
+
+- `0`: Success
+- `3`: Database error
+
+---
+
+### `task resolve`
 
 Resolve task dependencies and update statuses.
 
-**Usage**:
+#### Syntax
+
 ```bash
 abathur task resolve
 ```
 
-**Description**:
+#### Description
 
-Checks all Pending and Blocked tasks and updates them to Ready status if their dependencies are satisfied. This command is useful after tasks complete to automatically unblock dependent tasks.
+Checks all Pending/Blocked tasks and updates them to Ready if their dependencies are satisfied. This is useful after completing tasks to automatically unblock dependent tasks.
 
-!!! tip "Automatic Resolution"
-    The swarm orchestrator automatically resolves dependencies. This command is primarily useful for manual queue management or troubleshooting.
+#### Examples
 
-**Examples**:
-
-Resolve dependencies:
+**Resolve dependencies**:
 ```bash
 abathur task resolve
 ```
 
-Get JSON output:
+**Output**:
+```
+Resolving task dependencies...
+
+Updated 3 tasks:
+  550e8400: blocked -> ready
+  a3b4c5d6: pending -> ready
+  7f8e9d0c: blocked -> ready
+```
+
+**JSON output**:
 ```bash
 abathur --json task resolve
 ```
 
 **Output**:
-
-Success with tasks updated:
-```
-Task Dependency Resolution
-=========================
-Tasks updated to Ready: 5
-
-Run 'abathur task list --status ready' to view ready tasks.
-```
-
-No tasks updated:
-```
-Task Dependency Resolution
-=========================
-Tasks updated to Ready: 0
-
-No tasks were ready to be updated.
-Check 'abathur task list --status pending' or '--status blocked' for pending tasks.
+```json
+{
+  "updated_tasks": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "old_status": "blocked",
+      "new_status": "ready"
+    }
+  ]
+}
 ```
 
-## memory
+#### Exit Codes
 
-Memory management commands.
+- `0`: Success
+- `2`: Resolution failed
+- `3`: Database error
 
-### memory list
+---
 
-List memories with optional filtering.
+## Memory Commands
 
-**Usage**:
+Manage memories in the memory system.
+
+### `memory list`
+
+List memories in the system.
+
+#### Syntax
+
 ```bash
-abathur memory list [OPTIONS]
+abathur memory list [options]
 ```
 
-**Options**:
+#### Options
 
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
-| `--namespace` | `-n` | string | (none) | Filter by namespace prefix |
-| `--memory-type` | `-t` | string | (none) | Filter by memory type: `semantic`, `episodic`, `procedural` |
+| `--namespace` | `-n` | string | - | Filter by namespace prefix |
+| `--memory-type` | `-t` | string | - | Filter by memory type (semantic, episodic, procedural) |
 | `--limit` | `-l` | integer | `50` | Maximum number of memories to display |
 
-**Description**:
+#### Examples
 
-Lists memories from the hierarchical memory system with optional filtering by namespace prefix and memory type. Results are displayed in a formatted table.
-
-**Examples**:
-
-List all memories:
+**List all memories**:
 ```bash
 abathur memory list
 ```
 
-List memories in specific namespace:
+**Output**:
+```
+Namespace                           Key               Type        Updated
+task:550e8400:technical_specs       requirements      semantic    2025-10-29 14:30:00
+task:550e8400:technical_specs       architecture      semantic    2025-10-29 14:31:00
+agent:rust-specialist:experience    bug_fixes         episodic    2025-10-29 14:32:00
+```
+
+**Filter by namespace**:
 ```bash
 abathur memory list --namespace task:550e8400
 ```
 
-List only semantic memories:
+**Filter by type**:
 ```bash
 abathur memory list --memory-type semantic
 ```
 
-Combine filters:
+**Combined filters with limit**:
 ```bash
-abathur memory list --namespace agent: --memory-type episodic --limit 100
+abathur memory list --namespace agent: --memory-type episodic --limit 10
 ```
 
-Get JSON output:
+**JSON output**:
 ```bash
-abathur --json memory list
+abathur --json memory list --namespace task:550e8400
 ```
 
 **Output**:
-
-Standard output (table format):
-```
-Memories:
-┌─────────────────────────────┬──────────────────┬───────────┬──────────────┐
-│ Namespace                   │ Key              │ Type      │ Created By   │
-├─────────────────────────────┼──────────────────┼───────────┼──────────────┤
-│ task:550e8400:specs         │ requirements     │ Semantic  │ gatherer     │
-│ task:550e8400:implementation│ phase1_complete  │ Episodic  │ architect    │
-│ agent:rust-specialist       │ patterns         │ Procedural│ system       │
-└─────────────────────────────┴──────────────────┴───────────┴──────────────┘
-
-Showing 3 memories
+```json
+{
+  "memories": [
+    {
+      "namespace": "task:550e8400:technical_specs",
+      "key": "requirements",
+      "memory_type": "semantic",
+      "updated_at": "2025-10-29T14:30:00Z"
+    }
+  ]
+}
 ```
 
-Empty result:
-```
-No memories found.
-```
+#### Exit Codes
 
-### memory show
+- `0`: Success
+- `3`: Database error
 
-Display detailed information for a specific memory entry.
+---
 
-**Usage**:
+### `memory show`
+
+Show details for a specific memory.
+
+#### Syntax
+
 ```bash
-abathur memory show <NAMESPACE> <KEY>
+abathur memory show <namespace> <key>
 ```
 
-**Arguments**:
+#### Required Arguments
 
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `<NAMESPACE>` | Yes | Memory namespace |
-| `<KEY>` | Yes | Memory key |
+- `<namespace>`: Memory namespace
+- `<key>`: Memory key
 
-**Description**:
+#### Examples
 
-Shows complete details for a specific memory entry including namespace, key, type, value (as formatted JSON), metadata, and timestamps.
-
-**Examples**:
-
-Show specific memory:
+**Show memory details**:
 ```bash
-abathur memory show task:550e8400:specs requirements
-```
-
-Get JSON output:
-```bash
-abathur --json memory show task:550e8400:specs requirements
+abathur memory show task:550e8400:technical_specs requirements
 ```
 
 **Output**:
-
-Standard output:
 ```
-Memory Details:
-─────────────────────────────────────────
-Namespace:   task:550e8400:specs
-Key:         requirements
-Type:        Semantic
-Created by:  requirements-gatherer
-Updated by:  requirements-gatherer
-Created at:  2025-10-29 14:30:00 UTC
-Updated at:  2025-10-29 14:35:00 UTC
+Namespace: task:550e8400:technical_specs
+Key: requirements
+Type: semantic
+Created: 2025-10-29 14:30:00 UTC
+Updated: 2025-10-29 14:30:00 UTC
+Created By: requirements-gatherer
 
 Value:
 {
-  "functional_requirements": [
-    "User authentication with JWT",
+  "functional": [
+    "User authentication",
+    "Session management",
     "Role-based access control"
   ],
-  "non_functional_requirements": [
-    "99.9% uptime",
-    "Sub-100ms response time"
+  "non_functional": [
+    "Response time < 200ms",
+    "99.9% uptime"
   ]
 }
+```
 
-Metadata:
+**JSON output**:
+```bash
+abathur --json memory show task:550e8400:technical_specs requirements
+```
+
+**Output**:
+```json
 {
-  "version": "1.2",
-  "confidence": "high"
+  "namespace": "task:550e8400:technical_specs",
+  "key": "requirements",
+  "memory_type": "semantic",
+  "value": {
+    "functional": ["User authentication", "Session management"],
+    "non_functional": ["Response time < 200ms"]
+  },
+  "created_at": "2025-10-29T14:30:00Z",
+  "updated_at": "2025-10-29T14:30:00Z",
+  "created_by": "requirements-gatherer"
 }
 ```
 
-Error (not found):
-```
-Error: Memory not found at task:550e8400:specs:requirements
-```
+#### Exit Codes
 
-### memory count
+- `0`: Success
+- `1`: Memory not found
+- `3`: Database error
 
-Count memories matching specified criteria.
+---
 
-**Usage**:
+### `memory count`
+
+Count memories matching criteria.
+
+#### Syntax
+
 ```bash
-abathur memory count [OPTIONS]
+abathur memory count [options]
 ```
 
-**Options**:
+#### Options
 
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
-| `--namespace` | `-n` | string | `""` | Namespace prefix to count (empty = all) |
-| `--memory-type` | `-t` | string | (none) | Filter by memory type: `semantic`, `episodic`, `procedural` |
+| `--namespace` | `-n` | string | `""` | Namespace prefix to count |
+| `--memory-type` | `-t` | string | - | Filter by memory type (semantic, episodic, procedural) |
 
-**Description**:
+#### Examples
 
-Counts the number of memories matching the specified criteria. Useful for understanding memory usage and organization.
-
-**Examples**:
-
-Count all memories:
+**Count all memories**:
 ```bash
 abathur memory count
 ```
 
-Count memories in namespace:
+**Output**:
+```
+Total memories: 42
+```
+
+**Count by namespace**:
 ```bash
 abathur memory count --namespace task:550e8400
 ```
 
-Count semantic memories:
+**Output**:
+```
+Total memories in namespace 'task:550e8400': 8
+```
+
+**Count by type**:
 ```bash
 abathur memory count --memory-type semantic
 ```
 
-Combine filters:
-```bash
-abathur memory count --namespace agent: --memory-type procedural
+**Output**:
+```
+Total semantic memories: 15
 ```
 
-Get JSON output:
+**JSON output**:
 ```bash
 abathur --json memory count --namespace task:
 ```
 
 **Output**:
-
-Standard output:
-```
-Found 47 memories matching prefix 'task:550e8400'
-```
-
-With type filter:
-```
-Found 23 semantic memories matching prefix 'agent:'
+```json
+{
+  "namespace": "task:",
+  "count": 35
+}
 ```
 
-All memories:
-```
-Found 312 memories matching prefix ''
-```
+#### Exit Codes
 
-## swarm
+- `0`: Success
+- `3`: Database error
 
-Swarm orchestration commands.
+---
 
-### swarm start
+## Swarm Commands
+
+Manage the swarm orchestrator.
+
+### `swarm start`
 
 Start the swarm orchestrator.
 
-**Usage**:
+#### Syntax
+
 ```bash
-abathur swarm start [OPTIONS]
+abathur swarm start [options]
 ```
 
-**Options**:
+#### Options
 
 | Option | Short | Type | Default | Description |
 |--------|-------|------|---------|-------------|
 | `--max-agents` | `-m` | integer | `10` | Maximum number of concurrent agents |
 
-**Description**:
+#### Examples
 
-Starts the swarm orchestrator as a background daemon process. The orchestrator automatically picks up tasks from the queue and assigns them to agents. HTTP MCP servers are started on ports 45678 (memory) and 45679 (tasks) for external client access.
-
-!!! info "Prerequisites"
-    The swarm requires:
-    - Initialized database (run `abathur init`)
-    - `ANTHROPIC_API_KEY` environment variable set
-    - Or Claude CLI installed and authenticated
-
-**Examples**:
-
-Start with default settings:
+**Start swarm with default settings**:
 ```bash
 abathur swarm start
 ```
 
-Start with custom max agents:
-```bash
-abathur swarm start --max-agents 20
+**Output**:
+```
+Starting swarm orchestrator...
+Max concurrent agents: 10
+Status: running
+
+Processing tasks...
 ```
 
-Get JSON output:
+**Start with custom agent limit**:
+```bash
+abathur swarm start --max-agents 5
+```
+
+**JSON output**:
 ```bash
 abathur --json swarm start
 ```
 
 **Output**:
-
-Success:
-```
-Starting swarm orchestrator with 10 max agents...
-Swarm orchestrator started successfully
-
-Daemon logs are written to: .abathur/swarm_daemon.log
-```
-
-Without initialization:
-```
-Starting swarm orchestrator with 10 max agents...
-Swarm orchestrator started successfully
-
-Daemon logs are written to: .abathur/swarm_daemon.log
-
-Note: Full orchestration requires database setup.
-Run 'abathur init' to initialize Abathur.
+```json
+{
+  "status": "running",
+  "max_agents": 10,
+  "active_agents": 0
+}
 ```
 
-Error:
-```
-Failed to start swarm orchestrator: No healthy substrates available
+#### Exit Codes
 
-Check logs at: .abathur/swarm_daemon.log
+- `0`: Success (orchestrator stopped normally)
+- `1`: Failed to start
+- `2`: Already running
 
-To enable full swarm functionality:
-  1. Run 'abathur init' to initialize Abathur
-  2. Ensure ANTHROPIC_API_KEY environment variable is set
-```
+---
 
-### swarm stop
+### `swarm stop`
 
 Stop the swarm orchestrator.
 
-**Usage**:
+#### Syntax
+
 ```bash
 abathur swarm stop
 ```
 
-**Description**:
+#### Examples
 
-Gracefully stops the swarm orchestrator daemon. Running agents complete their current tasks before shutdown. HTTP MCP servers are also stopped.
-
-**Examples**:
-
-Stop the swarm:
+**Stop swarm**:
 ```bash
 abathur swarm stop
 ```
 
-Get JSON output:
+**Output**:
+```
+Stopping swarm orchestrator...
+Status: stopped
+```
+
+**JSON output**:
 ```bash
 abathur --json swarm stop
 ```
 
 **Output**:
-
-Success:
-```
-Stopping swarm orchestrator...
-Swarm orchestrator stopped successfully
-```
-
-Error:
-```
-Failed to stop swarm orchestrator: No running swarm found
+```json
+{
+  "status": "stopped",
+  "message": "Swarm orchestrator stopped successfully"
+}
 ```
 
-### swarm status
+#### Exit Codes
 
-Show swarm orchestrator status and statistics.
+- `0`: Success
+- `1`: Not running
+- `2`: Failed to stop
 
-**Usage**:
+---
+
+### `swarm status`
+
+Show swarm orchestrator status.
+
+#### Syntax
+
 ```bash
 abathur swarm status
 ```
 
-**Description**:
+#### Examples
 
-Displays the current state of the swarm orchestrator including active/idle agents, queue statistics, and performance metrics.
-
-**Examples**:
-
-Get swarm status:
+**Check swarm status**:
 ```bash
 abathur swarm status
 ```
 
-Get JSON output:
+**Output**:
+```
+Swarm Orchestrator Status
+
+Status: running
+Active Agents: 3/10
+Tasks in Queue: 12
+  Ready: 5
+  Running: 3
+  Pending: 4
+```
+
+**JSON output**:
 ```bash
 abathur --json swarm status
 ```
 
 **Output**:
-
-Standard output:
-```
-Swarm Orchestrator Status
-========================
-State: Running
-Active Agents: 7
-Idle Agents: 3
-Max Agents: 10
-Tasks Processed: 142
-Tasks Failed: 3
-
-Queue Statistics:
-  Total Tasks: 87
-  Pending: 12
-  Blocked: 5
-  Ready: 8
-  Running: 7
-  Completed: 52
-  Failed: 2
-  Cancelled: 1
+```json
+{
+  "status": "running",
+  "active_agents": 3,
+  "max_agents": 10,
+  "queue_stats": {
+    "total": 12,
+    "ready": 5,
+    "running": 3,
+    "pending": 4
+  }
+}
 ```
 
-## mcp
+#### Exit Codes
 
-MCP (Model Context Protocol) server commands for internal use.
+- `0`: Success
+- `3`: Database error
+
+---
+
+## MCP Commands
+
+Model Context Protocol server commands (for internal use).
 
 !!! warning "Internal Use Only"
-    These commands are typically used internally by the swarm orchestrator. Manual use is only needed for debugging or custom integrations.
+    These commands are primarily for internal use by the Claude Code MCP integration. Most users will not need to run these directly.
 
-### mcp memory-http
+### `mcp memory-http`
 
 Run HTTP MCP server for memory management.
 
-**Usage**:
+#### Syntax
+
 ```bash
-abathur mcp memory-http [OPTIONS]
+abathur mcp memory-http [options]
 ```
 
-**Options**:
+#### Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `--db-path` | string | `.abathur/abathur.db` | Path to SQLite database file |
 | `--port` | integer | `45678` | Port to listen on |
 
-**Description**:
+#### Examples
 
-Starts an HTTP MCP server that exposes memory management operations. This allows external MCP clients to interact with the memory system.
-
-**Examples**:
-
-Start with default settings:
+**Start memory MCP server**:
 ```bash
 abathur mcp memory-http
 ```
 
-Use custom database and port:
+**Custom database and port**:
 ```bash
-abathur mcp memory-http --db-path /path/to/db.sqlite --port 8080
+abathur mcp memory-http --db-path /var/db/abathur.db --port 8080
 ```
 
-### mcp tasks-http
+#### Exit Codes
+
+- `0`: Server stopped normally
+- `1`: Failed to start
+- `2`: Port already in use
+
+---
+
+### `mcp tasks-http`
 
 Run HTTP MCP server for task queue management.
 
-**Usage**:
+#### Syntax
+
 ```bash
-abathur mcp tasks-http [OPTIONS]
+abathur mcp tasks-http [options]
 ```
 
-**Options**:
+#### Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `--db-path` | string | `.abathur/abathur.db` | Path to SQLite database file |
 | `--port` | integer | `45679` | Port to listen on |
 
-**Description**:
+#### Examples
 
-Starts an HTTP MCP server that exposes task queue operations. This allows external MCP clients to interact with the task system.
-
-**Examples**:
-
-Start with default settings:
+**Start task MCP server**:
 ```bash
 abathur mcp tasks-http
 ```
 
-Use custom database and port:
+**Custom database and port**:
 ```bash
-abathur mcp tasks-http --db-path /path/to/db.sqlite --port 8081
+abathur mcp tasks-http --db-path /var/db/abathur.db --port 8081
 ```
 
-## Exit Codes
+#### Exit Codes
 
-Abathur uses standard exit codes:
+- `0`: Server stopped normally
+- `1`: Failed to start
+- `2`: Port already in use
+
+---
+
+## Common Patterns
+
+### Task Workflow
+
+**1. Submit a task**:
+```bash
+abathur task submit "Implement feature X" --priority 7
+```
+
+**2. Check queue status**:
+```bash
+abathur task status
+```
+
+**3. View task details**:
+```bash
+abathur task show <task-id>
+```
+
+**4. Start swarm to process tasks**:
+```bash
+abathur swarm start
+```
+
+**5. Monitor progress**:
+```bash
+abathur task list --status running
+```
+
+### Dependency Management
+
+**Create dependent tasks**:
+```bash
+# Create parent task
+abathur task submit "Design API" --summary "API Design"
+
+# Create dependent task (use ID from previous command)
+abathur task submit "Implement API" --dependencies <parent-id>
+```
+
+**Resolve dependencies after completion**:
+```bash
+abathur task resolve
+```
+
+### Memory Inspection
+
+**View task-specific memories**:
+```bash
+abathur memory list --namespace task:<task-id>
+```
+
+**Examine technical specifications**:
+```bash
+abathur memory show task:<task-id>:technical_specs requirements
+```
+
+### JSON Integration
+
+**Parse task list in scripts**:
+```bash
+abathur --json task list | jq '.tasks[] | select(.status=="ready")'
+```
+
+**Automated task submission**:
+```bash
+for desc in "Task 1" "Task 2" "Task 3"; do
+  abathur --json task submit "$desc" | jq -r '.task_id'
+done
+```
+
+---
+
+## Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ABATHUR_CONFIG` | Path to configuration file | `.abathur/config.yaml` |
+| `ABATHUR_DB` | Path to SQLite database | `.abathur/abathur.db` |
+| `RUST_LOG` | Logging level (error, warn, info, debug, trace) | `info` |
+
+---
+
+## Exit Codes Summary
 
 | Code | Meaning |
 |------|---------|
 | `0` | Success |
-| `1` | General error (invalid arguments, operation failed) |
-| `2` | Database error |
-| `3` | Configuration error |
-| `101` | Not initialized (run `abathur init`) |
+| `1` | General error (invalid arguments, not found, etc.) |
+| `2` | Operation failed (creation, update, start, etc.) |
+| `3` | Database error |
 
-## Environment Variables
+---
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `ANTHROPIC_API_KEY` | Anthropic API key for Claude access | Yes (or use Claude CLI) |
-| `ABATHUR_CONFIG` | Custom path to config file | No |
-| `ABATHUR_DB` | Custom path to database file | No |
-| `RUST_LOG` | Log level (error, warn, info, debug, trace) | No |
+## Related Documentation
 
-## JSON Output Format
-
-All commands support `--json` flag for machine-readable output. JSON responses follow this structure:
-
-**Success Response**:
-```json
-{
-  "status": "success",
-  "data": {
-    // Command-specific data
-  }
-}
-```
-
-**Error Response**:
-```json
-{
-  "status": "error",
-  "message": "Error description",
-  "details": {
-    // Optional error details
-  }
-}
-```
-
-## Common Patterns
-
-### Working with Task Prefixes
-
-Task IDs can be specified using prefixes for convenience:
-
-```bash
-# Full UUID
-abathur task show 550e8400-e29b-41d4-a716-446655440000
-
-# Short prefix (minimum 4 characters)
-abathur task show 550e
-
-# Longer prefix for disambiguation
-abathur task show 550e8400
-```
-
-!!! tip "Prefix Length"
-    Use longer prefixes if multiple tasks share the same starting characters. Abathur will error if a prefix matches multiple tasks.
-
-### Scripting with JSON Output
-
-Use `--json` for reliable parsing in scripts:
-
-```bash
-# Get task ID from submission
-TASK_ID=$(abathur --json task submit "Build project" | jq -r '.task_id')
-
-# Check if swarm is running
-STATUS=$(abathur --json swarm status | jq -r '.swarm.state')
-if [ "$STATUS" = "Running" ]; then
-  echo "Swarm is active"
-fi
-
-# Count failed tasks
-FAILED=$(abathur --json task status | jq -r '.queue.failed')
-echo "Failed tasks: $FAILED"
-```
-
-### Chaining Tasks with Dependencies
-
-Create task pipelines using dependencies:
-
-```bash
-# Submit first task
-TASK1=$(abathur --json task submit "Design architecture" | jq -r '.task_id')
-
-# Submit dependent task
-TASK2=$(abathur --json task submit "Implement design" \
-  --dependencies $TASK1 | jq -r '.task_id')
-
-# Submit final task depending on both
-abathur task submit "Deploy system" \
-  --dependencies $TASK1,$TASK2 \
-  --priority 9
-```
-
-### Monitoring Queue
-
-Monitor queue in real-time:
-
-```bash
-# Watch queue status (Linux/macOS)
-watch -n 5 'abathur task status'
-
-# Check for ready tasks
-abathur task list --status ready
-
-# View running tasks
-abathur task list --status running
-```
-
-## See Also
-
-- [Configuration Reference](configuration.md) - Complete configuration options
-- [Getting Started: Quickstart](../getting-started/quickstart.md) - Quick introduction tutorial
-- [How-To: Task Management](../how-to/task-management.md) - Task queue recipes
-- [Explanation: Task Queue](../explanation/task-queue.md) - Understanding task execution
+- [Getting Started Guide](../getting-started/quickstart.md)
+- [How-To: Task Management](../how-to/task-management.md)
+- [Configuration Reference](configuration.md)
+- [Understanding Task Queue](../explanation/task-queue.md)
+- [Understanding Memory System](../explanation/memory-system.md)
