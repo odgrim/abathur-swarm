@@ -213,86 +213,27 @@ When invoked, you must follow these steps:
    - Read-only analysis tasks
    - Documentation-only tasks
 
-   **Worktree creation process with validation:**
-   ```bash
-   # Create isolated worktree for task implementation
+   **After invoking the git-branch skill, follow these patterns:**
 
-   # CRITICAL: Extract feature_branch from task metadata or description
-   # The technical-requirements-specialist passes this in metadata
-   feature_branch_name = task_metadata.get('feature_branch')  # e.g., "feature/task-queue-enhancements"
+   The git-branch skill documents the standard task worktree creation pattern. Use these patterns:
 
-   if not feature_branch_name:
-       raise Exception("Feature branch name not provided by technical-requirements-specialist!")
+   **Task Worktree Pattern (from git-branch skill):**
+   - Branch format: `feature/{feature-name}/task/{task-name}/YYYY-MM-DD-HH-MM-SS`
+   - Fork from: The parent feature branch (NOT main)
+   - Merge to: The parent feature branch (NOT main)
+   - Location: `.abathur/worktrees/{task-name}`
 
-   # For each implementation task that needs code isolation:
-   task_id = generate_unique_task_id()  # e.g., "task-001-domain-model"
+   **Reference the git-branch skill for:**
+   - Complete task worktree creation commands
+   - Feature branch context and hierarchy
+   - Timestamp format standards
+   - Validation procedures
+   - Error handling patterns
 
-   # Extract feature name from feature_branch_name (e.g., "feature/user-auth" -> "user-auth")
-   feature_name = feature_branch_name.replace('feature/', '')
-
-   # Generate timestamp without milliseconds for cleaner branch names
-   timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
-
-   # New hierarchical format: feature/{feature_name}/task/{task_id}/{timestamp}
-   branch_name = f"{feature_branch_name}/task/{task_id}/{timestamp}"
-   worktree_path = f".abathur/worktrees/{task_id}"
-
-   # Create worktree using git-branch skill patterns (see git-branch skill documentation)
-   # CRITICAL: Create worktree FROM THE FEATURE BRANCH (third argument)
-   # This ensures task branch forks from feature branch, NOT from main
-   bash_command = f'git worktree add -b {branch_name} {worktree_path} {feature_branch_name}'
-   result = Bash(command=bash_command, description=f"Create worktree for {task_id} from {feature_branch_name}")
-
-   # ✅ CRITICAL: Validate worktree creation succeeded
-   if result.exit_code == 0:
-       print(f"✓ Worktree created: {worktree_path}")
-
-       # Verify directory exists
-       verify_result = Bash(
-           command=f'test -d "{worktree_path}" && echo "EXISTS" || echo "MISSING"',
-           description=f"Verify worktree directory exists"
-       )
-
-       if "EXISTS" in verify_result.stdout:
-           print(f"✓ Worktree directory verified at: {worktree_path}")
-       else:
-           print(f"✗ ERROR: Worktree directory not found at: {worktree_path}")
-           raise Exception(f"Worktree creation failed - directory missing: {worktree_path}")
-
-       # 🚨 CRITICAL: Build Rust project in worktree to verify setup
-       # This ensures dependencies are resolved and project compiles
-       print(f"Building Rust project in {worktree_path}...")
-       build_result = Bash(
-           command=f'cd "{worktree_path}" && cargo build',
-           description=f"Build Rust project in worktree {task_id}",
-           timeout=300000  # 5 minutes for dependency download and build
-       )
-
-       if build_result.exit_code == 0:
-           print(f"✓ Rust project built successfully in worktree")
-       else:
-           print(f"⚠ WARNING: Cargo build failed (exit code {build_result.exit_code})")
-           print(f"Error output: {build_result.stderr}")
-           print(f"Implementation agent will need to fix build errors")
-
-   else:
-       print(f"✗ ERROR: git worktree add failed with exit code {result.exit_code}")
-       print(f"Error output: {result.stderr}")
-       raise Exception(f"Failed to create worktree for {task_id}")
-
-   # 🚨 CRITICAL: Capture the absolute worktree_path for task_enqueue
-   # This MUST be passed to the task_enqueue call
-   worktree_path_absolute = os.path.abspath(worktree_path)
-
-   # Store worktree info for task context (step 6)
-   worktree_info[task_id] = {
-       "worktree_path": worktree_path_absolute,
-       "branch_name": branch_name,
-       "feature_branch": feature_branch_name,
-       "merge_target": feature_branch_name,  # Task branches merge into feature branch
-       "created_at": datetime.now().isoformat()
-   }
-   ```
+   **After creating worktrees using the git-branch skill patterns:**
+   - Capture the absolute worktree_path for task_enqueue
+   - Store worktree info for task context (step 6)
+   - Pass worktree_path to task_enqueue (MANDATORY parameter)
 
    **🚨 CRITICAL: Passing worktree_path to task_enqueue**
 
@@ -314,70 +255,14 @@ When invoked, you must follow these steps:
    })
    ```
 
-   **Error Handling for Worktree Creation:**
-
-   1. **Branch already exists**:
-      - Use unique timestamp in branch name
-      - Format: `{feature_branch_name}/task/{task_id}/{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}`
-      - Example: `feature/user-auth/task/login-validation/2025-10-22-14-30-45`
-
-   2. **Worktree path already exists**:
-      ```python
-      # Check if directory exists before creating
-      check_result = Bash(
-          command=f'test -d "{worktree_path}" && echo "EXISTS" || echo "MISSING"',
-          description="Check if worktree path exists"
-      )
-
-      if "EXISTS" in check_result.stdout:
-          # Clean up stale worktree
-          Bash(command='git worktree prune', description="Prune stale worktrees")
-          # Try alternative path
-          worktree_path = f".abathur/worktrees/{task_id}-{timestamp}"
-      ```
-
-   3. **Permission denied**:
-      - Verify write permissions in .abathur/worktrees/ directory
-      - Check disk space: `df -h .`
-      - Ensure .abathur/worktrees/ directory exists:
-        ```python
-        Bash(command='mkdir -p .abathur/worktrees', description="Create worktrees directory")
-        ```
-
-   4. **Git errors**:
-      - Ensure we're in a git repository: `git rev-parse --git-dir`
-      - Check git status before creating worktrees: `git status --porcelain`
-      - Verify working tree is clean (no untracked files that would conflict)
-
    **Worktree Creation Checklist (VERIFY BEFORE PROCEEDING):**
 
-   Before marking worktree creation as complete, verify ALL of these:
-
-   - [ ] Worktree directory created: `.abathur/worktrees/{task_id}/`
-   - [ ] Git branch created: `{feature_branch_name}/task/{task_id}/{timestamp}`
-   - [ ] Worktree path captured in `worktree_info[task_id]` variable
-   - [ ] worktree_path will be passed to task_enqueue call (verify in code)
-   - [ ] Git exit code checked (should be 0)
-   - [ ] Directory verified to exist using test command
-   - [ ] worktree_path is absolute path (used `os.path.abspath()`)
-   - [ ] Error handling implemented for common failure scenarios
+   After using the git-branch skill to create worktrees, verify:
+   - [ ] Used git-branch skill (not manual commands)
+   - [ ] Branch follows format: `feature/{feature-name}/task/{task-name}/YYYY-MM-DD-HH-MM-SS`
+   - [ ] Worktree path captured for task_enqueue
+   - [ ] worktree_path will be passed to task_enqueue call
    - [ ] Validation results logged for debugging
-
-   **Best practices:**
-   - Use descriptive task IDs in branch names (e.g., feature/user-auth/task/login-validation/2025-10-22-14-30-45)
-   - Task branch names use hierarchical format showing feature relationship
-   - ALWAYS create task branches from the feature branch (not main)
-   - Store worktree info for each task to pass to implementation agents
-   - Include feature_branch in worktree_info so agents know the merge target
-   - Worktrees will be automatically ignored by .gitignore
-   - Implementation agents will work in their assigned worktree directory
-   - After task completion, agents should commit their changes in the worktree
-   - Task branches will merge into the feature branch (not main)
-   - Feature branch will eventually merge to main when all tasks complete
-   - Cleanup strategy: Worktrees can be merged and removed after task completion or left for manual review
-   - ALWAYS validate worktree creation succeeded before proceeding
-   - ALWAYS use absolute paths for worktree_path
-   - Timestamps use seconds precision (no milliseconds) for cleaner branch names
 
    Example suggested_agents structure:
    ```json
