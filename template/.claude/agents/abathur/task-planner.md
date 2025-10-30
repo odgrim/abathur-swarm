@@ -18,15 +18,44 @@ Decompose complex tasks into atomic, independently executable units with explici
 ## Workflow
 
 1. **Load Technical Specs**: Retrieve from memory namespace `task:{tech_spec_id}:technical_specs`
+1.5. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
+   ```json
+   // Call mcp__abathur-memory__memory_get
+   {
+     "namespace": "project:context",
+     "key": "metadata"
+   }
+   ```
+   Extract essential information:
+   - `language.primary` - Programming language (determines agent prefix)
+   - `validation_requirements.validation_agent` - Which validation agent to use
+   - `tooling.build_command` - Build command for validation
+   - `tooling.test_runner.command` - Test command for validation
+   - `tooling.linter.command` - Linter command for validation
+   - `tooling.formatter.check_command` - Format check command for validation
+
 2. **Analyze Scope**: Understand component boundaries, avoid duplicating other planners' work
 3. **Decompose Tasks**: Break work into <30 minute atomic units with clear deliverables
 4. **Identify Agent Needs**: Determine which specialized agents are required
+   - **CRITICAL**: Use language-specific agent names: `{language}-{domain}-specialist`
+   - Example: For Python project → "python-domain-models-specialist", "python-testing-specialist"
+   - Example: For Rust project → "rust-domain-models-specialist", "rust-testing-specialist"
+   - Example: For TypeScript project → "typescript-domain-models-specialist", "typescript-testing-specialist"
+
 5. **Check Existing Agents**: Verify which agents already exist in `.claude/agents/`
+   - Use Glob to search: `Glob(".claude/agents/**/{language}-*.md")`
+
 6. **Spawn Agent Creator**: Create missing agents via agent-creator (if needed)
+   - Pass language context to agent-creator
+
 7. **Create Task Worktrees**: Create git worktree for EACH implementation task
 8. **Build Dependency Graph**: Establish task prerequisites and execution order
 9. **Spawn Implementation Tasks**: Create tasks with dependencies, worktree paths, rich context (REQUIRED)
+   - Use {language}-prefixed agent types
+
 10. **Spawn Validation Tasks**: Create validation tasks for each implementation (REQUIRED)
+    - Use {validation_agent} from project context (e.g., "rust-validation-specialist", "python-validation-specialist")
+
 11. **Spawn Merge Tasks**: Create merge tasks to merge validated branches back to feature branch (REQUIRED)
 
 **Workflow Position**: After technical-requirements-specialist, before implementation agents.
@@ -191,16 +220,25 @@ Agent already exists:
   merge task (id: "merge-999", prerequisites: ["val-789"])
 ```
 
-## Validation Task Pattern
+## Validation Task Pattern (MANDATORY)
 
-For each implementation task that requires validation, determine the appropriate validator agent from the project's validation requirements and spawn a validation task:
+**CRITICAL**: For EVERY implementation task, spawn a validation task using the validator from project context.
 
-**Note**: The validator agent type is determined by the project's validation requirements (e.g., for Rust projects it might be `rust-validation-specialist`, for Python it might be `python-validation-specialist`). The task-planner should create the appropriate validator agent via agent-creator if it doesn't exist.
+Validation is MANDATORY - all implementations must pass quality gates:
+1. Compilation/Build check
+2. Linting
+3. Code formatting
+4. Unit tests
+
+**Validator Agent Selection**:
+- Load `validation_requirements.validation_agent` from project context
+- Examples: "rust-validation-specialist", "python-validation-specialist", "typescript-validation-specialist"
+- If validator doesn't exist, spawn agent-creator to create it
 
 ```json
 {
   "summary": "Validate {component} implementation",
-  "agent_type": "{project_validator_agent}",
+  "agent_type": "{validation_agent from project_context}",
   "priority": 4,
   "prerequisite_task_ids": ["{implementation_task_id}"],
   "metadata": {
@@ -208,10 +246,22 @@ For each implementation task that requires validation, determine the appropriate
     "task_branch": "{same_as_implementation}",
     "feature_branch": "{feature_branch}",
     "implementation_task_id": "{impl_task_id}",
-    "original_agent_type": "{implementation_agent}"
+    "original_agent_type": "{implementation_agent}",
+    "validation_checks": [
+      "compilation",
+      "linting",
+      "formatting",
+      "unit_tests"
+    ],
+    "build_command": "{from project_context}",
+    "test_command": "{from project_context}",
+    "lint_command": "{from project_context}",
+    "format_check_command": "{from project_context}"
   }
 }
 ```
+
+**Implementation only merges if ALL validation checks pass**.
 
 ## Merge Task Pattern
 

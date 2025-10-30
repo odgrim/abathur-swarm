@@ -3,9 +3,37 @@ use crate::domain::ports::{TaskFilters, TaskRepository};
 use crate::services::{DependencyResolver, PriorityCalculator};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
 use uuid::Uuid;
+
+/// Result of a task pruning operation.
+///
+/// Contains information about which tasks were deleted and which tasks
+/// were blocked from deletion due to non-terminal dependents.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PruneResult {
+    /// Number of tasks successfully deleted
+    pub deleted_count: usize,
+    /// UUIDs of tasks that were deleted
+    pub deleted_ids: Vec<Uuid>,
+    /// Tasks that could not be deleted due to active dependents
+    pub blocked_tasks: Vec<BlockedTask>,
+    /// Whether this was a dry-run (no actual deletion performed)
+    pub dry_run: bool,
+}
+
+/// A task that was blocked from deletion due to non-terminal dependents.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BlockedTask {
+    /// UUID of the task that cannot be deleted
+    pub task_id: Uuid,
+    /// Human-readable reason why the task is blocked
+    pub reason: String,
+    /// UUIDs of dependent tasks that are not in terminal states
+    pub non_terminal_dependents: Vec<Uuid>,
+}
 
 /// Service for managing task queue operations.
 ///
@@ -364,6 +392,200 @@ impl TaskQueueService {
             .await
             .context("Failed to count tasks")
     }
+
+    /// Validate and prune tasks with dependency validation.
+    ///
+    /// This method validates whether tasks can be safely deleted by checking
+    /// if all their dependent tasks are in terminal states (completed, failed,
+    /// or cancelled). It performs a two-phase operation:
+    ///
+    /// **Phase 1 - Validation**:
+    /// - Verify each task exists
+    /// - Get all tasks that depend on each task
+    /// - Check if ALL dependents are in terminal states
+    /// - Categorize tasks as deletable or blocked
+    ///
+    /// **Phase 2 - Deletion** (only if `dry_run = false`):
+    /// - Delete all tasks that passed validation
+    ///
+    /// # Arguments
+    /// * `task_ids` - UUIDs of tasks to validate and prune
+    /// * `dry_run` - If true, only validate without performing deletion
+    ///
+    /// # Returns
+    /// `PruneResult` containing:
+    /// - `deleted_count`: Number of tasks actually deleted
+    /// - `deleted_ids`: UUIDs of deleted tasks
+    /// - `blocked_tasks`: Tasks that couldn't be deleted with reasons
+    /// - `dry_run`: Whether this was a dry-run
+    ///
+    /// # Errors
+    /// - Database query failures
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use abathur::services::TaskQueueService;
+    /// # use std::sync::Arc;
+    /// # async fn example(service: TaskQueueService, task_id: uuid::Uuid) -> anyhow::Result<()> {
+    /// // Dry run to check what would be deleted
+    /// let result = service.validate_and_prune_tasks(vec![task_id], true).await?;
+    /// println!("Would delete {} tasks", result.deleted_ids.len());
+    /// println!("Blocked: {} tasks", result.blocked_tasks.len());
+    ///
+    /// // Actually delete if safe
+    /// if result.blocked_tasks.is_empty() {
+    ///     let result = service.validate_and_prune_tasks(vec![task_id], false).await?;
+    ///     println!("Deleted {} tasks", result.deleted_count);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[instrument(skip(self), err)]
+    pub async fn validate_and_prune_tasks(
+        &self,
+        task_ids: Vec<Uuid>,
+        dry_run: bool,
+    ) -> Result<PruneResult> {
+        info!(
+            "Validating {} tasks for pruning (dry_run: {})",
+            task_ids.len(),
+            dry_run
+        );
+
+        let mut deletable_tasks = Vec::new();
+        let mut blocked_tasks = Vec::new();
+
+        // PHASE 1: VALIDATION
+        for task_id in task_ids {
+            // 1. Verify task exists
+            let _task = match self.repo.get(task_id).await {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    warn!("Task {} not found, skipping", task_id);
+                    blocked_tasks.push(BlockedTask {
+                        task_id,
+                        reason: "Task not found".to_string(),
+                        non_terminal_dependents: vec![],
+                    });
+                    continue;
+                }
+                Err(e) => {
+                    warn!("Failed to fetch task {}: {}", task_id, e);
+                    blocked_tasks.push(BlockedTask {
+                        task_id,
+                        reason: format!("Failed to fetch task: {}", e),
+                        non_terminal_dependents: vec![],
+                    });
+                    continue;
+                }
+            };
+
+            // 2. Get all dependent tasks
+            let dependent_tasks = match self.repo.get_dependents(task_id).await {
+                Ok(deps) => deps,
+                Err(e) => {
+                    warn!("Failed to get dependents for task {}: {}", task_id, e);
+                    blocked_tasks.push(BlockedTask {
+                        task_id,
+                        reason: format!("Failed to fetch dependents: {}", e),
+                        non_terminal_dependents: vec![],
+                    });
+                    continue;
+                }
+            };
+
+            // 3. Check if ALL dependents are terminal
+            let non_terminal_dependents: Vec<Uuid> = dependent_tasks
+                .iter()
+                .filter(|dep| !is_terminal_status(dep.status))
+                .map(|dep| dep.id)
+                .collect();
+
+            if non_terminal_dependents.is_empty() {
+                // 4. All dependents are terminal (or no dependents) - safe to delete
+                info!(
+                    "Task {} is deletable ({} terminal dependents)",
+                    task_id,
+                    dependent_tasks.len()
+                );
+                deletable_tasks.push(task_id);
+            } else {
+                // 5. Has non-terminal dependents - block deletion
+                warn!(
+                    "Task {} blocked from deletion: {} non-terminal dependents",
+                    task_id,
+                    non_terminal_dependents.len()
+                );
+                blocked_tasks.push(BlockedTask {
+                    task_id,
+                    reason: format!(
+                        "Task has {} non-terminal dependent(s)",
+                        non_terminal_dependents.len()
+                    ),
+                    non_terminal_dependents,
+                });
+            }
+        }
+
+        // PHASE 2: DELETION (if not dry run)
+        let deleted_ids = if !dry_run && !deletable_tasks.is_empty() {
+            info!("Deleting {} tasks", deletable_tasks.len());
+
+            // Delete tasks one by one since we don't have delete_batch yet
+            let mut successfully_deleted = Vec::new();
+            for task_id in &deletable_tasks {
+                match self.repo.delete(*task_id).await {
+                    Ok(_) => {
+                        info!("Successfully deleted task {}", task_id);
+                        successfully_deleted.push(*task_id);
+                    }
+                    Err(e) => {
+                        warn!("Failed to delete task {}: {}", task_id, e);
+                        // Move from deletable to blocked
+                        blocked_tasks.push(BlockedTask {
+                            task_id: *task_id,
+                            reason: format!("Deletion failed: {}", e),
+                            non_terminal_dependents: vec![],
+                        });
+                    }
+                }
+            }
+            successfully_deleted
+        } else {
+            if dry_run {
+                info!("Dry run: would delete {} tasks", deletable_tasks.len());
+            }
+            vec![]
+        };
+
+        let result = PruneResult {
+            deleted_count: deleted_ids.len(),
+            deleted_ids: deleted_ids.clone(),
+            blocked_tasks,
+            dry_run,
+        };
+
+        info!(
+            "Pruning complete: deleted={}, blocked={}, dry_run={}",
+            result.deleted_count,
+            result.blocked_tasks.len(),
+            result.dry_run
+        );
+
+        Ok(result)
+    }
+}
+
+/// Check if a task status is terminal (completed, failed, or cancelled).
+///
+/// Terminal states indicate that a task will never execute or change state again,
+/// making it safe to delete tasks that depend on them.
+fn is_terminal_status(status: TaskStatus) -> bool {
+    matches!(
+        status,
+        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+    )
 }
 
 // Standalone recursive function for finding dependent tasks
@@ -842,5 +1064,421 @@ mod tests {
         use crate::domain::ports::TaskQueueService as TaskQueueServiceTrait;
         let result = service.update_task_status(task1_id, TaskStatus::Completed).await;
         assert!(result.is_ok());
+    }
+
+    // ==================== PRUNE TESTS ====================
+
+    #[tokio::test]
+    async fn test_validate_task_no_dependents_ok() {
+        let mut mock_repo = MockTaskRepo::new();
+
+        let task = create_test_task("Task with no dependents");
+        let task_id = task.id;
+        let task_clone = task.clone();
+
+        // Task exists
+        mock_repo
+            .expect_get()
+            .with(eq(task_id))
+            .returning(move |_| Ok(Some(task_clone.clone())));
+
+        // No dependents
+        mock_repo
+            .expect_get_dependents()
+            .with(eq(task_id))
+            .returning(|_| Ok(vec![]));
+
+        let service = TaskQueueService::new(
+            Arc::new(mock_repo),
+            DependencyResolver::new(),
+            PriorityCalculator::new(),
+        );
+
+        let result = service
+            .validate_and_prune_tasks(vec![task_id], true)
+            .await;
+
+        assert!(result.is_ok());
+        let prune_result = result.unwrap();
+        assert_eq!(prune_result.deleted_ids.len(), 0); // Dry run
+        assert_eq!(prune_result.blocked_tasks.len(), 0);
+        assert!(prune_result.dry_run);
+    }
+
+    #[tokio::test]
+    async fn test_validate_task_terminal_dependents_ok() {
+        let mut mock_repo = MockTaskRepo::new();
+
+        let task = create_test_task("Task to delete");
+        let task_id = task.id;
+        let task_clone = task.clone();
+
+        // Create terminal dependent tasks
+        let mut dep1 = create_test_task("Completed dependent");
+        dep1.status = TaskStatus::Completed;
+        dep1.dependencies = Some(vec![task_id]);
+
+        let mut dep2 = create_test_task("Failed dependent");
+        dep2.status = TaskStatus::Failed;
+        dep2.dependencies = Some(vec![task_id]);
+
+        let mut dep3 = create_test_task("Cancelled dependent");
+        dep3.status = TaskStatus::Cancelled;
+        dep3.dependencies = Some(vec![task_id]);
+
+        // Task exists
+        mock_repo
+            .expect_get()
+            .with(eq(task_id))
+            .returning(move |_| Ok(Some(task_clone.clone())));
+
+        // All dependents are terminal
+        let deps = vec![dep1.clone(), dep2.clone(), dep3.clone()];
+        mock_repo
+            .expect_get_dependents()
+            .with(eq(task_id))
+            .returning(move |_| Ok(deps.clone()));
+
+        let service = TaskQueueService::new(
+            Arc::new(mock_repo),
+            DependencyResolver::new(),
+            PriorityCalculator::new(),
+        );
+
+        let result = service
+            .validate_and_prune_tasks(vec![task_id], true)
+            .await;
+
+        assert!(result.is_ok());
+        let prune_result = result.unwrap();
+        assert_eq!(prune_result.deleted_ids.len(), 0); // Dry run
+        assert_eq!(prune_result.blocked_tasks.len(), 0);
+        assert!(prune_result.dry_run);
+    }
+
+    #[tokio::test]
+    async fn test_validate_task_non_terminal_dependents_blocked() {
+        let mut mock_repo = MockTaskRepo::new();
+
+        let task = create_test_task("Task to delete");
+        let task_id = task.id;
+        let task_clone = task.clone();
+
+        // Create non-terminal dependent tasks
+        let mut dep1 = create_test_task("Running dependent");
+        dep1.status = TaskStatus::Running;
+        dep1.dependencies = Some(vec![task_id]);
+
+        let mut dep2 = create_test_task("Ready dependent");
+        dep2.status = TaskStatus::Ready;
+        dep2.dependencies = Some(vec![task_id]);
+
+        // Task exists
+        mock_repo
+            .expect_get()
+            .with(eq(task_id))
+            .returning(move |_| Ok(Some(task_clone.clone())));
+
+        // Has non-terminal dependents
+        let deps = vec![dep1.clone(), dep2.clone()];
+        let dep1_id = dep1.id;
+        let dep2_id = dep2.id;
+        mock_repo
+            .expect_get_dependents()
+            .with(eq(task_id))
+            .returning(move |_| Ok(deps.clone()));
+
+        let service = TaskQueueService::new(
+            Arc::new(mock_repo),
+            DependencyResolver::new(),
+            PriorityCalculator::new(),
+        );
+
+        let result = service
+            .validate_and_prune_tasks(vec![task_id], true)
+            .await;
+
+        assert!(result.is_ok());
+        let prune_result = result.unwrap();
+        assert_eq!(prune_result.deleted_ids.len(), 0);
+        assert_eq!(prune_result.blocked_tasks.len(), 1);
+        assert!(prune_result.dry_run);
+
+        let blocked = &prune_result.blocked_tasks[0];
+        assert_eq!(blocked.task_id, task_id);
+        assert_eq!(blocked.non_terminal_dependents.len(), 2);
+        assert!(blocked.non_terminal_dependents.contains(&dep1_id));
+        assert!(blocked.non_terminal_dependents.contains(&dep2_id));
+    }
+
+    #[tokio::test]
+    async fn test_prune_dry_run_no_deletion() {
+        let mut mock_repo = MockTaskRepo::new();
+
+        let task = create_test_task("Task to delete");
+        let task_id = task.id;
+        let task_clone = task.clone();
+
+        // Task exists
+        mock_repo
+            .expect_get()
+            .with(eq(task_id))
+            .returning(move |_| Ok(Some(task_clone.clone())));
+
+        // No dependents
+        mock_repo
+            .expect_get_dependents()
+            .with(eq(task_id))
+            .returning(|_| Ok(vec![]));
+
+        // Should NOT call delete in dry run
+        mock_repo.expect_delete().times(0);
+
+        let service = TaskQueueService::new(
+            Arc::new(mock_repo),
+            DependencyResolver::new(),
+            PriorityCalculator::new(),
+        );
+
+        let result = service
+            .validate_and_prune_tasks(vec![task_id], true)
+            .await;
+
+        assert!(result.is_ok());
+        let prune_result = result.unwrap();
+        assert_eq!(prune_result.deleted_count, 0);
+        assert_eq!(prune_result.deleted_ids.len(), 0);
+        assert!(prune_result.dry_run);
+    }
+
+    #[tokio::test]
+    async fn test_prune_actual_deletion_calls_repository() {
+        let mut mock_repo = MockTaskRepo::new();
+
+        let task = create_test_task("Task to delete");
+        let task_id = task.id;
+        let task_clone = task.clone();
+
+        // Task exists
+        mock_repo
+            .expect_get()
+            .with(eq(task_id))
+            .returning(move |_| Ok(Some(task_clone.clone())));
+
+        // No dependents
+        mock_repo
+            .expect_get_dependents()
+            .with(eq(task_id))
+            .returning(|_| Ok(vec![]));
+
+        // Should call delete when not dry run
+        mock_repo
+            .expect_delete()
+            .with(eq(task_id))
+            .times(1)
+            .returning(|_| Ok(()));
+
+        let service = TaskQueueService::new(
+            Arc::new(mock_repo),
+            DependencyResolver::new(),
+            PriorityCalculator::new(),
+        );
+
+        let result = service
+            .validate_and_prune_tasks(vec![task_id], false)
+            .await;
+
+        assert!(result.is_ok());
+        let prune_result = result.unwrap();
+        assert_eq!(prune_result.deleted_count, 1);
+        assert_eq!(prune_result.deleted_ids.len(), 1);
+        assert_eq!(prune_result.deleted_ids[0], task_id);
+        assert!(!prune_result.dry_run);
+    }
+
+    #[tokio::test]
+    async fn test_prune_empty_list() {
+        let mock_repo = MockTaskRepo::new();
+
+        let service = TaskQueueService::new(
+            Arc::new(mock_repo),
+            DependencyResolver::new(),
+            PriorityCalculator::new(),
+        );
+
+        let result = service.validate_and_prune_tasks(vec![], false).await;
+
+        assert!(result.is_ok());
+        let prune_result = result.unwrap();
+        assert_eq!(prune_result.deleted_count, 0);
+        assert_eq!(prune_result.deleted_ids.len(), 0);
+        assert_eq!(prune_result.blocked_tasks.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_prune_all_blocked() {
+        let mut mock_repo = MockTaskRepo::new();
+
+        let task1 = create_test_task("Task 1");
+        let task1_id = task1.id;
+        let task1_clone = task1.clone();
+
+        let task2 = create_test_task("Task 2");
+        let task2_id = task2.id;
+        let task2_clone = task2.clone();
+
+        // Both tasks have non-terminal dependents
+        let mut dep1 = create_test_task("Dep 1");
+        dep1.status = TaskStatus::Running;
+
+        let mut dep2 = create_test_task("Dep 2");
+        dep2.status = TaskStatus::Ready;
+
+        // Task 1
+        mock_repo
+            .expect_get()
+            .with(eq(task1_id))
+            .returning(move |_| Ok(Some(task1_clone.clone())));
+        let dep1_for_task1 = dep1.clone();
+        mock_repo
+            .expect_get_dependents()
+            .with(eq(task1_id))
+            .returning(move |_| Ok(vec![dep1_for_task1.clone()]));
+
+        // Task 2
+        mock_repo
+            .expect_get()
+            .with(eq(task2_id))
+            .returning(move |_| Ok(Some(task2_clone.clone())));
+        let dep2_for_task2 = dep2.clone();
+        mock_repo
+            .expect_get_dependents()
+            .with(eq(task2_id))
+            .returning(move |_| Ok(vec![dep2_for_task2.clone()]));
+
+        // No deletions should occur
+        mock_repo.expect_delete().times(0);
+
+        let service = TaskQueueService::new(
+            Arc::new(mock_repo),
+            DependencyResolver::new(),
+            PriorityCalculator::new(),
+        );
+
+        let result = service
+            .validate_and_prune_tasks(vec![task1_id, task2_id], false)
+            .await;
+
+        assert!(result.is_ok());
+        let prune_result = result.unwrap();
+        assert_eq!(prune_result.deleted_count, 0);
+        assert_eq!(prune_result.blocked_tasks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_prune_with_dependency_chain() {
+        let mut mock_repo = MockTaskRepo::new();
+
+        // Create chain: task1 <- task2 <- task3
+        // task1 is a dependency of task2, task2 is a dependency of task3
+        let task1 = create_test_task("Task 1");
+        let task1_id = task1.id;
+        let task1_clone = task1.clone();
+
+        let mut task2 = create_test_task("Task 2");
+        task2.dependencies = Some(vec![task1_id]);
+        task2.status = TaskStatus::Completed; // Terminal
+        let task2_id = task2.id;
+        let task2_clone = task2.clone();
+
+        let mut task3 = create_test_task("Task 3");
+        task3.dependencies = Some(vec![task2_id]);
+        task3.status = TaskStatus::Completed; // Terminal
+        let task3_clone = task3.clone();
+
+        // Try to delete task1 - should succeed since task2 and task3 are terminal
+        mock_repo
+            .expect_get()
+            .with(eq(task1_id))
+            .returning(move |_| Ok(Some(task1_clone.clone())));
+
+        // task1 has task2 as dependent
+        let task2_for_deps = task2.clone();
+        mock_repo
+            .expect_get_dependents()
+            .with(eq(task1_id))
+            .returning(move |_| Ok(vec![task2_for_deps.clone()]));
+
+        // Actually delete task1
+        mock_repo
+            .expect_delete()
+            .with(eq(task1_id))
+            .times(1)
+            .returning(|_| Ok(()));
+
+        let service = TaskQueueService::new(
+            Arc::new(mock_repo),
+            DependencyResolver::new(),
+            PriorityCalculator::new(),
+        );
+
+        let result = service
+            .validate_and_prune_tasks(vec![task1_id], false)
+            .await;
+
+        assert!(result.is_ok());
+        let prune_result = result.unwrap();
+        assert_eq!(prune_result.deleted_count, 1);
+        assert_eq!(prune_result.deleted_ids[0], task1_id);
+        assert_eq!(prune_result.blocked_tasks.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_prune_respects_terminal_states() {
+        let mut mock_repo = MockTaskRepo::new();
+
+        let task = create_test_task("Task to delete");
+        let task_id = task.id;
+        let task_clone = task.clone();
+
+        // Create one terminal and one non-terminal dependent
+        let mut dep1 = create_test_task("Completed dependent");
+        dep1.status = TaskStatus::Completed;
+
+        let mut dep2 = create_test_task("Pending dependent");
+        dep2.status = TaskStatus::Pending; // Non-terminal
+
+        // Task exists
+        mock_repo
+            .expect_get()
+            .with(eq(task_id))
+            .returning(move |_| Ok(Some(task_clone.clone())));
+
+        // Has mixed dependents - should be blocked
+        let deps = vec![dep1.clone(), dep2.clone()];
+        let dep2_id = dep2.id;
+        mock_repo
+            .expect_get_dependents()
+            .with(eq(task_id))
+            .returning(move |_| Ok(deps.clone()));
+
+        let service = TaskQueueService::new(
+            Arc::new(mock_repo),
+            DependencyResolver::new(),
+            PriorityCalculator::new(),
+        );
+
+        let result = service
+            .validate_and_prune_tasks(vec![task_id], true)
+            .await;
+
+        assert!(result.is_ok());
+        let prune_result = result.unwrap();
+        assert_eq!(prune_result.blocked_tasks.len(), 1);
+        assert_eq!(prune_result.blocked_tasks[0].non_terminal_dependents.len(), 1);
+        assert_eq!(
+            prune_result.blocked_tasks[0].non_terminal_dependents[0],
+            dep2_id
+        );
     }
 }
