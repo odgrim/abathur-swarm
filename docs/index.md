@@ -1,76 +1,189 @@
-# Welcome to Abathur Documentation
+# Abathur Swarm
 
-**Abathur** is a powerful AI orchestration CLI tool that provides intelligent task queue management, swarm orchestration, and Model Context Protocol (MCP) integration.
+**Intelligent CLI orchestration for autonomous agent swarms**
 
-## Overview
-
-Abathur enables developers to:
-
-- **Manage Complex Tasks**: Intelligent task queue with dependency resolution and priority management
-- **Orchestrate AI Agents**: Swarm-based orchestration for collaborative AI workflows
-- **Integrate MCP Servers**: Seamless integration with Model Context Protocol for memory and task management
-- **Execute Loops**: Autonomous execution loops for long-running workflows
-
-## Quick Links
-
-- [Installation Guide](getting-started/installation.md) - Get started with Abathur
-- [Quickstart Tutorial](getting-started/quickstart.md) - Your first Abathur workflow
-- [CLI Commands Reference](reference/cli-commands.md) - Complete command reference
-- [Architecture Overview](explanation/architecture.md) - Understand Abathur's design
-
-## Key Features
-
-### Task Queue Management
-Sophisticated task queue system with support for:
-
-- Task dependencies and dependency resolution
-- Priority-based execution
-- Task status tracking and monitoring
-- Cancellation with cascade support
-
-### Swarm Orchestration
-Coordinate multiple AI agents to work together:
-
-- Agent specialization and role assignment
-- Inter-agent communication
-- Parallel task execution
-- Result aggregation
-
-### MCP Integration
-Built-in Model Context Protocol servers:
-
-- **Memory Server**: Hierarchical memory management (semantic, episodic, procedural)
-- **Task Queue Server**: Task management via MCP
-- **HTTP MCP Server**: JSON-RPC over HTTP transport
-
-### Autonomous Loops
-Execute long-running workflows autonomously:
-
-- Continuous execution monitoring
-- Error handling and recovery
-- Progress tracking
-- Graceful shutdown
-
-## Documentation Structure
-
-This documentation follows the [Diátaxis framework](https://diataxis.fr/):
-
-- **Tutorials**: Step-by-step learning paths for beginners
-- **How-To Guides**: Task-oriented guides for specific problems
-- **Reference**: Technical reference and API documentation
-- **Explanation**: Conceptual explanations of design decisions
-
-## Getting Help
-
-- Browse the [Tutorials](tutorials/index.md) to learn by example
-- Check [How-To Guides](how-to/index.md) for specific tasks
-- Explore [Reference](reference/index.md) for complete API documentation
-- Read [Explanation](explanation/index.md) to understand architecture
-
-## Contributing
-
-Abathur is an open-source project. We welcome contributions! See our [Contributing Guide](contributing/index.md) to get started.
+Abathur is a Rust-powered CLI system for managing swarms of specialized Claude agents with hierarchical task queues, concurrent execution, and iterative refinement. Build sophisticated agentic workflows with dependency management, persistent state, and seamless MCP integration.
 
 ---
 
-*This documentation is built with [MkDocs](https://www.mkdocs.org/) and [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/).*
+## Quick Start
+
+Get up and running in minutes:
+
+```bash
+# Install from source
+git clone https://github.com/yourorg/abathur.git
+cd abathur
+cargo install --path .
+
+# Initialize your project
+abathur init
+export ANTHROPIC_API_KEY=YOUR_API_KEY
+
+# Start orchestrating agents
+abathur task list
+abathur swarm start --max-agents 10
+```
+
+[Get Started →](tutorials/quickstart.md){ .md-button .md-button--primary }
+[Architecture Overview →](explanation/architecture.md){ .md-button }
+
+---
+
+## Key Features
+
+### 🎯 Hierarchical Task Queue
+Priority-based task scheduling with dependency resolution, automatic retry logic, and persistent state management using SQLite with WAL mode.
+
+[Learn More →](explanation/task-queue.md)
+
+### 🤖 Autonomous Agent Swarm
+Deploy multiple Claude agents concurrently with semaphore-based resource control, dynamic lifecycle management, and health monitoring.
+
+[Explore Agents →](reference/agent-types.md)
+
+### 🧠 Memory System
+Persistent memory with semantic, episodic, and procedural storage patterns. Enable agents to learn, adapt, and build on previous work.
+
+[Memory Guide →](how-to/memory-management.md)
+
+### 🔌 MCP Integration
+Native Model Context Protocol support with server lifecycle management, agent-to-server binding, and automatic health monitoring.
+
+[MCP Setup →](how-to/mcp-integration.md)
+
+### 🔄 Iterative Refinement
+Execute tasks with configurable convergence strategies, automatic checkpointing, and crash recovery for complex multi-step workflows.
+
+[Loop Execution →](reference/loop-execution.md)
+
+### 📊 Rich Observability
+Structured logging with audit trails, beautiful terminal output with tables and progress bars, and comprehensive resource monitoring.
+
+[Monitoring →](how-to/monitoring.md)
+
+---
+
+## Documentation Structure
+
+Our documentation follows the [Diátaxis framework](https://diataxis.fr/) for clarity and ease of navigation:
+
+<div class="grid cards" markdown>
+
+-   :material-school:{ .lg .middle } __Tutorials__
+
+    ---
+
+    Step-by-step learning paths for beginners. Start here if you're new to Abathur.
+
+    [:octicons-arrow-right-24: Getting Started](tutorials/index.md)
+
+-   :material-wrench:{ .lg .middle } __How-To Guides__
+
+    ---
+
+    Problem-oriented recipes for accomplishing specific tasks and workflows.
+
+    [:octicons-arrow-right-24: Practical Guides](how-to/index.md)
+
+-   :material-book-open-variant:{ .lg .middle } __Reference__
+
+    ---
+
+    Comprehensive technical details on CLI commands, configuration, and APIs.
+
+    [:octicons-arrow-right-24: Technical Reference](reference/index.md)
+
+-   :material-lightbulb:{ .lg .middle } __Explanation__
+
+    ---
+
+    Conceptual deep-dives into architecture, design patterns, and system internals.
+
+    [:octicons-arrow-right-24: Understanding Abathur](explanation/index.md)
+
+</div>
+
+---
+
+## Why Abathur?
+
+Abathur combines the power of Claude's capabilities with robust orchestration:
+
+- **Type-Safe**: Built in Rust for performance, safety, and reliability
+- **Scalable**: Handle complex multi-agent workflows with confidence
+- **Persistent**: Never lose work with automatic state management
+- **Observable**: Rich logging and monitoring for production deployments
+- **Extensible**: Plugin architecture with MCP support
+
+!!! tip "Coming from Python?"
+    Abathur is being rewritten from Python to Rust. The Python implementation remains functional and feature-complete. See our [migration guide](how-to/python-migration.md) for transition details.
+
+---
+
+## Project Status
+
+**Active Development** | Rust Rewrite in Progress
+
+- ✅ **Phase 1 Complete**: Domain models, database layer, configuration system
+- 🚧 **Phase 2 In Progress**: Service layer, repository pattern, async infrastructure
+- 📋 **Phase 3 Planned**: CLI layer, orchestration services, full MCP integration
+
+[View Roadmap →](explanation/roadmap.md) | [Contributing →](contributing.md)
+
+---
+
+## Community & Support
+
+<div class="grid cards" markdown>
+
+-   :material-chat-question:{ .lg .middle } __Questions?__
+
+    ---
+
+    Join our GitHub Discussions for help and community support.
+
+    [:octicons-arrow-right-24: Ask Questions](https://github.com/yourorg/abathur/discussions)
+
+-   :material-bug:{ .lg .middle } __Found a Bug?__
+
+    ---
+
+    Report issues and track development on GitHub Issues.
+
+    [:octicons-arrow-right-24: Report Issue](https://github.com/yourorg/abathur/issues)
+
+-   :material-code-braces:{ .lg .middle } __Want to Contribute?__
+
+    ---
+
+    Check out our contributing guide and development setup.
+
+    [:octicons-arrow-right-24: Contributing Guide](contributing.md)
+
+-   :material-license:{ .lg .middle } __License__
+
+    ---
+
+    Abathur is open source under the MIT License.
+
+    [:octicons-arrow-right-24: View License](https://github.com/yourorg/abathur/blob/main/LICENSE)
+
+</div>
+
+---
+
+## Quick Links
+
+- [Installation Guide](tutorials/installation.md) - Detailed setup instructions
+- [First Task Tutorial](tutorials/first-task.md) - Submit and execute your first task
+- [CLI Command Reference](reference/cli-commands.md) - Complete command documentation
+- [Architecture Overview](explanation/architecture.md) - System design and patterns
+- [Configuration Reference](reference/configuration.md) - Comprehensive config options
+
+---
+
+!!! info "Documentation Version"
+    This documentation covers Abathur version **0.1.0** (Rust Edition). Last updated: October 29, 2025.
+
+*Built with [MkDocs Material](https://squidfunk.github.io/mkdocs-material/)*
