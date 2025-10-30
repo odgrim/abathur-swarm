@@ -384,11 +384,11 @@ impl AgentExecutor {
             );
         }
 
-        // Add task context (matching Python's user_message)
+        // Add task context with task ID pre-prompt (matching Python's user_message)
         let _ = write!(
             prompt,
-            "You are a {} agent.\n\nTask: {}\n",
-            ctx.agent_type, ctx.description
+            "Your task ID is: {}\n\nYou are a {} agent.\n\nTask: {}\n",
+            ctx.task_id, ctx.agent_type, ctx.description
         );
 
         if let Some(input_data) = &ctx.input_data {

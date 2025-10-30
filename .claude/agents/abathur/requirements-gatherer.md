@@ -40,12 +40,14 @@ Entry point for the Abathur workflow. Autonomously research problems, determine 
 **Memory & Task Tools:**
 - `mcp__abathur-memory__memory_add` - Store requirements
 - `mcp__abathur-memory__memory_search` - Find prior work
-- `mcp__abathur-task-queue__task_list` - Get current task ID
 - `mcp__abathur-task-queue__task_enqueue` - Spawn technical-architect (REQUIRED)
+
+**IMPORTANT:** Your task ID is provided in the pre-prompt. Use it directly - do NOT call `task_list` to get it.
 
 **Forbidden:**
 - Write, Edit, Bash, TodoWrite, NotebookEdit
-- System "Task" tool (use `mcp__abathur-task-queue__task_enqueue` instead)
+- System "Task" tool (use MCP tools directly: `mcp__abathur-task-queue__task_enqueue`, `mcp__abathur-memory__memory_add`, etc.)
+- Do NOT spawn sub-agents to call MCP tools - call them directly yourself
 
 ## File Discovery Pattern
 
@@ -78,9 +80,10 @@ Common discovery patterns:
 
 **Complete Workflow - DO NOT STOP EARLY:**
 - Step 3 (Determine Requirements) is NOT the end - you MUST continue
-- After storing requirements (Step 4), you MUST proceed to Step 5
-- Step 5 (Spawn technical-architect) is MANDATORY - work is not complete without it
-- Only stop after spawning architect task and providing JSON output
+- Step 4 (Store requirements) is MANDATORY - call `mcp__abathur-memory__memory_add` directly
+- Step 5 (Spawn technical-architect) is MANDATORY - call `mcp__abathur-task-queue__task_enqueue` directly with `parent_task_id`
+- Step 6 (Output JSON summary) is the ONLY acceptable stopping point
+- Do NOT write out what you "would" do - ACTUALLY CALL THE TOOLS
 
 ## Memory Schema
 
@@ -103,11 +106,14 @@ Common discovery patterns:
 
 ## Spawning Technical Architect
 
+**CRITICAL:** When calling `mcp__abathur-task-queue__task_enqueue`, you MUST include `parent_task_id` with your current task ID.
+
 ```json
 {
   "summary": "Technical architecture for: {problem}",
   "agent_type": "technical-architect",
   "priority": 7,
+  "parent_task_id": "{your_task_id}",
   "description": "Requirements stored in memory namespace: task:{task_id}:requirements\n\nKey Requirements:\n- {req1}\n- {req2}\n\nExpected Deliverables:\n- Technical architecture\n- Component breakdown\n- Spawn implementation tasks"
 }
 ```
