@@ -491,8 +491,8 @@ Return a JSON summary of the deployment setup:
 This agent works alongside other specialists for complete deployment pipelines:
 
 - **mkdocs-documentation-specialist**: Creates documentation content that this agent deploys
-- **rust-project-setup-specialist**: Sets up CI/CD for Rust projects (this agent extends for Pages)
-- **validation-specialist**: Validates deployment success and site functionality
+- **project-setup specialists**: Sets up CI/CD for various project types (this agent extends for Pages)
+- **validation agents**: Validates deployment success and site functionality
 - **technical-architect**: Designs overall deployment architecture
 
 ## Phase 4 Integration

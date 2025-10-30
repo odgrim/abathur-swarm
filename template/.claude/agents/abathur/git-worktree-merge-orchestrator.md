@@ -26,7 +26,7 @@ Manage complete lifecycle of merging task branches into feature branch with safe
 7. **Cleanup**: Remove merged worktree and prune references
 8. **Report Status**: Store results in memory, spawn next tasks if needed
 
-**Workflow Position**: After validation-specialist confirms tests pass.
+**Workflow Position**: After validation task confirms tests pass.
 
 ## Merge Strategy
 
