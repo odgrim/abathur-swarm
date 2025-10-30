@@ -1,8 +1,9 @@
 use crate::domain::models::{Memory, MemoryType};
 use crate::domain::ports::MemoryRepository;
+use crate::infrastructure::database::utils::parse_datetime;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use sqlx::SqlitePool;
 
 /// SQLite implementation of MemoryRepository
@@ -99,12 +100,10 @@ impl MemoryRepository for MemoryRepositoryImpl {
                         .and_then(|m| serde_json::from_str(m).ok()),
                     created_by: r.created_by,
                     updated_by: r.updated_by,
-                    created_at: DateTime::parse_from_rfc3339(&r.created_at)
-                        .context("failed to parse created_at")?
-                        .with_timezone(&Utc),
-                    updated_at: DateTime::parse_from_rfc3339(&r.updated_at)
-                        .context("failed to parse updated_at")?
-                        .with_timezone(&Utc),
+                    created_at: parse_datetime(&r.created_at)
+                        .context("failed to parse created_at")?,
+                    updated_at: parse_datetime(&r.updated_at)
+                        .context("failed to parse updated_at")?,
                 };
                 Ok(Some(memory))
             }
@@ -177,12 +176,10 @@ impl MemoryRepository for MemoryRepositoryImpl {
                         .and_then(|m| serde_json::from_str(m).ok()),
                     created_by,
                     updated_by,
-                    created_at: DateTime::parse_from_rfc3339(&created_at)
-                        .context("failed to parse created_at")?
-                        .with_timezone(&Utc),
-                    updated_at: DateTime::parse_from_rfc3339(&updated_at)
-                        .context("failed to parse updated_at")?
-                        .with_timezone(&Utc),
+                    created_at: parse_datetime(&created_at)
+                        .context("failed to parse created_at")?,
+                    updated_at: parse_datetime(&updated_at)
+                        .context("failed to parse updated_at")?,
                 })
             })
             .collect();

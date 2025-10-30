@@ -1,10 +1,11 @@
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::domain::models::{Agent, AgentStatus};
 use crate::domain::ports::AgentRepository;
+use crate::infrastructure::database::utils::parse_datetime;
 use crate::infrastructure::database::DatabaseError;
 
 /// `SQLite` implementation of `AgentRepository` using sqlx
@@ -56,23 +57,20 @@ impl AgentRepositoryImpl {
                 .map(|s| Uuid::parse_str(s))
                 .transpose()
                 .map_err(|e| DatabaseError::ParseError(format!("Invalid UUID: {e}")))?,
-            heartbeat_at: DateTime::parse_from_rfc3339(&row.heartbeat_at)
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
-                .with_timezone(&Utc),
+            heartbeat_at: parse_datetime(&row.heartbeat_at)
+                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?,
             memory_usage_bytes: u64::try_from(row.memory_usage_bytes).map_err(|e| {
                 DatabaseError::ParseError(format!("Invalid memory_usage_bytes: {e}"))
             })?,
             cpu_usage_percent: row.cpu_usage_percent,
-            created_at: DateTime::parse_from_rfc3339(&row.created_at)
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
-                .with_timezone(&Utc),
+            created_at: parse_datetime(&row.created_at)
+                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?,
             terminated_at: row
                 .terminated_at
                 .as_ref()
-                .map(|s| DateTime::parse_from_rfc3339(s))
+                .map(|s| parse_datetime(s))
                 .transpose()
-                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?
-                .map(|dt| dt.with_timezone(&Utc)),
+                .map_err(|e| DatabaseError::ParseError(format!("Invalid timestamp: {e}")))?,
         })
     }
 }

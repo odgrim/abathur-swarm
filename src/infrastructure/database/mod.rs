@@ -12,6 +12,7 @@ pub mod errors;
 pub mod memory_repo;
 pub mod session_repo;
 pub mod task_repo;
+pub mod utils;
 
 pub use agent_repo::AgentRepositoryImpl;
 pub use connection::DatabaseConnection;

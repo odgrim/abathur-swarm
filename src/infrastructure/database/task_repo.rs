@@ -1,8 +1,8 @@
 use crate::domain::models::{Task, TaskStatus};
 use crate::domain::ports::task_repository::{TaskFilters, TaskRepository};
-use crate::infrastructure::database::DatabaseError;
+use crate::infrastructure::database::{utils::parse_datetime, DatabaseError};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -47,24 +47,20 @@ impl TaskRepositoryImpl {
             max_retries: row.get::<i64, _>("max_retries") as u32,
             max_execution_timeout_seconds: row.get::<i64, _>("max_execution_timeout_seconds")
                 as u32,
-            submitted_at: DateTime::parse_from_rfc3339(
+            submitted_at: parse_datetime(
                 row.get::<String, _>("submitted_at").as_str(),
-            )?
-            .with_timezone(&Utc),
+            )?,
             started_at: row
                 .get::<Option<String>, _>("started_at")
                 .as_ref()
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.with_timezone(&Utc)),
+                .and_then(|s| parse_datetime(s).ok()),
             completed_at: row
                 .get::<Option<String>, _>("completed_at")
                 .as_ref()
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.with_timezone(&Utc)),
-            last_updated_at: DateTime::parse_from_rfc3339(
+                .and_then(|s| parse_datetime(s).ok()),
+            last_updated_at: parse_datetime(
                 row.get::<String, _>("last_updated_at").as_str(),
-            )?
-            .with_timezone(&Utc),
+            )?,
             created_by: row.get("created_by"),
             parent_task_id: row
                 .get::<Option<String>, _>("parent_task_id")
@@ -78,8 +74,7 @@ impl TaskRepositoryImpl {
             deadline: row
                 .get::<Option<String>, _>("deadline")
                 .as_ref()
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.with_timezone(&Utc)),
+                .and_then(|s| parse_datetime(s).ok()),
             estimated_duration_seconds: row
                 .get::<Option<i64>, _>("estimated_duration_seconds")
                 .map(|v| v as u32),

@@ -184,8 +184,18 @@ When invoked, you must follow these steps:
       - DO NOT attempt to create tasks without agent assignments
    6. **IF missing agents are identified**, you will spawn agent-creator tasks BEFORE implementation tasks (see step 6)
 
-5. **🚨🚨🚨 CRITICAL: Create Git Worktrees for Implementation Tasks 🚨🚨🚨**
+5. **🚨🚨🚨 CRITICAL: Create Git Worktrees Using git-branch Skill 🚨🚨🚨**
    **MANDATORY STEP - DO NOT SKIP**
+
+   **MANDATORY**: Use the git-branch skill to create worktrees. DO NOT use manual git commands.
+
+   Before creating any worktrees, invoke the git-branch skill:
+   ```python
+   # ALWAYS use the skill instead of manual commands
+   Skill("git-branch")
+   ```
+
+   Then follow the skill's documented patterns for creating task worktrees.
 
    To prevent file conflicts when multiple agents work concurrently, you MUST create isolated git worktrees for implementation tasks that modify code.
 
@@ -227,7 +237,9 @@ When invoked, you must follow these steps:
    branch_name = f"{feature_branch_name}/task/{task_id}/{timestamp}"
    worktree_path = f".abathur/worktrees/{task_id}"
 
-   # Create worktree using Bash tool - branching from the FEATURE BRANCH (not main!)
+   # Create worktree using git-branch skill patterns (see git-branch skill documentation)
+   # CRITICAL: Create worktree FROM THE FEATURE BRANCH (third argument)
+   # This ensures task branch forks from feature branch, NOT from main
    bash_command = f'git worktree add -b {branch_name} {worktree_path} {feature_branch_name}'
    result = Bash(command=bash_command, description=f"Create worktree for {task_id} from {feature_branch_name}")
 

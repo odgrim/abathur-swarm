@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde_json::Value;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::errors::DatabaseError;
+use super::utils::parse_datetime;
 use crate::domain::models::{Session, SessionEvent};
 use crate::domain::ports::SessionRepository;
 
@@ -72,12 +73,10 @@ impl SessionRepository for SessionRepositoryImpl {
                     user_id: r.user_id,
                     project_id: r.project_id,
                     state: serde_json::from_str(&r.state).context("failed to deserialize state")?,
-                    created_at: DateTime::parse_from_rfc3339(&r.created_at)
-                        .context("invalid created_at timestamp")?
-                        .with_timezone(&Utc),
-                    updated_at: DateTime::parse_from_rfc3339(&r.updated_at)
-                        .context("invalid updated_at timestamp")?
-                        .with_timezone(&Utc),
+                    created_at: parse_datetime(&r.created_at)
+                        .context("invalid created_at timestamp")?,
+                    updated_at: parse_datetime(&r.updated_at)
+                        .context("invalid updated_at timestamp")?,
                 };
                 Ok(Some(session))
             }
@@ -139,9 +138,8 @@ impl SessionRepository for SessionRepositoryImpl {
                     actor: r.actor,
                     content: serde_json::from_str(&r.content)
                         .context("failed to deserialize event content")?,
-                    timestamp: DateTime::parse_from_rfc3339(&r.timestamp)
-                        .context("invalid timestamp")?
-                        .with_timezone(&Utc),
+                    timestamp: parse_datetime(&r.timestamp)
+                        .context("invalid timestamp")?,
                 })
             })
             .collect();

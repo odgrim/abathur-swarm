@@ -1,12 +1,81 @@
 ---
 name: git-branch
-description: Create and manage git worktrees in .abathur directory for parallel branch development
+description: ALWAYS use this skill to create git branches/worktrees instead of manual git commands. Required for all branch creation by agents.
 version: 3.0.0
 ---
+
+## ⚠️ MANDATORY USAGE FOR ALL AGENTS
+
+**ALL agents MUST use this skill when creating branches or worktrees.**
+
+**NEVER use manual git commands** like:
+- `git branch`
+- `git checkout -b`
+- `git worktree add`
+
+**ALWAYS invoke this skill instead** using the Skill tool.
+
+This skill is REQUIRED for:
+- Creating feature branches (technical-requirements-specialist)
+- Creating task branches (task-planner)
+- Creating any isolated working directory
+- Managing parallel development workflows
+
+**How to use:**
+```bash
+# Instead of: git worktree add -b feature/my-feature .abathur/features/my-feature
+# Do this:
+Skill("git-branch")
+# Then follow the skill's documented commands
+```
 
 # git-branch Skill
 
 This skill provides standardized commands for creating and managing git worktrees. Worktrees enable parallel development on multiple branches without switching contexts or stashing changes.
+
+## Branch Hierarchy
+
+**CRITICAL: Understand the two-level branch hierarchy:**
+
+```
+main (production)
+├── feature/feature-name-1 (forked from main)
+│   ├── feature/feature-name-1/task/task-001/YYYY-MM-DD-HH-MM-SS (forked from feature branch)
+│   ├── feature/feature-name-1/task/task-002/YYYY-MM-DD-HH-MM-SS (forked from feature branch)
+│   └── feature/feature-name-1/task/task-003/YYYY-MM-DD-HH-MM-SS (forked from feature branch)
+├── feature/feature-name-2 (forked from main)
+│   ├── feature/feature-name-2/task/task-001/YYYY-MM-DD-HH-MM-SS (forked from feature branch)
+│   └── feature/feature-name-2/task/task-002/YYYY-MM-DD-HH-MM-SS (forked from feature branch)
+```
+
+**Two types of branches:**
+
+1. **Feature Branches** (created by technical-requirements-specialist)
+   - Format: `feature/descriptive-name`
+   - Fork from: `main` branch
+   - Merge to: `main` branch
+   - Purpose: Container for all work related to a feature
+   - Location: `.abathur/features/descriptive-name`
+   - Example: `feature/user-authentication` forked from `main`
+
+2. **Task Branches** (created by task-planner)
+   - Format: `feature/feature-name/task/task-name/YYYY-MM-DD-HH-MM-SS`
+   - Fork from: The parent `feature/feature-name` branch (NOT main!)
+   - Merge to: The parent `feature/feature-name` branch (NOT main!)
+   - Purpose: Isolated work for a single atomic task
+   - Location: `.abathur/worktrees/task-name`
+   - Example: `feature/user-authentication/task/login-validation/2025-10-29-14-30-00` forked from `feature/user-authentication`
+
+**Workflow:**
+1. Feature branch is created from main
+2. Multiple task branches are created from the feature branch
+3. Task branches merge back into their feature branch
+4. Feature branch merges into main when all tasks complete
+
+**NEVER:**
+- Create task branches from main (they must fork from feature branch)
+- Merge task branches to main (they must merge to feature branch)
+- Create feature branches from other feature branches
 
 ## When to Use This Skill
 
@@ -54,10 +123,10 @@ All worktrees are created in the `.abathur/` directory with the following struct
 
 ### Create Feature Worktree (for entire feature)
 
-Creates a feature branch as a git worktree for all work related to a feature:
+Creates a feature branch as a git worktree **forked from main**:
 
 ```bash
-# Create feature worktree
+# Create feature worktree FROM MAIN BRANCH
 FEATURE_NAME="user-authentication"
 FEATURE_BRANCH="feature/$FEATURE_NAME"
 WORKTREE_PATH=".abathur/features/$FEATURE_NAME"
@@ -65,11 +134,12 @@ WORKTREE_PATH=".abathur/features/$FEATURE_NAME"
 # Ensure .abathur/features directory exists
 mkdir -p .abathur/features
 
-# Create feature worktree from main
+# CRITICAL: Create feature worktree from main (no third argument = current branch, which should be main)
 git worktree add -b "$FEATURE_BRANCH" "$WORKTREE_PATH"
 
 # Verify creation
 test -d "$WORKTREE_PATH" && echo "Feature worktree created at $WORKTREE_PATH"
+git branch -vv | grep "$FEATURE_BRANCH"  # Should show it's based on main
 
 # Navigate to worktree and start working
 cd "$WORKTREE_PATH"
@@ -77,11 +147,11 @@ cd "$WORKTREE_PATH"
 
 ### Create Task Worktree (for individual task)
 
-Creates a task-specific worktree that branches from a feature branch:
+Creates a task-specific worktree **forked from the parent feature branch**:
 
 ```bash
-# Create task worktree from feature branch
-FEATURE_BRANCH="feature/user-authentication"
+# CRITICAL: Create task worktree from FEATURE BRANCH (not main!)
+FEATURE_BRANCH="feature/user-authentication"  # The parent feature branch
 TASK_NAME="domain-model"
 TIMESTAMP=$(date +%Y-%m-%d-%H-%M-%S)
 TASK_BRANCH="$FEATURE_BRANCH/task/$TASK_NAME/$TIMESTAMP"
@@ -90,11 +160,12 @@ WORKTREE_PATH=".abathur/worktrees/$TASK_NAME"
 # Ensure .abathur/worktrees directory exists
 mkdir -p .abathur/worktrees
 
-# Create task worktree from feature branch (not main!)
+# CRITICAL: Third argument specifies the source branch (feature branch, NOT main!)
 git worktree add -b "$TASK_BRANCH" "$WORKTREE_PATH" "$FEATURE_BRANCH"
 
 # Verify creation
 test -d "$WORKTREE_PATH" && echo "Task worktree created at $WORKTREE_PATH"
+git branch -vv | grep "$TASK_BRANCH"  # Should show it's based on feature branch
 
 # Navigate to worktree and start working
 cd "$WORKTREE_PATH"

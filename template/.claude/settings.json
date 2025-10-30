@@ -3,9 +3,7 @@
   "permissions": {
     "allow": [
       "mcp__abathur-memory__*",
-      "mcp__abathur-task-queue__*",
-      "WebFetch",
-      "WebSearch"
+      "mcp__abathur-task-queue__*"
     ]
   }
 }
