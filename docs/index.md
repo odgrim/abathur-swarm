@@ -1,31 +1,76 @@
-# Abathur CLI Documentation
+# Welcome to Abathur Documentation
 
-Welcome to the Abathur CLI documentation! Abathur is a powerful CLI tool for orchestrating multi-agent systems with built-in task queue management, hierarchical memory, and MCP integration.
+**Abathur** is a powerful AI orchestration CLI tool that provides intelligent task queue management, swarm orchestration, and Model Context Protocol (MCP) integration.
 
-## Quick Navigation
+## Overview
 
-- **[Getting Started](getting-started/installation.md)** - Install and configure Abathur
-- **[Tutorials](tutorials/)** - Step-by-step guides
-- **[How-To Guides](how-to/)** - Recipes for specific tasks
-- **[Reference](reference/)** - CLI commands and configuration
-- **[Explanation](explanation/)** - Architecture and concepts
-- **[Contributing](contributing/)** - Development guidelines
+Abathur enables developers to:
 
-## What is Abathur?
+- **Manage Complex Tasks**: Intelligent task queue with dependency resolution and priority management
+- **Orchestrate AI Agents**: Swarm-based orchestration for collaborative AI workflows
+- **Integrate MCP Servers**: Seamless integration with Model Context Protocol for memory and task management
+- **Execute Loops**: Autonomous execution loops for long-running workflows
 
-Abathur is a Rust-based CLI tool designed for orchestrating complex multi-agent workflows. Key features include:
+## Quick Links
 
-- **Task Queue Management**: Priority-based task scheduling with dependency resolution
-- **Swarm Orchestration**: Coordinate multiple specialized agents working in parallel
-- **Hierarchical Memory**: Semantic, episodic, and procedural memory with namespace organization
-- **MCP Integration**: Connect to Model Context Protocol servers for extended capabilities
-- **Loop Execution**: Automated workflows with conditional logic and error handling
+- [Installation Guide](getting-started/installation.md) - Get started with Abathur
+- [Quickstart Tutorial](getting-started/quickstart.md) - Your first Abathur workflow
+- [CLI Commands Reference](reference/cli-commands.md) - Complete command reference
+- [Architecture Overview](explanation/architecture.md) - Understand Abathur's design
 
-## Getting Started
+## Key Features
 
-1. [Install Abathur](getting-started/installation.md)
-2. [Complete the Quickstart](getting-started/quickstart.md)
-3. [Configure your environment](getting-started/configuration.md)
-4. [Run your first task](tutorials/first-task.md)
+### Task Queue Management
+Sophisticated task queue system with support for:
 
-For questions or issues, visit our [GitHub repository](https://github.com/your-org/abathur).
+- Task dependencies and dependency resolution
+- Priority-based execution
+- Task status tracking and monitoring
+- Cancellation with cascade support
+
+### Swarm Orchestration
+Coordinate multiple AI agents to work together:
+
+- Agent specialization and role assignment
+- Inter-agent communication
+- Parallel task execution
+- Result aggregation
+
+### MCP Integration
+Built-in Model Context Protocol servers:
+
+- **Memory Server**: Hierarchical memory management (semantic, episodic, procedural)
+- **Task Queue Server**: Task management via MCP
+- **HTTP MCP Server**: JSON-RPC over HTTP transport
+
+### Autonomous Loops
+Execute long-running workflows autonomously:
+
+- Continuous execution monitoring
+- Error handling and recovery
+- Progress tracking
+- Graceful shutdown
+
+## Documentation Structure
+
+This documentation follows the [Diátaxis framework](https://diataxis.fr/):
+
+- **Tutorials**: Step-by-step learning paths for beginners
+- **How-To Guides**: Task-oriented guides for specific problems
+- **Reference**: Technical reference and API documentation
+- **Explanation**: Conceptual explanations of design decisions
+
+## Getting Help
+
+- Browse the [Tutorials](tutorials/index.md) to learn by example
+- Check [How-To Guides](how-to/index.md) for specific tasks
+- Explore [Reference](reference/index.md) for complete API documentation
+- Read [Explanation](explanation/index.md) to understand architecture
+
+## Contributing
+
+Abathur is an open-source project. We welcome contributions! See our [Contributing Guide](contributing/index.md) to get started.
+
+---
+
+*This documentation is built with [MkDocs](https://www.mkdocs.org/) and [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/).*
