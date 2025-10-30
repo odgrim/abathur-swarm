@@ -1,0 +1,120 @@
+name: Deploy Documentation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'requirements.txt'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:  # Manual trigger for testing and ad-hoc deployments
+
+permissions:
+  contents: write  # Required for gh-pages deployment
+
+env:
+  PYTHON_VERSION: '3.x'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Prevent deployment on forked repositories
+    if: github.event.repository.fork == false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for git info plugin and proper git context
+
+      - name: Configure Git Credentials
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up dependency caching for MkDocs Material
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: mkdocs-material-${{ github.ref }}-${{ github.run_id }}
+          restore-keys: |
+            mkdocs-material-${{ github.ref }}
+            mkdocs-material-
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate MkDocs configuration
+        run: |
+          echo "Validating MkDocs configuration..."
+          mkdocs --version
+          python -c "import yaml; yaml.safe_load(open('mkdocs.yml'))"
+          echo "Configuration is valid"
+
+      - name: Build documentation (validation)
+        run: |
+          echo "Building documentation for validation..."
+          mkdocs build --strict --verbose
+          echo "Build successful"
+
+      - name: Verify build output
+        run: |
+          if [ ! -d "site" ]; then
+            echo "Error: Build directory 'site' not found"
+            exit 1
+          fi
+          if [ ! -f "site/index.html" ]; then
+            echo "Error: index.html not generated"
+            exit 1
+          fi
+          echo "Build output verified successfully"
+
+      - name: Deploy to GitHub Pages
+        run: |
+          echo "Deploying to GitHub Pages..."
+          mkdocs gh-deploy --force --verbose
+          echo "Deployment completed"
+
+      - name: Post-deployment summary
+        if: success()
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Documentation successfully deployed to GitHub Pages" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Actor:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📚 Site URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_Note: Allow 1-2 minutes for GitHub Pages to update_" >> $GITHUB_STEP_SUMMARY
+
+      - name: Failure notification
+        if: failure()
+        run: |
+          echo "## Deployment Failed ❌" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The documentation deployment encountered an error." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Please check the workflow logs for details." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
