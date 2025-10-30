@@ -1,0 +1,190 @@
+# Abathur Documentation Configuration
+# MkDocs configuration with Material theme for Abathur AI orchestration CLI
+
+# Site Metadata
+site_name: Abathur Documentation
+site_url: https://<username>.github.io/abathur-swarm/
+site_author: Abathur Team
+site_description: Comprehensive documentation for Abathur AI orchestration CLI - task queue, swarm orchestration, and MCP integration
+repo_url: https://github.com/<username>/abathur-swarm
+repo_name: abathur-swarm
+edit_uri: edit/main/docs/
+
+# Theme Configuration
+theme:
+  name: material
+  language: en
+
+  # Color Palette (Light/Dark Mode)
+  palette:
+    # Light mode
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+
+    # Dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+  # Typography
+  font:
+    text: Roboto
+    code: Roboto Mono
+
+  # Material Features
+  features:
+    # Navigation
+    - navigation.instant          # Instant loading (SPA-like)
+    - navigation.instant.prefetch # Prefetch pages on hover
+    - navigation.instant.progress # Show progress indicator
+    - navigation.tracking         # Update URL with active anchor
+    - navigation.tabs             # Top-level sections as tabs
+    - navigation.tabs.sticky      # Tabs always visible
+    - navigation.sections         # Group navigation items
+    - navigation.expand           # Expand navigation by default
+    - navigation.path             # Breadcrumbs
+    - navigation.indexes          # Section index pages
+    - navigation.top              # Back-to-top button
+    - navigation.footer           # Previous/next page footer
+
+    # Table of Contents
+    - toc.follow                  # TOC follows scroll position
+    - toc.integrate               # Integrate TOC into navigation
+
+    # Search
+    - search.suggest              # Search suggestions
+    - search.highlight            # Highlight search terms
+    - search.share                # Share search link
+
+    # Header
+    - header.autohide             # Hide header on scroll
+
+    # Content
+    - content.code.copy           # Copy button for code blocks
+    - content.code.annotate       # Inline annotations in code
+    - content.tabs.link           # Link content tabs
+
+  # Icons
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+    view: material/eye
+
+# Plugins
+plugins:
+  - search        # Built-in search
+  - tags          # Tag support for content
+
+# Markdown Extensions
+markdown_extensions:
+  # Basic Extensions
+  - abbr                          # Abbreviations with tooltips
+  - admonition                    # Callout blocks (note, warning, tip)
+  - attr_list                     # Add HTML attributes to elements
+  - def_list                      # Definition lists
+  - footnotes                     # Footnote support
+  - md_in_html                    # Markdown in HTML blocks
+  - tables                        # Table support
+  - toc:                          # Table of contents
+      permalink: true             # Add permalink anchors
+      toc_depth: 3                # Maximum heading depth
+
+  # Pymdown Extensions
+  - pymdownx.arithmatex:          # Math notation support
+      generic: true
+  - pymdownx.betterem             # Better emphasis handling
+  - pymdownx.caret                # Superscript (^text^)
+  - pymdownx.mark                 # Highlighting (==text==)
+  - pymdownx.tilde                # Subscript (~text~) and strikethrough (~~text~~)
+  - pymdownx.critic               # Track changes markup
+  - pymdownx.details              # Collapsible details blocks
+  - pymdownx.emoji:               # Emoji support
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:           # Code highlighting
+      anchor_linenums: true       # Anchor line numbers
+      line_spans: __span          # Line span format
+      pygments_lang_class: true   # Add language class
+  - pymdownx.inlinehilite         # Inline code highlighting
+  - pymdownx.keys                 # Keyboard key rendering
+  - pymdownx.smartsymbols         # Smart symbols (arrows, etc.)
+  - pymdownx.snippets:            # Include external files
+      auto_append:
+        - includes/abbreviations.md
+  - pymdownx.superfences:         # Enhanced code blocks with Mermaid
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:              # Content tabs
+      alternate_style: true
+  - pymdownx.tasklist:            # Task list support
+      custom_checkbox: true
+
+# Navigation Structure (Diátaxis Framework)
+nav:
+  - Home: index.md
+
+  # Getting Started (Quick orientation)
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+      - Configuration: getting-started/configuration.md
+
+  # Tutorials (Learning-oriented)
+  - Tutorials:
+      - tutorials/index.md
+      - Your First Task: tutorials/first-task.md
+      - Swarm Orchestration: tutorials/swarm-orchestration.md
+      - Loop Execution: tutorials/loop-execution.md
+      - MCP Integration: tutorials/mcp-integration.md
+
+  # How-To Guides (Task-oriented)
+  - How-To Guides:
+      - how-to/index.md
+      - Task Management: how-to/task-management.md
+      - Agent Development: how-to/agent-development.md
+      - Memory System: how-to/memory-system.md
+      - Troubleshooting: how-to/troubleshooting.md
+
+  # Reference (Information-oriented)
+  - Reference:
+      - reference/index.md
+      - CLI Commands: reference/cli-commands.md
+      - Configuration: reference/configuration.md
+      - API: reference/api.md
+      - MCP Servers: reference/mcp-servers.md
+
+  # Explanation (Understanding-oriented)
+  - Explanation:
+      - explanation/index.md
+      - Architecture: explanation/architecture.md
+      - Design Patterns: explanation/design-patterns.md
+      - Task Queue: explanation/task-queue.md
+      - Swarm Orchestration: explanation/swarm-orchestration.md
+      - Memory System: explanation/memory-system.md
+
+  # Contributing
+  - Contributing:
+      - contributing/index.md
+      - Development: contributing/development.md
+      - Testing: contributing/testing.md
+      - Style Guide: contributing/style-guide.md
+
+# Extra Configuration
+extra:
+  # Social Links
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/<username>/abathur-swarm
+
+  # Documentation Versioning (using mike)
+  version:
+    provider: mike
