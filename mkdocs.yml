@@ -1,5 +1,5 @@
-# MkDocs Configuration for Abathur Documentation
-# Material for MkDocs theme with comprehensive features
+# Abathur Documentation Configuration
+# MkDocs configuration with Material theme for Abathur AI orchestration CLI
 
 # Site Metadata
 site_name: Abathur Documentation
@@ -10,14 +10,14 @@ repo_url: https://github.com/<username>/abathur-swarm
 repo_name: abathur-swarm
 edit_uri: edit/main/docs/
 
-# Material Theme Configuration
+# Theme Configuration
 theme:
   name: material
   language: en
 
-  # Color Palette - Dark/Light Mode Toggle
+  # Color Palette (Light/Dark Mode)
   palette:
-    # Light Mode
+    # Light mode
     - scheme: default
       primary: indigo
       accent: indigo
@@ -25,7 +25,7 @@ theme:
         icon: material/brightness-7
         name: Switch to dark mode
 
-    # Dark Mode
+    # Dark mode
     - scheme: slate
       primary: indigo
       accent: indigo
@@ -38,40 +38,38 @@ theme:
     text: Roboto
     code: Roboto Mono
 
-  # Navigation and Content Features
+  # Material Features
   features:
-    # Instant Navigation (SPA-like experience)
-    - navigation.instant
-    - navigation.instant.prefetch
-    - navigation.instant.progress
-    - navigation.tracking
-
-    # Navigation Structure
-    - navigation.tabs
-    - navigation.tabs.sticky
-    - navigation.sections
-    - navigation.expand
-    - navigation.path
-    - navigation.indexes
-    - navigation.top
-    - navigation.footer
+    # Navigation
+    - navigation.instant          # Instant loading (SPA-like)
+    - navigation.instant.prefetch # Prefetch pages on hover
+    - navigation.instant.progress # Show progress indicator
+    - navigation.tracking         # Update URL with active anchor
+    - navigation.tabs             # Top-level sections as tabs
+    - navigation.tabs.sticky      # Tabs always visible
+    - navigation.sections         # Group navigation items
+    - navigation.expand           # Expand navigation by default
+    - navigation.path             # Breadcrumbs
+    - navigation.indexes          # Section index pages
+    - navigation.top              # Back-to-top button
+    - navigation.footer           # Previous/next page footer
 
     # Table of Contents
-    - toc.follow
-    - toc.integrate
+    - toc.follow                  # TOC follows scroll position
+    - toc.integrate               # Integrate TOC into navigation
 
-    # Search Features
-    - search.suggest
-    - search.highlight
-    - search.share
+    # Search
+    - search.suggest              # Search suggestions
+    - search.highlight            # Highlight search terms
+    - search.share                # Share search link
 
     # Header
-    - header.autohide
+    - header.autohide             # Hide header on scroll
 
-    # Content Features
-    - content.code.copy
-    - content.code.annotate
-    - content.tabs.link
+    # Content
+    - content.code.copy           # Copy button for code blocks
+    - content.code.annotate       # Inline annotations in code
+    - content.tabs.link           # Link content tabs
 
   # Icons
   icon:
@@ -81,120 +79,104 @@ theme:
 
 # Plugins
 plugins:
-  - search
-  - tags
+  - search        # Built-in search
+  - tags          # Tag support for content
 
 # Markdown Extensions
 markdown_extensions:
-  # Standard Extensions
-  - abbr
-  - admonition
-  - attr_list
-  - def_list
-  - footnotes
-  - md_in_html
-  - tables
-  - toc:
-      permalink: true
-      toc_depth: 3
+  # Basic Extensions
+  - abbr                          # Abbreviations with tooltips
+  - admonition                    # Callout blocks (note, warning, tip)
+  - attr_list                     # Add HTML attributes to elements
+  - def_list                      # Definition lists
+  - footnotes                     # Footnote support
+  - md_in_html                    # Markdown in HTML blocks
+  - tables                        # Table support
+  - toc:                          # Table of contents
+      permalink: true             # Add permalink anchors
+      toc_depth: 3                # Maximum heading depth
 
   # Pymdown Extensions
-  - pymdownx.arithmatex:
+  - pymdownx.arithmatex:          # Math notation support
       generic: true
-  - pymdownx.betterem
-  - pymdownx.caret
-  - pymdownx.mark
-  - pymdownx.tilde
-  - pymdownx.critic
-  - pymdownx.details
-
-  # Emoji Support
-  - pymdownx.emoji:
+  - pymdownx.betterem             # Better emphasis handling
+  - pymdownx.caret                # Superscript (^text^)
+  - pymdownx.mark                 # Highlighting (==text==)
+  - pymdownx.tilde                # Subscript (~text~) and strikethrough (~~text~~)
+  - pymdownx.critic               # Track changes markup
+  - pymdownx.details              # Collapsible details blocks
+  - pymdownx.emoji:               # Emoji support
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
-
-  # Code Highlighting
-  - pymdownx.highlight:
-      anchor_linenums: true
-      line_spans: __span
-      pygments_lang_class: true
-  - pymdownx.inlinehilite
-
-  # Keyboard Keys
-  - pymdownx.keys
-
-  # Smart Symbols
-  - pymdownx.smartsymbols
-
-  # Snippets (for reusable content)
-  - pymdownx.snippets:
+  - pymdownx.highlight:           # Code highlighting
+      anchor_linenums: true       # Anchor line numbers
+      line_spans: __span          # Line span format
+      pygments_lang_class: true   # Add language class
+  - pymdownx.inlinehilite         # Inline code highlighting
+  - pymdownx.keys                 # Keyboard key rendering
+  - pymdownx.smartsymbols         # Smart symbols (arrows, etc.)
+  - pymdownx.snippets:            # Include external files
       auto_append:
         - includes/abbreviations.md
-
-  # Superfences (Code Blocks with Mermaid Support)
-  - pymdownx.superfences:
+  - pymdownx.superfences:         # Enhanced code blocks with Mermaid
       custom_fences:
         - name: mermaid
           class: mermaid
           format: !!python/name:pymdownx.superfences.fence_code_format
-
-  # Tabbed Content
-  - pymdownx.tabbed:
+  - pymdownx.tabbed:              # Content tabs
       alternate_style: true
-
-  # Task Lists
-  - pymdownx.tasklist:
+  - pymdownx.tasklist:            # Task list support
       custom_checkbox: true
 
 # Navigation Structure (Diátaxis Framework)
 nav:
   - Home: index.md
 
-  # Getting Started
+  # Getting Started (Quick orientation)
   - Getting Started:
-    - getting-started/installation.md
-    - getting-started/quickstart.md
-    - getting-started/configuration.md
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+      - Configuration: getting-started/configuration.md
 
-  # Tutorials (Learning-Oriented)
+  # Tutorials (Learning-oriented)
   - Tutorials:
-    - tutorials/index.md
-    - tutorials/first-task.md
-    - tutorials/swarm-orchestration.md
-    - tutorials/loop-execution.md
-    - tutorials/mcp-integration.md
+      - tutorials/index.md
+      - Your First Task: tutorials/first-task.md
+      - Swarm Orchestration: tutorials/swarm-orchestration.md
+      - Loop Execution: tutorials/loop-execution.md
+      - MCP Integration: tutorials/mcp-integration.md
 
-  # How-To Guides (Task-Oriented)
+  # How-To Guides (Task-oriented)
   - How-To Guides:
-    - how-to/index.md
-    - how-to/task-management.md
-    - how-to/agent-development.md
-    - how-to/memory-system.md
-    - how-to/troubleshooting.md
+      - how-to/index.md
+      - Task Management: how-to/task-management.md
+      - Agent Development: how-to/agent-development.md
+      - Memory System: how-to/memory-system.md
+      - Troubleshooting: how-to/troubleshooting.md
 
-  # Reference (Information-Oriented)
+  # Reference (Information-oriented)
   - Reference:
-    - reference/index.md
-    - reference/cli-commands.md
-    - reference/configuration.md
-    - reference/api.md
-    - reference/mcp-servers.md
+      - reference/index.md
+      - CLI Commands: reference/cli-commands.md
+      - Configuration: reference/configuration.md
+      - API: reference/api.md
+      - MCP Servers: reference/mcp-servers.md
 
-  # Explanation (Understanding-Oriented)
+  # Explanation (Understanding-oriented)
   - Explanation:
-    - explanation/index.md
-    - explanation/architecture.md
-    - explanation/design-patterns.md
-    - explanation/task-queue.md
-    - explanation/swarm-orchestration.md
-    - explanation/memory-system.md
+      - explanation/index.md
+      - Architecture: explanation/architecture.md
+      - Design Patterns: explanation/design-patterns.md
+      - Task Queue: explanation/task-queue.md
+      - Swarm Orchestration: explanation/swarm-orchestration.md
+      - Memory System: explanation/memory-system.md
 
   # Contributing
   - Contributing:
-    - contributing/index.md
-    - contributing/development.md
-    - contributing/testing.md
-    - contributing/style-guide.md
+      - contributing/index.md
+      - Development: contributing/development.md
+      - Testing: contributing/testing.md
+      - Style Guide: contributing/style-guide.md
 
 # Extra Configuration
 extra:
@@ -203,9 +185,6 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/<username>/abathur-swarm
 
-  # Documentation Versioning (mike)
+  # Documentation Versioning (using mike)
   version:
     provider: mike
-
-# Copyright
-copyright: Copyright &copy; 2025 Abathur Team
