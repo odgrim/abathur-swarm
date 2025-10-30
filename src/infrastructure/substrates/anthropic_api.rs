@@ -182,8 +182,6 @@ impl LlmSubstrate for AnthropicApiSubstrate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
-    use crate::domain::ports::ExecutionParameters;
 
     #[test]
     fn test_config_default() {

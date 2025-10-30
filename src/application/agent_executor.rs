@@ -431,6 +431,7 @@ mod tests {
     use crate::domain::ports::{
         HealthStatus, LlmSubstrate, McpClient, McpError,
         McpToolRequest, McpToolResponse, SubstrateTokenUsage,
+        SubstrateResponse, StopReason,
     };
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicU32, Ordering};

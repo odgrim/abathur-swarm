@@ -164,7 +164,7 @@ impl ConfigLoader {
 mod tests {
     use super::*;
     use crate::domain::models::config::{
-        DatabaseConfig, LoggingConfig, RateLimitConfig, RetryConfig,
+        DatabaseConfig, LoggingConfig, RateLimitConfig, RetryConfig, SubstratesConfig,
     };
     use std::env;
 
@@ -231,10 +231,7 @@ logging:
                 max_backoff_ms: 30000,
             },
             mcp_servers: vec![],
-            resource_limits: ResourceLimitsConfig {
-                per_agent_memory_mb: 512,
-                total_memory_mb: 4096,
-            },
+            substrates: SubstratesConfig::default(),
         };
         assert!(ConfigLoader::validate(&config).is_ok());
     }
@@ -387,22 +384,23 @@ logging:
         ));
     }
 
-    #[test]
-    fn test_validate_invalid_resource_limits() {
-        let mut config = Config::default();
-        config.resource_limits.per_agent_memory_mb = 8192;
-        config.resource_limits.total_memory_mb = 4096;
-
-        let result = ConfigLoader::validate(&config);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ConfigError::ValidationFailed(msg) => {
-                assert!(msg.contains("per_agent_memory_mb"));
-                assert!(msg.contains("total_memory_mb"));
-            }
-            _ => panic!("Expected ValidationFailed error"),
-        }
-    }
+    // Resource limits feature has been removed
+    // #[test]
+    // fn test_validate_invalid_resource_limits() {
+    //     let mut config = Config::default();
+    //     config.resource_limits.per_agent_memory_mb = 8192;
+    //     config.resource_limits.total_memory_mb = 4096;
+    //
+    //     let result = ConfigLoader::validate(&config);
+    //     assert!(result.is_err());
+    //     match result.unwrap_err() {
+    //         ConfigError::ValidationFailed(msg) => {
+    //             assert!(msg.contains("per_agent_memory_mb"));
+    //             assert!(msg.contains("total_memory_mb"));
+    //         }
+    //         _ => panic!("Expected ValidationFailed error"),
+    //     }
+    // }
 
     #[test]
     fn test_env_override() {

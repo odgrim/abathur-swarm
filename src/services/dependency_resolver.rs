@@ -354,7 +354,7 @@ fn calculate_depth_recursive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::task::{DependencyType, TaskSource, TaskStatus};
+    use crate::domain::models::task::{DependencyType, TaskSource, TaskStatus, ValidationRequirement};
     use chrono::Utc;
 
     fn create_test_task(id: &str, dependencies: Option<Vec<&str>>) -> Task {
@@ -391,6 +391,13 @@ mod tests {
             feature_branch: None,
             task_branch: None,
             worktree_path: None,
+            validation_requirement: ValidationRequirement::None,
+            validation_task_id: None,
+            validating_task_id: None,
+            remediation_count: 0,
+            is_remediation: false,
+            workflow_state: None,
+            workflow_expectations: None,
         }
     }
 

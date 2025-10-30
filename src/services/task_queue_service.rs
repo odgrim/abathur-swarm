@@ -793,7 +793,7 @@ mod tests {
         let mut task2 = create_test_task("Task 2");
         task2.dependencies = Some(vec![task1_id]);
         task2.status = TaskStatus::Blocked;
-        let task2_id = task2.id;
+        let _task2_id = task2.id;
 
         // Mock get_dependents to return task2 when task1 completes
         let task2_clone = task2.clone();

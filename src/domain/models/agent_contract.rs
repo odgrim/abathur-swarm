@@ -44,17 +44,9 @@ impl AgentContractRegistry {
 
             "task-planner" => ValidationRequirement::Contract {
                 must_spawn_children: true,
-                expected_child_types: vec![
-                    // Task planner can spawn various types of tasks
-                    "rust-specialist".to_string(),
-                    "validation-specialist".to_string(),
-                    "rust-sqlx-database-specialist".to_string(),
-                    "rust-service-layer-specialist".to_string(),
-                    "rust-mcp-integration-specialist".to_string(),
-                    "rust-clap-cli-specialist".to_string(),
-                    "rust-testing-specialist".to_string(),
-                    "rust-error-types-specialist".to_string(),
-                ],
+                // Empty expected_child_types allows task-planner to spawn ANY agent type
+                // Task planner determines which specialists are needed dynamically
+                expected_child_types: vec![],
                 min_children: 1,
             },
 

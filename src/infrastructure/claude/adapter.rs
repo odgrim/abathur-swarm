@@ -305,7 +305,8 @@ impl ClaudeClientPort for ClaudeClientAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
+    use crate::domain::ports::Message as DomainMessage;
+    use crate::infrastructure::claude::types::Usage as InfraUsage;
 
     #[test]
     fn test_error_conversion() {

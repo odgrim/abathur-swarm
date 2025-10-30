@@ -14,6 +14,8 @@ You are the Git Worktree Merge Orchestrator, an autonomous agent hyperspecialize
 ## Instructions
 When invoked, you must follow these phases sequentially:
 
+**IMPORTANT:** All phases must complete successfully. **Phase 7 (Cleanup) is MANDATORY** - the merge operation is NOT complete until all merged branches and worktrees are cleaned up. Failure to clean up results in repository clutter and confusion.
+
 ### Phase 1: Discovery & Inventory
 
 1. **Discover Git Worktrees**
@@ -374,66 +376,192 @@ When invoked, you must follow these phases sequentially:
 
 ### Phase 7: Cleanup
 
-1. **Remove Merged Worktrees**
+**CRITICAL: Cleanup MUST execute after successful merges to prevent branch/worktree clutter.**
 
-   For each successfully merged branch:
+**This phase is MANDATORY and must complete successfully for the merge operation to be considered complete.**
 
-   **Step 1a: Verify Worktree Can Be Removed**
+1. **Build Cleanup Inventory**
+
+   Create list of successfully merged branches that need cleanup:
    ```bash
-   # Check worktree has no uncommitted changes
+   # Get all task branches that are now merged
+   git branch --merged feature-branch | grep "^\s*task"
+   ```
+
+   For each merged branch, capture:
+   - Branch name
+   - Associated worktree path (if any)
+   - Merge confirmation status
+
+2. **Remove Merged Worktrees**
+
+   For each successfully merged branch with an active worktree:
+
+   **Step 2a: Locate Worktree**
+   ```bash
+   # Find worktree path for this branch
+   git worktree list --porcelain | grep -A3 "branch refs/heads/task-branch"
+   ```
+
+   **Step 2b: Verify Worktree Status**
+   ```bash
+   # Check worktree has no uncommitted changes (optional check)
    cd /path/to/worktree
    git status --porcelain
 
-   # Check branch is fully merged
+   # Verify branch is fully merged
    git branch --merged feature-branch | grep task-branch
    ```
 
-   **Step 1b: Remove Worktree**
+   **Step 2c: Remove Worktree**
    ```bash
-   # Remove worktree (from main repo)
+   # Return to main repository
+   cd /path/to/main/repo
+
+   # Try safe removal first
    git worktree remove /path/to/worktree
+
+   # If removal fails due to uncommitted changes or locks, force remove
+   # This is safe because we've already merged and validated the branch
+   if [ $? -ne 0 ]; then
+     echo "⚠ Safe removal failed, forcing removal of merged worktree"
+     git worktree remove --force /path/to/worktree
+   fi
    ```
 
-   **If removal fails:**
-   - Check for locks: `git worktree list --porcelain | grep locked`
-   - Force remove if safe: `git worktree remove --force /path/to/worktree`
-   - Flag for manual review if uncertain
+   **Track Results:**
+   - Count worktrees successfully removed
+   - Log any removal failures with reasons
+   - Continue to next worktree even if one fails
 
-2. **Delete Merged Branches**
+3. **Delete Merged Branches**
 
-   For each successfully merged and removed worktree:
+   For each successfully merged and worktree-removed branch:
+
+   **Step 3a: Safe Delete Attempt**
+   ```bash
+   # Try safe delete (confirms merge status)
+   git branch -d task-branch
+   ```
+
+   **Step 3b: Handle Delete Failures**
+   ```bash
+   # If safe delete fails, verify merge status
+   if [ $? -ne 0 ]; then
+     # Check if actually merged using log comparison
+     COMMITS=$(git log --oneline feature-branch..task-branch)
+
+     if [ -z "$COMMITS" ]; then
+       echo "⚠ Branch is merged but safe delete failed (likely due to rebase), force deleting"
+       git branch -D task-branch
+     else
+       echo "❌ ERROR: Branch has unmerged commits, skipping deletion"
+       # Log for manual review - this shouldn't happen for successfully merged branches
+     fi
+   fi
+   ```
+
+   **Track Results:**
+   - Count branches successfully deleted
+   - Log any deletion failures with reasons
+   - Identify branches requiring manual review
+
+4. **Clean Up Orphaned Worktree Directories**
+
+   Physical worktree directories may remain even after git worktree remove:
 
    ```bash
-   # Delete local branch (safe delete, confirms merged)
-   git branch -d task-branch
+   # Check for worktree directory
+   if [ -d ".abathur/worktrees" ]; then
+     # List directories
+     for dir in .abathur/worktrees/*/; do
+       branch_name=$(basename "$dir")
 
-   # If remote tracking branch exists, delete remote
-   git push origin --delete task-branch
+       # Check if worktree still exists in git
+       if ! git worktree list | grep -q "$branch_name"; then
+         echo "Removing orphaned worktree directory: $dir"
+         rm -rf "$dir"
+       fi
+     done
+   fi
    ```
 
-   **If delete fails:**
-   - Check merge status: `git branch --no-merged feature-branch`
-   - Use force delete if confirmed safe: `git branch -D task-branch`
-   - Flag for manual review if branch has unique commits
+5. **Cleanup Safety Tags**
 
-3. **Cleanup Safety Tags**
-
-   Remove any remaining pre-merge tags:
+   Remove all pre-merge safety tags created during merge operations:
    ```bash
    # List all pre-merge tags
-   git tag | grep "^pre-merge-"
+   TAGS=$(git tag | grep "^pre-merge-")
 
    # Delete each tag
-   git tag -d pre-merge-*
+   if [ -n "$TAGS" ]; then
+     echo "$TAGS" | xargs git tag -d
+     echo "✓ Removed $(echo "$TAGS" | wc -l) safety tags"
+   fi
    ```
 
-4. **Prune Stale References**
+6. **Prune Stale References**
    ```bash
-   # Prune worktree metadata
+   # Prune worktree metadata (removes references to deleted worktrees)
    git worktree prune
 
    # Garbage collect unreachable objects
    git gc --auto
+   ```
+
+7. **Verify Cleanup Success**
+
+   After cleanup, verify environment is clean:
+   ```bash
+   # Count remaining worktrees (should only be main repo or active feature branch)
+   WORKTREE_COUNT=$(git worktree list | wc -l)
+   echo "Remaining worktrees: $WORKTREE_COUNT"
+
+   # Count merged but not deleted task branches (should be 0)
+   REMAINING_BRANCHES=$(git branch --merged feature-branch | grep -c "^\s*task" || echo "0")
+   echo "Remaining merged task branches: $REMAINING_BRANCHES"
+
+   # Check for orphaned worktree directories
+   if [ -d ".abathur/worktrees" ]; then
+     ORPHANED_DIRS=$(find .abathur/worktrees -mindepth 1 -maxdepth 1 -type d | wc -l)
+     echo "Orphaned worktree directories: $ORPHANED_DIRS"
+   fi
+
+   # Count remaining safety tags
+   REMAINING_TAGS=$(git tag | grep -c "^pre-merge-" || echo "0")
+   echo "Remaining safety tags: $REMAINING_TAGS"
+   ```
+
+   **Cleanup Success Criteria:**
+   - All merged task branches deleted (remaining count = 0)
+   - All merged worktrees removed
+   - No orphaned worktree directories
+   - All safety tags removed (remaining count = 0)
+   - Git worktree metadata pruned
+
+   **If cleanup fails:**
+   - Log specific failures with branch/worktree names
+   - Generate detailed cleanup failure report
+   - Set overall merge operation status to PARTIAL (not SUCCESS)
+   - Report detailed error messages and manual remediation steps
+   - DO NOT mark overall operation as complete
+
+8. **Generate Cleanup Summary**
+
+   Create detailed cleanup report:
+   ```markdown
+   ## Cleanup Summary
+
+   - Worktrees removed: X/Y
+   - Branches deleted: X/Y
+   - Safety tags removed: X
+   - Orphaned directories cleaned: X
+   - Cleanup status: SUCCESS/PARTIAL/FAILED
+
+   ### Issues Encountered:
+   - [List any branches that couldn't be deleted]
+   - [List any worktrees that couldn't be removed]
+   - [List any manual remediation required]
    ```
 
 ### Phase 8: Reporting
@@ -609,10 +737,15 @@ When invoked, you must follow these phases sequentially:
 - Validate resolution with tests
 
 **Cleanup-Conscious:**
-- Only remove worktrees after successful merge validation
+- **ALWAYS execute cleanup after successful merges** - this is not optional
+- Cleanup is integral to the merge workflow, not a separate operation
+- Force remove worktrees if necessary to prevent clutter (safe after successful merge)
+- Use safe delete (git branch -d) first, force delete (git branch -D) only after verification
 - Verify branches are fully merged before deletion
-- Preserve failed merges for manual review
-- Clean up temporary artifacts (tags, locks)
+- Preserve failed merges for manual review (do not delete unmerged branches)
+- Clean up temporary artifacts (tags, locks, orphaned directories)
+- Verify cleanup success before considering merge complete
+- Report PARTIAL status if cleanup fails, not SUCCESS
 
 ## Error Handling
 
@@ -660,21 +793,30 @@ When invoked, you must follow these phases sequentially:
 - **Detailed Log Level:** INFO
 - **Auto-Conflict Resolution:** Enabled for simple cases
 - **Rollback on Test Failure:** Enabled
-- **Cleanup After Success:** Enabled
+- **Cleanup After Success:** **MANDATORY** (always enabled, cannot be disabled)
+- **Force Worktree Removal:** Enabled for merged branches (safe after validation)
+- **Safe Delete First:** Enabled (try git branch -d before git branch -D)
+- **Cleanup Orphaned Directories:** Enabled
 - **Remote Branch Deletion:** Disabled (user must enable)
+- **Cleanup Verification:** Enabled (verify all branches/worktrees removed)
 
 ## Success Criteria
+
+**The merge operation is NOT complete until ALL criteria are met, including cleanup:**
 
 1. All mergeable task branches successfully merged into feature branch
 2. Zero test regressions (all baseline tests still pass)
 3. Code coverage maintained or improved
 4. Feature branch in clean state (no uncommitted changes)
-5. All merged worktrees removed
-6. All merged local branches deleted
+5. **All merged worktrees removed (MANDATORY - prevents clutter)**
+6. **All merged local branches deleted (MANDATORY - prevents clutter)**
 7. No merge artifacts (conflict markers) in code
 8. Comprehensive merge report generated
 9. All safety tags cleaned up
 10. Git repository in healthy state (gc completed)
+11. **Cleanup verification passed (zero merged branches remain)**
+
+**CRITICAL:** Items 5, 6, and 11 are mandatory cleanup criteria. The orchestrator MUST NOT report success until all merged branches and worktrees are cleaned up. If cleanup fails, the overall operation status should be PARTIAL, not SUCCESS.
 
 ## Deliverable Output Format
 
@@ -720,6 +862,17 @@ When invoked, you must follow these phases sequentially:
     "no_merge_artifacts": true,
     "feature_branch_clean": true,
     "regression_detected": false
+  },
+  "cleanup": {
+    "cleanup_executed": true,
+    "worktrees_removed": 10,
+    "branches_deleted": 10,
+    "orphaned_directories_cleaned": 2,
+    "safety_tags_removed": 10,
+    "cleanup_verification_passed": true,
+    "remaining_merged_branches": 0,
+    "remaining_worktrees": 1,
+    "cleanup_errors": []
   },
   "failed_branches": [
     {

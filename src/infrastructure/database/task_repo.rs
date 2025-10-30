@@ -677,7 +677,7 @@ mod tests {
             ..Default::default()
         };
 
-        let tasks = repo.list(filters).await.expect("Failed to list tasks");
+        let tasks = repo.list(&filters).await.expect("Failed to list tasks");
         assert_eq!(tasks.len(), 3); // Tasks 0, 2, 4
 
         pool.close().await;
@@ -722,7 +722,7 @@ mod tests {
         }
 
         let count = repo
-            .count(TaskFilters::default())
+            .count(&TaskFilters::default())
             .await
             .expect("Failed to count tasks");
         assert_eq!(count, 5);
