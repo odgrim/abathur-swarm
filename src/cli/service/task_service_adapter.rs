@@ -47,6 +47,7 @@ impl TaskQueueServiceAdapter {
 
         let filters = TaskFilters {
             status: domain_status,
+            limit: Some(limit),
             ..Default::default()
         };
 
@@ -65,7 +66,6 @@ impl TaskQueueServiceAdapter {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        cli_tasks.truncate(limit);
         Ok(cli_tasks)
     }
 
