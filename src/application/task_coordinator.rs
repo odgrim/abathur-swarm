@@ -689,6 +689,13 @@ mod tests {
             feature_branch: None,
             task_branch: None,
             worktree_path: None,
+            validation_requirement: crate::domain::models::task::ValidationRequirement::None,
+            validation_task_id: None,
+            validating_task_id: None,
+            remediation_count: 0,
+            is_remediation: false,
+            workflow_state: None,
+            workflow_expectations: None,
         }
     }
 

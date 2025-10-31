@@ -51,41 +51,14 @@ impl AgentContractRegistry {
             },
 
             // ========================================
-            // Implementation Agents (Test Validation)
+            // Orchestration Support Agents (No Validation)
             // ========================================
+            //
+            // Note: Language-specific implementation agents (e.g., rust-*, python-*, etc.)
+            // should NOT be hardcoded here. Their validation requirements should be
+            // determined dynamically by the task-planner based on project configuration.
+            // Only core orchestration agents are defined in this registry.
 
-            "rust-specialist" |
-            "rust-sqlx-database-specialist" |
-            "rust-service-layer-specialist" |
-            "rust-mcp-integration-specialist" |
-            "rust-clap-cli-specialist" |
-            "rust-testing-specialist" |
-            "rust-error-types-specialist" |
-            "rust-http-api-client-specialist" |
-            "rust-tracing-logging-specialist" |
-            "rust-ports-traits-specialist" |
-            "rust-config-management-specialist" |
-            "rust-criterion-benchmark-specialist" |
-            "rust-terminal-output-specialist" |
-            "rust-tokio-concurrency-specialist" |
-            "rust-domain-models-specialist" => {
-                ValidationRequirement::Testing {
-                    validator_agent: "validation-specialist".to_string(),
-                    test_commands: vec![
-                        "cargo build".to_string(),
-                        "cargo clippy --all-targets --all-features -- -D warnings".to_string(),
-                        "cargo test --all-features".to_string(),
-                    ],
-                    worktree_required: true,
-                    max_remediation_cycles: 3,
-                }
-            }
-
-            // ========================================
-            // Validation and Support Agents (No Validation)
-            // ========================================
-
-            "validation-specialist" |
             "git-worktree-merge-orchestrator" |
             "git-branch-cleanup-specialist" |
             "technical-requirements-specialist" => {
@@ -193,19 +166,23 @@ mod tests {
     }
 
     #[test]
-    fn test_rust_specialist_has_testing() {
+    fn test_language_specific_agents_not_hardcoded() {
+        // Language-specific agents should NOT be hardcoded in the registry
+        // They should default to ValidationRequirement::None and have their
+        // requirements determined dynamically by the task-planner
         let req = AgentContractRegistry::get_validation_requirement("rust-specialist");
-        assert!(matches!(req, ValidationRequirement::Testing { .. }));
+        assert!(matches!(req, ValidationRequirement::None));
 
-        if let ValidationRequirement::Testing { validator_agent, worktree_required, .. } = req {
-            assert_eq!(validator_agent, "validation-specialist");
-            assert!(worktree_required);
-        }
+        let req = AgentContractRegistry::get_validation_requirement("python-specialist");
+        assert!(matches!(req, ValidationRequirement::None));
     }
 
     #[test]
-    fn test_validation_specialist_has_no_validation() {
-        let req = AgentContractRegistry::get_validation_requirement("validation-specialist");
+    fn test_orchestration_agents_have_no_validation() {
+        let req = AgentContractRegistry::get_validation_requirement("git-worktree-merge-orchestrator");
+        assert!(matches!(req, ValidationRequirement::None));
+
+        let req = AgentContractRegistry::get_validation_requirement("technical-requirements-specialist");
         assert!(matches!(req, ValidationRequirement::None));
     }
 
@@ -225,10 +202,11 @@ mod tests {
         assert!(AgentContractRegistry::requires_contract("requirements-gatherer"));
         assert!(!AgentContractRegistry::requires_testing("requirements-gatherer"));
 
-        assert!(AgentContractRegistry::requires_validation("rust-specialist"));
-        assert!(AgentContractRegistry::requires_testing("rust-specialist"));
+        // Language-specific agents are not hardcoded, so they default to no validation
+        assert!(!AgentContractRegistry::requires_validation("rust-specialist"));
+        assert!(!AgentContractRegistry::requires_testing("rust-specialist"));
         assert!(!AgentContractRegistry::requires_contract("rust-specialist"));
 
-        assert!(!AgentContractRegistry::requires_validation("validation-specialist"));
+        assert!(!AgentContractRegistry::requires_validation("git-worktree-merge-orchestrator"));
     }
 }

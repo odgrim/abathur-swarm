@@ -275,7 +275,7 @@ pub async fn validate_task_completion(
         }
 
         ValidationRequirement::Testing { .. } => {
-            // Testing validation requires spawning validation-specialist
+            // Testing validation requires spawning a validator agent
             // This is handled by spawn_validation_task
             Ok(ValidationResult::Passed) // Assume will be validated externally
         }
@@ -284,7 +284,7 @@ pub async fn validate_task_completion(
 
 /// Spawn a validation task for test-based validation
 ///
-/// Creates a validation-specialist task that will run tests in the worktree
+/// Creates a validator agent task that will run tests in the worktree
 /// and route to either merge or remediation based on results.
 ///
 /// # Arguments

@@ -136,6 +136,20 @@ pub enum TaskCommands {
     /// This command checks all Pending/Blocked tasks and updates them to Ready
     /// if their dependencies are satisfied.
     Resolve,
+
+    /// Prune (delete) tasks with dependency validation
+    ///
+    /// This command validates and deletes tasks from the queue. Tasks can only be
+    /// deleted if all their dependent tasks are in terminal states (completed, failed,
+    /// or cancelled). Use --dry-run to validate without actually deleting.
+    Prune {
+        /// Task ID(s) to prune (space-separated, full UUIDs or prefixes)
+        task_ids: Vec<String>,
+
+        /// Dry run - validate without actually deleting
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]

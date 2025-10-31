@@ -8,6 +8,7 @@ pub mod agent_contract;
 pub mod agent_metadata;
 pub mod config;
 pub mod memory;
+pub mod prune;
 pub mod queue;
 pub mod session;
 pub mod task;
@@ -20,6 +21,7 @@ pub use config::{
     RetryConfig,
 };
 pub use memory::{Memory, MemoryType};
+pub use prune::{BlockedTask, PruneResult};
 pub use queue::{Queue, QueueError};
 pub use session::{Session, SessionEvent};
 pub use task::{

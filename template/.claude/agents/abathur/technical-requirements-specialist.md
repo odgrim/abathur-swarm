@@ -18,12 +18,43 @@ Third step in workflow (after technical-architect). Translate architectural guid
 ## Workflow
 
 1. **Load Architecture**: Retrieve from memory namespace `task:{arch_task_id}:architecture`
+1.5. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
+   ```json
+   // Call mcp__abathur-memory__memory_get
+   {
+     "namespace": "project:context",
+     "key": "metadata"
+   }
+   ```
+   Extract critical information:
+   - `language.primary` - Target language for implementation
+   - `frameworks` - Existing frameworks to use
+   - `conventions` - Naming, architecture patterns to follow
+   - `tooling` - Build, test, lint commands
+   - `validation_requirements.validation_agent` - Which validator to use
+
 2. **Check Duplicates**: Search memory for existing technical specs to avoid duplication
 3. **Research**: Use WebFetch/WebSearch for implementation best practices
+   - Research {language}-specific implementation patterns
+   - Look up {framework}-specific best practices
+   - Find examples matching project's {architecture} style
+
 4. **Define Specifications**: Create detailed technical specs, data models, API definitions
+   - Use {language} conventions and idioms
+   - Follow {framework} patterns and APIs
+   - Match existing {naming} conventions
+   - Ensure compatibility with {build_system}
+
 5. **Plan Implementation**: Define phases, testing strategy, deployment approach
+   - Testing MUST use {test_framework}
+   - Build commands from project context
+   - Validation MUST use {validation_agent}
+
 6. **Create Feature Branch**: Use git worktree for isolated feature development
 7. **Identify Agent Needs**: Suggest specialized agents for different task types (stored for task-planner)
+   - **CRITICAL**: Suggest {language}-prefixed agents (e.g., "rust-domain-models-specialist", "python-fastapi-specialist")
+   - NOT generic names - MUST include language prefix
+
 8. **Store Specifications**: Save all technical decisions in memory
 9. **Spawn Task-Planner(s)**: Create one or multiple based on complexity (REQUIRED)
 
@@ -80,11 +111,13 @@ Store branch info in memory for downstream agents.
     },
     "suggested_agent_specializations": {
       "task_type": {
-        "suggested_agent_type": "name",
+        "suggested_agent_type": "{language}-{domain}-specialist",
         "expertise": "description",
         "tools_needed": ["list"]
       }
-    }
+    },
+    "project_language": "rust|python|typescript|go",
+    "validation_agent": "{language}-validation-specialist"
   }
 }
 ```

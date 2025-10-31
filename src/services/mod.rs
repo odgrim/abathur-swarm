@@ -18,3 +18,6 @@ pub use dependency_resolver::DependencyResolver;
 pub use memory_service::MemoryService;
 pub use priority_calculator::PriorityCalculator;
 pub use task_queue_service::TaskQueueService;
+
+// Re-export pruning types from domain for convenience
+pub use crate::domain::models::{BlockedTask, PruneResult};

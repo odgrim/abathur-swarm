@@ -193,12 +193,14 @@ Agent already exists:
 
 ## Validation Task Pattern
 
-For each implementation task, spawn a validation task:
+For each implementation task that requires validation, determine the appropriate validator agent from the project's validation requirements and spawn a validation task:
+
+**Note**: The validator agent type is determined by the project's validation requirements (e.g., for Rust projects it might be `rust-validation-specialist`, for Python it might be `python-validation-specialist`). The task-planner should create the appropriate validator agent via agent-creator if it doesn't exist.
 
 ```json
 {
   "summary": "Validate {component} implementation",
-  "agent_type": "validation-specialist",
+  "agent_type": "{project_validator_agent}",
   "priority": 4,
   "prerequisite_task_ids": ["{implementation_task_id}"],
   "metadata": {
@@ -301,8 +303,8 @@ Task branch merged to feature branch, worktree cleaned up
   ],
   "summary": {
     "components": ["..."],
-    "agents_created": ["rust-domain-models-specialist"],
-    "agents_reused": ["validation-specialist"],
+    "agents_created": ["rust-domain-models-specialist", "rust-validation-specialist"],
+    "agents_reused": [],
     "estimated_hours": N
   }
 }
