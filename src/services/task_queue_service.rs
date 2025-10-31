@@ -1,39 +1,11 @@
-use crate::domain::models::{Task, TaskStatus};
+use crate::domain::models::{Task, TaskStatus, PruneResult, BlockedTask};
 use crate::domain::ports::{TaskFilters, TaskRepository};
 use crate::services::{DependencyResolver, PriorityCalculator};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
 use uuid::Uuid;
-
-/// Result of a task pruning operation.
-///
-/// Contains information about which tasks were deleted and which tasks
-/// were blocked from deletion due to non-terminal dependents.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PruneResult {
-    /// Number of tasks successfully deleted
-    pub deleted_count: usize,
-    /// UUIDs of tasks that were deleted
-    pub deleted_ids: Vec<Uuid>,
-    /// Tasks that could not be deleted due to active dependents
-    pub blocked_tasks: Vec<BlockedTask>,
-    /// Whether this was a dry-run (no actual deletion performed)
-    pub dry_run: bool,
-}
-
-/// A task that was blocked from deletion due to non-terminal dependents.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct BlockedTask {
-    /// UUID of the task that cannot be deleted
-    pub task_id: Uuid,
-    /// Human-readable reason why the task is blocked
-    pub reason: String,
-    /// UUIDs of dependent tasks that are not in terminal states
-    pub non_terminal_dependents: Vec<Uuid>,
-}
 
 /// Service for managing task queue operations.
 ///
@@ -1389,12 +1361,12 @@ mod tests {
         task2.dependencies = Some(vec![task1_id]);
         task2.status = TaskStatus::Completed; // Terminal
         let task2_id = task2.id;
-        let task2_clone = task2.clone();
+        let _task2_clone = task2.clone();
 
         let mut task3 = create_test_task("Task 3");
         task3.dependencies = Some(vec![task2_id]);
         task3.status = TaskStatus::Completed; // Terminal
-        let task3_clone = task3.clone();
+        let _task3_clone = task3.clone();
 
         // Try to delete task1 - should succeed since task2 and task3 are terminal
         mock_repo

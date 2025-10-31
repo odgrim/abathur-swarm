@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use uuid::Uuid;
 
 use crate::cli::models::{QueueStats, Task as CliTask, TaskStatus as CliTaskStatus};
-use crate::domain::models::{Task as DomainTask, TaskStatus as DomainTaskStatus};
+use crate::domain::models::{Task as DomainTask, TaskStatus as DomainTaskStatus, PruneResult};
 use crate::domain::ports::TaskFilters;
 use crate::services::TaskQueueService as RealTaskQueueService;
 
@@ -273,6 +273,24 @@ impl TaskQueueServiceAdapter {
                 ))
             }
         }
+    }
+
+    /// Prune (delete) tasks with dependency validation
+    ///
+    /// Validates and deletes tasks from the queue. Tasks can only be deleted if all their
+    /// dependent tasks are in terminal states (completed, failed, or cancelled).
+    ///
+    /// # Arguments
+    /// * `task_ids` - UUIDs of tasks to prune
+    /// * `dry_run` - If true, only validate without performing deletion
+    ///
+    /// # Returns
+    /// `PruneResult` containing deletion results and any blocked tasks
+    pub async fn prune_tasks(&self, task_ids: Vec<Uuid>, dry_run: bool) -> Result<PruneResult> {
+        self.service
+            .validate_and_prune_tasks(task_ids, dry_run)
+            .await
+            .context("Failed to prune tasks")
     }
 }
 

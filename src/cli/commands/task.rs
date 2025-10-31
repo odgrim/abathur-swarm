@@ -323,3 +323,87 @@ pub async fn handle_resolve(service: &TaskQueueServiceAdapter, json: bool) -> Re
 
     Ok(())
 }
+
+/// Handle task prune command
+///
+/// Validates and deletes tasks from the queue. Tasks can only be deleted if all their
+/// dependent tasks are in terminal states (completed, failed, or cancelled).
+pub async fn handle_prune(
+    service: &TaskQueueServiceAdapter,
+    task_id_prefixes: Vec<String>,
+    dry_run: bool,
+    json: bool,
+) -> Result<()> {
+    if task_id_prefixes.is_empty() {
+        return Err(anyhow::anyhow!("At least one task ID must be provided"));
+    }
+
+    // Resolve all task ID prefixes to full UUIDs
+    let mut task_ids = Vec::new();
+    for prefix in &task_id_prefixes {
+        let task_id = service
+            .resolve_task_id_prefix(prefix)
+            .await
+            .context(format!("Failed to resolve task ID '{}'", prefix))?;
+        task_ids.push(task_id);
+    }
+
+    // Call the prune service method
+    let result = service
+        .prune_tasks(task_ids.clone(), dry_run)
+        .await
+        .context("Failed to prune tasks")?;
+
+    if json {
+        let output = serde_json::json!({
+            "deleted_count": result.deleted_count,
+            "deleted_ids": result.deleted_ids,
+            "blocked_tasks": result.blocked_tasks.iter().map(|b| {
+                serde_json::json!({
+                    "task_id": b.task_id,
+                    "reason": b.reason,
+                    "non_terminal_dependents": b.non_terminal_dependents,
+                })
+            }).collect::<Vec<_>>(),
+            "dry_run": result.dry_run,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        if dry_run {
+            println!("Task Pruning Validation (Dry Run)");
+            println!("==================================");
+        } else {
+            println!("Task Pruning Results");
+            println!("====================");
+        }
+
+        if result.deleted_count > 0 {
+            println!("\n✓ Deleted {} task(s):", result.deleted_count);
+            for task_id in &result.deleted_ids {
+                println!("  - {}", task_id);
+            }
+        } else if !dry_run {
+            println!("\nNo tasks were deleted.");
+        }
+
+        if !result.blocked_tasks.is_empty() {
+            println!("\n✗ {} task(s) blocked from deletion:", result.blocked_tasks.len());
+            for blocked in &result.blocked_tasks {
+                println!("  - {} ({})", blocked.task_id, blocked.reason);
+                if !blocked.non_terminal_dependents.is_empty() {
+                    println!("    Non-terminal dependents:");
+                    for dep_id in &blocked.non_terminal_dependents {
+                        println!("      - {}", dep_id);
+                    }
+                }
+            }
+        }
+
+        if dry_run && result.blocked_tasks.is_empty() {
+            println!("\n✓ All tasks can be safely deleted.");
+            println!("Run without --dry-run to perform actual deletion.");
+        }
+    }
+
+    Ok(())
+}

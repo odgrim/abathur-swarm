@@ -133,6 +133,9 @@ async fn main() -> Result<()> {
             TaskCommands::Resolve => {
                 task::handle_resolve(&task_service, cli.json).await?;
             }
+            TaskCommands::Prune { task_ids, dry_run } => {
+                task::handle_prune(&task_service, task_ids, dry_run, cli.json).await?;
+            }
         },
         Commands::Memory(memory_cmd) => match memory_cmd {
             MemoryCommands::List {
