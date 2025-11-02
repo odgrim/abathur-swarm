@@ -10,11 +10,15 @@
 //! Services use domain models and port traits to implement business workflows.
 
 pub mod dependency_resolver;
+pub mod hook_executor;
+pub mod hook_registry;
 pub mod memory_service;
 pub mod priority_calculator;
 pub mod task_queue_service;
 
 pub use dependency_resolver::DependencyResolver;
+pub use hook_executor::HookExecutor;
+pub use hook_registry::HookRegistry;
 pub use memory_service::MemoryService;
 pub use priority_calculator::PriorityCalculator;
 pub use task_queue_service::TaskQueueService;

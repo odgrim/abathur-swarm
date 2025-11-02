@@ -7,6 +7,7 @@ pub mod agent;
 pub mod agent_contract;
 pub mod agent_metadata;
 pub mod config;
+pub mod hook;
 pub mod memory;
 pub mod prune;
 pub mod queue;
@@ -19,6 +20,10 @@ pub use agent_metadata::{AgentMetadata, AgentMetadataRegistry};
 pub use config::{
     Config, DatabaseConfig, LoggingConfig, McpServerConfig, RateLimitConfig,
     RetryConfig,
+};
+pub use hook::{
+    BranchCompletionContext, BranchType, HookAction, HookCondition, HookContext, HookEvent,
+    HookResult, HooksConfig, MergeStrategy, TaskHook,
 };
 pub use memory::{Memory, MemoryType};
 pub use prune::{BlockedTask, PruneResult};

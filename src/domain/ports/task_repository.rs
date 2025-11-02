@@ -277,6 +277,9 @@ pub struct TaskFilters {
     /// Filter by feature branch name
     pub feature_branch: Option<String>,
 
+    /// Filter by task branch name
+    pub task_branch: Option<String>,
+
     /// Filter by session ID
     pub session_id: Option<uuid::Uuid>,
 

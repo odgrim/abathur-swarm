@@ -1,11 +1,12 @@
-.abathur/
 .env
 .venv
 env/
 venv/
 
-# Runtime
-.abathur/
+# Runtime - ignore .abathur directory except for hooks
+.abathur/*
+!.abathur/hooks/
+!.abathur/hooks.yaml
 .abathur/worktrees/
 *.db
 *.db-shm

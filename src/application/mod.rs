@@ -12,6 +12,7 @@
 //! implementing the use cases and business workflows.
 
 pub mod agent_executor;
+pub mod branch_completion_detector;
 pub mod loop_executor;
 pub mod resource_monitor;
 pub mod swarm_orchestrator;
@@ -20,6 +21,7 @@ pub mod validation;
 pub mod workflow_verifier;
 
 pub use agent_executor::{AgentExecutor, ExecutionContext, ExecutionError};
+pub use branch_completion_detector::BranchCompletionDetector;
 pub use loop_executor::{ConvergenceStrategy, LoopExecutor, LoopState};
 pub use resource_monitor::{ResourceEvent, ResourceLimits, ResourceMonitor, ResourceStatus};
 pub use swarm_orchestrator::{SwarmOrchestrator, SwarmState, SwarmStats};
