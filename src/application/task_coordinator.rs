@@ -480,6 +480,43 @@ impl TaskCoordinator {
         Ok(task_id)
     }
 
+    /// Process all pending tasks on startup
+    ///
+    /// This method should be called when the swarm orchestrator starts to transition
+    /// all pending tasks to either Ready (if dependencies are met) or Blocked (if not).
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(usize)` - Number of tasks processed
+    /// * `Err` - If database error or coordination fails
+    #[instrument(skip(self))]
+    pub async fn process_pending_tasks(&self) -> Result<usize> {
+        info!("Processing all pending tasks on startup");
+
+        // Get all pending tasks
+        let pending_tasks = self
+            .task_queue
+            .get_tasks_by_status(TaskStatus::Pending)
+            .await
+            .context("Failed to get pending tasks")?;
+
+        let task_count = pending_tasks.len();
+        info!("Found {} pending tasks to process", task_count);
+
+        // Process each pending task
+        for task in pending_tasks {
+            if let Err(e) = self.coordinate_task_lifecycle(task.id).await {
+                warn!(
+                    "Failed to coordinate pending task {}: {:?}",
+                    task.id, e
+                );
+            }
+        }
+
+        info!("Finished processing {} pending tasks", task_count);
+        Ok(task_count)
+    }
+
     // Private helper methods
 
     /// Check if all dependencies for a task are met

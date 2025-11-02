@@ -198,8 +198,9 @@ impl SwarmOrchestrator {
     ///
     /// Initializes:
     /// 1. Resource monitoring background task
-    /// 2. Task polling and distribution loop
-    /// 3. Agent event processing loop
+    /// 2. Process all pending tasks (transition to Ready/Blocked)
+    /// 3. Task polling and distribution loop
+    /// 4. Agent event processing loop
     pub async fn start(&mut self) -> Result<()> {
         let mut state = self.state.write().await;
         if *state != SwarmState::Stopped {
@@ -219,6 +220,18 @@ impl SwarmOrchestrator {
             .context("Failed to start resource monitor")?;
 
         *self.resource_monitor_handle.write().await = Some(resource_handle);
+
+        // Process all pending tasks to transition them to Ready or Blocked
+        info!("Processing pending tasks on startup");
+        match self.task_coordinator.process_pending_tasks().await {
+            Ok(count) => {
+                info!("Processed {} pending tasks", count);
+            }
+            Err(e) => {
+                warn!("Error processing pending tasks: {:?}", e);
+                // Continue anyway - this is not a fatal error
+            }
+        }
 
         // Start main task processing loop
         let task_loop_handle = self.spawn_task_processing_loop().await?;

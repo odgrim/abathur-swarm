@@ -350,6 +350,26 @@ hooks:
     enabled: true
 
   # ============================================================================
+  # PROJECT CONTEXT SCANNER HOOKS
+  # ============================================================================
+
+  - id: validate-project-context-memory
+    description: "Validate that project-context-scanner stored memory correctly and reinitialize if failed"
+    event: post_complete
+    conditions:
+      - agent_type: project-context-scanner
+        task_status: completed
+    actions:
+      - type: run_script
+        script_path: ./.abathur/hooks/validate_project_context_memory.sh
+        args: ["${task_id}"]
+      - type: log_message
+        level: info
+        message: "Validating project context memory for task ${task_id}"
+    priority: 10
+    enabled: true
+
+  # ============================================================================
   # CHILD SPAWNING HOOKS
   # ============================================================================
 

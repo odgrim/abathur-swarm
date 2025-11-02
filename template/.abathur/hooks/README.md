@@ -76,6 +76,36 @@ Validates technical requirements before allowing a technical-requirements-specia
       args: ["${task_id}", "${parent_task_id}"]
 ```
 
+### `validate_project_context_memory.sh`
+
+Validates that the project-context-scanner agent successfully saved project context to memory. If validation fails, automatically re-enqueues the scanner task for retry.
+
+**Usage:**
+```bash
+./validate_project_context_memory.sh <task_id>
+```
+
+**What it validates:**
+- Memory entry exists at `project:context/metadata`
+- Contains required fields: language, frameworks, tooling, validation_requirements
+- Primary language is detected
+- Validation agent is specified
+
+**Hook Configuration:**
+```yaml
+- event: post_complete
+  conditions:
+    - agent_type: project-context-scanner
+      task_status: completed
+  actions:
+    - type: run_script
+      script_path: ./.abathur/hooks/validate_project_context_memory.sh
+      args: ["${task_id}"]
+```
+
+**Retry Logic:**
+If validation fails, the hook automatically re-enqueues a new project-context-scanner task with priority 10 to retry the scan.
+
 ### `integration_test.sh`
 
 Runs integration tests when a feature branch completes all its tasks.
