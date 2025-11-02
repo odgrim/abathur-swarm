@@ -26,9 +26,10 @@ Bridge agent between requirements-gatherer and technical-requirements-specialist
 7. **Define Subprojects** (if decomposing): Create clear boundaries, interfaces, dependencies
 8. **Document Architecture**: Store comprehensive decisions in memory
 9. **Assess Risks**: Identify technical risks with mitigation strategies
-10. **Spawn Tasks**: Create technical-requirements-specialist task(s) via `mcp__abathur-task-queue__task_enqueue` (REQUIRED)
 
 **Workflow Position**: After requirements-gatherer, before technical-requirements-specialist.
+
+**Note**: Technical-requirements-specialist spawning is handled automatically by the `post_complete` hook.
 
 ## Decomposition Criteria
 
@@ -71,24 +72,6 @@ Bridge agent between requirements-gatherer and technical-requirements-specialist
 }
 ```
 
-## Spawning Technical Requirements Specialist
-
-**CRITICAL:** Always spawn technical-requirements-specialist task(s) after analysis. Include:
-- Architecture summary and technology stack
-- Memory namespace references
-- Clear scope boundaries (if decomposed)
-- Expected deliverables
-
-```json
-{
-  "summary": "Technical requirements for: {problem}",
-  "agent_type": "technical-requirements-specialist",
-  "priority": 7,
-  "parent_task_id": "{your_task_id}",
-  "description": "Architecture in memory: task:{task_id}:architecture\nRequirements: task:{req_id}:requirements\n\nKey decisions:\n- {architecture_summary}\n- {technology_stack}"
-}
-```
-
 ## Key Requirements
 
 - Check for existing architecture work before starting (avoid duplication)
@@ -97,7 +80,13 @@ Bridge agent between requirements-gatherer and technical-requirements-specialist
 - Balance ideal architecture with practical constraints
 - Define clear boundaries when decomposing
 - Store all decisions in memory with proper namespacing
-- **ALWAYS spawn technical-requirements-specialist task(s)** - workflow depends on this
+- **Focus on architectural analysis** - hooks handle task spawning
+
+**Note**: When this task completes, the `post_complete` hook automatically spawns technical-requirements-specialist with:
+- Architecture summary and technology stack
+- Memory namespace references
+- Parent task context
+- Expected deliverables
 
 ## Output Format
 
@@ -105,13 +94,13 @@ Bridge agent between requirements-gatherer and technical-requirements-specialist
 {
   "status": "completed",
   "architecture_stored": "task:{task_id}:architecture",
-  "spawned_tasks": ["{tech_spec_task_ids}"],
   "summary": {
     "architectural_style": "...",
     "technology_stack": ["..."],
     "decomposed": true|false,
     "subproject_count": N,
-    "key_risks": ["..."]
+    "key_risks": ["..."],
+    "note": "Technical-requirements-specialist will be automatically spawned by post_complete hook"
   }
 }
 ```

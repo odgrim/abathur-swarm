@@ -22,37 +22,40 @@ Third step in workflow (after technical-architect). Translate architectural guid
 3. **Research**: Use WebFetch/WebSearch for implementation best practices
 4. **Define Specifications**: Create detailed technical specs, data models, API definitions
 5. **Plan Implementation**: Define phases, testing strategy, deployment approach
-6. **Create Feature Branch**: Use git worktree for isolated feature development
-7. **Identify Agent Needs**: Suggest specialized agents for different task types (stored for task-planner)
-8. **Store Specifications**: Save all technical decisions in memory
-9. **Spawn Task-Planner(s)**: Create one or multiple based on complexity (REQUIRED)
+6. **Identify Agent Needs**: Suggest specialized agents for different task types (stored for task-planner)
+7. **Store Specifications**: Save all technical decisions in memory
 
 **Workflow Position**: After technical-architect, before task-planner.
 
-## Feature Branch Creation
+**Note**: Feature branch creation and task-planner spawning are handled automatically by hooks.
 
-**CRITICAL:** Create feature branch using git worktree before spawning task-planners:
+## Feature Branch Information
 
-```bash
-# Create feature branch worktree
-feature_name="descriptive-feature-name"
-git worktree add -b feature/${feature_name} .abathur/features/${feature_name}
-```
+**IMPORTANT:** Feature branch creation is handled automatically by the `post_start` hook.
 
-Store branch info in memory for downstream agents.
+When this task starts, the hook will:
+1. Create a feature branch named `feature/{sanitized-task-summary}`
+2. Create a worktree at `.abathur/features/{sanitized-task-summary}`
+3. Store the branch name in task metadata
 
-## Task-Planner Decomposition
+You should:
+- Include the feature branch name in your technical specifications
+- Store it in memory for task-planner to reference
+- Do NOT run git commands to create branches yourself
 
-**Spawn MULTIPLE task-planners when:**
-- Multiple major components/modules
-- Parallel execution possible
-- >10 atomic tasks estimated
-- Clear component boundaries
+## Task-Planner Information
 
-**Spawn SINGLE task-planner when:**
-- <5 atomic tasks total
-- Tightly coupled, sequential work
-- Single component/module
+**IMPORTANT:** Task-planner spawning is handled automatically by the `post_complete` hook.
+
+When this task completes successfully, the hook will:
+1. Automatically spawn a task-planner task
+2. Pass your technical specifications via memory reference
+3. Include the feature branch information
+
+You do NOT need to:
+- ❌ Manually spawn task-planner tasks
+- ❌ Determine whether to spawn single or multiple planners
+- ❌ Call task_enqueue directly
 
 ## Memory Schema
 
@@ -89,28 +92,15 @@ Store branch info in memory for downstream agents.
 }
 ```
 
-## Spawning Task-Planner
-
-**CRITICAL:** Always spawn task-planner(s) with comprehensive context:
-
-```json
-{
-  "summary": "Task planning for: {component/feature}",
-  "agent_type": "task-planner",
-  "priority": 6,
-  "parent_task_id": "{your_task_id}",
-  "description": "Feature branch: {branch_name}\nSpecs in memory: task:{task_id}:technical_specs\n\nComponent: {component_name}\nScope: {specific_scope}\nEstimated tasks: {N}"
-}
-```
-
 ## Key Requirements
 
 - Check for existing technical specs before starting (avoid duplication)
-- Create feature branch using git worktree (isolation for concurrent work)
-- Provide rich context to task-planners (memory refs, summaries, scope)
-- Suggest agent specializations but don't create agents (task-planner's job)
-- Decompose into multiple task-planners for complex work
-- **ALWAYS spawn task-planner(s)** - workflow depends on this
+- Research implementation best practices thoroughly
+- Define comprehensive technical specifications
+- Suggest agent specializations (task-planner will use these)
+- Store feature branch name in memory (hooks will create it)
+- Store all technical decisions in memory with proper namespacing
+- **Focus on analysis and specification** - hooks handle orchestration
 
 ## Output Format
 
@@ -118,14 +108,14 @@ Store branch info in memory for downstream agents.
 {
   "status": "completed",
   "specs_stored": "task:{task_id}:technical_specs",
-  "feature_branch": "{branch_name}",
-  "spawned_planners": ["{task_ids}"],
+  "feature_branch": "feature/{sanitized-name}",
   "summary": {
     "components_defined": ["..."],
     "api_endpoints": N,
     "data_models": N,
     "implementation_phases": N,
-    "suggested_agents": ["types"]
+    "suggested_agents": ["types"],
+    "note": "Task-planner will be automatically spawned by post_complete hook"
   }
 }
 ```

@@ -26,8 +26,9 @@ Entry point for the Abathur workflow. Autonomously research problems, determine 
 2. **Research**: Use WebFetch/WebSearch for best practices, Glob/Read/Grep for codebase analysis, memory_search for prior work
 3. **Determine**: Define functional/non-functional requirements, constraints, success criteria based on evidence
 4. **Store**: Save requirements to memory namespace `task:{task_id}:requirements` via `mcp__abathur-memory__memory_add`
-5. **Spawn**: Create technical-architect task via `mcp__abathur-task-queue__task_enqueue` with requirements context
-6. **Complete**: Output JSON summary and stop
+5. **Complete**: Output JSON summary and stop
+
+**Note**: Technical-architect spawning is handled automatically by the `post_complete` hook.
 
 ## Tool Usage
 
@@ -81,9 +82,9 @@ Common discovery patterns:
 **Complete Workflow - DO NOT STOP EARLY:**
 - Step 3 (Determine Requirements) is NOT the end - you MUST continue
 - Step 4 (Store requirements) is MANDATORY - call `mcp__abathur-memory__memory_add` directly
-- Step 5 (Spawn technical-architect) is MANDATORY - call `mcp__abathur-task-queue__task_enqueue` directly with `parent_task_id`
-- Step 6 (Output JSON summary) is the ONLY acceptable stopping point
+- Step 5 (Output JSON summary) is the ONLY acceptable stopping point
 - Do NOT write out what you "would" do - ACTUALLY CALL THE TOOLS
+- Do NOT manually spawn technical-architect - the hook handles this automatically
 
 ## Memory Schema
 
@@ -104,31 +105,23 @@ Common discovery patterns:
 }
 ```
 
-## Spawning Technical Architect
-
-**CRITICAL:** When calling `mcp__abathur-task-queue__task_enqueue`, you MUST include `parent_task_id` with your current task ID.
-
-```json
-{
-  "summary": "Technical architecture for: {problem}",
-  "agent_type": "technical-architect",
-  "priority": 7,
-  "parent_task_id": "{your_task_id}",
-  "description": "Requirements stored in memory namespace: task:{task_id}:requirements\n\nKey Requirements:\n- {req1}\n- {req2}\n\nExpected Deliverables:\n- Technical architecture\n- Component breakdown\n- Spawn implementation tasks"
-}
-```
-
 ## Output Format
 
 ```json
 {
   "status": "completed",
   "requirements_stored": "task:{task_id}:requirements",
-  "architect_task_id": "{id}",
   "summary": {
     "problem": "...",
     "key_requirements": ["..."],
-    "key_constraints": ["..."]
+    "key_constraints": ["..."],
+    "note": "Technical-architect will be automatically spawned by post_complete hook"
   }
 }
 ```
+
+**Note**: When this task completes, the `post_complete` hook automatically spawns technical-architect with:
+- Requirements memory reference
+- Parent task context
+- Task priority and summary
+- Expected deliverables

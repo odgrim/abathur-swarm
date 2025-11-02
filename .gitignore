@@ -11,6 +11,10 @@ venv/
 *.db
 *.db-shm
 *.db-wal
+
+# Template - include all template files
+!template/.abathur/
+!template/.abathur/**
 design_docs/Chapter*
 
 # Claude

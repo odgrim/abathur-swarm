@@ -354,6 +354,10 @@ Agent Type: {}
         vars.insert("task_summary".to_string(), task.summary.clone());
         vars.insert("task_status".to_string(), task.status.to_string());
 
+        if let Some(parent_id) = task.parent_task_id {
+            vars.insert("parent_task_id".to_string(), parent_id.to_string());
+        }
+
         if let Some(ref feature_branch) = task.feature_branch {
             vars.insert("feature_branch".to_string(), feature_branch.clone());
         }

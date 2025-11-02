@@ -110,7 +110,19 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
             println!("✓ Copied agent templates");
         }
 
-        // Step 6: Merge MCP server configuration
+        // Step 6: Copy hooks configuration
+        setup::copy_hooks_config(&paths, template_dir, force)?;
+        if !json_output {
+            println!("✓ Copied hooks configuration");
+        }
+
+        // Step 7: Copy hook scripts
+        setup::copy_hook_scripts(&paths, template_dir, force)?;
+        if !json_output {
+            println!("✓ Copied hook scripts");
+        }
+
+        // Step 8: Merge MCP server configuration
         setup::merge_mcp_config(template_dir, force)?;
         if !json_output {
             println!("✓ Merged MCP server configuration");
@@ -124,6 +136,8 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
             "config_file": paths.config_file.display().to_string(),
             "database": paths.database_file.display().to_string(),
             "agents_dir": paths.agents_dir.display().to_string(),
+            "hooks_file": paths.hooks_file.display().to_string(),
+            "hooks_dir": paths.hooks_dir.display().to_string(),
             "initial_task": {
                 "id": scanner_task.id.to_string(),
                 "agent_type": "project-context-scanner",
@@ -139,6 +153,7 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
         println!("Configuration: {}", paths.config_file.display());
         println!("Database: {}", paths.database_file.display());
         println!("Agents: {}", paths.agents_dir.display());
+        println!("Hooks: {}", paths.hooks_file.display());
         println!();
         println!("Initial task enqueued:");
         println!("  - project-context-scanner (priority: 10)");
@@ -147,7 +162,8 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
         println!("Next steps:");
         println!("  1. Edit your config file to customize settings");
         println!("  2. Set ANTHROPIC_API_KEY environment variable");
-        println!("  3. Run 'abathur swarm start' to start the orchestrator");
+        println!("  3. Customize hooks in {} if needed", paths.hooks_file.display());
+        println!("  4. Run 'abathur swarm start' to start the orchestrator");
     }
 
     Ok(())
