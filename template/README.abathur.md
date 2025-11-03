@@ -24,7 +24,7 @@ pip install abathur-swarm
 abathur init
 ```
 
-This will set up the `.abathur` directory with agent definitions and configuration.
+This will set up the `.abathur` directory for configuration and `.claude/agents` for agent definitions.
 
 ### Configure Your Environment
 
@@ -57,18 +57,22 @@ abathur analytics show
 
 ```
 .abathur/
-├── agents/           # Agent definitions
-│   ├── meta/        # Coordination agents
-│   ├── specialists/ # Specialized agents
-│   └── workers/     # General-purpose agents
-└── config/          # Configuration files
+├── config.yaml      # Abathur configuration
+├── hooks.yaml       # Task lifecycle hooks
+├── hooks/           # Hook scripts
+└── abathur.db       # Task queue database
+
+.claude/
+└── agents/          # Agent definitions
+    ├── abathur/     # Core orchestration agents
+    └── workers/     # Specialized worker agents
 ```
 
 ## Customization
 
 ### Adding Custom Agents
 
-Create new agent definitions in `.abathur/agents/`:
+Create new agent definitions in `.claude/agents/`:
 
 ```markdown
 ---

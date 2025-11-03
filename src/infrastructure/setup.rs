@@ -103,7 +103,7 @@ impl SetupPaths {
         Ok(Self {
             config_file: config_dir.join("config.yaml"),
             database_file: config_dir.join("abathur.db"),
-            agents_dir: config_dir.join("agents"),
+            agents_dir: current_dir.join(".claude/agents"),
             hooks_dir: config_dir.join("hooks"),
             hooks_file: config_dir.join("hooks.yaml"),
             config_dir,
@@ -219,7 +219,7 @@ pub fn clone_template_repo(repo_url: &str, force: bool) -> Result<PathBuf> {
     Ok(template_dir)
 }
 
-/// Copy agent templates from template directory to .abathur/agents
+/// Copy agent templates from template directory to .claude/agents
 pub fn copy_agent_templates(paths: &SetupPaths, template_dir: &PathBuf, force: bool) -> Result<()> {
     let template_agents_dir = template_dir.join(".claude/agents");
 
