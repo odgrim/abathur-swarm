@@ -133,68 +133,205 @@ Glob("go.mod") → Found → language = "go"
 
 ## Memory Schema
 
-Store comprehensive context in memory namespace `project:context`:
+Store comprehensive context in SEPARATE memory entries under namespace `project:context`:
 
+### 1. Project Metadata
 ```json
 {
   "namespace": "project:context",
   "key": "metadata",
   "value": {
-    "language": {
-      "primary": "rust|python|typescript|javascript|go|java",
-      "version": "detected from config or null",
-      "detected_from": "Cargo.toml|package.json|go.mod|etc."
-    },
-    "frameworks": {
-      "web": "axum|fastapi|express|gin|null",
-      "database": "sqlx|sqlalchemy|prisma|null",
-      "test": "cargo test|pytest|jest|go test",
-      "async_runtime": "tokio|asyncio|null"
-    },
+    "project_name": "detected from Cargo.toml name, package.json name, etc.",
+    "description": "from config file description field",
+    "version": "from config file version field",
+    "license": "from LICENSE file or config",
+    "repository": "from config or git remote",
+    "detected_at": "ISO timestamp",
+    "scan_duration_ms": 1247
+  },
+  "memory_type": "semantic",
+  "created_by": "project-context-scanner"
+}
+```
+
+### 2. Language and Frameworks
+```json
+{
+  "namespace": "project:context",
+  "key": "language",
+  "value": {
+    "primary": "rust|python|typescript|javascript|go|java",
+    "version": "detected from config or null",
+    "detected_from": "Cargo.toml|package.json|go.mod|etc.",
+    "secondary_languages": ["list of other languages if polyglot"],
+    "confidence": "high|medium|low"
+  },
+  "memory_type": "semantic",
+  "created_by": "project-context-scanner"
+}
+```
+
+### 3. Frameworks
+```json
+{
+  "namespace": "project:context",
+  "key": "frameworks",
+  "value": {
+    "web": "axum|fastapi|express|gin|null",
+    "database": "sqlx|sqlalchemy|prisma|null",
+    "test": "cargo test|pytest|jest|go test",
+    "async_runtime": "tokio|asyncio|null",
+    "other": ["list of other significant frameworks"]
+  },
+  "memory_type": "semantic",
+  "created_by": "project-context-scanner"
+}
+```
+
+### 4. Dependencies
+```json
+{
+  "namespace": "project:context",
+  "key": "dependencies",
+  "value": {
     "build_system": {
       "tool": "cargo|poetry|npm|yarn|pnpm|go",
       "config_file": "Cargo.toml|package.json|go.mod",
       "lock_file": "Cargo.lock|poetry.lock|package-lock.json|go.sum|null"
     },
-    "tooling": {
-      "linter": {
-        "tool": "clippy|pylint|eslint|golangci-lint",
-        "config": ".clippy.toml|.pylintrc|.eslintrc.json|null",
-        "command": "cargo clippy|pylint src|eslint .|golangci-lint run"
-      },
-      "formatter": {
-        "tool": "rustfmt|black|prettier|gofmt",
-        "config": ".rustfmt.toml|pyproject.toml|.prettierrc|null",
-        "command": "cargo fmt|black .|prettier --write .|gofmt -w .",
-        "check_command": "cargo fmt --check|black --check .|prettier --check .|gofmt -l ."
-      },
-      "test_runner": {
-        "command": "cargo test|pytest|npm test|go test ./...",
-        "coverage_tool": "tarpaulin|coverage.py|c8|go test -cover"
-      },
-      "build_command": "cargo build|poetry install|npm run build|go build ./..."
+    "key_dependencies": {
+      "production": ["list of major prod dependencies"],
+      "development": ["list of major dev dependencies"]
     },
-    "project_structure": {
-      "source_dirs": ["src", "lib", "app"],
-      "test_dirs": ["tests", "test"],
-      "test_pattern": "*_test.rs|test_*.py|*.test.ts|*_test.go",
-      "has_ci": true|false,
-      "ci_provider": "github-actions|gitlab-ci|null"
+    "package_manager": "cargo|pip|poetry|npm|yarn|pnpm|go modules"
+  },
+  "memory_type": "semantic",
+  "created_by": "project-context-scanner"
+}
+```
+
+### 5. Project Structure
+```json
+{
+  "namespace": "project:context",
+  "key": "structure",
+  "value": {
+    "source_dirs": ["src", "lib", "app"],
+    "test_dirs": ["tests", "test"],
+    "test_pattern": "*_test.rs|test_*.py|*.test.ts|*_test.go",
+    "docs_dirs": ["docs", "documentation"],
+    "config_dirs": [".config", "config"],
+    "has_ci": true|false,
+    "ci_provider": "github-actions|gitlab-ci|circleci|null",
+    "monorepo": true|false,
+    "workspace_members": ["list if monorepo"]
+  },
+  "memory_type": "semantic",
+  "created_by": "project-context-scanner"
+}
+```
+
+### 6. Architecture
+```json
+{
+  "namespace": "project:context",
+  "key": "architecture",
+  "value": {
+    "pattern": "clean|hexagonal|mvc|layered|microservices|unknown",
+    "layers": ["domain", "application", "infrastructure"],
+    "key_directories": {
+      "domain": "src/domain",
+      "application": "src/application",
+      "infrastructure": "src/infrastructure"
     },
-    "conventions": {
-      "naming": "snake_case|camelCase|PascalCase",
-      "architecture": "clean|hexagonal|mvc|layered|unknown",
-      "import_style": "detected pattern or null"
+    "design_patterns": ["repository", "dependency-injection", "factory"],
+    "description": "Brief description of architectural approach"
+  },
+  "memory_type": "semantic",
+  "created_by": "project-context-scanner"
+}
+```
+
+### 7. Code Style and Conventions
+```json
+{
+  "namespace": "project:context",
+  "key": "conventions",
+  "value": {
+    "naming_convention": "snake_case|camelCase|PascalCase",
+    "file_naming": "snake_case|kebab-case|PascalCase",
+    "import_style": "detected pattern or null",
+    "formatting_style": "standard|custom",
+    "line_length": 80|100|120|null,
+    "indentation": "spaces|tabs",
+    "indent_size": 2|4
+  },
+  "memory_type": "semantic",
+  "created_by": "project-context-scanner"
+}
+```
+
+### 8. Naming Conventions
+```json
+{
+  "namespace": "project:context",
+  "key": "naming",
+  "value": {
+    "functions": "snake_case|camelCase",
+    "types": "PascalCase|snake_case",
+    "constants": "SCREAMING_SNAKE_CASE|UPPER_CASE",
+    "modules": "snake_case|kebab-case",
+    "files": "snake_case.rs|kebab-case.ts|PascalCase.java",
+    "test_files": "*_test.rs|test_*.py|*.test.ts|*_test.go"
+  },
+  "memory_type": "semantic",
+  "created_by": "project-context-scanner"
+}
+```
+
+### 9. Tooling
+```json
+{
+  "namespace": "project:context",
+  "key": "tooling",
+  "value": {
+    "linter": {
+      "tool": "clippy|pylint|eslint|golangci-lint",
+      "config": ".clippy.toml|.pylintrc|.eslintrc.json|null",
+      "command": "cargo clippy|pylint src|eslint .|golangci-lint run"
     },
-    "validation_requirements": {
-      "mandatory_checks": [
-        "compilation",
-        "linting",
-        "formatting",
-        "unit_tests"
-      ],
-      "validation_agent": "rust-validation-specialist|python-validation-specialist|typescript-validation-specialist|go-validation-specialist"
-    }
+    "formatter": {
+      "tool": "rustfmt|black|prettier|gofmt",
+      "config": ".rustfmt.toml|pyproject.toml|.prettierrc|null",
+      "command": "cargo fmt|black .|prettier --write .|gofmt -w .",
+      "check_command": "cargo fmt --check|black --check .|prettier --check .|gofmt -l ."
+    },
+    "test_runner": {
+      "command": "cargo test|pytest|npm test|go test ./...",
+      "coverage_tool": "tarpaulin|coverage.py|c8|go test -cover"
+    },
+    "build_command": "cargo build|poetry install|npm run build|go build ./..."
+  },
+  "memory_type": "semantic",
+  "created_by": "project-context-scanner"
+}
+```
+
+### 10. Validation Requirements
+```json
+{
+  "namespace": "project:context",
+  "key": "validation",
+  "value": {
+    "mandatory_checks": [
+      "compilation",
+      "linting",
+      "formatting",
+      "unit_tests"
+    ],
+    "validation_agent": "rust-validation-specialist|python-validation-specialist|typescript-validation-specialist|go-validation-specialist",
+    "pre_commit_hooks": ["list of detected hooks"],
+    "ci_checks": ["list of CI validation steps"]
   },
   "memory_type": "semantic",
   "created_by": "project-context-scanner"
@@ -268,43 +405,89 @@ Store comprehensive context in memory namespace `project:context`:
 ```json
 {
   "status": "completed",
-  "context_stored": "project:context/metadata",
+  "context_stored": [
+    "project:context/metadata",
+    "project:context/language",
+    "project:context/frameworks",
+    "project:context/dependencies",
+    "project:context/structure",
+    "project:context/architecture",
+    "project:context/conventions",
+    "project:context/naming",
+    "project:context/tooling",
+    "project:context/validation"
+  ],
   "summary": {
     "language": "rust",
     "frameworks": ["axum", "sqlx", "tokio"],
+    "architecture": "clean",
     "build_system": "cargo",
     "test_framework": "cargo test",
     "linter": "clippy",
     "formatter": "rustfmt",
     "validation_agent": "rust-validation-specialist",
     "confidence": "high",
-    "scan_duration_ms": 1247
+    "scan_duration_ms": 1247,
+    "entries_created": 10
   }
 }
 ```
 
 ## Usage by Other Agents
 
-All agents should load project context FIRST:
+All agents should load relevant project context entries:
 
 ```python
-# In requirements-gatherer, task-planner, agent-creator, etc.
-project_context = memory_get({
+# Load language info
+language_context = memory_get({
     "namespace": "project:context",
-    "key": "metadata"
+    "key": "language"
 })
+primary_language = language_context["primary"]  # "rust", "python", etc.
 
-language = project_context["language"]["primary"]  # "rust", "python", etc.
-validation_agent = project_context["validation_requirements"]["validation_agent"]
-build_command = project_context["tooling"]["build_command"]
+# Load architecture info
+architecture_context = memory_get({
+    "namespace": "project:context",
+    "key": "architecture"
+})
+arch_pattern = architecture_context["pattern"]  # "clean", "hexagonal", etc.
+
+# Load tooling info
+tooling_context = memory_get({
+    "namespace": "project:context",
+    "key": "tooling"
+})
+build_command = tooling_context["build_command"]
+
+# Load validation requirements
+validation_context = memory_get({
+    "namespace": "project:context",
+    "key": "validation"
+})
+validation_agent = validation_context["validation_agent"]
+
+# Load all at once using search
+all_context = memory_search({
+    "namespace_prefix": "project:context",
+    "memory_type": "semantic",
+    "limit": 50
+})
 ```
 
 **Agents that MUST use project context:**
-- requirements-gatherer (understand codebase conventions)
-- technical-architect (select appropriate technologies)
-- technical-requirements-specialist (language-specific specs)
+- requirements-gatherer (understand codebase conventions, architecture)
+- technical-architect (select appropriate technologies, align with existing architecture)
+- technical-requirements-specialist (language-specific specs, naming conventions)
 - task-planner (select language-appropriate worker agents and validator)
-- agent-creator (create language-specific agents)
-- All validation agents (know which commands to run)
+- agent-creator (create language-specific agents following project conventions)
+- All validation agents (know which commands to run, what to check)
+- All worker agents (follow project conventions, architecture patterns)
 
 **Context is ALWAYS available** - project-context-scanner runs FIRST on project init.
+
+**Benefits of Separate Entries:**
+- Agents can load only what they need (faster, less context)
+- Easier to update individual aspects without touching everything
+- More granular memory queries and filtering
+- Better organization and discoverability
+- Clearer responsibility boundaries
