@@ -10,6 +10,8 @@ use crate::cli::service::{SwarmService, TaskQueueServiceAdapter};
 use crate::infrastructure::config::ConfigLoader;
 use crate::infrastructure::database::{AgentRepositoryImpl, MemoryRepositoryImpl, TaskRepositoryImpl};
 use crate::services::{DependencyResolver, PriorityCalculator, TaskQueueService as TaskQueueServiceImpl};
+use crate::services::hook_executor::HookExecutor;
+use crate::services::hook_registry::HookRegistry;
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::sync::Arc;
@@ -342,6 +344,33 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
         dependency_resolver_arc,
         priority_calc_arc,
     ));
+
+    // Initialize hook system
+    eprintln!("Initializing hook system...");
+    let hook_executor = Arc::new(HookExecutor::new(Some(task_coordinator.clone())));
+    let mut hook_registry = HookRegistry::new(hook_executor);
+
+    // Load hooks configuration
+    let hooks_config_path = std::env::current_dir()
+        .context("Failed to get current directory")?
+        .join(".abathur/hooks.yaml");
+
+    if hooks_config_path.exists() {
+        if let Err(e) = hook_registry.load_from_file(&hooks_config_path) {
+            eprintln!("Warning: Failed to load hooks configuration: {}", e);
+            eprintln!("Continuing without hooks enabled");
+        } else {
+            eprintln!("Hooks loaded successfully: {} hooks registered", hook_registry.hook_count());
+        }
+    } else {
+        eprintln!("No hooks configuration found at {}", hooks_config_path.display());
+        eprintln!("Continuing without hooks enabled");
+    }
+
+    let hook_registry = Arc::new(hook_registry);
+
+    // Set the hook registry on the coordinator (uses interior mutability)
+    task_coordinator.set_hook_registry(hook_registry).await;
 
     // Create AgentExecutor with substrate registry and agent metadata
     let agent_executor = Arc::new(AgentExecutor::new(

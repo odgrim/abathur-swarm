@@ -1,9 +1,12 @@
 use crate::domain::models::task::{Task, TaskStatus};
+use crate::domain::models::{HookContext, HookEvent};
 use crate::domain::ports::{PriorityCalculator, TaskQueueService};
+use crate::services::hook_executor::HookExecutor;
+use crate::services::hook_registry::HookRegistry;
 use crate::services::DependencyResolver;
 use anyhow::{Context, Result};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, instrument, warn};
 use uuid::Uuid;
 
@@ -68,6 +71,7 @@ pub struct TaskCoordinator {
     priority_calc: Arc<dyn PriorityCalculator>,
     status_tx: mpsc::Sender<TaskStatusUpdate>,
     status_rx: Option<mpsc::Receiver<TaskStatusUpdate>>,
+    hook_registry: Arc<RwLock<Option<Arc<HookRegistry>>>>,
 }
 
 impl TaskCoordinator {
@@ -95,7 +99,18 @@ impl TaskCoordinator {
             priority_calc,
             status_tx,
             status_rx: Some(status_rx),
+            hook_registry: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set the hook registry for this coordinator
+    ///
+    /// This must be called after construction to enable hook execution.
+    /// It's separate from the constructor to avoid circular dependencies
+    /// (HookExecutor needs TaskCoordinator, TaskCoordinator needs HookRegistry).
+    pub async fn set_hook_registry(&self, hook_registry: Arc<HookRegistry>) {
+        let mut registry = self.hook_registry.write().await;
+        *registry = Some(hook_registry);
     }
 
     /// Get a handle to send status updates
@@ -172,7 +187,48 @@ impl TaskCoordinator {
             TaskStatus::Blocked
         };
 
-        if task.status != new_status {
+        if task.status != new_status && new_status == TaskStatus::Ready {
+            // Execute PreReady hooks
+            let hook_registry_guard = self.hook_registry.read().await;
+            if let Some(ref registry) = *hook_registry_guard {
+                let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
+                let hook_result = registry.execute_hooks(HookEvent::PreReady, &task, &context).await
+                    .context("Failed to execute PreReady hooks")?;
+
+                if hook_result.should_block() {
+                    warn!("PreReady hook blocked task {} from becoming ready", task_id);
+                    return Ok(());
+                }
+            }
+            drop(hook_registry_guard);
+
+            // Update status to Ready
+            self.task_queue
+                .update_task_status(task_id, new_status)
+                .await
+                .context("Failed to update task status")?;
+
+            // Notify status change
+            let _ = self
+                .status_tx
+                .send(TaskStatusUpdate {
+                    task_id,
+                    old_status: task.status,
+                    new_status,
+                })
+                .await;
+
+            info!("Task {} transitioned to {:?}", task_id, new_status);
+
+            // Execute PostReady hooks
+            let hook_registry_guard = self.hook_registry.read().await;
+            if let Some(ref registry) = *hook_registry_guard {
+                let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
+                let _ = registry.execute_hooks(HookEvent::PostReady, &task, &context).await;
+            }
+            drop(hook_registry_guard);
+        } else if task.status != new_status {
+            // Non-ready status transitions (e.g., to Blocked)
             self.task_queue
                 .update_task_status(task_id, new_status)
                 .await
@@ -227,6 +283,24 @@ impl TaskCoordinator {
     /// * `Err` - If task not found or database error
     #[instrument(skip(self), fields(task_id = %task_id))]
     pub async fn mark_task_running(&self, task_id: Uuid) -> Result<()> {
+        // Get the task for hook execution
+        let task = self.task_queue.get_task(task_id).await
+            .context("Failed to get task for mark_task_running")?;
+
+        // Execute PreStart hooks
+        let hook_registry_guard = self.hook_registry.read().await;
+        if let Some(ref registry) = *hook_registry_guard {
+            let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
+            let hook_result = registry.execute_hooks(HookEvent::PreStart, &task, &context).await
+                .context("Failed to execute PreStart hooks")?;
+
+            if hook_result.should_block() {
+                warn!("PreStart hook blocked task {} from starting", task_id);
+                return Ok(());
+            }
+        }
+        drop(hook_registry_guard);
+
         self.task_queue
             .update_task_status(task_id, TaskStatus::Running)
             .await
@@ -241,6 +315,14 @@ impl TaskCoordinator {
                 new_status: TaskStatus::Running,
             })
             .await;
+
+        // Execute PostStart hooks
+        let hook_registry_guard = self.hook_registry.read().await;
+        if let Some(ref registry) = *hook_registry_guard {
+            let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
+            let _ = registry.execute_hooks(HookEvent::PostStart, &task, &context).await;
+        }
+        drop(hook_registry_guard);
 
         Ok(())
     }
@@ -266,6 +348,24 @@ impl TaskCoordinator {
     pub async fn handle_task_completion(&self, task_id: Uuid) -> Result<()> {
         info!("Handling task completion for task {}", task_id);
 
+        // Get the task for hook execution
+        let task = self.task_queue.get_task(task_id).await
+            .context("Failed to get task for handle_task_completion")?;
+
+        // Execute PreComplete hooks
+        let hook_registry_guard = self.hook_registry.read().await;
+        if let Some(ref registry) = *hook_registry_guard {
+            let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
+            let hook_result = registry.execute_hooks(HookEvent::PreComplete, &task, &context).await
+                .context("Failed to execute PreComplete hooks")?;
+
+            if hook_result.should_block() {
+                warn!("PreComplete hook blocked task {} from completing", task_id);
+                return Ok(());
+            }
+        }
+        drop(hook_registry_guard);
+
         // 1. Mark task as completed
         self.task_queue
             .update_task_status(task_id, TaskStatus::Completed)
@@ -281,6 +381,14 @@ impl TaskCoordinator {
                 new_status: TaskStatus::Completed,
             })
             .await;
+
+        // Execute PostComplete hooks
+        let hook_registry_guard = self.hook_registry.read().await;
+        if let Some(ref registry) = *hook_registry_guard {
+            let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
+            let _ = registry.execute_hooks(HookEvent::PostComplete, &task, &context).await;
+        }
+        drop(hook_registry_guard);
 
         // 2. Get all dependent tasks
         let dependent_tasks = self
@@ -885,5 +993,181 @@ mod tests {
         let updated_task = task_queue.get_task(task_id).await.unwrap();
         assert_eq!(updated_task.status, TaskStatus::Failed);
         assert_eq!(updated_task.error_message, Some("Test error".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_hooks_integration_pre_ready() {
+        use crate::domain::models::{HookAction, HookEvent, HooksConfig, TaskHook};
+
+        let task_queue = Arc::new(MockTaskQueue::new());
+        let dependency_resolver = Arc::new(DependencyResolver::new());
+        let priority_calc = Arc::new(MockPriorityCalculator);
+
+        let coordinator = Arc::new(TaskCoordinator::new(
+            task_queue.clone(),
+            dependency_resolver,
+            priority_calc,
+        ));
+
+        // Create a hook configuration with a log message on PreReady
+        let hook = TaskHook {
+            id: "test-pre-ready".to_string(),
+            description: Some("Test PreReady hook".to_string()),
+            event: HookEvent::PreReady,
+            conditions: vec![],
+            actions: vec![HookAction::LogMessage {
+                level: "info".to_string(),
+                message: "PreReady hook executed for ${task_id}".to_string(),
+            }],
+            priority: 10,
+            enabled: true,
+        };
+
+        let config = HooksConfig { hooks: vec![hook] };
+
+        // Initialize hooks
+        let hook_executor = Arc::new(HookExecutor::new(Some(coordinator.clone())));
+        let mut hook_registry = HookRegistry::new(hook_executor);
+        hook_registry.load_from_config(config).unwrap();
+
+        // Set hook registry on coordinator
+        coordinator
+            .set_hook_registry(Arc::new(hook_registry))
+            .await;
+
+        // Create a pending task
+        let task_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let task = create_test_task(
+            "00000000-0000-0000-0000-000000000001",
+            TaskStatus::Pending,
+            None,
+        );
+
+        task_queue.add_task(task);
+
+        // Coordinate task lifecycle - should trigger PreReady hook
+        coordinator
+            .coordinate_task_lifecycle(task_id)
+            .await
+            .unwrap();
+
+        // Task should be ready (hook didn't block)
+        let updated_task = task_queue.get_task(task_id).await.unwrap();
+        assert_eq!(updated_task.status, TaskStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn test_hooks_integration_post_complete() {
+        use crate::domain::models::{HookAction, HookEvent, HooksConfig, TaskHook};
+
+        let task_queue = Arc::new(MockTaskQueue::new());
+        let dependency_resolver = Arc::new(DependencyResolver::new());
+        let priority_calc = Arc::new(MockPriorityCalculator);
+
+        let coordinator = Arc::new(TaskCoordinator::new(
+            task_queue.clone(),
+            dependency_resolver,
+            priority_calc,
+        ));
+
+        // Create a hook configuration with a log message on PostComplete
+        let hook = TaskHook {
+            id: "test-post-complete".to_string(),
+            description: Some("Test PostComplete hook".to_string()),
+            event: HookEvent::PostComplete,
+            conditions: vec![],
+            actions: vec![HookAction::LogMessage {
+                level: "info".to_string(),
+                message: "Task ${task_id} completed successfully".to_string(),
+            }],
+            priority: 10,
+            enabled: true,
+        };
+
+        let config = HooksConfig { hooks: vec![hook] };
+
+        // Initialize hooks
+        let hook_executor = Arc::new(HookExecutor::new(Some(coordinator.clone())));
+        let mut hook_registry = HookRegistry::new(hook_executor);
+        hook_registry.load_from_config(config).unwrap();
+
+        // Set hook registry on coordinator
+        coordinator
+            .set_hook_registry(Arc::new(hook_registry))
+            .await;
+
+        // Create a running task
+        let task_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let task = create_test_task(
+            "00000000-0000-0000-0000-000000000001",
+            TaskStatus::Running,
+            None,
+        );
+
+        task_queue.add_task(task);
+
+        // Handle task completion - should trigger PostComplete hook
+        coordinator.handle_task_completion(task_id).await.unwrap();
+
+        // Task should be completed
+        let updated_task = task_queue.get_task(task_id).await.unwrap();
+        assert_eq!(updated_task.status, TaskStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_hooks_integration_blocking_hook() {
+        use crate::domain::models::{HookAction, HookEvent, HooksConfig, TaskHook};
+
+        let task_queue = Arc::new(MockTaskQueue::new());
+        let dependency_resolver = Arc::new(DependencyResolver::new());
+        let priority_calc = Arc::new(MockPriorityCalculator);
+
+        let coordinator = Arc::new(TaskCoordinator::new(
+            task_queue.clone(),
+            dependency_resolver,
+            priority_calc,
+        ));
+
+        // Create a hook that blocks transition
+        let hook = TaskHook {
+            id: "test-blocking".to_string(),
+            description: Some("Test blocking hook".to_string()),
+            event: HookEvent::PreStart,
+            conditions: vec![],
+            actions: vec![HookAction::BlockTransition {
+                reason: "Task blocked by test hook".to_string(),
+            }],
+            priority: 10,
+            enabled: true,
+        };
+
+        let config = HooksConfig { hooks: vec![hook] };
+
+        // Initialize hooks
+        let hook_executor = Arc::new(HookExecutor::new(Some(coordinator.clone())));
+        let mut hook_registry = HookRegistry::new(hook_executor);
+        hook_registry.load_from_config(config).unwrap();
+
+        // Set hook registry on coordinator
+        coordinator
+            .set_hook_registry(Arc::new(hook_registry))
+            .await;
+
+        // Create a ready task
+        let task_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let task = create_test_task(
+            "00000000-0000-0000-0000-000000000001",
+            TaskStatus::Ready,
+            None,
+        );
+
+        task_queue.add_task(task);
+
+        // Try to mark task as running - should be blocked by hook
+        coordinator.mark_task_running(task_id).await.unwrap();
+
+        // Task should still be ready (blocked from starting)
+        let updated_task = task_queue.get_task(task_id).await.unwrap();
+        assert_eq!(updated_task.status, TaskStatus::Ready);
     }
 }
