@@ -59,21 +59,26 @@ pub async fn handle_list(
     Ok(())
 }
 
-/// Handle memory show command
+/// Handle memory show command with fuzzy matching support
+/// If exact match is not found, attempts fuzzy matching on namespace and key
 pub async fn handle_show(
     service: &MemoryServiceAdapter,
     namespace: String,
     key: String,
     json: bool,
 ) -> Result<()> {
+    // First try exact match
     let memory = service
         .get(&namespace, &key)
         .await
         .context("Failed to retrieve memory")?;
 
-    let memory = memory.ok_or_else(|| {
-        anyhow::anyhow!("Memory not found at {}:{}", namespace, key)
-    })?;
+    let memory = if let Some(mem) = memory {
+        mem
+    } else {
+        // Exact match failed, try fuzzy matching
+        fuzzy_find_memory(service, &namespace, &key).await?
+    };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&memory)?);
@@ -97,6 +102,55 @@ pub async fn handle_show(
     }
 
     Ok(())
+}
+
+/// Fuzzy find a memory by namespace and key patterns
+/// Returns error if no match or multiple matches found
+async fn fuzzy_find_memory(
+    service: &MemoryServiceAdapter,
+    namespace_pattern: &str,
+    key_pattern: &str,
+) -> Result<crate::domain::models::Memory> {
+    // Search for memories with namespace prefix
+    let all_memories = service
+        .search("", None, Some(1000))
+        .await
+        .context("Failed to search memories for fuzzy matching")?;
+
+    // Filter memories that match both namespace and key patterns
+    let matches: Vec<_> = all_memories
+        .into_iter()
+        .filter(|m| {
+            m.namespace.contains(namespace_pattern) && m.key.contains(key_pattern)
+        })
+        .collect();
+
+    match matches.len() {
+        0 => Err(anyhow::anyhow!(
+            "No memory found matching namespace pattern '{}' and key pattern '{}'",
+            namespace_pattern,
+            key_pattern
+        )),
+        1 => {
+            let memory = &matches[0];
+            eprintln!(
+                "Found unique match: {}:{}",
+                memory.namespace, memory.key
+            );
+            Ok(matches.into_iter().next().unwrap())
+        }
+        n => {
+            let mut error_msg = format!(
+                "Found {} memories matching namespace pattern '{}' and key pattern '{}'.\n\nAmbiguous matches:\n",
+                n, namespace_pattern, key_pattern
+            );
+            for m in &matches {
+                error_msg.push_str(&format!("  - {}:{}\n", m.namespace, m.key));
+            }
+            error_msg.push_str("\nPlease provide more specific namespace and key patterns.");
+            Err(anyhow::anyhow!(error_msg))
+        }
+    }
 }
 
 /// Handle memory count command
