@@ -261,8 +261,8 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
 
     eprintln!("Tasks HTTP MCP server started on port 45679");
 
-    // Give servers a moment to start listening
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // Give servers a moment to start listening and initialize
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
     eprintln!("HTTP MCP servers ready for connections");
 
