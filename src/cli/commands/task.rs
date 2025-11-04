@@ -12,6 +12,7 @@ pub async fn handle_submit(
     summary: Option<String>,
     priority: u8,
     dependencies: Vec<String>,
+    chain_id: Option<String>,
     json: bool,
 ) -> Result<()> {
     // Resolve dependency prefixes to full UUIDs
@@ -41,6 +42,7 @@ pub async fn handle_submit(
             agent_type.clone(),
             priority,
             resolved_deps.clone(),
+            chain_id.clone(),
         )
         .await
         .context("Failed to submit task")?;
@@ -151,6 +153,10 @@ pub async fn handle_show(service: &TaskQueueServiceAdapter, task_id_prefix: Stri
                 "  Completed at: {}",
                 completed_at.format("%Y-%m-%d %H:%M:%S UTC")
             );
+        }
+
+        if let Some(chain_id) = &task.chain_id {
+            println!("  Chain ID: {}", chain_id);
         }
 
         if !task.dependencies.is_empty() {

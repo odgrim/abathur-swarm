@@ -1,7 +1,4 @@
-.env
-.venv
-env/
-venv/
+design_docs
 
 # Runtime - ignore .abathur directory except for hooks
 .abathur/*

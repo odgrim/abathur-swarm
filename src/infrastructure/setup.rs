@@ -91,6 +91,7 @@ pub struct SetupPaths {
     pub agents_dir: PathBuf,
     pub hooks_dir: PathBuf,
     pub hooks_file: PathBuf,
+    pub chains_dir: PathBuf,
 }
 
 impl SetupPaths {
@@ -106,6 +107,7 @@ impl SetupPaths {
             agents_dir: current_dir.join(".claude/agents"),
             hooks_dir: config_dir.join("hooks"),
             hooks_file: config_dir.join("hooks.yaml"),
+            chains_dir: current_dir.join("templates/chains"),
             config_dir,
         })
     }
@@ -389,6 +391,45 @@ pub fn merge_mcp_config(template_dir: &PathBuf, force: bool) -> Result<()> {
 
     fs::write(&mcp_config_path, merged_content)
         .context("Failed to write MCP configuration")?;
+
+    Ok(())
+}
+
+/// Copy chain templates from template directory to templates/chains
+pub fn copy_chain_templates(paths: &SetupPaths, template_dir: &PathBuf, force: bool) -> Result<()> {
+    let template_chains_dir = template_dir.join("chains");
+
+    // Check if template chains directory exists
+    if !template_chains_dir.exists() {
+        return Ok(());
+    }
+
+    // Create target chains directory
+    if !paths.chains_dir.exists() || force {
+        fs::create_dir_all(&paths.chains_dir)
+            .context("Failed to create chains directory")?;
+    }
+
+    // Copy chain templates
+    for entry in fs::read_dir(&template_chains_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Only copy .yaml files and README.md
+        if path.is_file() {
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+
+            if file_name_str.ends_with(".yaml") || file_name_str.ends_with(".yml") || file_name_str == "README.md" {
+                let dest_path = paths.chains_dir.join(&file_name);
+
+                if !dest_path.exists() || force {
+                    fs::copy(&path, &dest_path)
+                        .with_context(|| format!("Failed to copy {} to {}", path.display(), dest_path.display()))?;
+                }
+            }
+        }
+    }
 
     Ok(())
 }

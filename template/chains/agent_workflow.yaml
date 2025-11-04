@@ -1,0 +1,589 @@
+name: agent_workflow
+description: "Default multi-agent workflow: requirements → architecture → technical specs → task planning → implementation → merge"
+
+steps:
+  - id: gather_requirements
+    role: Requirements Analyst
+    prompt: |
+      Analyze the following task and gather comprehensive requirements:
+
+      Task: {task_description}
+      Project Context: {project_context}
+
+      Research:
+      1. Search existing codebase for similar patterns and conventions
+      2. Research industry best practices for this type of task
+      3. Check for prior work in memory
+      4. Identify constraints and success criteria
+
+      Determine:
+      - Functional requirements (what the system must do)
+      - Non-functional requirements (performance, scalability, security)
+      - Technical constraints
+      - Success criteria
+      - Dependencies on existing systems
+
+      Return comprehensive requirements in JSON:
+      {
+        "problem_statement": "Clear description of the problem to solve",
+        "functional_requirements": [
+          {"id": "FR-1", "description": "...", "priority": "must|should|could"}
+        ],
+        "non_functional_requirements": [
+          {"id": "NFR-1", "category": "performance|security|scalability|...", "description": "...", "target": "specific metric"}
+        ],
+        "constraints": ["constraint1", "constraint2"],
+        "success_criteria": ["criteria1", "criteria2"],
+        "dependencies": ["existing_system1", "existing_system2"],
+        "research_sources": [
+          {"type": "codebase|web|memory", "reference": "file path or URL", "key_insight": "..."}
+        ]
+      }
+    expected_output:
+      type: json
+      schema:
+        type: object
+        properties:
+          problem_statement:
+            type: string
+          functional_requirements:
+            type: array
+            items:
+              type: object
+              properties:
+                id:
+                  type: string
+                description:
+                  type: string
+                priority:
+                  type: string
+                  enum:
+                    - must
+                    - should
+                    - could
+              required:
+                - id
+                - description
+                - priority
+          non_functional_requirements:
+            type: array
+          constraints:
+            type: array
+          success_criteria:
+            type: array
+          dependencies:
+            type: array
+        required:
+          - problem_statement
+          - functional_requirements
+          - success_criteria
+    post_hooks:
+      # Store requirements in memory for future reference
+      - type: run_script
+        script_path: scripts/store_requirements.sh
+        args:
+          - "{task_id}"
+          - "requirements"
+    next: design_architecture
+    timeout_secs: 300
+
+  - id: design_architecture
+    role: Technical Architect
+    prompt: |
+      Based on these requirements, design the system architecture:
+      {previous_output}
+
+      Analyze:
+      1. Research architectural patterns suitable for these requirements
+      2. Evaluate technology choices based on project stack and constraints
+      3. Identify if this requires multiple subprojects or single implementation
+      4. Determine component boundaries and interfaces
+
+      Design:
+      - High-level architecture (components, data flow, integration points)
+      - Technology recommendations with justification
+      - Data models and schemas
+      - API contracts and interfaces
+      - Decomposition strategy (single project vs multiple subprojects)
+
+      Return architecture design in JSON:
+      {
+        "architecture_overview": "High-level description",
+        "components": [
+          {
+            "name": "component_name",
+            "responsibility": "what it does",
+            "interfaces": ["interface1", "interface2"],
+            "dependencies": ["dep1", "dep2"]
+          }
+        ],
+        "technology_stack": [
+          {"layer": "frontend|backend|database|...", "technology": "...", "justification": "..."}
+        ],
+        "data_models": [
+          {"entity": "User", "fields": ["id", "name", "email"], "relationships": ["has_many_posts"]}
+        ],
+        "api_contracts": [
+          {"endpoint": "/api/users", "method": "POST", "request_schema": {}, "response_schema": {}}
+        ],
+        "decomposition": {
+          "strategy": "single|multiple",
+          "subprojects": ["project1", "project2"],
+          "rationale": "why this decomposition"
+        },
+        "architectural_decisions": [
+          {"decision": "...", "rationale": "...", "alternatives_considered": ["alt1", "alt2"]}
+        ]
+      }
+    expected_output:
+      type: json
+      schema:
+        type: object
+        properties:
+          architecture_overview:
+            type: string
+          components:
+            type: array
+          technology_stack:
+            type: array
+          decomposition:
+            type: object
+            properties:
+              strategy:
+                type: string
+                enum:
+                  - single
+                  - multiple
+            required:
+              - strategy
+        required:
+          - architecture_overview
+          - components
+          - decomposition
+    post_hooks:
+      # Store architecture in memory
+      - type: run_script
+        script_path: scripts/store_architecture.sh
+        args:
+          - "{task_id}"
+          - "architecture"
+      # Create feature branch for this work
+      - type: run_script
+        script_path: scripts/create_feature_branch.sh
+        args:
+          - "{task_id}"
+          - "{decomposition.strategy}"
+      - type: log_message
+        level: info
+        message: "Architecture designed and feature branch created for task {task_id}"
+    next: create_technical_specs
+    timeout_secs: 420
+
+  - id: create_technical_specs
+    role: Technical Requirements Specialist
+    prompt: |
+      Translate this architecture into detailed technical specifications:
+
+      Requirements: {gather_requirements.output}
+      Architecture: {previous_output}
+
+      Create:
+      1. Detailed technical specifications for each component
+      2. Data models with field types and constraints
+      3. API specifications with request/response schemas
+      4. Phased implementation plan
+      5. Testing requirements
+      6. List of specialized agents needed
+
+      Return technical specifications in JSON:
+      {
+        "components": [
+          {
+            "name": "component_name",
+            "specifications": {
+              "language": "Rust|Python|...",
+              "framework": "...",
+              "entry_point": "file_path",
+              "key_modules": ["module1", "module2"]
+            },
+            "data_models": [
+              {
+                "name": "User",
+                "fields": [
+                  {"name": "id", "type": "UUID", "constraints": ["primary_key", "not_null"]},
+                  {"name": "email", "type": "String", "constraints": ["unique", "not_null"]}
+                ]
+              }
+            ],
+            "apis": [
+              {
+                "endpoint": "/api/users",
+                "method": "POST",
+                "request": {"type": "object", "properties": {}},
+                "response": {"type": "object", "properties": {}},
+                "authentication": "required|optional|none"
+              }
+            ]
+          }
+        ],
+        "implementation_phases": [
+          {
+            "phase": 1,
+            "name": "Core Setup",
+            "deliverables": ["deliverable1", "deliverable2"],
+            "estimated_effort": "small|medium|large"
+          }
+        ],
+        "testing_requirements": {
+          "unit_tests": ["test_area1", "test_area2"],
+          "integration_tests": ["scenario1", "scenario2"],
+          "performance_targets": [
+            {"metric": "response_time", "target": "< 200ms", "endpoint": "/api/users"}
+          ]
+        },
+        "required_agents": [
+          {
+            "type": "rust-service-layer-specialist",
+            "reason": "Implement async business logic",
+            "estimated_tasks": 3
+          }
+        ],
+        "feature_branch": "feature/{task_id}",
+        "branching_strategy": "task-per-worktree"
+      }
+    expected_output:
+      type: json
+      schema:
+        type: object
+        properties:
+          components:
+            type: array
+          implementation_phases:
+            type: array
+          testing_requirements:
+            type: object
+          required_agents:
+            type: array
+          feature_branch:
+            type: string
+        required:
+          - components
+          - implementation_phases
+          - required_agents
+          - feature_branch
+    pre_hooks:
+      # Checkout and prepare feature branch worktree
+      - type: run_script
+        script_path: scripts/prepare_feature_worktree.sh
+        args:
+          - "{task_id}"
+          - "feature/{task_id}"
+    post_hooks:
+      # Store technical specs in memory
+      - type: run_script
+        script_path: scripts/store_technical_specs.sh
+        args:
+          - "{task_id}"
+          - "technical_specs"
+      - type: log_message
+        level: info
+        message: "Technical specifications created for {components.length} components"
+    next: create_task_plan
+    timeout_secs: 480
+
+  - id: create_task_plan
+    role: Task Planning Specialist
+    prompt: |
+      Break down the technical specifications into atomic, executable tasks:
+
+      Technical Specs: {previous_output}
+
+      For each component and phase, create:
+      1. Atomic tasks with clear deliverables
+      2. Task dependencies (what must complete before what)
+      3. Agent assignments based on required_agents
+      4. Validation criteria for each task
+
+      Return task plan in JSON:
+      {
+        "tasks": [
+          {
+            "id": "task-001",
+            "summary": "Implement User domain model",
+            "description": "Create User struct with validation logic...",
+            "agent_type": "rust-domain-models-specialist",
+            "phase": 1,
+            "estimated_effort": "small|medium|large",
+            "dependencies": [],
+            "deliverables": [
+              {"type": "code", "path": "src/domain/models/user.rs"},
+              {"type": "test", "path": "tests/unit/user_tests.rs"}
+            ],
+            "validation_criteria": [
+              "All fields properly typed and validated",
+              "Unit tests achieve >90% coverage",
+              "Follows domain model patterns"
+            ],
+            "needs_worktree": true
+          }
+        ],
+        "execution_order": [
+          {"batch": 1, "tasks": ["task-001", "task-002"], "can_parallelize": true},
+          {"batch": 2, "tasks": ["task-003"], "can_parallelize": false}
+        ],
+        "agent_workload": [
+          {
+            "agent_type": "rust-domain-models-specialist",
+            "task_count": 3,
+            "total_effort": "medium"
+          }
+        ],
+        "estimated_total_duration": "2-3 hours",
+        "critical_path": ["task-001", "task-005", "task-008"]
+      }
+    expected_output:
+      type: json
+      schema:
+        type: object
+        properties:
+          tasks:
+            type: array
+            items:
+              type: object
+              properties:
+                id:
+                  type: string
+                summary:
+                  type: string
+                description:
+                  type: string
+                agent_type:
+                  type: string
+                dependencies:
+                  type: array
+                deliverables:
+                  type: array
+                validation_criteria:
+                  type: array
+                needs_worktree:
+                  type: boolean
+              required:
+                - id
+                - summary
+                - description
+                - agent_type
+                - deliverables
+          execution_order:
+            type: array
+        required:
+          - tasks
+          - execution_order
+    post_hooks:
+      # Create task branches and worktrees for tasks that need them
+      - type: run_script
+        script_path: scripts/create_task_worktrees.sh
+        args:
+          - "{task_id}"
+          - "tasks_json"
+      # Spawn implementation tasks via task queue
+      - type: run_script
+        script_path: scripts/spawn_implementation_tasks.sh
+        args:
+          - "{task_id}"
+          - "tasks_json"
+      - type: log_message
+        level: info
+        message: "Created {tasks.length} implementation tasks for execution"
+    next: monitor_implementation
+    timeout_secs: 360
+
+  - id: monitor_implementation
+    role: Implementation Monitor
+    prompt: |
+      Monitor the implementation tasks that were spawned:
+
+      Task Plan: {previous_output}
+
+      Check:
+      1. Status of all spawned tasks
+      2. Any blocked or failed tasks
+      3. Overall progress
+      4. Quality of completed work
+
+      Return monitoring status in JSON:
+      {
+        "total_tasks": 10,
+        "completed": 7,
+        "in_progress": 2,
+        "blocked": 1,
+        "failed": 0,
+        "progress_percentage": 70,
+        "completed_tasks": [
+          {
+            "id": "task-001",
+            "summary": "...",
+            "completion_time": "2025-11-03T10:30:00Z",
+            "quality_check": "passed"
+          }
+        ],
+        "issues": [
+          {
+            "task_id": "task-005",
+            "status": "blocked",
+            "reason": "Waiting for task-001 dependency",
+            "action_needed": "none - dependency in progress"
+          }
+        ],
+        "ready_for_merge": false,
+        "next_steps": "Wait for remaining tasks to complete"
+      }
+    expected_output:
+      type: json
+      schema:
+        type: object
+        properties:
+          total_tasks:
+            type: integer
+          completed:
+            type: integer
+          progress_percentage:
+            type: integer
+            minimum: 0
+            maximum: 100
+          ready_for_merge:
+            type: boolean
+        required:
+          - total_tasks
+          - completed
+          - ready_for_merge
+    post_hooks:
+      # Update task status in memory
+      - type: run_script
+        script_path: scripts/update_progress.sh
+        args:
+          - "{task_id}"
+          - "{progress_percentage}"
+    next: prepare_merge
+    timeout_secs: 180
+
+  - id: prepare_merge
+    role: Merge Preparation Specialist
+    prompt: |
+      Prepare for merging all implementation work:
+
+      Implementation Status: {previous_output}
+
+      Verify:
+      1. All tasks completed successfully
+      2. All tests passing
+      3. Code quality meets standards
+      4. No conflicts with main branch
+      5. Documentation updated
+
+      Return merge readiness assessment in JSON:
+      {
+        "ready_to_merge": true,
+        "verification_results": {
+          "all_tasks_complete": true,
+          "tests_passing": true,
+          "quality_checks_passed": true,
+          "no_conflicts": true,
+          "documentation_complete": true
+        },
+        "test_summary": {
+          "unit_tests": {"total": 45, "passed": 45, "failed": 0},
+          "integration_tests": {"total": 12, "passed": 12, "failed": 0},
+          "coverage_percentage": 92
+        },
+        "branches_to_merge": [
+          {"source": "task/001-user-model", "target": "feature/{task_id}"},
+          {"source": "task/002-user-service", "target": "feature/{task_id}"}
+        ],
+        "final_deliverables": [
+          {"type": "code", "count": 15, "loc": 2340},
+          {"type": "tests", "count": 57, "coverage": "92%"},
+          {"type": "docs", "count": 8}
+        ],
+        "merge_strategy": "rebase",
+        "post_merge_actions": ["cleanup_worktrees", "tag_release"]
+      }
+    expected_output:
+      type: json
+      schema:
+        type: object
+        properties:
+          ready_to_merge:
+            type: boolean
+          verification_results:
+            type: object
+          branches_to_merge:
+            type: array
+        required:
+          - ready_to_merge
+          - verification_results
+          - branches_to_merge
+    pre_hooks:
+      # Run comprehensive test suite
+      - type: run_script
+        script_path: scripts/run_all_tests.sh
+        args:
+          - "{task_id}"
+      # Run quality checks
+      - type: run_script
+        script_path: scripts/quality_checks.sh
+        args:
+          - "{task_id}"
+    post_hooks:
+      # Merge all task branches to feature branch
+      - type: run_script
+        script_path: scripts/merge_task_branches.sh
+        args:
+          - "{task_id}"
+          - "branches_json"
+      # Merge feature branch to main
+      - type: merge_branch
+        source: "feature/{task_id}"
+        target: "main"
+        strategy:
+          type: rebase
+      # Clean up all worktrees and branches
+      - type: run_script
+        script_path: scripts/cleanup_all_worktrees.sh
+        args:
+          - "{task_id}"
+      # Create release tag
+      - type: create_tag
+        name: "release/{task_id}"
+        message: "Completed: {gather_requirements.problem_statement}"
+      # Final status log
+      - type: log_message
+        level: info
+        message: "Successfully completed full workflow for task {task_id} - merged to main"
+    timeout_secs: 300
+
+validation_rules:
+  - step_id: gather_requirements
+    rule_type:
+      type: json_schema
+    error_message: "Requirements must include problem statement, functional requirements, and success criteria"
+
+  - step_id: design_architecture
+    rule_type:
+      type: json_schema
+    error_message: "Architecture must specify components and decomposition strategy"
+
+  - step_id: create_technical_specs
+    rule_type:
+      type: json_schema
+    error_message: "Technical specs must include components, phases, and required agents"
+
+  - step_id: create_task_plan
+    rule_type:
+      type: json_schema
+    error_message: "Task plan must include tasks array with agent assignments and execution order"
+
+  - step_id: prepare_merge
+    rule_type:
+      type: custom_validator
+      name: merge_readiness
+    error_message: "Cannot merge - not all verification checks passed"

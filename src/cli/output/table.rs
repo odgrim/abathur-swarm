@@ -41,7 +41,7 @@ impl TableFormatter {
             Cell::new("ID").add_attribute(Attribute::Bold),
             Cell::new("Summary").add_attribute(Attribute::Bold),
             Cell::new("Status").add_attribute(Attribute::Bold),
-            Cell::new("Priority").add_attribute(Attribute::Bold),
+            Cell::new("Chain").add_attribute(Attribute::Bold),
             Cell::new("Agent").add_attribute(Attribute::Bold),
             Cell::new("Branch").add_attribute(Attribute::Bold),
         ]);
@@ -58,11 +58,22 @@ impl TableFormatter {
                 Cell::new(format!("{} {}", status_icon(&task.status), task.status))
             };
 
-            let priority_cell = if self.use_colors {
-                Cell::new(task.priority.to_string())
-                    .fg(priority_color(task.priority))
+            // Format chain_id - show first 8 chars if present, otherwise show "-"
+            let chain_display = task.chain_id
+                .as_ref()
+                .map(|id| {
+                    if id.len() > 8 {
+                        format!("{}...", &id[..8])
+                    } else {
+                        id.clone()
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string());
+
+            let chain_cell = if self.use_colors && task.chain_id.is_some() {
+                Cell::new(&chain_display).fg(Color::Cyan)
             } else {
-                Cell::new(task.priority.to_string())
+                Cell::new(&chain_display)
             };
 
             let branch = task.task_branch.as_deref().unwrap_or("-");
@@ -71,7 +82,7 @@ impl TableFormatter {
                 Cell::new(id_short),
                 Cell::new(&summary),
                 status_cell,
-                priority_cell,
+                chain_cell,
                 Cell::new(&task.agent_type),
                 Cell::new(truncate_text(branch, 30)),
             ]);
@@ -234,15 +245,6 @@ fn status_icon(status: &TaskStatus) -> &'static str {
     }
 }
 
-/// Map priority to color (high = red, low = blue)
-fn priority_color(priority: u8) -> Color {
-    match priority {
-        8..=10 => Color::Red,
-        5..=7 => Color::Yellow,
-        _ => Color::Blue,
-    }
-}
-
 /// Map agent status to color
 fn agent_status_color(status: &AgentStatus) -> Color {
     match status {
@@ -319,6 +321,7 @@ pub fn format_task_table(tasks: &[crate::cli::models::Task]) -> String {
         is_remediation: false,
         workflow_state: None,
         workflow_expectations: None,
+        chain_id: t.chain_id.clone(),
     }).collect();
 
     formatter.format_tasks(&domain_tasks)

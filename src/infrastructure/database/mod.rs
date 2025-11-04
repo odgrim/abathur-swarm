@@ -7,6 +7,7 @@
 //! - Repository implementations
 
 pub mod agent_repo;
+pub mod chain_repo;
 pub mod connection;
 pub mod errors;
 pub mod memory_repo;
@@ -15,6 +16,7 @@ pub mod task_repo;
 pub mod utils;
 
 pub use agent_repo::AgentRepositoryImpl;
+pub use chain_repo::ChainRepositoryImpl;
 pub use connection::DatabaseConnection;
 pub use errors::DatabaseError;
 pub use memory_repo::MemoryRepositoryImpl;

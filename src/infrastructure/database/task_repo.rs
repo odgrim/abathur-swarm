@@ -110,6 +110,7 @@ impl TaskRepositoryImpl {
                 .get::<Option<String>, _>("workflow_expectations")
                 .as_ref()
                 .and_then(|s| serde_json::from_str(s).ok()),
+            chain_id: row.get("chain_id"),
         })
     }
 }
@@ -164,9 +165,9 @@ impl TaskRepository for TaskRepositoryImpl {
                 deadline, estimated_duration_seconds, feature_branch, task_branch,
                 worktree_path, validation_requirement, validation_task_id,
                 validating_task_id, remediation_count, is_remediation,
-                workflow_state, workflow_expectations
+                workflow_state, workflow_expectations, chain_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             id,
             task.summary,
@@ -203,7 +204,8 @@ impl TaskRepository for TaskRepositoryImpl {
             task.remediation_count,
             task.is_remediation,
             workflow_state,
-            workflow_expectations
+            workflow_expectations,
+            task.chain_id
         )
         .execute(&self.pool)
         .await?;
@@ -299,7 +301,8 @@ impl TaskRepository for TaskRepositoryImpl {
                 remediation_count = ?,
                 is_remediation = ?,
                 workflow_state = ?,
-                workflow_expectations = ?
+                workflow_expectations = ?,
+                chain_id = ?
             WHERE id = ?
             "#,
             task.summary,
@@ -336,6 +339,7 @@ impl TaskRepository for TaskRepositoryImpl {
             task.is_remediation,
             workflow_state,
             workflow_expectations,
+            task.chain_id,
             id
         )
         .execute(&self.pool)

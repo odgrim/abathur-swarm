@@ -74,6 +74,10 @@ pub enum TaskCommands {
         /// Task dependencies (comma-separated UUIDs or prefixes)
         #[arg(short = 'D', long, value_delimiter = ',')]
         dependencies: Vec<String>,
+
+        /// Prompt chain ID to execute task through multi-step workflow
+        #[arg(short, long)]
+        chain: Option<String>,
     },
 
     /// List tasks in the queue

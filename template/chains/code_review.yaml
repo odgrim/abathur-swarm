@@ -1,0 +1,356 @@
+name: code_review
+description: "Comprehensive code review process with multiple analysis stages"
+
+steps:
+  - id: analyze_structure
+    role: Software Architect
+    prompt: |
+      Analyze the structure and architecture of the following code:
+      {code}
+
+      File: {file_path}
+      Language: {language}
+
+      Evaluate:
+      1. Overall structure and organization
+      2. Design patterns used
+      3. Separation of concerns
+      4. Module/class/function cohesion
+      5. Coupling between components
+      6. Adherence to architectural principles (SOLID, DRY, KISS)
+
+      Return analysis in JSON format:
+      {
+        "structure_assessment": {
+          "overall_rating": 1-10,
+          "organization": "assessment",
+          "design_patterns": ["pattern1", "pattern2"],
+          "cohesion_score": 1-10,
+          "coupling_score": 1-10
+        },
+        "architectural_principles": {
+          "solid": {"rating": 1-10, "notes": "..."},
+          "dry": {"rating": 1-10, "notes": "..."},
+          "kiss": {"rating": 1-10, "notes": "..."}
+        },
+        "strengths": ["strength1", "strength2"],
+        "concerns": [
+          {"issue": "description", "severity": "high|medium|low", "location": "line X"}
+        ],
+        "recommendations": ["recommendation1", "recommendation2"]
+      }
+    expected_output:
+      type: json
+      schema:
+        type: object
+        properties:
+          structure_assessment:
+            type: object
+            properties:
+              overall_rating:
+                type: integer
+                minimum: 1
+                maximum: 10
+              organization:
+                type: string
+              cohesion_score:
+                type: integer
+                minimum: 1
+                maximum: 10
+              coupling_score:
+                type: integer
+                minimum: 1
+                maximum: 10
+            required:
+              - overall_rating
+              - organization
+          architectural_principles:
+            type: object
+          strengths:
+            type: array
+          concerns:
+            type: array
+          recommendations:
+            type: array
+        required:
+          - structure_assessment
+          - concerns
+          - recommendations
+    next: review_quality
+    timeout_secs: 180
+
+  - id: review_quality
+    role: Code Quality Specialist
+    prompt: |
+      Review the code quality based on the structural analysis:
+      {structure_assessment}
+
+      Original code:
+      {code}
+
+      Evaluate:
+      1. Code readability and clarity
+      2. Naming conventions
+      3. Comments and documentation
+      4. Error handling
+      5. Edge cases
+      6. Code duplication
+      7. Complexity (cognitive and cyclomatic)
+      8. Test coverage considerations
+
+      Return quality review in JSON format:
+      {
+        "quality_metrics": {
+          "readability": 1-10,
+          "maintainability": 1-10,
+          "documentation": 1-10,
+          "error_handling": 1-10,
+          "complexity": "low|medium|high"
+        },
+        "code_smells": [
+          {
+            "type": "long_method|magic_number|dead_code|...",
+            "location": "line X",
+            "description": "...",
+            "severity": "high|medium|low"
+          }
+        ],
+        "best_practices": {
+          "followed": ["practice1", "practice2"],
+          "violated": ["practice3", "practice4"]
+        },
+        "refactoring_suggestions": [
+          {
+            "type": "extract_method|rename|...",
+            "location": "line X",
+            "reason": "...",
+            "suggested_change": "..."
+          }
+        ]
+      }
+    expected_output:
+      type: json
+      schema:
+        type: object
+        properties:
+          quality_metrics:
+            type: object
+            properties:
+              readability:
+                type: integer
+                minimum: 1
+                maximum: 10
+              maintainability:
+                type: integer
+                minimum: 1
+                maximum: 10
+              documentation:
+                type: integer
+                minimum: 1
+                maximum: 10
+              error_handling:
+                type: integer
+                minimum: 1
+                maximum: 10
+              complexity:
+                type: string
+                enum:
+                  - low
+                  - medium
+                  - high
+            required:
+              - readability
+              - maintainability
+              - complexity
+          code_smells:
+            type: array
+          best_practices:
+            type: object
+          refactoring_suggestions:
+            type: array
+        required:
+          - quality_metrics
+          - code_smells
+          - refactoring_suggestions
+    next: security_analysis
+    timeout_secs: 240
+
+  - id: security_analysis
+    role: Security Analyst
+    prompt: |
+      Perform security analysis on the code:
+      {code}
+
+      Quality review context:
+      {quality_metrics}
+
+      Check for:
+      1. Common vulnerabilities (OWASP Top 10)
+      2. Input validation issues
+      3. Authentication/authorization flaws
+      4. Data exposure risks
+      5. Injection vulnerabilities
+      6. Cryptography issues
+      7. Unsafe dependencies
+      8. Information leakage
+
+      Return security analysis in JSON format:
+      {
+        "security_rating": "secure|needs_review|vulnerable",
+        "vulnerabilities": [
+          {
+            "type": "SQL_injection|XSS|...",
+            "severity": "critical|high|medium|low",
+            "location": "line X",
+            "description": "...",
+            "cwe_id": "CWE-XXX",
+            "remediation": "..."
+          }
+        ],
+        "security_best_practices": {
+          "followed": ["practice1", "practice2"],
+          "missing": ["practice3", "practice4"]
+        },
+        "risk_assessment": {
+          "overall_risk": "low|medium|high|critical",
+          "data_sensitivity": "low|medium|high",
+          "attack_surface": "..."
+        }
+      }
+    expected_output:
+      type: json
+      schema:
+        type: object
+        properties:
+          security_rating:
+            type: string
+            enum:
+              - secure
+              - needs_review
+              - vulnerable
+          vulnerabilities:
+            type: array
+            items:
+              type: object
+              properties:
+                type:
+                  type: string
+                severity:
+                  type: string
+                  enum:
+                    - critical
+                    - high
+                    - medium
+                    - low
+                location:
+                  type: string
+                description:
+                  type: string
+                remediation:
+                  type: string
+              required:
+                - type
+                - severity
+                - description
+          security_best_practices:
+            type: object
+          risk_assessment:
+            type: object
+            properties:
+              overall_risk:
+                type: string
+                enum:
+                  - low
+                  - medium
+                  - high
+                  - critical
+            required:
+              - overall_risk
+        required:
+          - security_rating
+          - vulnerabilities
+          - risk_assessment
+    next: generate_report
+    timeout_secs: 200
+
+  - id: generate_report
+    role: Technical Writer
+    prompt: |
+      Generate a comprehensive code review report synthesizing all findings:
+
+      Structural Analysis:
+      {structure_assessment}
+
+      Quality Review:
+      {quality_metrics}
+
+      Security Analysis:
+      {security_rating}
+
+      Create a markdown report with:
+
+      # Code Review Report
+
+      ## Overview
+      - File: {file_path}
+      - Language: {language}
+      - Review Date: {current_date}
+      - Overall Assessment: (summary rating)
+
+      ## Executive Summary
+      High-level summary of the review findings (2-3 paragraphs)
+
+      ## Structural Analysis
+      - Architecture and design assessment
+      - Key strengths
+      - Areas for improvement
+
+      ## Code Quality
+      - Readability and maintainability metrics
+      - Code smells identified
+      - Refactoring opportunities
+
+      ## Security Analysis
+      - Security rating and risk level
+      - Vulnerabilities found (if any)
+      - Security recommendations
+
+      ## Detailed Findings
+      Organized by severity:
+      ### Critical Issues
+      ### High Priority
+      ### Medium Priority
+      ### Low Priority / Nice to Have
+
+      ## Recommendations
+      Prioritized list of actionable improvements
+
+      ## Conclusion
+      Overall assessment and next steps
+
+      Use clear, professional language. Be specific with line numbers and code examples.
+    expected_output:
+      type: markdown
+    timeout_secs: 240
+
+validation_rules:
+  - step_id: analyze_structure
+    rule_type:
+      type: json_schema
+    error_message: "Structure analysis must include overall rating, concerns, and recommendations"
+
+  - step_id: review_quality
+    rule_type:
+      type: json_schema
+    error_message: "Quality review must include metrics, code smells, and refactoring suggestions"
+
+  - step_id: security_analysis
+    rule_type:
+      type: json_schema
+    error_message: "Security analysis must include rating, vulnerabilities list, and risk assessment"
+
+  - step_id: generate_report
+    rule_type:
+      type: regex_match
+      pattern: "(?s)^# Code Review Report.*## Overview.*## Executive Summary.*## Conclusion"
+    error_message: "Report must contain all required sections in proper order"

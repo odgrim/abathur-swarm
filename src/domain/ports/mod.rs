@@ -10,6 +10,7 @@
 //! of specific infrastructure implementations.
 
 pub mod agent_repository;
+pub mod chain_repository;
 pub mod claude_client;
 pub mod llm_substrate;
 pub mod logger;
@@ -21,6 +22,7 @@ pub mod task_queue_service;
 pub mod task_repository;
 
 pub use agent_repository::AgentRepository;
+pub use chain_repository::{ChainRepository, ChainStats};
 pub use claude_client::{
     ClaudeClient, ClaudeError, ClaudeRequest, ClaudeResponse, ContentBlock, Message, MessageChunk,
     MessageRequest, MessageResponse, TokenUsage, Usage,

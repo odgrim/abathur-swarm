@@ -18,6 +18,7 @@ pub struct Task {
     pub updated_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub chain_id: Option<String>,
 }
 
 /// Task status enum

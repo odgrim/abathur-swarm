@@ -9,6 +9,7 @@ pub mod agent_metadata;
 pub mod config;
 pub mod hook;
 pub mod memory;
+pub mod prompt_chain;
 pub mod prune;
 pub mod queue;
 pub mod session;
@@ -26,6 +27,10 @@ pub use hook::{
     HookResult, HooksConfig, MergeStrategy, TaskHook,
 };
 pub use memory::{Memory, MemoryType};
+pub use prompt_chain::{
+    ChainExecution, ChainStatus, OutputFormat, PromptChain, PromptStep, StepResult,
+    ValidationRule, ValidationType,
+};
 pub use prune::{BlockedTask, PruneResult};
 pub use queue::{Queue, QueueError};
 pub use session::{Session, SessionEvent};

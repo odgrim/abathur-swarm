@@ -1,0 +1,167 @@
+name: research_synthesis
+description: "Research multiple sources and synthesize findings into a coherent report"
+
+steps:
+  - id: identify_sources
+    role: Research Librarian
+    prompt: |
+      Identify 5 authoritative sources for the following topic:
+      {topic}
+
+      Return results in JSON format with the following structure:
+      {
+        "sources": [
+          {"url": "...", "title": "...", "relevance": 0-10}
+        ]
+      }
+
+      Focus on:
+      - Academic papers and peer-reviewed sources
+      - Recent publications (within last 3 years if possible)
+      - Authoritative industry sources
+      - Diverse perspectives on the topic
+    expected_output:
+      type: json
+      schema:
+        type: object
+        properties:
+          sources:
+            type: array
+            minItems: 3
+            maxItems: 5
+            items:
+              type: object
+              properties:
+                url:
+                  type: string
+                  format: uri
+                title:
+                  type: string
+                relevance:
+                  type: number
+                  minimum: 0
+                  maximum: 10
+              required:
+                - url
+                - title
+                - relevance
+        required:
+          - sources
+    next: extract_info
+    timeout_secs: 180
+
+  - id: extract_info
+    role: Information Analyst
+    prompt: |
+      Extract key information from the following sources:
+      {sources}
+
+      For each source, identify:
+      1. Main findings and conclusions
+      2. Key data points and statistics
+      3. Notable quotes or insights
+      4. Methodology used (if applicable)
+      5. Limitations or caveats mentioned
+
+      Return results in JSON format:
+      {
+        "findings": [
+          {
+            "source": "title",
+            "main_points": ["point1", "point2", ...],
+            "data_points": ["stat1", "stat2", ...],
+            "quotes": ["quote1", "quote2", ...],
+            "methodology": "description",
+            "limitations": ["limit1", "limit2", ...]
+          }
+        ]
+      }
+    expected_output:
+      type: json
+      schema:
+        type: object
+        properties:
+          findings:
+            type: array
+            items:
+              type: object
+              properties:
+                source:
+                  type: string
+                main_points:
+                  type: array
+                  items:
+                    type: string
+                data_points:
+                  type: array
+                  items:
+                    type: string
+                quotes:
+                  type: array
+                  items:
+                    type: string
+                methodology:
+                  type: string
+                limitations:
+                  type: array
+                  items:
+                    type: string
+              required:
+                - source
+                - main_points
+        required:
+          - findings
+    next: synthesize
+    timeout_secs: 240
+
+  - id: synthesize
+    role: Technical Writer
+    prompt: |
+      Synthesize the following findings into a coherent research report:
+      {findings}
+
+      Create a well-structured markdown document with:
+
+      # Executive Summary
+      - High-level overview (2-3 paragraphs)
+      - Key takeaways (3-5 bullet points)
+
+      # Key Findings
+      - Main discoveries organized by theme
+      - Supporting data and statistics
+      - Areas of consensus and disagreement
+
+      # Detailed Analysis
+      - In-depth exploration of each major theme
+      - Connections between different sources
+      - Implications and significance
+
+      # Methodology & Limitations
+      - How the research was conducted
+      - Quality assessment of sources
+      - Gaps and limitations in current knowledge
+
+      # Conclusions
+      - Summary of main insights
+      - Recommendations for further research
+      - Practical implications
+
+      # References
+      - Full citations for all sources
+
+      Use clear, professional language appropriate for a technical audience.
+      Include proper markdown formatting for headings, lists, and emphasis.
+    expected_output:
+      type: markdown
+    timeout_secs: 300
+
+validation_rules:
+  - step_id: identify_sources
+    rule_type:
+      type: json_schema
+    error_message: "Source identification must return at least 3 valid sources with URLs and relevance scores"
+
+  - step_id: extract_info
+    rule_type:
+      type: json_schema
+    error_message: "Information extraction must include main points for each source"

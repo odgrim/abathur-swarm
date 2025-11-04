@@ -24,6 +24,7 @@ impl TaskQueueServiceAdapter {
         agent_type: String,
         priority: u8,
         dependencies: Vec<Uuid>,
+        chain_id: Option<String>,
     ) -> Result<Uuid> {
         // Create domain task
         let mut task = DomainTask::new(summary, description);
@@ -32,6 +33,7 @@ impl TaskQueueServiceAdapter {
         if !dependencies.is_empty() {
             task.dependencies = Some(dependencies);
         }
+        task.chain_id = chain_id;
 
         // Submit via real service
         self.service.submit(task).await
@@ -310,6 +312,7 @@ fn convert_domain_to_cli_task(domain_task: DomainTask) -> CliTask {
         updated_at: domain_task.last_updated_at,
         started_at: domain_task.started_at,
         completed_at: domain_task.completed_at,
+        chain_id: domain_task.chain_id,
     }
 }
 

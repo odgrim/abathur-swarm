@@ -92,8 +92,9 @@ async fn main() -> Result<()> {
                 summary,
                 priority,
                 dependencies,
+                chain,
             } => {
-                task::handle_submit(&task_service, description, agent_type, summary, priority, dependencies, cli.json)
+                task::handle_submit(&task_service, description, agent_type, summary, priority, dependencies, chain, cli.json)
                     .await?;
             }
             TaskCommands::List { status, limit } => {

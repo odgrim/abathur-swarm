@@ -1,0 +1,239 @@
+name: etl_pipeline
+description: "Extract data from documents, transform and normalize it, then validate for quality"
+
+steps:
+  - id: extract
+    role: Data Extraction Specialist
+    prompt: |
+      Extract all relevant data from the following document:
+      {document}
+
+      Identify and extract:
+      1. Structured data (tables, lists, key-value pairs)
+      2. Unstructured text content
+      3. Metadata (dates, authors, references)
+      4. Relationships between data elements
+
+      Return the extracted data in JSON format:
+      {
+        "structured_data": {
+          "tables": [...],
+          "key_value_pairs": {...}
+        },
+        "unstructured_content": {
+          "paragraphs": [...],
+          "sections": [...]
+        },
+        "metadata": {
+          "date": "YYYY-MM-DD",
+          "authors": [...],
+          "references": [...]
+        },
+        "relationships": [
+          {"from": "item1", "to": "item2", "type": "reference"}
+        ]
+      }
+
+      Preserve all data accuracy - do not infer or add information not present in the source.
+    expected_output:
+      type: json
+      schema:
+        type: object
+        properties:
+          structured_data:
+            type: object
+          unstructured_content:
+            type: object
+          metadata:
+            type: object
+          relationships:
+            type: array
+        required:
+          - structured_data
+          - metadata
+    next: transform
+    timeout_secs: 180
+
+  - id: transform
+    role: Data Transformation Specialist
+    prompt: |
+      Normalize and clean the following extracted data:
+      {extracted_data}
+
+      Perform these transformations:
+      1. Standardize date formats to ISO 8601 (YYYY-MM-DD)
+      2. Normalize text (trim whitespace, fix encoding issues)
+      3. Convert units to standard measures
+      4. Deduplicate entries
+      5. Structure hierarchical data consistently
+      6. Tag data with types and categories
+
+      Return the transformed data in JSON format:
+      {
+        "normalized_data": {
+          "entities": [...],
+          "attributes": {...},
+          "relationships": [...]
+        },
+        "transformations_applied": [
+          {"field": "date", "action": "standardized", "from": "...", "to": "..."}
+        ],
+        "data_types": {
+          "field_name": "type"
+        },
+        "quality_metrics": {
+          "completeness": 0.95,
+          "accuracy_estimate": 0.98,
+          "consistency": 0.99
+        }
+      }
+
+      Ensure data integrity throughout the transformation process.
+    expected_output:
+      type: json
+      schema:
+        type: object
+        properties:
+          normalized_data:
+            type: object
+            required:
+              - entities
+          transformations_applied:
+            type: array
+          data_types:
+            type: object
+          quality_metrics:
+            type: object
+            properties:
+              completeness:
+                type: number
+                minimum: 0
+                maximum: 1
+              accuracy_estimate:
+                type: number
+                minimum: 0
+                maximum: 1
+              consistency:
+                type: number
+                minimum: 0
+                maximum: 1
+        required:
+          - normalized_data
+          - transformations_applied
+          - quality_metrics
+    next: validate
+    timeout_secs: 240
+
+  - id: validate
+    role: Quality Assurance Specialist
+    prompt: |
+      Validate the completeness and accuracy of the transformed data:
+      {transformed_data}
+
+      Perform these quality checks:
+      1. Completeness: Are all expected fields present?
+      2. Accuracy: Do values make sense and fall within expected ranges?
+      3. Consistency: Are related fields consistent with each other?
+      4. Referential Integrity: Do all references point to valid entities?
+      5. Data Type Compliance: Do values match their declared types?
+      6. Business Rule Validation: Do records satisfy domain constraints?
+
+      Return validation results in JSON format:
+      {
+        "validation_status": "pass|fail|warning",
+        "overall_quality_score": 0.95,
+        "checks_performed": [
+          {
+            "check": "completeness",
+            "status": "pass",
+            "score": 0.98,
+            "details": "98% of expected fields present"
+          }
+        ],
+        "issues_found": [
+          {
+            "severity": "error|warning|info",
+            "field": "field_name",
+            "issue": "description",
+            "suggestion": "how to fix"
+          }
+        ],
+        "data_summary": {
+          "total_records": 100,
+          "valid_records": 95,
+          "records_with_warnings": 3,
+          "invalid_records": 2
+        }
+      }
+
+      Provide actionable feedback for any issues found.
+    expected_output:
+      type: json
+      schema:
+        type: object
+        properties:
+          validation_status:
+            type: string
+            enum:
+              - pass
+              - fail
+              - warning
+          overall_quality_score:
+            type: number
+            minimum: 0
+            maximum: 1
+          checks_performed:
+            type: array
+            items:
+              type: object
+              properties:
+                check:
+                  type: string
+                status:
+                  type: string
+                score:
+                  type: number
+              required:
+                - check
+                - status
+                - score
+          issues_found:
+            type: array
+          data_summary:
+            type: object
+            properties:
+              total_records:
+                type: integer
+              valid_records:
+                type: integer
+            required:
+              - total_records
+              - valid_records
+        required:
+          - validation_status
+          - overall_quality_score
+          - checks_performed
+          - data_summary
+    timeout_secs: 180
+
+validation_rules:
+  - step_id: extract
+    rule_type:
+      type: json_schema
+    error_message: "Extraction must include structured_data and metadata sections"
+
+  - step_id: transform
+    rule_type:
+      type: json_schema
+    error_message: "Transformation must include normalized_data, transformations_applied, and quality_metrics"
+
+  - step_id: validate
+    rule_type:
+      type: json_schema
+    error_message: "Validation must include status, quality score, checks, and data summary"
+
+  - step_id: validate
+    rule_type:
+      type: custom_validator
+      name: quality_threshold
+    error_message: "Overall quality score must be at least 0.90 (90%)"

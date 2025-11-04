@@ -111,6 +111,8 @@ pub struct TaskEnqueueRequest {
     pub dependency_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<String>,
 }
 
 /// Request parameters for getting a task

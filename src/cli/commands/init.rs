@@ -127,6 +127,12 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
         if !json_output {
             println!("✓ Merged MCP server configuration");
         }
+
+        // Step 9: Copy chain templates
+        setup::copy_chain_templates(&paths, template_dir, force)?;
+        if !json_output {
+            println!("✓ Copied chain templates");
+        }
     }
 
     if json_output {
@@ -138,6 +144,7 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
             "agents_dir": paths.agents_dir.display().to_string(),
             "hooks_file": paths.hooks_file.display().to_string(),
             "hooks_dir": paths.hooks_dir.display().to_string(),
+            "chains_dir": paths.chains_dir.display().to_string(),
             "initial_task": {
                 "id": scanner_task.id.to_string(),
                 "agent_type": "project-context-scanner",
@@ -154,6 +161,7 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
         println!("Database: {}", paths.database_file.display());
         println!("Agents: {}", paths.agents_dir.display());
         println!("Hooks: {}", paths.hooks_file.display());
+        println!("Chains: {}", paths.chains_dir.display());
         println!();
         println!("Initial task enqueued:");
         println!("  - project-context-scanner (priority: 10)");

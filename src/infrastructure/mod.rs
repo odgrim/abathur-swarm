@@ -18,3 +18,5 @@ pub mod database;
 pub mod mcp;
 pub mod setup;
 pub mod substrates;
+pub mod templates;
+pub mod validators;

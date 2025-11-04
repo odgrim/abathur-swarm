@@ -81,7 +81,8 @@ fn handle_tasks_list_tools(id: Option<Value>) -> JsonRpcResponse {
                             "priority": { "type": "integer", "default": 5, "minimum": 0, "maximum": 10 },
                             "dependencies": { "type": "array", "items": { "type": "string" } },
                             "dependency_type": { "type": "string", "default": "sequential" },
-                            "parent_task_id": { "type": "string" }
+                            "parent_task_id": { "type": "string" },
+                            "chain_id": { "type": "string", "description": "Prompt chain ID to execute task through multi-step workflow" }
                         },
                         "required": ["summary", "description"]
                     }
@@ -243,6 +244,9 @@ async fn task_enqueue(service: &TaskQueueService, arguments: Value) -> Result<St
             .map_err(|e| format!("Invalid parent_task_id UUID: {}", e))?;
         task.parent_task_id = Some(parent_id);
     }
+
+    // Set chain_id if provided
+    task.chain_id = params.chain_id;
 
     service
         .submit(task)

@@ -249,6 +249,9 @@ pub struct Task {
 
     /// Expected workflow behavior
     pub workflow_expectations: Option<WorkflowExpectations>,
+
+    /// Prompt chain ID (if task should execute through a multi-step chain)
+    pub chain_id: Option<String>,
 }
 
 impl Task {
@@ -292,6 +295,7 @@ impl Task {
             is_remediation: false,
             workflow_state: None,
             workflow_expectations: None,
+            chain_id: None,
         }
     }
 
