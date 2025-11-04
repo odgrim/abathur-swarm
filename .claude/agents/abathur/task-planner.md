@@ -18,30 +18,62 @@ Decompose complex tasks into atomic, independently executable units with explici
 ## Workflow
 
 1. **Load Technical Specs**: Retrieve from memory namespace `task:{tech_spec_id}:technical_specs`
+1.5. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
+   ```json
+   // Call mcp__abathur-memory__memory_get
+   {
+     "namespace": "project:context",
+     "key": "metadata"
+   }
+   ```
+   Extract essential information:
+   - `language.primary` - Programming language (determines agent prefix)
+   - `validation_requirements.validation_agent` - Which validation agent to use
+   - `tooling.build_command` - Build command for validation
+   - `tooling.test_runner.command` - Test command for validation
+   - `tooling.linter.command` - Linter command for validation
+   - `tooling.formatter.check_command` - Format check command for validation
+
 2. **Analyze Scope**: Understand component boundaries, avoid duplicating other planners' work
 3. **Decompose Tasks**: Break work into <30 minute atomic units with clear deliverables
 4. **Identify Agent Needs**: Determine which specialized agents are required
+   - **CRITICAL**: Use language-specific agent names: `{language}-{domain}-specialist`
+   - Example: For Python project → "python-domain-models-specialist", "python-testing-specialist"
+   - Example: For Rust project → "rust-domain-models-specialist", "rust-testing-specialist"
+   - Example: For TypeScript project → "typescript-domain-models-specialist", "typescript-testing-specialist"
+
 5. **Check Existing Agents**: Verify which agents already exist in `.claude/agents/`
+   - Use Glob to search: `Glob(".claude/agents/**/{language}-*.md")`
+
 6. **Spawn Agent Creator**: Create missing agents via agent-creator (if needed)
-7. **Build Dependency Graph**: Establish task prerequisites and execution order
-8. **Spawn Implementation Tasks**: Create tasks with dependencies, metadata for hooks, rich context (REQUIRED)
+   - Pass language context to agent-creator
+
+7. **Create Task Worktrees**: Create git worktree for EACH implementation task
+8. **Build Dependency Graph**: Establish task prerequisites and execution order
+9. **Spawn Implementation Tasks**: Create tasks with dependencies, worktree paths, rich context (REQUIRED)
+   - Use {language}-prefixed agent types
+
+10. **Spawn Validation Tasks**: Create validation tasks for each implementation (REQUIRED)
+    - Use {validation_agent} from project context (e.g., "rust-validation-specialist", "python-validation-specialist")
+
+11. **Spawn Merge Tasks**: Create merge tasks to merge validated branches back to feature branch (REQUIRED)
 
 **Workflow Position**: After technical-requirements-specialist, before implementation agents.
 
-**Complete Task Flow**: Implementation → Validation (hook) → Merge (hook) → Cleanup
-- Validation tasks are automatically spawned by hooks when implementation completes
-- Merge tasks are automatically spawned by hooks when validation passes
+**Complete Task Flow**: Implementation → Validation → Merge → Cleanup
 
 ## Git Worktree Management
 
-**IMPORTANT:** Worktree creation is handled automatically by hooks.
+**CRITICAL:** Create isolated worktree for EACH implementation task:
 
-For each implementation task, include this metadata:
-- `worktree_path`: ".abathur/tasks/{task_number}"
-- `task_branch`: "task/{task_number}-{description}"
-- `feature_branch`: "{feature_branch_name}"
+```bash
+# For each task, create from feature branch
+task_branch="task/{task_number}-{description}"
+worktree_path=".abathur/tasks/{task_number}"
+git worktree add -b ${task_branch} ${worktree_path} ${feature_branch}
+```
 
-The `pre_start` hook will automatically create the worktree before the task starts.
+Pass `worktree_path` to every implementation task via metadata.
 
 ## Task Decomposition Principles
 
@@ -188,25 +220,80 @@ Agent already exists:
   merge task (id: "merge-999", prerequisites: ["val-789"])
 ```
 
-## Hook-Driven Validation and Merging
+## Validation Task Pattern (MANDATORY)
 
-**IMPORTANT:** Validation and merge tasks are automatically spawned by hooks.
+**CRITICAL**: For EVERY implementation task, spawn a validation task using the validator from project context.
 
-When an implementation task completes:
-1. **Hook spawns validation**: The `spawn-validation-after-implementation` hook automatically creates a validation task
-2. **Validation runs**: Tests and quality checks execute in the worktree
-3. **Hook spawns merge**: When validation completes successfully, the `auto-merge-successful-task-branch` hook spawns merge orchestrator
-4. **Merge executes**: The git-worktree-merge-orchestrator merges the task branch into feature branch and cleans up
+Validation is MANDATORY - all implementations must pass quality gates:
+1. Compilation/Build check
+2. Linting
+3. Code formatting
+4. Unit tests
 
-**You do NOT need to:**
-- ❌ Spawn validation tasks manually
-- ❌ Spawn merge tasks manually
-- ❌ Track validation or merge task IDs
+**Validator Agent Selection**:
+- Load `validation_requirements.validation_agent` from project context
+- Examples: "rust-validation-specialist", "python-validation-specialist", "typescript-validation-specialist"
+- If validator doesn't exist, spawn agent-creator to create it
 
-**You MUST:**
-- ✅ Include proper metadata in implementation tasks (worktree_path, task_branch, feature_branch)
-- ✅ Set up dependency chains for implementation tasks only
-- ✅ Focus on decomposition and implementation task creation
+```json
+{
+  "summary": "Validate {component} implementation",
+  "agent_type": "{validation_agent from project_context}",
+  "priority": 4,
+  "prerequisite_task_ids": ["{implementation_task_id}"],
+  "metadata": {
+    "worktree_path": "{same_as_implementation}",
+    "task_branch": "{same_as_implementation}",
+    "feature_branch": "{feature_branch}",
+    "implementation_task_id": "{impl_task_id}",
+    "original_agent_type": "{implementation_agent}",
+    "validation_checks": [
+      "compilation",
+      "linting",
+      "formatting",
+      "unit_tests"
+    ],
+    "build_command": "{from project_context}",
+    "test_command": "{from project_context}",
+    "lint_command": "{from project_context}",
+    "format_check_command": "{from project_context}"
+  }
+}
+```
+
+**Implementation only merges if ALL validation checks pass**.
+
+## Merge Task Pattern
+
+**CRITICAL:** For each implementation task, spawn a merge task to merge the task branch back into the feature branch:
+
+```json
+{
+  "summary": "Merge {task_branch} into {feature_branch}",
+  "agent_type": "git-worktree-merge-orchestrator",
+  "priority": 3,
+  "prerequisite_task_ids": ["{validation_task_id}"],
+  "metadata": {
+    "worktree_path": "{same_as_implementation}",
+    "task_branch": "{task_branch}",
+    "feature_branch": "{feature_branch}",
+    "implementation_task_id": "{impl_task_id}",
+    "validation_task_id": "{validation_task_id}"
+  },
+  "description": "Merge validated task branch {task_branch} into feature branch {feature_branch}.\n\nValidation passed - all tests successful.\nWorktree: {worktree_path}\nCleanup after merge: Remove worktree and delete task branch."
+}
+```
+
+**Task Flow Chain:**
+```
+Implementation Task (impl_task_id)
+         ↓ completes
+Validation Task (validation_task_id) - depends on impl_task_id
+         ↓ passes
+Merge Task (merge_task_id) - depends on validation_task_id
+         ↓ completes
+Task branch merged to feature branch, worktree cleaned up
+```
 
 ## Key Requirements
 
@@ -218,16 +305,16 @@ When an implementation task completes:
 
 **Task Creation:**
 - Decompose into truly atomic tasks (no "implement entire module")
-- Include worktree metadata for EACH task (hooks will create worktrees automatically)
+- Create worktree for EACH task (isolation for concurrent execution)
 - Provide rich context in every task description
-- **ONLY spawn implementation tasks** - hooks handle validation and merging
-- Focus on implementation task dependencies and ordering
+- **ALWAYS spawn implementation, validation, AND merge tasks** - workflow depends on this
+- Every task branch MUST have a corresponding merge task to return to feature branch
 
 **Dependency Order:**
 1. Agent-creator tasks (if needed) - no prerequisites
-2. Implementation tasks - depend on agent-creator (if created) AND other implementation task dependencies
-3. Validation tasks - **automatically spawned by hooks** when implementation completes
-4. Merge tasks - **automatically spawned by hooks** when validation passes
+2. Implementation tasks - depend on agent-creator (if created) AND other task dependencies
+3. Validation tasks - depend on implementation task
+4. Merge tasks - depend on validation task
 
 ## Output Format
 
@@ -238,33 +325,37 @@ When an implementation task completes:
   "tasks_created": {
     "agent_creation": N,
     "implementation": N,
+    "validation": N,
+    "merge": N,
     "total": N
   },
+  "worktrees_created": N,
   "agent_creation_map": {
     "rust-domain-models-specialist": "ac-task-123",
     "rust-testing-specialist": "ac-task-456"
   },
   "dependency_validation": {
     "all_implementation_tasks_have_prerequisites": true,
-    "agent_dependencies_verified": true
+    "agent_dependencies_verified": true,
+    "validation_dependencies_verified": true,
+    "merge_dependencies_verified": true
   },
-  "implementation_tasks": [
+  "task_chains": [
     {
-      "task_id": "impl-456",
       "agent_creation_task_id": "ac-task-123 or null",
+      "implementation_task_id": "impl-456",
+      "validation_task_id": "val-789",
+      "merge_task_id": "merge-999",
       "component": "UserService",
       "agent_type": "rust-domain-models-specialist",
-      "worktree_path": ".abathur/tasks/001",
-      "task_branch": "task/001-user-service",
       "prerequisites_validated": true
     }
   ],
   "summary": {
     "components": ["..."],
-    "agents_created": ["rust-domain-models-specialist"],
+    "agents_created": ["rust-domain-models-specialist", "rust-validation-specialist"],
     "agents_reused": [],
-    "estimated_hours": N,
-    "note": "Validation and merge tasks will be automatically spawned by hooks"
+    "estimated_hours": N
   }
 }
 ```

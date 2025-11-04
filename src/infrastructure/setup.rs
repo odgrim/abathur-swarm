@@ -107,7 +107,7 @@ impl SetupPaths {
             agents_dir: current_dir.join(".claude/agents"),
             hooks_dir: config_dir.join("hooks"),
             hooks_file: config_dir.join("hooks.yaml"),
-            chains_dir: current_dir.join("templates/chains"),
+            chains_dir: current_dir.join("template/chains"),
             config_dir,
         })
     }
@@ -395,7 +395,7 @@ pub fn merge_mcp_config(template_dir: &PathBuf, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Copy chain templates from template directory to templates/chains
+/// Copy chain templates from template directory to template/chains
 pub fn copy_chain_templates(paths: &SetupPaths, template_dir: &PathBuf, force: bool) -> Result<()> {
     let template_chains_dir = template_dir.join("chains");
 

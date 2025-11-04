@@ -11,8 +11,8 @@ hooks:
   - id: auto-merge-successful-task-branch
     description: "Automatically spawn merge orchestrator when all tasks in a branch succeed"
     event:
-      on_branch_complete:
-        branch_type: task_branch
+      type: on_branch_complete
+      branch_type: task_branch
     conditions:
       - all_tasks_succeeded: true
         min_tasks_completed: 1
@@ -53,8 +53,8 @@ hooks:
   - id: notify-branch-failures
     description: "Spawn failure analyst when branch completes with failures"
     event:
-      on_branch_complete:
-        branch_type: task_branch
+      type: on_branch_complete
+      branch_type: task_branch
     conditions:
       - all_tasks_succeeded: false
         branch_pattern: "^task/.*"
@@ -95,8 +95,8 @@ hooks:
   - id: feature-branch-integration-test
     description: "Run integration tests when feature branch work completes"
     event:
-      on_branch_complete:
-        branch_type: feature_branch
+      type: on_branch_complete
+      branch_type: feature_branch
     conditions:
       - all_tasks_succeeded: true
         branch_pattern: "^feature/.*"
@@ -118,7 +118,7 @@ hooks:
 
   - id: spawn-architect-after-requirements
     description: "Automatically spawn technical-architect after requirements gathering completes"
-    event: post_complete
+    event: {type: post_complete}
     conditions:
       - agent_type: requirements-gatherer
         task_status: completed
@@ -149,7 +149,7 @@ hooks:
 
   - id: spawn-tech-spec-after-architect
     description: "Automatically spawn technical-requirements-specialist after architecture completes"
-    event: post_complete
+    event: {type: post_complete}
     conditions:
       - agent_type: technical-architect
         task_status: completed
@@ -183,7 +183,7 @@ hooks:
 
   - id: spawn-planner-after-tech-spec
     description: "Automatically spawn task-planner after technical specifications complete"
-    event: post_complete
+    event: {type: post_complete}
     conditions:
       - agent_type: technical-requirements-specialist
         task_status: completed
@@ -220,7 +220,7 @@ hooks:
 
   - id: create-feature-branch-on-tech-spec-start
     description: "Create feature branch worktree when technical-requirements-specialist starts"
-    event: post_start
+    event: {type: post_start}
     conditions:
       - agent_type: technical-requirements-specialist
     actions:
@@ -235,7 +235,7 @@ hooks:
 
   - id: create-worktree-before-implementation
     description: "Create task branch worktree before implementation tasks start"
-    event: pre_start
+    event: {type: pre_start}
     conditions:
       - has_metadata_key: worktree_path
         has_metadata_key: task_branch
@@ -256,7 +256,7 @@ hooks:
 
   - id: tech-requirements-pre-ready
     description: "Validate technical requirements before marking task ready"
-    event: pre_ready
+    event: {type: pre_ready}
     conditions:
       - agent_type: technical-requirements-specialist
         parent_agent_type: technical-architect
@@ -273,7 +273,7 @@ hooks:
 
   - id: log-task-start
     description: "Log when high-priority tasks start execution"
-    event: post_start
+    event: {type: post_start}
     conditions:
       - priority_min: 8
     actions:
@@ -285,7 +285,7 @@ hooks:
 
   - id: log-task-completion
     description: "Log when tasks complete"
-    event: post_complete
+    event: {type: post_complete}
     actions:
       - type: log_message
         level: info
@@ -295,7 +295,7 @@ hooks:
 
   - id: spawn-validation-after-implementation
     description: "Automatically spawn validation task after implementation completes"
-    event: post_complete
+    event: {type: post_complete}
     conditions:
       - agent_type_pattern: "^rust-.*-specialist$"
         exclude_agent_types:
@@ -341,7 +341,7 @@ hooks:
 
   - id: pre-validation-check
     description: "Run pre-validation checks before spawning validator"
-    event: on_validation
+    event: {type: on_validation}
     actions:
       - type: log_message
         level: info
@@ -355,7 +355,7 @@ hooks:
 
   - id: validate-project-context-memory
     description: "Validate that project-context-scanner stored memory correctly and reinitialize if failed"
-    event: post_complete
+    event: {type: post_complete}
     conditions:
       - agent_type: project-context-scanner
         task_status: completed
@@ -375,7 +375,7 @@ hooks:
 
   - id: log-child-spawned
     description: "Log when child tasks are spawned"
-    event: on_child_spawned
+    event: {type: on_child_spawned}
     actions:
       - type: log_message
         level: debug

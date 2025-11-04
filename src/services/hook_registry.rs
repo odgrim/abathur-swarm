@@ -45,7 +45,9 @@ impl HookRegistry {
             std::fs::read_to_string(config_path).context("Failed to read hooks config file")?;
 
         let config: HooksConfig =
-            serde_yaml::from_str(&config_str).context("Failed to parse hooks config")?;
+            serde_yaml::from_str(&config_str).map_err(|e| {
+                anyhow::anyhow!("Failed to parse hooks config: {}", e)
+            })?;
 
         self.load_from_config(config)
     }

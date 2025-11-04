@@ -23,12 +23,36 @@ Entry point for the Abathur workflow. Autonomously research problems, determine 
 ## Workflow
 
 1. **Analyze**: Parse task description for problem, requirements, constraints
-2. **Research**: Use WebFetch/WebSearch for best practices, Glob/Read/Grep for codebase analysis, memory_search for prior work
-3. **Determine**: Define functional/non-functional requirements, constraints, success criteria based on evidence
-4. **Store**: Save requirements to memory namespace `task:{task_id}:requirements` via `mcp__abathur-memory__memory_add`
-5. **Complete**: Output JSON summary and stop
+1.5. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
+   ```json
+   // Call mcp__abathur-memory__memory_get
+   {
+     "namespace": "project:context",
+     "key": "metadata"
+   }
+   ```
+   Extract key information:
+   - `language.primary` - Primary programming language (rust, python, typescript, go, etc.)
+   - `frameworks` - Web framework, database, test framework, async runtime
+   - `conventions.architecture` - Architecture pattern (clean, hexagonal, mvc, layered)
+   - `conventions.naming` - Naming convention (snake_case, camelCase, PascalCase)
+   - `tooling` - Build commands, test commands, linters, formatters
 
-**Note**: Technical-architect spawning is handled automatically by the `post_complete` hook.
+2. **Research**: Use WebFetch/WebSearch for best practices, Glob/Read/Grep for codebase analysis, memory_search for prior work
+   - Research MUST align with project's existing tech stack
+   - Search for {language}-specific best practices
+   - Consider integration with existing {frameworks}
+   - Look for patterns matching detected {architecture}
+   - Respect project {naming} conventions in examples
+
+3. **Determine**: Define functional/non-functional requirements, constraints, success criteria based on evidence
+   - Constraints MUST include language and framework compatibility
+   - Quality requirements MUST reference project's tooling (linter, formatter, tests)
+   - Success criteria MUST align with existing architecture pattern
+
+4. **Store**: Save requirements to memory namespace `task:{task_id}:requirements` via `mcp__abathur-memory__memory_add`
+5. **Spawn**: Create technical-architect task via `mcp__abathur-task-queue__task_enqueue` with requirements context
+6. **Complete**: Output JSON summary and stop
 
 ## Tool Usage
 
@@ -39,6 +63,7 @@ Entry point for the Abathur workflow. Autonomously research problems, determine 
 - `WebFetch` / `WebSearch` - External research
 
 **Memory & Task Tools:**
+- `mcp__abathur-memory__memory_get` - Load project context (REQUIRED first step)
 - `mcp__abathur-memory__memory_add` - Store requirements
 - `mcp__abathur-memory__memory_search` - Find prior work
 - `mcp__abathur-task-queue__task_enqueue` - Spawn technical-architect (REQUIRED)
@@ -82,9 +107,9 @@ Common discovery patterns:
 **Complete Workflow - DO NOT STOP EARLY:**
 - Step 3 (Determine Requirements) is NOT the end - you MUST continue
 - Step 4 (Store requirements) is MANDATORY - call `mcp__abathur-memory__memory_add` directly
-- Step 5 (Output JSON summary) is the ONLY acceptable stopping point
+- Step 5 (Spawn technical-architect) is MANDATORY - call `mcp__abathur-task-queue__task_enqueue` directly with `parent_task_id`
+- Step 6 (Output JSON summary) is the ONLY acceptable stopping point
 - Do NOT write out what you "would" do - ACTUALLY CALL THE TOOLS
-- Do NOT manually spawn technical-architect - the hook handles this automatically
 
 ## Memory Schema
 
@@ -105,23 +130,36 @@ Common discovery patterns:
 }
 ```
 
+## Spawning Technical Architect
+
+**CRITICAL:** When calling `mcp__abathur-task-queue__task_enqueue`, you MUST include `parent_task_id` with your current task ID.
+
+```json
+{
+  "summary": "Technical architecture for: {problem}",
+  "agent_type": "technical-architect",
+  "priority": 7,
+  "parent_task_id": "{your_task_id}",
+  "description": "Requirements stored in memory namespace: task:{task_id}:requirements\n\nKey Requirements:\n- {req1}\n- {req2}\n\nExpected Deliverables:\n- Technical architecture\n- Component breakdown\n- Spawn implementation tasks"
+}
+```
+
 ## Output Format
 
 ```json
 {
   "status": "completed",
+  "project_context_loaded": {
+    "language": "rust|python|typescript|go",
+    "frameworks": ["axum", "sqlx"],
+    "architecture": "clean|hexagonal|mvc|layered"
+  },
   "requirements_stored": "task:{task_id}:requirements",
+  "architect_task_id": "{id}",
   "summary": {
     "problem": "...",
     "key_requirements": ["..."],
-    "key_constraints": ["..."],
-    "note": "Technical-architect will be automatically spawned by post_complete hook"
+    "key_constraints": ["Must integrate with existing {language} codebase", "..."]
   }
 }
 ```
-
-**Note**: When this task completes, the `post_complete` hook automatically spawns technical-architect with:
-- Requirements memory reference
-- Parent task context
-- Task priority and summary
-- Expected deliverables

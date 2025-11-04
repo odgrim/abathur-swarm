@@ -309,7 +309,7 @@ impl ChainLoader {
 
 impl Default for ChainLoader {
     fn default() -> Self {
-        Self::new("templates/chains")
+        Self::new("template/chains")
     }
 }
 

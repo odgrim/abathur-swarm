@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 /// Hook lifecycle events that can trigger actions
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum HookEvent {
     /// Before task transitions to Ready status
     PreReady,
