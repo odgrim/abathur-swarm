@@ -12,6 +12,7 @@
 pub mod agent_repository;
 pub mod chain_repository;
 pub mod claude_client;
+pub mod embedding_repository;
 pub mod llm_substrate;
 pub mod logger;
 pub mod mcp_client;
@@ -26,6 +27,9 @@ pub use chain_repository::{ChainRepository, ChainStats};
 pub use claude_client::{
     ClaudeClient, ClaudeError, ClaudeRequest, ClaudeResponse, ContentBlock, Message, MessageChunk,
     MessageRequest, MessageResponse, TokenUsage, Usage,
+};
+pub use embedding_repository::{
+    ChunkingService, EmbeddingRepository, EmbeddingService,
 };
 pub use llm_substrate::{
     ExecutionParameters, HealthStatus, LlmSubstrate, StopReason, SubstrateError, SubstrateRequest,

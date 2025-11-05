@@ -31,6 +31,10 @@ pub struct Config {
     /// LLM substrate configurations
     #[serde(default)]
     pub substrates: SubstratesConfig,
+
+    /// RAG (Retrieval-Augmented Generation) configuration
+    #[serde(default)]
+    pub rag: RagConfig,
 }
 
 const fn default_max_agents() -> usize {
@@ -47,6 +51,7 @@ impl Default for Config {
             retry: RetryConfig::default(),
             mcp_servers: vec![],
             substrates: SubstratesConfig::default(),
+            rag: RagConfig::default(),
         }
     }
 }
@@ -321,6 +326,218 @@ impl Default for AnthropicApiSubstrateConfig {
             api_key: None,
             model: default_anthropic_model(),
             base_url: None,
+        }
+    }
+}
+
+/// RAG (Retrieval-Augmented Generation) configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RagConfig {
+    /// Enable RAG features
+    #[serde(default = "default_rag_enabled")]
+    pub enabled: bool,
+
+    /// Embedding configuration
+    #[serde(default)]
+    pub embedding: EmbeddingConfig,
+
+    /// Chunking configuration
+    #[serde(default)]
+    pub chunking: ChunkingConfigSettings,
+
+    /// Vector search configuration
+    #[serde(default)]
+    pub search: VectorSearchConfig,
+}
+
+const fn default_rag_enabled() -> bool {
+    true
+}
+
+impl Default for RagConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_rag_enabled(),
+            embedding: EmbeddingConfig::default(),
+            chunking: ChunkingConfigSettings::default(),
+            search: VectorSearchConfig::default(),
+        }
+    }
+}
+
+/// Embedding configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct EmbeddingConfig {
+    /// Embedding provider: local (default) or openai
+    #[serde(default = "default_embedding_provider")]
+    pub provider: String,
+
+    /// Model name (e.g., all-MiniLM-L6-v2, all-mpnet-base-v2)
+    #[serde(default = "default_embedding_model")]
+    pub model: String,
+
+    /// Device: cpu, cuda, or metal
+    #[serde(default = "default_embedding_device")]
+    pub device: String,
+
+    /// Cache directory for models
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<String>,
+
+    /// Batch size for embedding generation
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+
+    /// OpenAI configuration (if provider is openai)
+    #[serde(default)]
+    pub openai: OpenAIEmbeddingConfig,
+}
+
+fn default_embedding_provider() -> String {
+    "local".to_string()
+}
+
+fn default_embedding_model() -> String {
+    "all-MiniLM-L6-v2".to_string()
+}
+
+fn default_embedding_device() -> String {
+    "cpu".to_string()
+}
+
+const fn default_batch_size() -> usize {
+    32
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_embedding_provider(),
+            model: default_embedding_model(),
+            device: default_embedding_device(),
+            cache_dir: None,
+            batch_size: default_batch_size(),
+            openai: OpenAIEmbeddingConfig::default(),
+        }
+    }
+}
+
+/// OpenAI embedding configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct OpenAIEmbeddingConfig {
+    /// Enable OpenAI embeddings
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// API key environment variable name
+    #[serde(default = "default_openai_api_key_env")]
+    pub api_key_env: String,
+
+    /// OpenAI model (e.g., text-embedding-ada-002)
+    #[serde(default = "default_openai_embedding_model")]
+    pub model: String,
+}
+
+fn default_openai_api_key_env() -> String {
+    "OPENAI_API_KEY".to_string()
+}
+
+fn default_openai_embedding_model() -> String {
+    "text-embedding-ada-002".to_string()
+}
+
+impl Default for OpenAIEmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key_env: default_openai_api_key_env(),
+            model: default_openai_embedding_model(),
+        }
+    }
+}
+
+/// Chunking configuration settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ChunkingConfigSettings {
+    /// Maximum tokens per chunk
+    #[serde(default = "default_chunk_size")]
+    pub chunk_size: usize,
+
+    /// Overlap between chunks in tokens
+    #[serde(default = "default_chunk_overlap")]
+    pub chunk_overlap: usize,
+
+    /// Text separator for chunks
+    #[serde(default = "default_separator")]
+    pub separator: String,
+
+    /// Respect sentence boundaries
+    #[serde(default = "default_respect_boundaries")]
+    pub respect_boundaries: bool,
+}
+
+const fn default_chunk_size() -> usize {
+    512
+}
+
+const fn default_chunk_overlap() -> usize {
+    50
+}
+
+fn default_separator() -> String {
+    "\n\n".to_string()
+}
+
+const fn default_respect_boundaries() -> bool {
+    true
+}
+
+impl Default for ChunkingConfigSettings {
+    fn default() -> Self {
+        Self {
+            chunk_size: default_chunk_size(),
+            chunk_overlap: default_chunk_overlap(),
+            separator: default_separator(),
+            respect_boundaries: default_respect_boundaries(),
+        }
+    }
+}
+
+/// Vector search configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct VectorSearchConfig {
+    /// Default result limit
+    #[serde(default = "default_search_limit")]
+    pub default_limit: usize,
+
+    /// Enable reranking
+    #[serde(default)]
+    pub rerank: bool,
+
+    /// Hybrid search alpha (0=keyword only, 1=vector only)
+    #[serde(default = "default_hybrid_alpha")]
+    pub hybrid_alpha: f32,
+}
+
+const fn default_search_limit() -> usize {
+    10
+}
+
+const fn default_hybrid_alpha() -> f32 {
+    0.7
+}
+
+impl Default for VectorSearchConfig {
+    fn default() -> Self {
+        Self {
+            default_limit: default_search_limit(),
+            rerank: false,
+            hybrid_alpha: default_hybrid_alpha(),
         }
     }
 }
