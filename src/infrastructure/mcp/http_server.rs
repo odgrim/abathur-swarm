@@ -71,12 +71,16 @@ pub async fn start_tasks_server(db_path: String, port: u16) -> Result<()> {
         .context("Failed to run database migrations")?;
 
     let task_repo = Arc::new(TaskRepositoryImpl::new(db.pool().clone()));
+    let memory_repo = Arc::new(MemoryRepositoryImpl::new(db.pool().clone()));
+    let memory_service = Arc::new(MemoryService::new(memory_repo));
+
     let dependency_resolver = DependencyResolver::new();
     let priority_calc = PriorityCalculator::new();
-    let task_service = Arc::new(TaskQueueService::new(
+    let task_service = Arc::new(TaskQueueService::with_memory_service(
         task_repo.clone(),
         dependency_resolver,
         priority_calc,
+        memory_service,
     ));
 
     info!("Database initialized successfully");
