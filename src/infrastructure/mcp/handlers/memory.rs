@@ -135,19 +135,6 @@ fn handle_memory_list_tools(id: Option<Value>) -> JsonRpcResponse {
                     }
                 },
                 {
-                    "name": "vector_add_document",
-                    "description": "Add a document to vector storage with automatic chunking and embedding for semantic search",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "namespace": { "type": "string", "description": "Namespace for organizing the document (e.g., 'docs:api', 'agent:memory')" },
-                            "content": { "type": "string", "description": "The document content to index" },
-                            "citation_source": { "type": "string", "description": "Optional source citation (file path or URL)" }
-                        },
-                        "required": ["namespace", "content"]
-                    }
-                },
-                {
                     "name": "vector_search",
                     "description": "Semantic search across vector memories using natural language queries",
                     "inputSchema": {
@@ -212,12 +199,11 @@ async fn handle_memory_tool_call(state: MemoryAppState, request: JsonRpcRequest)
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
     let result = match tool_name.as_str() {
-        "memory_add" => memory_add(&state.memory_service, arguments).await,
+        "memory_add" => memory_add(&state, arguments).await,
         "memory_get" => memory_get(&state.memory_service, arguments).await,
         "memory_search" => memory_search(&state.memory_service, arguments).await,
         "memory_update" => memory_update(&state.memory_service, arguments).await,
         "memory_delete" => memory_delete(&state.memory_service, arguments).await,
-        "vector_add_document" => vector_add_document(&state, arguments).await,
         "vector_search" => vector_search(&state, arguments).await,
         "vector_list_namespaces" => vector_list_namespaces(&state).await,
         _ => Err(format!("Unknown tool: {}", tool_name)),
@@ -250,7 +236,9 @@ async fn handle_memory_tool_call(state: MemoryAppState, request: JsonRpcRequest)
     }
 }
 
-async fn memory_add(service: &MemoryService, arguments: Value) -> Result<String, String> {
+async fn memory_add(state: &MemoryAppState, arguments: Value) -> Result<String, String> {
+    use crate::domain::models::Citation;
+
     let params: MemoryAddRequest =
         serde_json::from_value(arguments).map_err(|e| format!("Invalid parameters: {}", e))?;
 
@@ -260,24 +248,58 @@ async fn memory_add(service: &MemoryService, arguments: Value) -> Result<String,
         .map_err(|e| format!("Invalid memory_type: {}", e))?;
 
     let memory = Memory::new(
-        params.namespace,
-        params.key,
-        params.value,
+        params.namespace.clone(),
+        params.key.clone(),
+        params.value.clone(),
         memory_type,
-        params.created_by,
+        params.created_by.clone(),
     );
 
-    service
+    // 1. Store in traditional memory
+    let id = state.memory_service
         .add(memory)
         .await
-        .map(|id| {
-            info!("Memory added successfully with ID: {}", id);
-            format!("Memory added successfully with ID: {}", id)
-        })
         .map_err(|e| {
             error!("Failed to add memory: {}", e);
             format!("Failed to add memory: {}", e)
-        })
+        })?;
+
+    info!("Memory added successfully with ID: {}", id);
+
+    // 2. ALSO store in vector memory for semantic search (graceful degradation)
+    if let Some(rag_service) = &state.rag_service {
+        // Extract text content from the JSON value
+        let text_content = match &params.value {
+            Value::String(s) => s.clone(),
+            other => serde_json::to_string_pretty(other)
+                .unwrap_or_else(|_| other.to_string()),
+        };
+
+        // Create citation with namespace:key for traceability
+        let citation = Some(Citation {
+            source: format!("memory:{}:{} (created by {})", params.namespace, params.key, params.created_by),
+            page: None,
+            url: None,
+            timestamp: chrono::Utc::now(),
+        });
+
+        // Add to vector storage (errors don't fail the overall operation)
+        match rag_service.add_document(&params.namespace, &text_content, citation).await {
+            Ok(chunk_ids) => {
+                info!(
+                    "Memory also stored in vector search: namespace={}, chunks={}",
+                    params.namespace,
+                    chunk_ids.len()
+                );
+            }
+            Err(e) => {
+                // Log but don't fail - traditional memory still works
+                error!("Failed to add memory to vector storage: {}", e);
+            }
+        }
+    }
+
+    Ok(format!("Memory added successfully with ID: {}", id))
 }
 
 async fn memory_get(service: &MemoryService, arguments: Value) -> Result<String, String> {
@@ -374,50 +396,6 @@ async fn memory_delete(service: &MemoryService, arguments: Value) -> Result<Stri
 }
 
 // Vector search tool handlers
-
-async fn vector_add_document(state: &MemoryAppState, arguments: Value) -> Result<String, String> {
-    use crate::domain::models::Citation;
-    use serde::Deserialize;
-
-    #[derive(Deserialize)]
-    struct VectorAddDocumentRequest {
-        namespace: String,
-        content: String,
-        citation_source: Option<String>,
-    }
-
-    let rag_service = match &state.rag_service {
-        Some(service) => service,
-        None => {
-            return Err("RAG service not available. Vector search is not enabled.".to_string());
-        }
-    };
-
-    let params: VectorAddDocumentRequest =
-        serde_json::from_value(arguments).map_err(|e| format!("Invalid parameters: {}", e))?;
-
-    let citation = params.citation_source.map(Citation::from_file);
-
-    rag_service
-        .add_document(&params.namespace, &params.content, citation)
-        .await
-        .map(|chunk_ids| {
-            info!(
-                "Document added to vector storage: namespace={}, chunks={}",
-                params.namespace,
-                chunk_ids.len()
-            );
-            format!(
-                "Document added successfully. Created {} chunks in namespace '{}'",
-                chunk_ids.len(),
-                params.namespace
-            )
-        })
-        .map_err(|e| {
-            error!("Failed to add document to vector storage: {}", e);
-            format!("Failed to add document: {}", e)
-        })
-}
 
 async fn vector_search(state: &MemoryAppState, arguments: Value) -> Result<String, String> {
     use serde::Deserialize;
