@@ -7,7 +7,7 @@ use crate::infrastructure::mcp::types::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, MemoryAddRequest, MemoryDeleteRequest,
     MemoryGetRequest, MemorySearchRequest, MemoryUpdateRequest,
 };
-use crate::services::{MemoryService, RagService};
+use crate::services::MemoryService;
 use axum::{extract::State, Json};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -17,7 +17,6 @@ use tracing::{debug, error, info};
 #[derive(Clone)]
 pub struct MemoryAppState {
     pub memory_service: Arc<MemoryService>,
-    pub rag_service: Option<Arc<RagService>>,
 }
 
 pub async fn handle_memory_request(
@@ -199,13 +198,13 @@ async fn handle_memory_tool_call(state: MemoryAppState, request: JsonRpcRequest)
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
     let result = match tool_name.as_str() {
-        "memory_add" => memory_add(&state, arguments).await,
+        "memory_add" => memory_add(&state.memory_service, arguments).await,
         "memory_get" => memory_get(&state.memory_service, arguments).await,
         "memory_search" => memory_search(&state.memory_service, arguments).await,
         "memory_update" => memory_update(&state.memory_service, arguments).await,
         "memory_delete" => memory_delete(&state.memory_service, arguments).await,
-        "vector_search" => vector_search(&state, arguments).await,
-        "vector_list_namespaces" => vector_list_namespaces(&state).await,
+        "vector_search" => vector_search(&state.memory_service, arguments).await,
+        "vector_list_namespaces" => vector_list_namespaces(&state.memory_service).await,
         _ => Err(format!("Unknown tool: {}", tool_name)),
     };
 
@@ -236,9 +235,7 @@ async fn handle_memory_tool_call(state: MemoryAppState, request: JsonRpcRequest)
     }
 }
 
-async fn memory_add(state: &MemoryAppState, arguments: Value) -> Result<String, String> {
-    use crate::domain::models::Citation;
-
+async fn memory_add(service: &MemoryService, arguments: Value) -> Result<String, String> {
     let params: MemoryAddRequest =
         serde_json::from_value(arguments).map_err(|e| format!("Invalid parameters: {}", e))?;
 
@@ -248,58 +245,24 @@ async fn memory_add(state: &MemoryAppState, arguments: Value) -> Result<String, 
         .map_err(|e| format!("Invalid memory_type: {}", e))?;
 
     let memory = Memory::new(
-        params.namespace.clone(),
-        params.key.clone(),
-        params.value.clone(),
+        params.namespace,
+        params.key,
+        params.value,
         memory_type,
-        params.created_by.clone(),
+        params.created_by,
     );
 
-    // 1. Store in traditional memory
-    let id = state.memory_service
+    service
         .add(memory)
         .await
+        .map(|id| {
+            info!("Memory added successfully with ID: {}", id);
+            format!("Memory added successfully with ID: {}", id)
+        })
         .map_err(|e| {
             error!("Failed to add memory: {}", e);
             format!("Failed to add memory: {}", e)
-        })?;
-
-    info!("Memory added successfully with ID: {}", id);
-
-    // 2. ALSO store in vector memory for semantic search (graceful degradation)
-    if let Some(rag_service) = &state.rag_service {
-        // Extract text content from the JSON value
-        let text_content = match &params.value {
-            Value::String(s) => s.clone(),
-            other => serde_json::to_string_pretty(other)
-                .unwrap_or_else(|_| other.to_string()),
-        };
-
-        // Create citation with namespace:key for traceability
-        let citation = Some(Citation {
-            source: format!("memory:{}:{} (created by {})", params.namespace, params.key, params.created_by),
-            page: None,
-            url: None,
-            timestamp: chrono::Utc::now(),
-        });
-
-        // Add to vector storage (errors don't fail the overall operation)
-        match rag_service.add_document(&params.namespace, &text_content, citation).await {
-            Ok(chunk_ids) => {
-                info!(
-                    "Memory also stored in vector search: namespace={}, chunks={}",
-                    params.namespace,
-                    chunk_ids.len()
-                );
-            }
-            Err(e) => {
-                // Log but don't fail - traditional memory still works
-                error!("Failed to add memory to vector storage: {}", e);
-            }
-        }
-    }
-
-    Ok(format!("Memory added successfully with ID: {}", id))
+        })
 }
 
 async fn memory_get(service: &MemoryService, arguments: Value) -> Result<String, String> {
@@ -397,7 +360,7 @@ async fn memory_delete(service: &MemoryService, arguments: Value) -> Result<Stri
 
 // Vector search tool handlers
 
-async fn vector_search(state: &MemoryAppState, arguments: Value) -> Result<String, String> {
+async fn vector_search(service: &MemoryService, arguments: Value) -> Result<String, String> {
     use serde::Deserialize;
 
     #[derive(Deserialize)]
@@ -412,20 +375,13 @@ async fn vector_search(state: &MemoryAppState, arguments: Value) -> Result<Strin
         10
     }
 
-    let rag_service = match &state.rag_service {
-        Some(service) => service,
-        None => {
-            return Err("RAG service not available. Vector search is not enabled.".to_string());
-        }
-    };
-
     let params: VectorSearchRequest =
         serde_json::from_value(arguments).map_err(|e| format!("Invalid parameters: {}", e))?;
 
     let namespace_filter = params.namespace_filter.as_deref();
 
-    rag_service
-        .retrieve_context(&params.query, params.limit, namespace_filter)
+    service
+        .vector_search(&params.query, params.limit, namespace_filter)
         .await
         .map(|results| {
             info!(
@@ -459,16 +415,9 @@ async fn vector_search(state: &MemoryAppState, arguments: Value) -> Result<Strin
         })
 }
 
-async fn vector_list_namespaces(state: &MemoryAppState) -> Result<String, String> {
-    let rag_service = match &state.rag_service {
-        Some(service) => service,
-        None => {
-            return Err("RAG service not available. Vector search is not enabled.".to_string());
-        }
-    };
-
-    rag_service
-        .list_namespaces()
+async fn vector_list_namespaces(service: &MemoryService) -> Result<String, String> {
+    service
+        .list_vector_namespaces()
         .await
         .map(|namespaces| {
             info!("Listed {} vector namespaces", namespaces.len());

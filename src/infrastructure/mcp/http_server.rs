@@ -10,7 +10,7 @@ use crate::infrastructure::mcp::handlers::{
     handle_memory_request, handle_tasks_request, MemoryAppState, TasksAppState,
 };
 use crate::infrastructure::vector::{Chunker, LocalEmbeddingService, VectorStore};
-use crate::services::{DependencyResolver, MemoryService, PriorityCalculator, RagService, TaskQueueService};
+use crate::services::{DependencyResolver, MemoryService, PriorityCalculator, TaskQueueService};
 use anyhow::{Context, Result};
 use axum::{routing::post, Router};
 use std::sync::Arc;
@@ -35,25 +35,25 @@ pub async fn start_memory_server(db_path: String, port: u16) -> Result<()> {
         .context("Failed to run database migrations")?;
 
     let memory_repo = Arc::new(MemoryRepositoryImpl::new(db.pool().clone()));
-    let memory_service = Arc::new(MemoryService::new(memory_repo));
 
     info!("Database initialized successfully");
 
-    // Initialize RAG services for vector search
-    let rag_service = match initialize_rag_service(db.pool().clone()) {
-        Ok(service) => {
-            info!("RAG service initialized successfully");
-            Some(Arc::new(service))
+    // Initialize vector search components (optional)
+    let (vector_store, chunker) = match initialize_vector_components(db.pool().clone()) {
+        Ok((vs, ch)) => {
+            info!("Vector search components initialized successfully");
+            (Some(vs), Some(ch))
         }
         Err(e) => {
-            warn!("Failed to initialize RAG service: {}. Vector search will not be available.", e);
-            None
+            warn!("Failed to initialize vector search: {}. Vector search will not be available.", e);
+            (None, None)
         }
     };
 
+    let memory_service = Arc::new(MemoryService::new(memory_repo, vector_store, chunker));
+
     let state = MemoryAppState {
         memory_service,
-        rag_service,
     };
 
     let app = Router::new()
@@ -89,7 +89,7 @@ pub async fn start_tasks_server(db_path: String, port: u16) -> Result<()> {
 
     let task_repo = Arc::new(TaskRepositoryImpl::new(db.pool().clone()));
     let memory_repo = Arc::new(MemoryRepositoryImpl::new(db.pool().clone()));
-    let memory_service = Arc::new(MemoryService::new(memory_repo));
+    let memory_service = Arc::new(MemoryService::new(memory_repo, None, None));
 
     let dependency_resolver = DependencyResolver::new();
     let priority_calc = PriorityCalculator::new();
@@ -131,7 +131,12 @@ fn init_tracing() {
 }
 
 /// Initialize RAG service with embedding service, vector store, and chunker
-fn initialize_rag_service(pool: sqlx::SqlitePool) -> Result<RagService> {
+fn initialize_vector_components(
+    pool: sqlx::SqlitePool,
+) -> Result<(
+    Arc<dyn crate::domain::ports::EmbeddingRepository>,
+    Arc<dyn crate::domain::ports::ChunkingService>,
+)> {
     // Create embedding service (using local deterministic embeddings for now)
     let embedding_service = LocalEmbeddingService::new(EmbeddingModel::LocalMiniLM)
         .context("Failed to create embedding service")?;
@@ -147,8 +152,5 @@ fn initialize_rag_service(pool: sqlx::SqlitePool) -> Result<RagService> {
         .context("Failed to create chunker")?;
     let chunker: Arc<dyn crate::domain::ports::ChunkingService> = Arc::new(chunker);
 
-    // Create RAG service
-    let rag_service = RagService::new(vector_store, chunker);
-
-    Ok(rag_service)
+    Ok((vector_store, chunker))
 }
