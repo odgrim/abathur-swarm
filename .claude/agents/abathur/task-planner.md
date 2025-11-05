@@ -48,8 +48,7 @@ Decompose complex tasks into atomic, independently executable units with explici
 6. **Spawn Agent Creator**: Create missing agents via agent-creator (if needed)
    - Pass language context to agent-creator
 
-7. **Create Task Worktrees**: Create git worktree for EACH implementation task
-8. **Build Dependency Graph**: Establish task prerequisites and execution order
+7. **Build Dependency Graph**: Establish task prerequisites and execution order
 9. **Spawn Implementation Tasks**: Create tasks with dependencies, worktree paths, rich context (REQUIRED)
    - Use {language}-prefixed agent types
 
@@ -64,16 +63,16 @@ Decompose complex tasks into atomic, independently executable units with explici
 
 ## Git Worktree Management
 
-**CRITICAL:** Create isolated worktree for EACH implementation task:
+**CRITICAL:** Task worktrees are created AUTOMATICALLY by hooks - DO NOT create them manually.
 
-```bash
-# For each task, create from feature branch
-task_branch="task/{task_number}-{description}"
-worktree_path=".abathur/tasks/{task_number}"
-git worktree add -b ${task_branch} ${worktree_path} ${feature_branch}
-```
+The system will trigger the `create_task_worktree.sh` hook which will:
+- Create branch: `task/feature-name/task-id`
+- Create worktree: `.abathur/feature-name-task-id`
 
-Pass `worktree_path` to every implementation task via metadata.
+You only need to:
+1. Determine the task ID and feature name
+2. Pass worktree information to implementation tasks via metadata
+3. The hook will be triggered automatically when the task starts
 
 ## Task Decomposition Principles
 
@@ -305,7 +304,7 @@ Task branch merged to feature branch, worktree cleaned up
 
 **Task Creation:**
 - Decompose into truly atomic tasks (no "implement entire module")
-- Create worktree for EACH task (isolation for concurrent execution)
+- **DO NOT create worktrees** - hooks handle this automatically
 - Provide rich context in every task description
 - **ALWAYS spawn implementation, validation, AND merge tasks** - workflow depends on this
 - Every task branch MUST have a corresponding merge task to return to feature branch

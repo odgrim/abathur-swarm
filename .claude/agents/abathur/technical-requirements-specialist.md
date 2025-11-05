@@ -50,8 +50,7 @@ Third step in workflow (after technical-architect). Translate architectural guid
    - Build commands from project context
    - Validation MUST use {validation_agent}
 
-6. **Create Feature Branch**: Use git worktree for isolated feature development
-7. **Identify Agent Needs**: Suggest specialized agents for different task types (stored for task-planner)
+6. **Identify Agent Needs**: Suggest specialized agents for different task types (stored for task-planner)
    - **CRITICAL**: Suggest {language}-prefixed agents (e.g., "rust-domain-models-specialist", "python-fastapi-specialist")
    - NOT generic names - MUST include language prefix
 
@@ -62,15 +61,13 @@ Third step in workflow (after technical-architect). Translate architectural guid
 
 ## Feature Branch Creation
 
-**CRITICAL:** Create feature branch using git worktree before spawning task-planners:
+**CRITICAL:** Feature branches are created AUTOMATICALLY by hooks - DO NOT create them manually.
 
-```bash
-# Create feature branch worktree
-feature_name="descriptive-feature-name"
-git worktree add -b feature/${feature_name} .abathur/features/${feature_name}
-```
+The system will trigger the `create_feature_branch.sh` hook which will:
+- Create branch: `feature/feature-name`
+- Create worktree: `.abathur/feature-feature-name`
 
-Store branch info in memory for downstream agents.
+You only need to determine the feature name and store it in memory for downstream agents.
 
 ## Task-Planner Decomposition
 
@@ -139,7 +136,7 @@ Store branch info in memory for downstream agents.
 ## Key Requirements
 
 - Check for existing technical specs before starting (avoid duplication)
-- Create feature branch using git worktree (isolation for concurrent work)
+- **DO NOT create branches or worktrees** - hooks handle this automatically
 - Provide rich context to task-planners (memory refs, summaries, scope)
 - Suggest agent specializations but don't create agents (task-planner's job)
 - Decompose into multiple task-planners for complex work
