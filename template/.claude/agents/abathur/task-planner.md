@@ -157,6 +157,39 @@ if agent_type in agent_creation_tasks:
 }
 ```
 
+## Spawning Agent-Creator Tasks (When Agents Don't Exist)
+
+**When to Spawn:** If a required agent doesn't exist in `.claude/agents/`, spawn agent-creator to create it.
+
+**CRITICAL:** Spawn these FIRST, capture their task IDs, then include as prerequisites for implementation tasks.
+
+```json
+{
+  "summary": "Create {agent_type} specialist agent",
+  "agent_type": "agent-creator",
+  "priority": 8,
+  "parent_task_id": "{your_task_id}",
+  "description": "Create specialized agent: {agent_type}\n\nContext:\n- Language: {language}\n- Domain: {domain}\n- Purpose: {what_this_agent_will_do}\n- Required Tools: {tools_list}\n- Expected Capabilities: {capabilities}\n\nExamples:\n- Input patterns the agent will handle\n- Output formats it should produce\n- Integration points with other agents"
+}
+```
+
+**Example - Creating rust-domain-models-specialist:**
+```json
+{
+  "summary": "Create rust-domain-models-specialist agent",
+  "agent_type": "agent-creator",
+  "priority": 8,
+  "parent_task_id": "current-planner-task-id",
+  "description": "Create specialized agent: rust-domain-models-specialist\n\nContext:\n- Language: Rust\n- Domain: Domain modeling with Clean Architecture\n- Purpose: Implement domain models with validation, value objects, and entity patterns\n- Required Tools: Read, Write, Edit, Bash\n- Expected Capabilities:\n  - Create domain structs with proper types\n  - Implement validation logic\n  - Add serde serialization\n  - Follow DDD patterns\n  - Write comprehensive unit tests\n\nThe agent will be used to implement domain models for the current feature."
+}
+```
+
+**Process:**
+1. Check if agent exists: `Glob(".claude/agents/**/{agent_type}.md")`
+2. If not found, spawn agent-creator task via `mcp__abathur-task-queue__task_enqueue`
+3. Capture returned task_id in `agent_creation_tasks[agent_type] = task_id`
+4. When spawning implementation task, include agent-creator task_id in prerequisites
+
 ## Spawning Implementation Tasks
 
 **CRITICAL: Build Prerequisites Correctly**
