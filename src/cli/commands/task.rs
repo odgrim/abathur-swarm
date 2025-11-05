@@ -35,6 +35,16 @@ pub async fn handle_submit(
         }
     });
 
+    // Determine effective chain_id
+    // - If user specified "none", set to None (no chain)
+    // - If user specified a value, use it
+    // - If not specified, default to "technical_feature_workflow"
+    let effective_chain_id = match chain_id.as_deref() {
+        Some("none") => None, // Special value to explicitly disable chains
+        Some(id) => Some(id.to_string()), // User-specified chain
+        None => Some("technical_feature_workflow".to_string()), // Default chain
+    };
+
     let task_id = service
         .submit_task(
             task_summary.clone(),
@@ -42,7 +52,7 @@ pub async fn handle_submit(
             agent_type.clone(),
             priority,
             resolved_deps.clone(),
-            chain_id.clone(),
+            effective_chain_id.clone(),
         )
         .await
         .context("Failed to submit task")?;
@@ -55,6 +65,7 @@ pub async fn handle_submit(
             "agent_type": agent_type,
             "priority": priority,
             "dependencies": resolved_deps,
+            "chain_id": effective_chain_id,
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -64,6 +75,11 @@ pub async fn handle_submit(
         println!("  Description: {}", description);
         println!("  Agent type: {}", agent_type);
         println!("  Priority: {}", priority);
+        if let Some(ref chain) = effective_chain_id {
+            println!("  Chain: {}", chain);
+        } else {
+            println!("  Chain: none (single agent execution)");
+        }
         if !dependencies.is_empty() {
             println!("  Dependencies: {} task(s)", dependencies.len());
         }

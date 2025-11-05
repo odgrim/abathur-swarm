@@ -1,15 +1,18 @@
-use crate::domain::models::{AgentMetadataRegistry, Config};
+use crate::domain::models::{AgentMetadataRegistry, Config, Task};
 use crate::domain::ports::{
     ExecutionParameters,
     SubstrateError, SubstrateRequest,
 };
 use crate::infrastructure::substrates::SubstrateRegistry;
+use crate::infrastructure::templates::ChainLoader;
+use crate::services::PromptChainService;
 use anyhow::Result;
 use serde_json::Value;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::timeout;
+use tracing::{debug, info};
 use uuid::Uuid;
 
 /// Context for agent task execution
@@ -97,6 +100,7 @@ pub enum ExecutionError {
 /// - Timeout enforcement
 /// - Retry logic for transient failures
 /// - Comprehensive error handling
+/// - Prompt chain execution for multi-step workflows
 ///
 /// Note: MCP tool access is handled by the substrates themselves (Claude Code, API),
 /// not by the agent executor. External LLM instances connect to HTTP MCP servers.
@@ -110,6 +114,12 @@ pub struct AgentExecutor {
     ///
     /// Used to determine which model to use for each agent type
     agent_metadata_registry: Arc<Mutex<AgentMetadataRegistry>>,
+
+    /// Chain loader for loading prompt chain templates
+    chain_loader: Arc<ChainLoader>,
+
+    /// Prompt chain service for executing multi-step workflows
+    chain_service: Arc<PromptChainService>,
 }
 
 impl AgentExecutor {
@@ -118,14 +128,123 @@ impl AgentExecutor {
     /// # Arguments
     /// * `substrate_registry` - Registry for routing to LLM substrates
     /// * `agent_metadata_registry` - Registry for loading agent metadata
+    /// * `chain_loader` - Loader for prompt chain templates
+    /// * `chain_service` - Service for executing prompt chains
     pub fn new(
         substrate_registry: Arc<SubstrateRegistry>,
         agent_metadata_registry: Arc<Mutex<AgentMetadataRegistry>>,
+        chain_loader: Arc<ChainLoader>,
+        chain_service: Arc<PromptChainService>,
     ) -> Self {
         Self {
             substrate_registry,
             agent_metadata_registry,
+            chain_loader,
+            chain_service,
         }
+    }
+
+    /// Execute a task, automatically detecting if it should use a prompt chain
+    ///
+    /// If the task has a `chain_id`, loads and executes the corresponding prompt chain.
+    /// Otherwise, executes the task as a single agent.
+    ///
+    /// # Arguments
+    /// * `task` - The task to execute
+    ///
+    /// # Returns
+    /// * `Ok(String)` - Task execution result
+    /// * `Err(ExecutionError)` - Execution failed or timed out
+    pub async fn execute_task(&self, task: &Task) -> Result<String, ExecutionError> {
+        // Check if task has a chain_id
+        if let Some(chain_id) = &task.chain_id {
+            info!(
+                task_id = %task.id,
+                chain_id = %chain_id,
+                "Executing task with prompt chain"
+            );
+
+            self.execute_with_chain(task, chain_id).await
+        } else {
+            // No chain - execute as single agent
+            debug!(
+                task_id = %task.id,
+                agent_type = %task.agent_type,
+                "Executing task as single agent (no chain_id)"
+            );
+
+            let ctx = ExecutionContext::new(
+                Uuid::new_v4(), // agent_id
+                task.id,
+                task.agent_type.clone(),
+                task.description.clone(),
+                Config::default(), // TODO: Pass actual config
+            );
+
+            self.execute(ctx).await
+        }
+    }
+
+    /// Execute a task using a prompt chain
+    ///
+    /// Loads the chain from a YAML file and executes all steps in sequence.
+    ///
+    /// # Arguments
+    /// * `task` - The task to execute
+    /// * `chain_id` - ID of the chain template to load (e.g., "technical_feature_workflow")
+    ///
+    /// # Returns
+    /// * `Ok(String)` - Chain execution result as JSON
+    /// * `Err(ExecutionError)` - Chain loading or execution failed
+    async fn execute_with_chain(
+        &self,
+        task: &Task,
+        chain_id: &str,
+    ) -> Result<String, ExecutionError> {
+        // Load the chain template
+        let chain_file = format!("{}.yaml", chain_id);
+        let chain = self
+            .chain_loader
+            .load_from_file(&chain_file)
+            .map_err(|e| {
+                ExecutionError::ExecutionFailed(format!(
+                    "Failed to load chain '{}': {}",
+                    chain_id, e
+                ))
+            })?;
+
+        info!(
+            task_id = %task.id,
+            chain_name = %chain.name,
+            steps = chain.steps.len(),
+            "Loaded prompt chain"
+        );
+
+        // Prepare initial input for the chain
+        let initial_input = serde_json::json!({
+            "task_id": task.id.to_string(),
+            "task_description": task.description,
+            "task_summary": task.summary,
+            "agent_type": task.agent_type,
+            "input_data": task.input_data,
+        });
+
+        // Execute the chain
+        let execution = self
+            .chain_service
+            .execute_chain_with_task(&chain, initial_input, Some(task))
+            .await
+            .map_err(|e| {
+                ExecutionError::ExecutionFailed(format!(
+                    "Chain execution failed for '{}': {}",
+                    chain_id, e
+                ))
+            })?;
+
+        // Return execution result as JSON
+        serde_json::to_string_pretty(&execution).map_err(|e| {
+            ExecutionError::ExecutionFailed(format!("Failed to serialize chain result: {}", e))
+        })
     }
 
     /// Execute a task with the configured timeout
@@ -622,13 +741,20 @@ mod tests {
         })
     }
 
-    #[tokio::test]
-    async fn test_successful_execution() {
-        let registry = create_mock_registry();
+    fn create_mock_executor(registry: Arc<SubstrateRegistry>) -> AgentExecutor {
         let metadata_registry = Arc::new(Mutex::new(AgentMetadataRegistry::new(
             &std::path::PathBuf::from("/tmp")
         )));
-        let executor = AgentExecutor::new(registry, metadata_registry);
+        let chain_loader = Arc::new(ChainLoader::default());
+        let chain_service = Arc::new(PromptChainService::new());
+
+        AgentExecutor::new(registry, metadata_registry, chain_loader, chain_service)
+    }
+
+    #[tokio::test]
+    async fn test_successful_execution() {
+        let registry = create_mock_registry();
+        let executor = create_mock_executor(registry);
 
         let ctx = create_test_context();
         let result = executor.execute(ctx).await;
@@ -640,10 +766,7 @@ mod tests {
     #[tokio::test]
     async fn test_timeout_behavior() {
         let registry = create_mock_registry();
-        let metadata_registry = Arc::new(Mutex::new(AgentMetadataRegistry::new(
-            &std::path::PathBuf::from("/tmp")
-        )));
-        let executor = AgentExecutor::new(registry, metadata_registry);
+        let executor = create_mock_executor(registry);
 
         let ctx = create_test_context();
         let timeout_duration = Duration::from_millis(1); // Very short timeout
@@ -662,10 +785,7 @@ mod tests {
     async fn test_retry_logic_with_transient_errors() {
         // Registry with substrate that fails twice, then succeeds
         let registry = create_mock_registry_with_failures(2);
-        let metadata_registry = Arc::new(Mutex::new(AgentMetadataRegistry::new(
-            &std::path::PathBuf::from("/tmp")
-        )));
-        let executor = AgentExecutor::new(registry.clone(), metadata_registry);
+        let executor = create_mock_executor(registry);
 
         let mut ctx = create_test_context();
         ctx.config.retry.max_retries = 3;
@@ -684,10 +804,7 @@ mod tests {
     async fn test_max_retries_exceeded() {
         // Registry with substrate that always fails
         let registry = create_mock_registry_with_failures(10);
-        let metadata_registry = Arc::new(Mutex::new(AgentMetadataRegistry::new(
-            &std::path::PathBuf::from("/tmp")
-        )));
-        let executor = AgentExecutor::new(registry.clone(), metadata_registry);
+        let executor = create_mock_executor(registry);
 
         let mut ctx = create_test_context();
         ctx.config.retry.max_retries = 2;

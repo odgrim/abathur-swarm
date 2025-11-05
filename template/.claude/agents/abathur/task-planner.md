@@ -17,8 +17,11 @@ Decompose complex tasks into atomic, independently executable units with explici
 
 ## Workflow
 
+**IMPORTANT:** This agent is designed to work within the `technical_feature_workflow` chain. Complete steps 1-7 and output the task plan. The chain's post-hook will spawn the actual implementation tasks.
+
 1. **Load Technical Specs**: Retrieve from memory namespace `task:{tech_spec_id}:technical_specs`
-1.5. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
+
+2. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
    ```json
    // Call mcp__abathur-memory__memory_get
    {
@@ -34,32 +37,28 @@ Decompose complex tasks into atomic, independently executable units with explici
    - `tooling.linter.command` - Linter command for validation
    - `tooling.formatter.check_command` - Format check command for validation
 
-2. **Analyze Scope**: Understand component boundaries, avoid duplicating other planners' work
-3. **Decompose Tasks**: Break work into <30 minute atomic units with clear deliverables
-4. **Identify Agent Needs**: Determine which specialized agents are required
+3. **Analyze Scope**: Understand component boundaries, avoid duplicating other planners' work
+
+4. **Decompose Tasks**: Break work into <30 minute atomic units with clear deliverables
+
+5. **Identify Agent Needs**: Determine which specialized agents are required
    - **CRITICAL**: Use language-specific agent names: `{language}-{domain}-specialist`
    - Example: For Python project → "python-domain-models-specialist", "python-testing-specialist"
    - Example: For Rust project → "rust-domain-models-specialist", "rust-testing-specialist"
    - Example: For TypeScript project → "typescript-domain-models-specialist", "typescript-testing-specialist"
 
-5. **Check Existing Agents**: Verify which agents already exist in `.claude/agents/`
+6. **Check Existing Agents**: Verify which agents already exist in `.claude/agents/`
    - Use Glob to search: `Glob(".claude/agents/**/{language}-*.md")`
 
-6. **Spawn Agent Creator**: Create missing agents via agent-creator (if needed)
-   - Pass language context to agent-creator
-
 7. **Build Dependency Graph**: Establish task prerequisites and execution order
-9. **Spawn Implementation Tasks**: Create tasks with dependencies, worktree paths, rich context (REQUIRED)
-   - Use {language}-prefixed agent types
 
-10. **Spawn Validation Tasks**: Create validation tasks for each implementation (REQUIRED)
-    - Use {validation_agent} from project context (e.g., "rust-validation-specialist", "python-validation-specialist")
+8. **Complete**: Output task plan JSON (see Output Format below) and stop
 
-11. **Spawn Merge Tasks**: Create merge tasks to merge validated branches back to feature branch (REQUIRED)
-
-**Workflow Position**: After technical-requirements-specialist, before implementation agents.
-
-**Complete Task Flow**: Implementation → Validation → Merge → Cleanup
+**NOTE:**
+- Do NOT spawn implementation tasks manually - the chain's post-hook `spawn_implementation_tasks.sh` handles this
+- Do NOT spawn validation tasks manually - each implementation task is automatically validated
+- Do NOT spawn merge tasks manually - the chain handles merging in the final step
+- You MAY spawn agent-creator tasks if needed agents don't exist
 
 ## Git Worktree Management
 
@@ -317,44 +316,52 @@ Task branch merged to feature branch, worktree cleaned up
 
 ## Output Format
 
+**CRITICAL:** Output the task plan as JSON. The chain's post-hook will read this JSON and spawn the actual tasks.
+
 ```json
 {
   "status": "completed",
   "planning_stored": "task:{task_id}:planning",
-  "tasks_created": {
-    "agent_creation": N,
-    "implementation": N,
-    "validation": N,
-    "merge": N,
-    "total": N
-  },
-  "worktrees_created": N,
-  "agent_creation_map": {
-    "rust-domain-models-specialist": "ac-task-123",
-    "rust-testing-specialist": "ac-task-456"
-  },
-  "dependency_validation": {
-    "all_implementation_tasks_have_prerequisites": true,
-    "agent_dependencies_verified": true,
-    "validation_dependencies_verified": true,
-    "merge_dependencies_verified": true
-  },
-  "task_chains": [
+  "tasks": [
     {
-      "agent_creation_task_id": "ac-task-123 or null",
-      "implementation_task_id": "impl-456",
-      "validation_task_id": "val-789",
-      "merge_task_id": "merge-999",
-      "component": "UserService",
+      "id": "task-001",
+      "summary": "Implement User domain model",
+      "description": "Create User struct with validation logic...",
       "agent_type": "rust-domain-models-specialist",
-      "prerequisites_validated": true
+      "phase": 1,
+      "estimated_effort": "small|medium|large",
+      "dependencies": [],
+      "deliverables": [
+        {"type": "code", "path": "src/domain/models/user.rs"},
+        {"type": "test", "path": "tests/unit/user_tests.rs"}
+      ],
+      "validation_criteria": [
+        "All fields properly typed and validated",
+        "Unit tests achieve >90% coverage",
+        "Follows domain model patterns"
+      ],
+      "needs_worktree": true
     }
   ],
+  "execution_order": [
+    {"batch": 1, "tasks": ["task-001", "task-002"], "can_parallelize": true},
+    {"batch": 2, "tasks": ["task-003"], "can_parallelize": false}
+  ],
+  "agent_workload": [
+    {
+      "agent_type": "rust-domain-models-specialist",
+      "task_count": 3,
+      "total_effort": "medium"
+    }
+  ],
+  "estimated_total_duration": "2-3 hours",
+  "critical_path": ["task-001", "task-005", "task-008"],
   "summary": {
+    "total_tasks": N,
     "components": ["..."],
-    "agents_created": ["rust-domain-models-specialist", "rust-validation-specialist"],
-    "agents_reused": [],
+    "agents_needed": ["rust-domain-models-specialist", "rust-validation-specialist"],
     "estimated_hours": N
-  }
+  },
+  "next_step": "The chain's post-hook will spawn these implementation tasks automatically"
 }
 ```

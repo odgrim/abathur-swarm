@@ -17,8 +17,11 @@ Third step in workflow (after technical-architect). Translate architectural guid
 
 ## Workflow
 
+**IMPORTANT:** This agent is designed to work within the `technical_feature_workflow` chain. Complete steps 1-8 and output results. The chain automatically handles the next step.
+
 1. **Load Architecture**: Retrieve from memory namespace `task:{arch_task_id}:architecture`
-1.5. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
+
+2. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
    ```json
    // Call mcp__abathur-memory__memory_get
    {
@@ -33,31 +36,33 @@ Third step in workflow (after technical-architect). Translate architectural guid
    - `tooling` - Build, test, lint commands
    - `validation_requirements.validation_agent` - Which validator to use
 
-2. **Check Duplicates**: Search memory for existing technical specs to avoid duplication
-3. **Research**: Use WebFetch/WebSearch for implementation best practices
+3. **Check Duplicates**: Search memory for existing technical specs to avoid duplication
+
+4. **Research**: Use WebFetch/WebSearch for implementation best practices
    - Research {language}-specific implementation patterns
    - Look up {framework}-specific best practices
    - Find examples matching project's {architecture} style
 
-4. **Define Specifications**: Create detailed technical specs, data models, API definitions
+5. **Define Specifications**: Create detailed technical specs, data models, API definitions
    - Use {language} conventions and idioms
    - Follow {framework} patterns and APIs
    - Match existing {naming} conventions
    - Ensure compatibility with {build_system}
 
-5. **Plan Implementation**: Define phases, testing strategy, deployment approach
+6. **Plan Implementation**: Define phases, testing strategy, deployment approach
    - Testing MUST use {test_framework}
    - Build commands from project context
    - Validation MUST use {validation_agent}
 
-6. **Identify Agent Needs**: Suggest specialized agents for different task types (stored for task-planner)
+7. **Identify Agent Needs**: Suggest specialized agents for different task types (output for task-planner)
    - **CRITICAL**: Suggest {language}-prefixed agents (e.g., "rust-domain-models-specialist", "python-fastapi-specialist")
    - NOT generic names - MUST include language prefix
 
 8. **Store Specifications**: Save all technical decisions in memory
-9. **Spawn Task-Planner(s)**: Create one or multiple based on complexity (REQUIRED)
 
-**Workflow Position**: After technical-architect, before task-planner.
+9. **Complete**: Output JSON summary (see Output Format below) and stop
+
+**NOTE:** Do NOT spawn task-planner tasks manually. The chain will automatically proceed to the next step.
 
 ## Feature Branch Creation
 
@@ -119,28 +124,12 @@ You only need to determine the feature name and store it in memory for downstrea
 }
 ```
 
-## Spawning Task-Planner
-
-**CRITICAL:** Always spawn task-planner(s) with comprehensive context:
-
-```json
-{
-  "summary": "Task planning for: {component/feature}",
-  "agent_type": "task-planner",
-  "priority": 6,
-  "parent_task_id": "{your_task_id}",
-  "description": "Feature branch: {branch_name}\nSpecs in memory: task:{task_id}:technical_specs\n\nComponent: {component_name}\nScope: {specific_scope}\nEstimated tasks: {N}"
-}
-```
-
 ## Key Requirements
 
 - Check for existing technical specs before starting (avoid duplication)
 - **DO NOT create branches or worktrees** - hooks handle this automatically
-- Provide rich context to task-planners (memory refs, summaries, scope)
-- Suggest agent specializations but don't create agents (task-planner's job)
-- Decompose into multiple task-planners for complex work
-- **ALWAYS spawn task-planner(s)** - workflow depends on this
+- **DO NOT spawn task-planner tasks manually** - the chain handles workflow progression
+- Suggest agent specializations in output for task-planner to use
 
 ## Output Format
 
@@ -149,13 +138,13 @@ You only need to determine the feature name and store it in memory for downstrea
   "status": "completed",
   "specs_stored": "task:{task_id}:technical_specs",
   "feature_branch": "{branch_name}",
-  "spawned_planners": ["{task_ids}"],
   "summary": {
     "components_defined": ["..."],
     "api_endpoints": N,
     "data_models": N,
     "implementation_phases": N,
-    "suggested_agents": ["types"]
-  }
+    "suggested_agents": ["rust-domain-models-specialist", "rust-service-layer-specialist"]
+  },
+  "next_step": "The chain will automatically proceed to task planning"
 }
 ```

@@ -75,7 +75,7 @@ pub enum TaskCommands {
         #[arg(short = 'D', long, value_delimiter = ',')]
         dependencies: Vec<String>,
 
-        /// Prompt chain ID to execute task through multi-step workflow
+        /// Prompt chain ID to execute (default: "technical_feature_workflow", use "none" to disable)
         #[arg(short, long)]
         chain: Option<String>,
     },

@@ -4,11 +4,11 @@ This directory contains prompt chain templates that orchestrate multi-step agent
 
 ## Available Chains
 
-### 1. **agent_workflow.yaml** - Default Multi-Agent Workflow
+### 1. **technical_feature_workflow.yaml** - Default Technical Feature Workflow
 
-The complete default agent workflow that replaces the traditional hook-based orchestration with a structured prompt chain.
+The complete default technical feature workflow that orchestrates multi-agent workflows with automatic progression and branching support.
 
-**Flow:**
+**Flow (Single Feature Mode):**
 1. **Gather Requirements** → Research & analyze, store in memory
 2. **Design Architecture** → Create system design → CREATE FEATURE BRANCH
 3. **Create Technical Specs** → PREPARE FEATURE WORKTREE → Detailed specs
@@ -16,7 +16,16 @@ The complete default agent workflow that replaces the traditional hook-based orc
 5. **Monitor Implementation** → Track progress
 6. **Prepare Merge** → RUN TESTS → MERGE BRANCHES → CLEANUP → TAG RELEASE
 
+**Flow (Multiple Features Mode - Branching):**
+1. **Gather Requirements** → Research & analyze, store in memory
+2. **Design Architecture** → Identifies 2+ distinct features → **SPAWNS N TASKS** (one per feature)
+   - Each spawned task has `chain_id: "technical_feature_workflow"`
+   - Each continues from step 3 (Create Technical Specs) independently
+   - Original chain exits after spawning
+   - Result: N parallel feature workflows
+
 **Key Features:**
+- **Adaptive Workflow**: Single chain for simple features, branching for complex multi-feature projects
 - **Worktree Management**: Automatic creation and cleanup of feature and task worktrees
 - **Memory Integration**: Requirements, architecture, and specs stored in memory
 - **Agent Spawning**: Automatically creates implementation tasks with proper agent assignments
@@ -26,7 +35,7 @@ The complete default agent workflow that replaces the traditional hook-based orc
 **Usage:**
 ```rust
 let loader = ChainLoader::default();
-let chain = loader.load_from_file("agent_workflow.yaml")?;
+let chain = loader.load_from_file("technical_feature_workflow.yaml")?;
 
 let service = PromptChainService::new()
     .with_hook_executor(hook_executor);
@@ -232,8 +241,8 @@ Chains can be triggered automatically by the task queue:
 // In task coordinator
 match task.agent_type.as_str() {
     "requirements-gatherer" => {
-        // Load and execute agent workflow chain
-        let chain = chain_loader.load_from_file("agent_workflow.yaml")?;
+        // Load and execute technical feature workflow chain
+        let chain = chain_loader.load_from_file("technical_feature_workflow.yaml")?;
         chain_service.execute_chain_with_task(&chain, initial_input, Some(&task)).await?;
     }
     _ => {
@@ -260,7 +269,7 @@ INFO Executing 1 post-hooks for step gather_requirements
 
 All executions are stored in the database:
 ```sql
-SELECT * FROM chain_executions WHERE chain_id = 'agent_workflow';
+SELECT * FROM chain_executions WHERE chain_id = 'technical_feature_workflow';
 ```
 
 ### Step Results

@@ -3,7 +3,7 @@
 //! Manages concurrent agent workers, task distribution, and resource monitoring
 //! using tokio async concurrency primitives.
 
-use crate::application::agent_executor::{AgentExecutor, ExecutionContext};
+use crate::application::agent_executor::AgentExecutor;
 use crate::application::resource_monitor::ResourceMonitor;
 use crate::application::task_coordinator::TaskCoordinator;
 use crate::domain::models::{Config, Task};
@@ -501,7 +501,7 @@ impl SwarmOrchestrator {
         task_coordinator: Arc<TaskCoordinator>,
         workers: Arc<RwLock<HashMap<Uuid, WorkerState>>>,
         agent_event_tx: mpsc::Sender<AgentEvent>,
-        config: Config,
+        _config: Config,
     ) -> Result<()> {
         let agent_id = Uuid::new_v4();
         let task_id = task.id;
@@ -538,18 +538,8 @@ impl SwarmOrchestrator {
 
         // Spawn agent execution task
         tokio::spawn(async move {
-            // Build execution context
-            let ctx = ExecutionContext::new(
-                agent_id,
-                task_id,
-                task.agent_type.clone(),
-                task.description.clone(),
-                config,
-            )
-            .with_input_data(task.input_data.clone().unwrap_or(serde_json::Value::Null));
-
-            // Execute task
-            let result = agent_executor.execute(ctx).await;
+            // Execute task (automatically detects and executes prompt chains if chain_id is present)
+            let result = agent_executor.execute_task(&task).await;
 
             // Determine event based on execution result and validation requirements
             let event = match result {

@@ -1,5 +1,5 @@
-name: agent_workflow
-description: "Default multi-agent workflow: requirements → architecture → technical specs → task planning → implementation → merge"
+name: technical_feature_workflow
+description: "Technical feature development workflow: requirements → architecture → technical specs → task planning → implementation → merge"
 
 steps:
   - id: gather_requirements

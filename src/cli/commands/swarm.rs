@@ -359,7 +359,7 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
     // Initialize hook system
     eprintln!("Initializing hook system...");
     let hook_executor = Arc::new(HookExecutor::new(Some(task_coordinator.clone())));
-    let mut hook_registry = HookRegistry::new(hook_executor);
+    let mut hook_registry = HookRegistry::new(hook_executor.clone());
 
     // Load hooks configuration
     let hooks_config_path = std::env::current_dir()
@@ -381,12 +381,23 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
     let hook_registry = Arc::new(hook_registry);
 
     // Set the hook registry on the coordinator (uses interior mutability)
-    task_coordinator.set_hook_registry(hook_registry).await;
+    task_coordinator.set_hook_registry(hook_registry.clone()).await;
 
-    // Create AgentExecutor with substrate registry and agent metadata
+    // Initialize chain loader and prompt chain service
+    eprintln!("Initializing prompt chain system...");
+    let chain_loader = Arc::new(crate::infrastructure::templates::ChainLoader::default());
+    let chain_service = Arc::new(
+        crate::services::PromptChainService::new()
+            .with_hook_executor(hook_executor)
+    );
+    eprintln!("Prompt chain system initialized");
+
+    // Create AgentExecutor with substrate registry, agent metadata, and chain support
     let agent_executor = Arc::new(AgentExecutor::new(
         substrate_registry.clone(),
         agent_metadata_registry,
+        chain_loader,
+        chain_service,
     ));
 
     // Create resource monitor with default limits (monitoring only, no enforcement)
