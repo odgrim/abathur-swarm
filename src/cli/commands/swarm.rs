@@ -261,6 +261,17 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
 
     eprintln!("Tasks HTTP MCP server started on port 45679");
 
+    // Save MCP server PIDs to state file for cleanup on stop
+    let memory_server_pid = memory_server.id();
+    let tasks_server_pid = tasks_server.id();
+
+    if let Err(e) = save_mcp_server_pids(memory_server_pid, tasks_server_pid).await {
+        eprintln!("Warning: Failed to save MCP server PIDs to state file: {}", e);
+        eprintln!("MCP servers may need to be stopped manually if daemon crashes");
+    } else {
+        eprintln!("MCP server PIDs saved to state file for cleanup");
+    }
+
     // Give servers a moment to start listening and initialize
     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
@@ -430,6 +441,43 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
     } else {
         eprintln!("Tasks HTTP MCP server stopped");
     }
+
+    Ok(())
+}
+
+/// Save MCP server PIDs to the swarm state file
+async fn save_mcp_server_pids(memory_pid: Option<u32>, tasks_pid: Option<u32>) -> Result<()> {
+    use serde::{Deserialize, Serialize};
+    use std::fs;
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct SwarmStateFile {
+        state: String,
+        max_agents: usize,
+        pid: Option<u32>,
+        #[serde(default)]
+        memory_server_pid: Option<u32>,
+        #[serde(default)]
+        tasks_server_pid: Option<u32>,
+    }
+
+    let state_path = std::env::current_dir()?.join(".abathur/swarm_state.json");
+
+    // Read existing state
+    let mut state: SwarmStateFile = if state_path.exists() {
+        let contents = fs::read_to_string(&state_path)?;
+        serde_json::from_str(&contents)?
+    } else {
+        return Err(anyhow::anyhow!("State file not found"));
+    };
+
+    // Update MCP server PIDs
+    state.memory_server_pid = memory_pid;
+    state.tasks_server_pid = tasks_pid;
+
+    // Write back to file
+    let contents = serde_json::to_string_pretty(&state)?;
+    fs::write(&state_path, contents)?;
 
     Ok(())
 }

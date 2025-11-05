@@ -17,6 +17,8 @@ struct SwarmStateFile {
     state: String,
     max_agents: usize,
     pid: Option<u32>,
+    memory_server_pid: Option<u32>,
+    tasks_server_pid: Option<u32>,
 }
 
 impl Default for SwarmStateFile {
@@ -25,6 +27,8 @@ impl Default for SwarmStateFile {
             state: "Stopped".to_string(),
             max_agents: 0,
             pid: None,
+            memory_server_pid: None,
+            tasks_server_pid: None,
         }
     }
 }
@@ -195,12 +199,18 @@ impl SwarmService {
 
         // Check if the process is actually alive
         if !Self::is_process_alive(pid) {
-            // PID exists but process is dead - clean up state
+            // PID exists but process is dead - clean up state and stop orphaned MCP servers
+            Self::stop_mcp_servers(&state).await;
             state.state = "Stopped".to_string();
             state.pid = None;
+            state.memory_server_pid = None;
+            state.tasks_server_pid = None;
             Self::write_state(&state)?;
             anyhow::bail!("No swarm orchestrator is running (PID {} not found)", pid);
         }
+
+        // Stop MCP servers first (before stopping the daemon)
+        Self::stop_mcp_servers(&state).await;
 
         // Process is alive, try to kill it
         #[cfg(unix)]
@@ -234,9 +244,80 @@ impl SwarmService {
 
         state.state = "Stopped".to_string();
         state.pid = None;
+        state.memory_server_pid = None;
+        state.tasks_server_pid = None;
         Self::write_state(&state)?;
 
         Ok(())
+    }
+
+    /// Stop MCP servers if they are running
+    async fn stop_mcp_servers(state: &SwarmStateFile) {
+        // Stop memory server
+        if let Some(memory_pid) = state.memory_server_pid {
+            if Self::is_process_alive(memory_pid) {
+                #[cfg(unix)]
+                {
+                    use std::process::Command;
+                    let _ = Command::new("kill")
+                        .arg("-TERM")
+                        .arg(memory_pid.to_string())
+                        .status();
+
+                    // Wait briefly for graceful shutdown
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                    // Force kill if still alive
+                    if Self::is_process_alive(memory_pid) {
+                        let _ = Command::new("kill")
+                            .arg("-KILL")
+                            .arg(memory_pid.to_string())
+                            .status();
+                    }
+                }
+
+                #[cfg(windows)]
+                {
+                    use std::process::Command;
+                    let _ = Command::new("taskkill")
+                        .args(&["/PID", &memory_pid.to_string(), "/F"])
+                        .status();
+                }
+            }
+        }
+
+        // Stop tasks server
+        if let Some(tasks_pid) = state.tasks_server_pid {
+            if Self::is_process_alive(tasks_pid) {
+                #[cfg(unix)]
+                {
+                    use std::process::Command;
+                    let _ = Command::new("kill")
+                        .arg("-TERM")
+                        .arg(tasks_pid.to_string())
+                        .status();
+
+                    // Wait briefly for graceful shutdown
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                    // Force kill if still alive
+                    if Self::is_process_alive(tasks_pid) {
+                        let _ = Command::new("kill")
+                            .arg("-KILL")
+                            .arg(tasks_pid.to_string())
+                            .status();
+                    }
+                }
+
+                #[cfg(windows)]
+                {
+                    use std::process::Command;
+                    let _ = Command::new("taskkill")
+                        .args(&["/PID", &tasks_pid.to_string(), "/F"])
+                        .status();
+                }
+            }
+        }
     }
 
     /// Get swarm statistics
