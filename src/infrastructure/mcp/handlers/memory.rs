@@ -7,7 +7,7 @@ use crate::infrastructure::mcp::types::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, MemoryAddRequest, MemoryDeleteRequest,
     MemoryGetRequest, MemorySearchRequest, MemoryUpdateRequest,
 };
-use crate::services::MemoryService;
+use crate::services::{MemoryService, RagService};
 use axum::{extract::State, Json};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -17,6 +17,7 @@ use tracing::{debug, error, info};
 #[derive(Clone)]
 pub struct MemoryAppState {
     pub memory_service: Arc<MemoryService>,
+    pub rag_service: Option<Arc<RagService>>,
 }
 
 pub async fn handle_memory_request(
@@ -132,6 +133,40 @@ fn handle_memory_list_tools(id: Option<Value>) -> JsonRpcResponse {
                         },
                         "required": ["namespace", "key"]
                     }
+                },
+                {
+                    "name": "vector_add_document",
+                    "description": "Add a document to vector storage with automatic chunking and embedding for semantic search",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "namespace": { "type": "string", "description": "Namespace for organizing the document (e.g., 'docs:api', 'agent:memory')" },
+                            "content": { "type": "string", "description": "The document content to index" },
+                            "citation_source": { "type": "string", "description": "Optional source citation (file path or URL)" }
+                        },
+                        "required": ["namespace", "content"]
+                    }
+                },
+                {
+                    "name": "vector_search",
+                    "description": "Semantic search across vector memories using natural language queries",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string", "description": "The search query in natural language" },
+                            "limit": { "type": "integer", "default": 10, "description": "Maximum number of results to return" },
+                            "namespace_filter": { "type": "string", "description": "Optional namespace prefix to filter results (e.g., 'docs:')" }
+                        },
+                        "required": ["query"]
+                    }
+                },
+                {
+                    "name": "vector_list_namespaces",
+                    "description": "List all vector memory namespaces with their document counts",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    }
                 }
             ]
         })),
@@ -182,6 +217,9 @@ async fn handle_memory_tool_call(state: MemoryAppState, request: JsonRpcRequest)
         "memory_search" => memory_search(&state.memory_service, arguments).await,
         "memory_update" => memory_update(&state.memory_service, arguments).await,
         "memory_delete" => memory_delete(&state.memory_service, arguments).await,
+        "vector_add_document" => vector_add_document(&state, arguments).await,
+        "vector_search" => vector_search(&state, arguments).await,
+        "vector_list_namespaces" => vector_list_namespaces(&state).await,
         _ => Err(format!("Unknown tool: {}", tool_name)),
     };
 
@@ -332,5 +370,144 @@ async fn memory_delete(service: &MemoryService, arguments: Value) -> Result<Stri
         .map_err(|e| {
             error!("Failed to delete memory: {}", e);
             format!("Failed to delete memory: {}", e)
+        })
+}
+
+// Vector search tool handlers
+
+async fn vector_add_document(state: &MemoryAppState, arguments: Value) -> Result<String, String> {
+    use crate::domain::models::Citation;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct VectorAddDocumentRequest {
+        namespace: String,
+        content: String,
+        citation_source: Option<String>,
+    }
+
+    let rag_service = match &state.rag_service {
+        Some(service) => service,
+        None => {
+            return Err("RAG service not available. Vector search is not enabled.".to_string());
+        }
+    };
+
+    let params: VectorAddDocumentRequest =
+        serde_json::from_value(arguments).map_err(|e| format!("Invalid parameters: {}", e))?;
+
+    let citation = params.citation_source.map(Citation::from_file);
+
+    rag_service
+        .add_document(&params.namespace, &params.content, citation)
+        .await
+        .map(|chunk_ids| {
+            info!(
+                "Document added to vector storage: namespace={}, chunks={}",
+                params.namespace,
+                chunk_ids.len()
+            );
+            format!(
+                "Document added successfully. Created {} chunks in namespace '{}'",
+                chunk_ids.len(),
+                params.namespace
+            )
+        })
+        .map_err(|e| {
+            error!("Failed to add document to vector storage: {}", e);
+            format!("Failed to add document: {}", e)
+        })
+}
+
+async fn vector_search(state: &MemoryAppState, arguments: Value) -> Result<String, String> {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct VectorSearchRequest {
+        query: String,
+        #[serde(default = "default_search_limit")]
+        limit: usize,
+        namespace_filter: Option<String>,
+    }
+
+    fn default_search_limit() -> usize {
+        10
+    }
+
+    let rag_service = match &state.rag_service {
+        Some(service) => service,
+        None => {
+            return Err("RAG service not available. Vector search is not enabled.".to_string());
+        }
+    };
+
+    let params: VectorSearchRequest =
+        serde_json::from_value(arguments).map_err(|e| format!("Invalid parameters: {}", e))?;
+
+    let namespace_filter = params.namespace_filter.as_deref();
+
+    rag_service
+        .retrieve_context(&params.query, params.limit, namespace_filter)
+        .await
+        .map(|results| {
+            info!(
+                "Vector search completed: query='{}', results={}",
+                params.query,
+                results.len()
+            );
+
+            if results.is_empty() {
+                return "No results found.".to_string();
+            }
+
+            // Format results as a readable string
+            let mut output = format!("Found {} results:\n\n", results.len());
+            for (i, result) in results.iter().enumerate() {
+                output.push_str(&format!(
+                    "{}. [Score: {:.2}] {} ({})\n{}\n\n",
+                    i + 1,
+                    result.score,
+                    result.id,
+                    result.namespace,
+                    result.content
+                ));
+            }
+
+            output
+        })
+        .map_err(|e| {
+            error!("Vector search failed: {}", e);
+            format!("Search failed: {}", e)
+        })
+}
+
+async fn vector_list_namespaces(state: &MemoryAppState) -> Result<String, String> {
+    let rag_service = match &state.rag_service {
+        Some(service) => service,
+        None => {
+            return Err("RAG service not available. Vector search is not enabled.".to_string());
+        }
+    };
+
+    rag_service
+        .list_namespaces()
+        .await
+        .map(|namespaces| {
+            info!("Listed {} vector namespaces", namespaces.len());
+
+            if namespaces.is_empty() {
+                return "No vector namespaces found.".to_string();
+            }
+
+            let mut output = format!("Vector Memory Namespaces ({} total):\n\n", namespaces.len());
+            for (namespace, count) in namespaces {
+                output.push_str(&format!("- {}: {} documents\n", namespace, count));
+            }
+
+            output
+        })
+        .map_err(|e| {
+            error!("Failed to list namespaces: {}", e);
+            format!("Failed to list namespaces: {}", e)
         })
 }

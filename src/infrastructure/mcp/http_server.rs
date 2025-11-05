@@ -2,17 +2,19 @@
 //!
 //! Provides HTTP MCP servers for memory and task queue management.
 
+use crate::domain::models::{ChunkingConfig, EmbeddingModel};
 use crate::infrastructure::database::{
     connection::DatabaseConnection, memory_repo::MemoryRepositoryImpl, task_repo::TaskRepositoryImpl,
 };
 use crate::infrastructure::mcp::handlers::{
     handle_memory_request, handle_tasks_request, MemoryAppState, TasksAppState,
 };
-use crate::services::{DependencyResolver, MemoryService, PriorityCalculator, TaskQueueService};
+use crate::infrastructure::vector::{Chunker, LocalEmbeddingService, VectorStore};
+use crate::services::{DependencyResolver, MemoryService, PriorityCalculator, RagService, TaskQueueService};
 use anyhow::{Context, Result};
 use axum::{routing::post, Router};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Start the Memory HTTP MCP server
@@ -37,7 +39,22 @@ pub async fn start_memory_server(db_path: String, port: u16) -> Result<()> {
 
     info!("Database initialized successfully");
 
-    let state = MemoryAppState { memory_service };
+    // Initialize RAG services for vector search
+    let rag_service = match initialize_rag_service(db.pool().clone()) {
+        Ok(service) => {
+            info!("RAG service initialized successfully");
+            Some(Arc::new(service))
+        }
+        Err(e) => {
+            warn!("Failed to initialize RAG service: {}. Vector search will not be available.", e);
+            None
+        }
+    };
+
+    let state = MemoryAppState {
+        memory_service,
+        rag_service,
+    };
 
     let app = Router::new()
         .route("/", post(handle_memory_request))
@@ -111,4 +128,27 @@ fn init_tracing() {
         )
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+}
+
+/// Initialize RAG service with embedding service, vector store, and chunker
+fn initialize_rag_service(pool: sqlx::SqlitePool) -> Result<RagService> {
+    // Create embedding service (using local deterministic embeddings for now)
+    let embedding_service = LocalEmbeddingService::new(EmbeddingModel::LocalMiniLM)
+        .context("Failed to create embedding service")?;
+    let embedding_service = Arc::new(embedding_service);
+
+    // Create vector store
+    let vector_store = VectorStore::new(Arc::new(pool), embedding_service.clone())
+        .context("Failed to create vector store")?;
+    let vector_store: Arc<dyn crate::domain::ports::EmbeddingRepository> = Arc::new(vector_store);
+
+    // Create chunker with default configuration
+    let chunker = Chunker::with_config(ChunkingConfig::default())
+        .context("Failed to create chunker")?;
+    let chunker: Arc<dyn crate::domain::ports::ChunkingService> = Arc::new(chunker);
+
+    // Create RAG service
+    let rag_service = RagService::new(vector_store, chunker);
+
+    Ok(rag_service)
 }
