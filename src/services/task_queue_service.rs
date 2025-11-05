@@ -1,6 +1,6 @@
 use crate::domain::models::{Task, TaskStatus, PruneResult, BlockedTask};
 use crate::domain::ports::{TaskFilters, TaskRepository};
-use crate::services::{DependencyResolver, PriorityCalculator};
+use crate::services::{DependencyResolver, PriorityCalculator, MemoryService};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -30,6 +30,7 @@ pub struct TaskQueueService {
     pub(crate) repo: Arc<dyn TaskRepository>,
     dependency_resolver: DependencyResolver,
     priority_calc: PriorityCalculator,
+    memory_service: Option<Arc<MemoryService>>,
 }
 
 impl TaskQueueService {
@@ -43,7 +44,73 @@ impl TaskQueueService {
             repo,
             dependency_resolver,
             priority_calc,
+            memory_service: None,
         }
+    }
+
+    /// Create a new TaskQueueService with memory service for task memory cleanup
+    pub fn with_memory_service(
+        repo: Arc<dyn TaskRepository>,
+        dependency_resolver: DependencyResolver,
+        priority_calc: PriorityCalculator,
+        memory_service: Arc<MemoryService>,
+    ) -> Self {
+        Self {
+            repo,
+            dependency_resolver,
+            priority_calc,
+            memory_service: Some(memory_service),
+        }
+    }
+
+    /// Delete all memory associated with a task
+    ///
+    /// Tasks store memory with namespace pattern `task:{task_id}:*`.
+    /// This method searches for and deletes all memory entries under that namespace.
+    ///
+    /// # Arguments
+    /// * `task_id` - The UUID of the task whose memory should be deleted
+    ///
+    /// # Returns
+    /// * `Ok(usize)` - Number of memory entries deleted
+    /// * `Err(_)` - If memory deletion fails
+    #[instrument(skip(self), err)]
+    async fn delete_task_memory(&self, task_id: Uuid) -> Result<usize> {
+        // If no memory service is configured, skip memory deletion
+        let Some(ref memory_service) = self.memory_service else {
+            info!("No memory service configured, skipping memory deletion for task {}", task_id);
+            return Ok(0);
+        };
+
+        // Search for all memory entries with namespace prefix task:{task_id}:
+        let namespace_prefix = format!("task:{}:", task_id);
+
+        info!("Searching for task memory with prefix: {}", namespace_prefix);
+        let memories = memory_service
+            .search(&namespace_prefix, None, Some(1000))
+            .await
+            .context("Failed to search for task memory")?;
+
+        let count = memories.len();
+        if count == 0 {
+            info!("No memory entries found for task {}", task_id);
+            return Ok(0);
+        }
+
+        info!("Found {} memory entries for task {}, deleting...", count, task_id);
+
+        // Delete each memory entry
+        for memory in memories {
+            if let Err(e) = memory_service.delete(&memory.namespace, &memory.key).await {
+                warn!(
+                    "Failed to delete memory {}:{} for task {}: {}",
+                    memory.namespace, memory.key, task_id, e
+                );
+            }
+        }
+
+        info!("Deleted {} memory entries for task {}", count, task_id);
+        Ok(count)
     }
 
     /// Submit a new task to the queue
@@ -507,9 +574,28 @@ impl TaskQueueService {
             // Delete tasks one by one since we don't have delete_batch yet
             let mut successfully_deleted = Vec::new();
             for task_id in &deletable_tasks {
+                // First, delete the task from the repository
                 match self.repo.delete(*task_id).await {
                     Ok(_) => {
                         info!("Successfully deleted task {}", task_id);
+
+                        // Then, delete associated memory
+                        match self.delete_task_memory(*task_id).await {
+                            Ok(count) => {
+                                if count > 0 {
+                                    info!("Deleted {} memory entries for task {}", count, task_id);
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Task {} deleted but failed to delete memory: {}",
+                                    task_id, e
+                                );
+                                // Don't fail the entire operation if memory deletion fails
+                                // The task is already deleted, so we continue
+                            }
+                        }
+
                         successfully_deleted.push(*task_id);
                     }
                     Err(e) => {

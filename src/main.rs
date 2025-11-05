@@ -65,16 +65,19 @@ async fn main() -> Result<()> {
     // Initialize services
     let dependency_resolver = DependencyResolver::new();
     let priority_calc = PriorityCalculator::new();
-    let real_task_service = RealTaskQueueService::new(
+
+    // Initialize real memory service with repository and adapter
+    let real_memory_service = Arc::new(RealMemoryService::new(memory_repo));
+    let memory_service = MemoryServiceAdapter::new(real_memory_service.clone());
+
+    // Initialize task service with memory service for cleanup
+    let real_task_service = RealTaskQueueService::with_memory_service(
         task_repo.clone(),
         dependency_resolver,
         priority_calc,
+        real_memory_service,
     );
     let task_service = TaskQueueServiceAdapter::new(real_task_service);
-
-    // Initialize real memory service with repository and adapter
-    let real_memory_service = RealMemoryService::new(memory_repo);
-    let memory_service = MemoryServiceAdapter::new(real_memory_service);
 
     match cli.command {
         Commands::Init { .. } => {
