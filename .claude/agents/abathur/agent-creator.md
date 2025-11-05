@@ -18,7 +18,8 @@ Meta-agent responsible for spawning hyperspecialized agents on-demand when capab
 ## Workflow
 
 1. **Check Existing**: Search memory and filesystem for existing agents (avoid duplication)
-1.5. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
+
+2. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
    ```json
    // Call mcp__abathur-memory__memory_get
    {
@@ -32,28 +33,53 @@ Meta-agent responsible for spawning hyperspecialized agents on-demand when capab
    - `conventions` - Naming and architecture patterns
    - `tooling` - Commands and tools available
 
-2. **Analyze Requirements**: Define agent's micro-domain, boundaries, capabilities
+3. **Search for Similar Agents** (RECOMMENDED): Use vector search to find similar agent patterns
+   ```json
+   // Call mcp__abathur-memory__vector_search
+   {
+     "query": "{language} agent for {domain} with {specific_capability}",
+     "limit": 3,
+     "namespace_filter": "agents:"
+   }
+   ```
+   Benefits:
+   - Discover existing agent patterns and prompt engineering techniques
+   - Learn from successful agent designs in similar domains
+   - Find reusable tool combinations and workflow patterns
+   - Avoid reinventing agent architectures
+
+   **Also search documentation for best practices:**
+   ```json
+   {
+     "query": "{language} {domain} best practices and patterns",
+     "limit": 3,
+     "namespace_filter": "docs:"
+   }
+   ```
+
+4. **Analyze Requirements**: Define agent's micro-domain, boundaries, capabilities
    - **CRITICAL**: Agent name MUST use language prefix: `{language}-{domain}-specialist`
 
-3. **Research Domain**: Use WebFetch/WebSearch for domain best practices
+5. **Research Domain**: Use WebFetch/WebSearch for domain best practices
    - Research {language}-specific patterns and idioms
    - Look up {framework}-specific best practices if applicable
    - Find official {language} documentation and style guides
    - Search for established patterns in {language} ecosystem
 
-4. **Design Specification**: Create name, description, select model, minimal tools
+6. **Design Specification**: Create name, description, select model, minimal tools
    - Name format: `{language}-{domain}-specialist` (e.g., "python-fastapi-specialist", "rust-tokio-specialist")
    - Include language in keywords
    - Tools: MUST include Bash if agent needs to run {language} commands
 
-5. **Engineer Prompt**: Write focused system prompt with domain best practices
+7. **Engineer Prompt**: Write focused system prompt with domain best practices
    - Include {language}-specific code examples
    - Reference {framework} APIs and patterns
    - Follow project's {naming} conventions
    - Include validation commands from project context
 
-6. **Create Agent File**: Generate markdown in `.claude/agents/workers/{language}-{domain}-specialist.md`
-7. **Update Registry**: Store agent info in memory namespace `agents:registry`
+8. **Create Agent File**: Generate markdown in `.claude/agents/workers/{language}-{domain}-specialist.md`
+
+9. **Update Registry**: Store agent info in memory namespace `agents:registry`
 
 **Workflow Position**: Invoked by task-planner when specialized agents are needed.
 

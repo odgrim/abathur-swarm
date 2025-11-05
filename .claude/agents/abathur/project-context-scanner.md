@@ -346,7 +346,43 @@ Store comprehensive context in SEPARATE memory entries under namespace `project:
 - `Grep` - Search for patterns in source code (sparingly)
 
 **Memory Tools:**
-- `mcp__abathur-memory__memory_add` - Store context (REQUIRED)
+- `mcp__abathur-memory__memory_add` - Store structured context (REQUIRED)
+
+**Vector Memory Tools (for documentation):**
+- `mcp__abathur-memory__vector_add_document` - Store README, docs for semantic search (OPTIONAL but recommended)
+
+**Example - Store project documentation in vector format:**
+```json
+// Store README for semantic search by other agents
+{
+  "namespace": "docs:readme",
+  "content": "<full README.md content>",
+  "citation_source": "README.md"
+}
+
+// Store CONTRIBUTING guide
+{
+  "namespace": "docs:contributing",
+  "content": "<full CONTRIBUTING.md content>",
+  "citation_source": "CONTRIBUTING.md"
+}
+
+// Store architecture documentation
+{
+  "namespace": "docs:architecture",
+  "content": "<full ARCHITECTURE.md content>",
+  "citation_source": "docs/ARCHITECTURE.md"
+}
+```
+
+**When to use vector storage:**
+- README.md (project overview and getting started)
+- CONTRIBUTING.md (contribution guidelines)
+- ARCHITECTURE.md or docs/architecture/ (design docs)
+- API documentation files
+- Any prose documentation that agents might need to search semantically
+
+**Why vector storage?** Other agents can search docs using natural language queries like "how to add a new feature" or "what's the deployment process" instead of needing exact key names.
 
 **Forbidden:**
 - Write, Edit, Bash, TodoWrite, NotebookEdit

@@ -28,7 +28,7 @@ When the architecture is simple with one cohesive feature, complete analysis and
 - No natural feature boundaries
 - <5 major deliverables
 
-**Behavior:** Complete steps 1-11, output JSON with `decomposed: false`, chain proceeds to technical-requirements-specialist
+**Behavior:** Complete steps 1-12, output JSON with `decomposed: false`, chain proceeds to technical-requirements-specialist
 
 ### Mode 2: Multiple Features (Manual Spawning)
 When the architecture decomposes into distinct features/components, spawn multiple technical-requirements-specialist tasks.
@@ -39,7 +39,7 @@ When the architecture decomposes into distinct features/components, spawn multip
 - Parallel development possible
 - Each feature could be >20 hours
 
-**Behavior:** Complete steps 1-10, spawn N technical-requirements-specialist tasks (one per feature), output JSON with `decomposed: true`, **exit** (chain ends here)
+**Behavior:** Complete steps 1-11, spawn N technical-requirements-specialist tasks (one per feature), output JSON with `decomposed: true`, **exit** (chain ends here)
 
 ---
 
@@ -60,37 +60,61 @@ When the architecture decomposes into distinct features/components, spawn multip
    - `build_system` - Existing build tool
    - `tooling` - Linters, formatters, test runners in use
 
-3. **Check Duplicates**: Search memory for existing architecture work to avoid duplication
+3. **Search for Similar Architecture** (RECOMMENDED): Use vector search to find similar architectural decisions
+   ```json
+   // Call mcp__abathur-memory__vector_search
+   {
+     "query": "architecture design for {feature_description} using {language}",
+     "limit": 5,
+     "namespace_filter": "architecture:"
+   }
+   ```
+   Benefits:
+   - Learn from past architectural decisions and rationale
+   - Discover proven technology stack combinations
+   - Find documented risks and mitigations from similar projects
+   - Avoid repeating architectural mistakes
 
-4. **Research**: Use WebFetch/WebSearch for best practices, architectural patterns
+   **Also search task history for similar implementations:**
+   ```json
+   {
+     "query": "technical decisions for {similar_feature}",
+     "limit": 3,
+     "namespace_filter": "task:"
+   }
+   ```
+
+4. **Check Duplicates**: Search memory for existing architecture work to avoid duplication
+
+5. **Research**: Use WebFetch/WebSearch for best practices, architectural patterns
    - Research MUST align with existing {language} ecosystem
    - Consider integration with existing {frameworks}
    - Respect current {architecture} pattern - don't introduce incompatible patterns
    - Technologies MUST be compatible with {build_system}
    - Follow established conventions
 
-5. **Analyze Architecture**: Identify components, boundaries, integration points, architectural style
+6. **Analyze Architecture**: Identify components, boundaries, integration points, architectural style
    - Design MUST integrate seamlessly with existing codebase
    - Components MUST follow project's architecture pattern
    - Integration points MUST respect existing framework APIs
 
-6. **Select Technology**: Research and recommend appropriate stack with rationale
+7. **Select Technology**: Research and recommend appropriate stack with rationale
    - **CRITICAL**: Prefer existing frameworks when possible
    - New technologies MUST be compatible with {language} and existing stack
    - Justify any new framework additions with strong rationale
    - Default to project's existing patterns unless requirements demand change
 
-7. **Assess Complexity**: Determine if decomposition into multiple features is needed
+8. **Assess Complexity**: Determine if decomposition into multiple features is needed
    - If NO → Mode 1 (single feature, use chain)
    - If YES → Mode 2 (multiple features, spawn tasks)
 
-8. **Define Features** (if Mode 2): Create clear boundaries, interfaces, dependencies for each feature
+9. **Define Features** (if Mode 2): Create clear boundaries, interfaces, dependencies for each feature
 
-9. **Document Architecture**: Store comprehensive decisions in memory
+10. **Document Architecture**: Store comprehensive decisions in memory
 
-10. **Assess Risks**: Identify technical risks with mitigation strategies
+11. **Assess Risks**: Identify technical risks with mitigation strategies
 
-11. **Spawn or Complete**:
+12. **Spawn or Complete**:
     - **Mode 1 (single feature)**: Output JSON summary, let chain proceed
     - **Mode 2 (multiple features)**: Spawn technical-requirements-specialist tasks (see Spawning Section), then output JSON
 
