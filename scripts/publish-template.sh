@@ -49,26 +49,27 @@ cp -R "$TEMPLATE_DIR"/.{gitignore,claude,abathur,mcp.json} ./ 2>/dev/null || tru
 # Remove . and .. if they were copied
 echo -e "${GREEN}✓${NC} Template files copied"
 
-# Copy hooks from root .abathur directory (go back to original directory)
-echo -e "${BLUE}Copying hooks from root .abathur directory...${NC}"
-SOURCE_DIR=$(dirname "$TEMPLATE_DIR")
-if [ -f "$SOURCE_DIR/.abathur/hooks.yaml" ]; then
-    echo -e "${BLUE}  - Copying .abathur/hooks.yaml${NC}"
-    mkdir -p ./.abathur
-    cp "$SOURCE_DIR/.abathur/hooks.yaml" ./.abathur/ 2>/dev/null || true
+# Verify hooks were copied
+echo -e "${BLUE}Verifying hooks...${NC}"
+if [ -f ".abathur/hooks.yaml" ]; then
+    echo -e "${GREEN}  ✓${NC} hooks.yaml copied"
+else
+    echo -e "${RED}  ✗${NC} hooks.yaml missing!"
 fi
-if [ -d "$SOURCE_DIR/.abathur/hooks" ]; then
-    echo -e "${BLUE}  - Copying .abathur/hooks/ directory${NC}"
-    mkdir -p ./.abathur/hooks
-    cp -R "$SOURCE_DIR/.abathur/hooks/"* ./.abathur/hooks/ 2>/dev/null || true
+if [ -d ".abathur/hooks" ]; then
+    HOOK_COUNT=$(find .abathur/hooks -name "*.sh" -type f | wc -l | tr -d ' ')
+    echo -e "${GREEN}  ✓${NC} hooks/ directory copied ($HOOK_COUNT scripts)"
     # Make hook scripts executable
-    chmod +x ./.abathur/hooks/*.sh 2>/dev/null || true
+    chmod +x .abathur/hooks/*.sh 2>/dev/null || true
+else
+    echo -e "${RED}  ✗${NC} hooks/ directory missing!"
 fi
-echo -e "${GREEN}✓${NC} Hooks copied"
 
 # Stage all files
 echo -e "${BLUE}Staging files...${NC}"
 git add -A
+# Force add .abathur directory (may be ignored by git for some reason)
+git add -f .abathur/ 2>/dev/null || true
 echo -e "${GREEN}✓${NC} Files staged"
 
 # Check if there are changes to commit
