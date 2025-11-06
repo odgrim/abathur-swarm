@@ -72,7 +72,44 @@ Entry point for the Abathur workflow. Autonomously research problems, determine 
 **Memory Tools:**
 - `mcp__abathur-memory__memory_get` - Load project context (REQUIRED first step)
 - `mcp__abathur-memory__memory_add` - Store requirements
-- `mcp__abathur-memory__memory_search` - Find prior work
+- `mcp__abathur-memory__memory_search` - Find prior work by namespace prefix
+
+**Vector Search Tools (Semantic Search):**
+- `mcp__abathur-memory__vector_search` - Search documentation and past decisions using natural language
+- `mcp__abathur-memory__vector_list_namespaces` - Discover what documentation is available
+
+**Example - Search for similar past requirements:**
+```json
+// Find similar feature implementations
+{
+  "query": "authentication and authorization implementation",
+  "limit": 5,
+  "namespace_filter": "requirements:"
+}
+
+// Find architectural decisions
+{
+  "query": "database schema design patterns",
+  "limit": 3,
+  "namespace_filter": "docs:"
+}
+
+// Search project documentation
+{
+  "query": "how to add new API endpoints",
+  "limit": 5,
+  "namespace_filter": "docs:readme"
+}
+```
+
+**When to use vector search:**
+- Understanding existing patterns before proposing new ones
+- Finding similar past requirements or features
+- Searching project documentation with natural language
+- Discovering architectural decisions and design patterns
+- Avoiding duplicate work by finding existing implementations
+
+**Workflow tip:** Start with vector search to understand what's been done before, then use traditional memory_search for structured data.
 
 **IMPORTANT:** Your task ID is provided in the pre-prompt. Use it directly - do NOT call `task_list` to get it.
 

@@ -13,7 +13,7 @@ use helpers::database::{setup_test_db, teardown_test_db};
 async fn test_add_memory() {
     let pool = setup_test_db().await;
     let repo = Arc::new(MemoryRepositoryImpl::new(pool.clone())) as Arc<dyn MemoryRepository>;
-    let service = MemoryService::new(repo);
+    let service = MemoryService::new(repo, None, None);
 
     let memory = Memory::new(
         "test:user:alice".to_string(),
@@ -47,7 +47,7 @@ async fn test_add_memory() {
 async fn test_add_duplicate_memory_fails() {
     let pool = setup_test_db().await;
     let repo = Arc::new(MemoryRepositoryImpl::new(pool.clone())) as Arc<dyn MemoryRepository>;
-    let service = MemoryService::new(repo);
+    let service = MemoryService::new(repo, None, None);
 
     let memory = Memory::new(
         "test:duplicate".to_string(),
@@ -74,7 +74,7 @@ async fn test_add_duplicate_memory_fails() {
 async fn test_get_nonexistent_memory() {
     let pool = setup_test_db().await;
     let repo = Arc::new(MemoryRepositoryImpl::new(pool.clone())) as Arc<dyn MemoryRepository>;
-    let service = MemoryService::new(repo);
+    let service = MemoryService::new(repo, None, None);
 
     let result = service.get("nonexistent", "key").await.expect("query should not fail");
     assert!(result.is_none());
@@ -86,7 +86,7 @@ async fn test_get_nonexistent_memory() {
 async fn test_update_memory() {
     let pool = setup_test_db().await;
     let repo = Arc::new(MemoryRepositoryImpl::new(pool.clone())) as Arc<dyn MemoryRepository>;
-    let service = MemoryService::new(repo);
+    let service = MemoryService::new(repo, None, None);
 
     // Add initial memory
     let memory = Memory::new(
@@ -122,7 +122,7 @@ async fn test_update_memory() {
 async fn test_update_nonexistent_memory_fails() {
     let pool = setup_test_db().await;
     let repo = Arc::new(MemoryRepositoryImpl::new(pool.clone())) as Arc<dyn MemoryRepository>;
-    let service = MemoryService::new(repo);
+    let service = MemoryService::new(repo, None, None);
 
     let result = service
         .update("nonexistent", "key", json!({"value": 1}), "test")
@@ -137,7 +137,7 @@ async fn test_update_nonexistent_memory_fails() {
 async fn test_delete_memory() {
     let pool = setup_test_db().await;
     let repo = Arc::new(MemoryRepositoryImpl::new(pool.clone())) as Arc<dyn MemoryRepository>;
-    let service = MemoryService::new(repo);
+    let service = MemoryService::new(repo, None, None);
 
     // Add memory
     let memory = Memory::new(
@@ -171,7 +171,7 @@ async fn test_delete_memory() {
 async fn test_search_by_namespace_prefix() {
     let pool = setup_test_db().await;
     let repo = Arc::new(MemoryRepositoryImpl::new(pool.clone())) as Arc<dyn MemoryRepository>;
-    let service = MemoryService::new(repo);
+    let service = MemoryService::new(repo, None, None);
 
     // Add multiple memories with hierarchical namespaces
     let memories = vec![
@@ -232,7 +232,7 @@ async fn test_search_by_namespace_prefix() {
 async fn test_search_by_memory_type() {
     let pool = setup_test_db().await;
     let repo = Arc::new(MemoryRepositoryImpl::new(pool.clone())) as Arc<dyn MemoryRepository>;
-    let service = MemoryService::new(repo);
+    let service = MemoryService::new(repo, None, None);
 
     // Add memories of different types
     let semantic = Memory::new(
@@ -296,7 +296,7 @@ async fn test_search_by_memory_type() {
 async fn test_search_with_limit() {
     let pool = setup_test_db().await;
     let repo = Arc::new(MemoryRepositoryImpl::new(pool.clone())) as Arc<dyn MemoryRepository>;
-    let service = MemoryService::new(repo);
+    let service = MemoryService::new(repo, None, None);
 
     // Add multiple memories
     for i in 0..10 {
@@ -325,7 +325,7 @@ async fn test_search_with_limit() {
 async fn test_count_memories() {
     let pool = setup_test_db().await;
     let repo = Arc::new(MemoryRepositoryImpl::new(pool.clone())) as Arc<dyn MemoryRepository>;
-    let service = MemoryService::new(repo);
+    let service = MemoryService::new(repo, None, None);
 
     // Add memories
     for i in 0..7 {
@@ -354,7 +354,7 @@ async fn test_count_memories() {
 async fn test_memory_versioning() {
     let pool = setup_test_db().await;
     let repo = Arc::new(MemoryRepositoryImpl::new(pool.clone())) as Arc<dyn MemoryRepository>;
-    let service = MemoryService::new(repo);
+    let service = MemoryService::new(repo, None, None);
 
     // Add initial memory
     let memory = Memory::new(
@@ -392,7 +392,7 @@ async fn test_memory_versioning() {
 async fn test_memory_with_metadata() {
     let pool = setup_test_db().await;
     let repo = Arc::new(MemoryRepositoryImpl::new(pool.clone())) as Arc<dyn MemoryRepository>;
-    let service = MemoryService::new(repo);
+    let service = MemoryService::new(repo, None, None);
 
     let metadata = json!({"source": "api", "confidence": 0.95});
 
@@ -422,7 +422,7 @@ async fn test_memory_with_metadata() {
 async fn test_update_deleted_memory_fails() {
     let pool = setup_test_db().await;
     let repo = Arc::new(MemoryRepositoryImpl::new(pool.clone())) as Arc<dyn MemoryRepository>;
-    let service = MemoryService::new(repo);
+    let service = MemoryService::new(repo, None, None);
 
     // Add and then delete memory
     let memory = Memory::new(

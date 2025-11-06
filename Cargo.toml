@@ -50,6 +50,16 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
 
+# RAG and Vector Embeddings
+# Using candle instead of rust-bert for lighter weight, pure-Rust ML
+candle-core = "0.8"
+candle-nn = "0.8"
+candle-transformers = "0.8"
+hf-hub = "0.3"  # For downloading models from HuggingFace
+sqlite-vec = "0.1"
+zerocopy = "0.7"
+tiktoken-rs = "0.5"
+
 [dev-dependencies]
 assert_cmd = "2.0"
 mockall = "0.13.1"

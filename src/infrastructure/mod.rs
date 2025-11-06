@@ -20,3 +20,4 @@ pub mod setup;
 pub mod substrates;
 pub mod templates;
 pub mod validators;
+pub mod vector;

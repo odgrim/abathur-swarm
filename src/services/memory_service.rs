@@ -1,14 +1,17 @@
-use crate::domain::models::{Memory, MemoryType};
-use crate::domain::ports::MemoryRepository;
+use crate::domain::models::{Citation, Memory, MemoryType, SearchResult};
+use crate::domain::ports::{ChunkingService, EmbeddingRepository, MemoryRepository};
 use anyhow::{Context, Result, anyhow};
+use chrono::Utc;
 use serde_json::Value;
 use std::sync::Arc;
-use tracing::instrument;
+use tracing::{error, info, instrument};
+use uuid::Uuid;
 
 /// Service for managing memory operations
 ///
 /// Coordinates memory CRUD operations with the repository layer, providing
-/// business logic for versioning, soft deletes, and namespace management.
+/// business logic for versioning, soft deletes, namespace management, and
+/// optional vector search capabilities.
 ///
 /// # Examples
 ///
@@ -19,7 +22,7 @@ use tracing::instrument;
 /// use serde_json::json;
 ///
 /// # async fn example(repo: Arc<dyn abathur::domain::ports::MemoryRepository>) -> anyhow::Result<()> {
-/// let service = MemoryService::new(repo);
+/// let service = MemoryService::new(repo, None, None);
 ///
 /// // Add a new memory
 /// let memory = Memory::new(
@@ -38,21 +41,41 @@ use tracing::instrument;
 /// ```
 pub struct MemoryService {
     repo: Arc<dyn MemoryRepository>,
+    vector_store: Option<Arc<dyn EmbeddingRepository>>,
+    chunker: Option<Arc<dyn ChunkingService>>,
 }
 
 impl MemoryService {
-    /// Create a new `MemoryService` with the given repository
+    /// Create a new `MemoryService` with the given repository and optional vector capabilities
     ///
     /// # Arguments
     /// * `repo` - Arc-wrapped trait object implementing `MemoryRepository`
-    pub fn new(repo: Arc<dyn MemoryRepository>) -> Self {
-        Self { repo }
+    /// * `vector_store` - Optional vector storage for semantic search
+    /// * `chunker` - Optional text chunking service
+    ///
+    /// Vector search features are only available if both `vector_store` and `chunker` are provided.
+    pub fn new(
+        repo: Arc<dyn MemoryRepository>,
+        vector_store: Option<Arc<dyn EmbeddingRepository>>,
+        chunker: Option<Arc<dyn ChunkingService>>,
+    ) -> Self {
+        if vector_store.is_some() && chunker.is_some() {
+            info!("MemoryService initialized with vector search capabilities");
+        } else {
+            info!("MemoryService initialized without vector search (graceful degradation)");
+        }
+        Self {
+            repo,
+            vector_store,
+            chunker,
+        }
     }
 
     /// Add a new memory entry
     ///
     /// Validates the memory and inserts it into the repository. The memory
-    /// will be assigned version 1 automatically.
+    /// will be assigned version 1 automatically. If vector search capabilities
+    /// are enabled, the memory will also be indexed for semantic search.
     ///
     /// # Arguments
     /// * `memory` - The memory entry to add
@@ -65,6 +88,10 @@ impl MemoryService {
     /// Returns an error if:
     /// - Memory already exists (namespace + key combination)
     /// - Repository insert operation fails
+    ///
+    /// # Note
+    /// Vector indexing errors are logged but don't fail the operation.
+    /// Traditional memory storage always succeeds even if vector indexing fails.
     #[instrument(skip(self, memory), fields(namespace = %memory.namespace, key = %memory.key), err)]
     pub async fn add(&self, memory: Memory) -> Result<i64> {
         // Validate memory doesn't already exist
@@ -82,11 +109,84 @@ impl MemoryService {
             ));
         }
 
-        // Insert the memory
-        self.repo
+        let namespace = memory.namespace.clone();
+        let key = memory.key.clone();
+        let value = memory.value.clone();
+        let created_by = memory.created_by.clone();
+
+        // 1. Insert into traditional memory
+        let id = self
+            .repo
             .insert(memory)
             .await
-            .context("Failed to insert memory")
+            .context("Failed to insert memory")?;
+
+        info!("Memory added successfully with ID: {}", id);
+
+        // 2. ALSO index in vector storage for semantic search (graceful degradation)
+        if let (Some(vector_store), Some(chunker)) = (&self.vector_store, &self.chunker) {
+            // Extract text content from the JSON value
+            let text_content = match &value {
+                Value::String(s) => s.clone(),
+                other => serde_json::to_string_pretty(other)
+                    .unwrap_or_else(|_| other.to_string()),
+            };
+
+            // Create citation with namespace:key for traceability
+            let citation = Citation {
+                source: format!("memory:{}:{} (created by {})", namespace, key, created_by),
+                page: None,
+                url: None,
+                timestamp: Utc::now(),
+            };
+
+            // Generate a parent document ID for chunking
+            let parent_id = Uuid::new_v4().to_string();
+
+            // Chunk and index (errors don't fail the overall operation)
+            match chunker.chunk(&text_content, &parent_id).await {
+                Ok(chunks) if !chunks.is_empty() => {
+                    // Insert all chunks with embeddings
+                    for chunk in chunks {
+                        let chunk_metadata = serde_json::json!({
+                            "parent_id": parent_id,
+                            "chunk_index": chunk.chunk_index,
+                            "token_count": chunk.token_count,
+                        });
+
+                        match vector_store
+                            .insert(
+                                &chunk.id,
+                                &namespace,
+                                &chunk.content,
+                                Some(chunk_metadata),
+                                Some(citation.clone()),
+                            )
+                            .await
+                        {
+                            Ok(_) => {}
+                            Err(e) => {
+                                error!("Failed to insert chunk to vector storage: {}", e);
+                            }
+                        }
+                    }
+                    info!(
+                        "Memory also indexed for semantic search: namespace={}, chunks={}",
+                        namespace,
+                        parent_id
+                    );
+                }
+                Ok(_) => {
+                    // Empty chunks, skip vector storage
+                }
+                Err(e) => {
+                    // Log but don't fail - traditional memory still works
+                    error!("Failed to chunk memory for vector storage: {}", e);
+                }
+            }
+        }
+
+        Ok(id)
     }
 
     /// Get the latest version of a memory
@@ -256,6 +356,86 @@ impl MemoryService {
             .context("Failed to count memories")
     }
 
+    /// Semantic search across vector memories using natural language queries
+    ///
+    /// Performs similarity search across all memories that have been indexed
+    /// for vector search. Returns memories ordered by semantic relevance.
+    ///
+    /// # Arguments
+    /// * `query` - Natural language search query
+    /// * `limit` - Maximum number of results to return
+    /// * `namespace_filter` - Optional namespace prefix to filter results
+    ///
+    /// # Returns
+    /// * `Ok(Vec<SearchResult>)` - Ordered by relevance (most relevant first)
+    /// * `Err(_)` - If search fails or vector search not available
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Vector search capabilities not initialized
+    /// - Search operation fails
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use abathur::services::MemoryService;
+    /// # use std::sync::Arc;
+    /// # async fn example(service: &MemoryService) -> anyhow::Result<()> {
+    /// // Search for authentication-related memories
+    /// let results = service.vector_search(
+    ///     "authentication and authorization implementation",
+    ///     10,
+    ///     Some("docs:")
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[instrument(skip(self), err)]
+    pub async fn vector_search(
+        &self,
+        query: &str,
+        limit: usize,
+        namespace_filter: Option<&str>,
+    ) -> Result<Vec<SearchResult>> {
+        let vector_store = self
+            .vector_store
+            .as_ref()
+            .ok_or_else(|| anyhow!("Vector search not available. Initialize MemoryService with vector_store and chunker."))?;
+
+        info!("Performing vector search: query='{}', limit={}", query, limit);
+
+        vector_store
+            .search_similar(query, limit, namespace_filter)
+            .await
+            .context("Vector search failed")
+    }
+
+    /// List all vector memory namespaces with their document counts
+    ///
+    /// Returns a list of namespaces that have memories indexed for vector search,
+    /// along with the count of documents in each namespace.
+    ///
+    /// # Returns
+    /// * `Ok(Vec<(String, usize)>)` - List of (namespace, count) tuples
+    /// * `Err(_)` - If operation fails or vector search not available
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Vector search capabilities not initialized
+    /// - List operation fails
+    #[instrument(skip(self), err)]
+    pub async fn list_vector_namespaces(&self) -> Result<Vec<(String, usize)>> {
+        let vector_store = self
+            .vector_store
+            .as_ref()
+            .ok_or_else(|| anyhow!("Vector search not available. Initialize MemoryService with vector_store and chunker."))?;
+
+        vector_store
+            .list_namespaces()
+            .await
+            .context("Failed to list vector namespaces")
+    }
+
 }
 
 #[cfg(test)]
@@ -319,7 +499,7 @@ mod tests {
         // Expect insert to succeed
         mock_repo.expect_insert().times(1).returning(|_| Ok(42));
 
-        let service = MemoryService::new(Arc::new(mock_repo));
+        let service = MemoryService::new(Arc::new(mock_repo), None, None);
         let result = service.add(memory).await;
 
         assert!(result.is_ok());
@@ -339,7 +519,7 @@ mod tests {
             .times(1)
             .returning(move |_, _| Ok(Some(existing.clone())));
 
-        let service = MemoryService::new(Arc::new(mock_repo));
+        let service = MemoryService::new(Arc::new(mock_repo), None, None);
         let result = service.add(memory).await;
 
         assert!(result.is_err());
@@ -357,7 +537,7 @@ mod tests {
             .times(1)
             .returning(move |_, _| Ok(Some(expected.clone())));
 
-        let service = MemoryService::new(Arc::new(mock_repo));
+        let service = MemoryService::new(Arc::new(mock_repo), None, None);
         let result = service.get("test:namespace", "key1").await;
 
         assert!(result.is_ok());
@@ -376,7 +556,7 @@ mod tests {
             .times(1)
             .returning(|_, _| Ok(None));
 
-        let service = MemoryService::new(Arc::new(mock_repo));
+        let service = MemoryService::new(Arc::new(mock_repo), None, None);
         let result = service.get("test:namespace", "key1").await;
 
         assert!(result.is_ok());
@@ -401,7 +581,7 @@ mod tests {
             .times(1)
             .returning(move |_, _, _| Ok(vec![memory1.clone(), memory2.clone()]));
 
-        let service = MemoryService::new(Arc::new(mock_repo));
+        let service = MemoryService::new(Arc::new(mock_repo), None, None);
         let result = service
             .search("test:namespace", Some(MemoryType::Semantic), None)
             .await;
@@ -436,7 +616,7 @@ mod tests {
             .times(1)
             .returning(|_, _, _, _| Ok(()));
 
-        let service = MemoryService::new(Arc::new(mock_repo));
+        let service = MemoryService::new(Arc::new(mock_repo), None, None);
         let result = service
             .update("test:namespace", "key1", new_value, "updater")
             .await;
@@ -454,7 +634,7 @@ mod tests {
             .times(1)
             .returning(|_, _| Ok(None));
 
-        let service = MemoryService::new(Arc::new(mock_repo));
+        let service = MemoryService::new(Arc::new(mock_repo), None, None);
         let result = service
             .update("test:namespace", "key1", json!({}), "updater")
             .await;
@@ -475,7 +655,7 @@ mod tests {
             .times(1)
             .returning(move |_, _| Ok(Some(deleted.clone())));
 
-        let service = MemoryService::new(Arc::new(mock_repo));
+        let service = MemoryService::new(Arc::new(mock_repo), None, None);
         let result = service
             .update("test:namespace", "key1", json!({}), "updater")
             .await;
@@ -501,7 +681,7 @@ mod tests {
             .times(1)
             .returning(|_, _| Ok(()));
 
-        let service = MemoryService::new(Arc::new(mock_repo));
+        let service = MemoryService::new(Arc::new(mock_repo), None, None);
         let result = service.delete("test:namespace", "key1").await;
 
         assert!(result.is_ok());
@@ -517,7 +697,7 @@ mod tests {
             .times(1)
             .returning(|_, _| Ok(None));
 
-        let service = MemoryService::new(Arc::new(mock_repo));
+        let service = MemoryService::new(Arc::new(mock_repo), None, None);
         let result = service.delete("test:namespace", "key1").await;
 
         assert!(result.is_err());
@@ -534,7 +714,7 @@ mod tests {
             .times(1)
             .returning(|_, _| Ok(5));
 
-        let service = MemoryService::new(Arc::new(mock_repo));
+        let service = MemoryService::new(Arc::new(mock_repo), None, None);
         let result = service
             .count("test:namespace", Some(MemoryType::Semantic))
             .await;

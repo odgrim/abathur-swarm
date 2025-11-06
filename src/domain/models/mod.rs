@@ -6,7 +6,9 @@
 pub mod agent;
 pub mod agent_contract;
 pub mod agent_metadata;
+pub mod chunking;
 pub mod config;
+pub mod embedding;
 pub mod hook;
 pub mod memory;
 pub mod prompt_chain;
@@ -18,9 +20,16 @@ pub mod task;
 pub use agent::{Agent, AgentStatus};
 pub use agent_contract::AgentContractRegistry;
 pub use agent_metadata::{AgentMetadata, AgentMetadataRegistry};
+pub use chunking::{
+    Chunk, ChunkMetadata, ChunkingConfig, ChunkingResult, OverlapStrategy,
+};
 pub use config::{
-    Config, DatabaseConfig, LoggingConfig, McpServerConfig, RateLimitConfig,
-    RetryConfig,
+    ChunkingConfigSettings, Config, DatabaseConfig, EmbeddingConfig, LoggingConfig,
+    McpServerConfig, OpenAIEmbeddingConfig, RagConfig, RateLimitConfig, RetryConfig,
+    VectorSearchConfig,
+};
+pub use embedding::{
+    Citation, EmbeddingModel, SearchResult, VectorMemory,
 };
 pub use hook::{
     BranchCompletionContext, BranchType, HookAction, HookCondition, HookContext, HookEvent,

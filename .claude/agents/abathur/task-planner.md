@@ -17,7 +17,7 @@ Decompose complex tasks into atomic, independently executable units with explici
 
 ## Workflow
 
-**IMPORTANT:** This agent is designed to work within the `technical_feature_workflow` chain. Complete steps 1-7 and output the task plan. The chain's post-hook will spawn the actual implementation tasks.
+**IMPORTANT:** This agent is designed to work within the `technical_feature_workflow` chain. Complete steps 1-9 and output the task plan. The chain's post-hook will spawn the actual implementation tasks.
 
 1. **Load Technical Specs**: Retrieve from memory namespace `task:{tech_spec_id}:technical_specs`
 
@@ -37,22 +37,46 @@ Decompose complex tasks into atomic, independently executable units with explici
    - `tooling.linter.command` - Linter command for validation
    - `tooling.formatter.check_command` - Format check command for validation
 
-3. **Analyze Scope**: Understand component boundaries, avoid duplicating other planners' work
+3. **Search for Similar Past Work** (OPTIONAL but recommended): Use vector search to find similar implementations
+   ```json
+   // Call mcp__abathur-memory__vector_search
+   {
+     "query": "similar feature description from technical specs",
+     "limit": 3,
+     "namespace_filter": "task:"
+   }
+   ```
+   Benefits:
+   - Learn from past successful task decompositions
+   - Discover existing patterns and conventions
+   - Avoid reinventing solutions
+   - Find reusable agents and approaches
 
-4. **Decompose Tasks**: Break work into <30 minute atomic units with clear deliverables
+   **Also search documentation:**
+   ```json
+   {
+     "query": "implementation guidelines for this type of feature",
+     "limit": 3,
+     "namespace_filter": "docs:"
+   }
+   ```
 
-5. **Identify Agent Needs**: Determine which specialized agents are required
+4. **Analyze Scope**: Understand component boundaries, avoid duplicating other planners' work
+
+5. **Decompose Tasks**: Break work into <30 minute atomic units with clear deliverables
+
+6. **Identify Agent Needs**: Determine which specialized agents are required
    - **CRITICAL**: Use language-specific agent names: `{language}-{domain}-specialist`
    - Example: For Python project → "python-domain-models-specialist", "python-testing-specialist"
    - Example: For Rust project → "rust-domain-models-specialist", "rust-testing-specialist"
    - Example: For TypeScript project → "typescript-domain-models-specialist", "typescript-testing-specialist"
 
-6. **Check Existing Agents**: Verify which agents already exist in `.claude/agents/`
+7. **Check Existing Agents**: Verify which agents already exist in `.claude/agents/`
    - Use Glob to search: `Glob(".claude/agents/**/{language}-*.md")`
 
-7. **Build Dependency Graph**: Establish task prerequisites and execution order
+8. **Build Dependency Graph**: Establish task prerequisites and execution order
 
-8. **Complete**: Output task plan JSON (see Output Format below) and stop
+9. **Complete**: Output task plan JSON (see Output Format below) and stop
 
 **NOTE:**
 - Do NOT spawn implementation tasks manually - the chain's post-hook `spawn_implementation_tasks.sh` handles this

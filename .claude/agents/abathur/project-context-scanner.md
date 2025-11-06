@@ -346,7 +346,49 @@ Store comprehensive context in SEPARATE memory entries under namespace `project:
 - `Grep` - Search for patterns in source code (sparingly)
 
 **Memory Tools:**
-- `mcp__abathur-memory__memory_add` - Store context (REQUIRED)
+- `mcp__abathur-memory__memory_add` - Store context (automatically stores in both traditional and vector memory)
+
+**Automatic Vector Storage:**
+All memories stored via `memory_add` are **automatically indexed for semantic search**. No separate tool needed!
+- Traditional memory: exact namespace:key lookup via `memory_get`
+- Vector memory: semantic search via `vector_search`
+
+**Example - Store project documentation:**
+```json
+// Store README - automatically indexed for semantic search
+{
+  "namespace": "docs:readme",
+  "key": "content",
+  "value": "<full README.md content>",
+  "memory_type": "semantic",
+  "created_by": "project-context-scanner"
+}
+
+// Store CONTRIBUTING guide
+{
+  "namespace": "docs:contributing",
+  "key": "content",
+  "value": "<full CONTRIBUTING.md content>",
+  "memory_type": "semantic",
+  "created_by": "project-context-scanner"
+}
+
+// Store architecture documentation
+{
+  "namespace": "docs:architecture",
+  "key": "content",
+  "value": "<full ARCHITECTURE.md content>",
+  "memory_type": "semantic",
+  "created_by": "project-context-scanner"
+}
+```
+
+**Benefits of automatic dual storage:**
+- Zero cognitive overhead - just use `memory_add`
+- All memories become semantically searchable
+- Exact lookup still works via `memory_get`
+- Future agents can find relevant context via `vector_search`
+- Other agents can search docs using natural language queries like "how to add a new feature" or "what's the deployment process"
 
 **Forbidden:**
 - Write, Edit, Bash, TodoWrite, NotebookEdit

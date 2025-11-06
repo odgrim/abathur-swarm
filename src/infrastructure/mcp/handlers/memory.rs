@@ -132,6 +132,27 @@ fn handle_memory_list_tools(id: Option<Value>) -> JsonRpcResponse {
                         },
                         "required": ["namespace", "key"]
                     }
+                },
+                {
+                    "name": "vector_search",
+                    "description": "Semantic search across vector memories using natural language queries",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string", "description": "The search query in natural language" },
+                            "limit": { "type": "integer", "default": 10, "description": "Maximum number of results to return" },
+                            "namespace_filter": { "type": "string", "description": "Optional namespace prefix to filter results (e.g., 'docs:')" }
+                        },
+                        "required": ["query"]
+                    }
+                },
+                {
+                    "name": "vector_list_namespaces",
+                    "description": "List all vector memory namespaces with their document counts",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    }
                 }
             ]
         })),
@@ -182,6 +203,8 @@ async fn handle_memory_tool_call(state: MemoryAppState, request: JsonRpcRequest)
         "memory_search" => memory_search(&state.memory_service, arguments).await,
         "memory_update" => memory_update(&state.memory_service, arguments).await,
         "memory_delete" => memory_delete(&state.memory_service, arguments).await,
+        "vector_search" => vector_search(&state.memory_service, arguments).await,
+        "vector_list_namespaces" => vector_list_namespaces(&state.memory_service).await,
         _ => Err(format!("Unknown tool: {}", tool_name)),
     };
 
@@ -332,5 +355,86 @@ async fn memory_delete(service: &MemoryService, arguments: Value) -> Result<Stri
         .map_err(|e| {
             error!("Failed to delete memory: {}", e);
             format!("Failed to delete memory: {}", e)
+        })
+}
+
+// Vector search tool handlers
+
+async fn vector_search(service: &MemoryService, arguments: Value) -> Result<String, String> {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct VectorSearchRequest {
+        query: String,
+        #[serde(default = "default_search_limit")]
+        limit: usize,
+        namespace_filter: Option<String>,
+    }
+
+    fn default_search_limit() -> usize {
+        10
+    }
+
+    let params: VectorSearchRequest =
+        serde_json::from_value(arguments).map_err(|e| format!("Invalid parameters: {}", e))?;
+
+    let namespace_filter = params.namespace_filter.as_deref();
+
+    service
+        .vector_search(&params.query, params.limit, namespace_filter)
+        .await
+        .map(|results| {
+            info!(
+                "Vector search completed: query='{}', results={}",
+                params.query,
+                results.len()
+            );
+
+            if results.is_empty() {
+                return "No results found.".to_string();
+            }
+
+            // Format results as a readable string
+            let mut output = format!("Found {} results:\n\n", results.len());
+            for (i, result) in results.iter().enumerate() {
+                output.push_str(&format!(
+                    "{}. [Score: {:.2}] {} ({})\n{}\n\n",
+                    i + 1,
+                    result.score,
+                    result.id,
+                    result.namespace,
+                    result.content
+                ));
+            }
+
+            output
+        })
+        .map_err(|e| {
+            error!("Vector search failed: {}", e);
+            format!("Search failed: {}", e)
+        })
+}
+
+async fn vector_list_namespaces(service: &MemoryService) -> Result<String, String> {
+    service
+        .list_vector_namespaces()
+        .await
+        .map(|namespaces| {
+            info!("Listed {} vector namespaces", namespaces.len());
+
+            if namespaces.is_empty() {
+                return "No vector namespaces found.".to_string();
+            }
+
+            let mut output = format!("Vector Memory Namespaces ({} total):\n\n", namespaces.len());
+            for (namespace, count) in namespaces {
+                output.push_str(&format!("- {}: {} documents\n", namespace, count));
+            }
+
+            output
+        })
+        .map_err(|e| {
+            error!("Failed to list namespaces: {}", e);
+            format!("Failed to list namespaces: {}", e)
         })
 }
