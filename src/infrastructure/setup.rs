@@ -107,7 +107,7 @@ impl SetupPaths {
             agents_dir: current_dir.join(".claude/agents"),
             hooks_dir: config_dir.join("hooks"),
             hooks_file: config_dir.join("hooks.yaml"),
-            chains_dir: current_dir.join("template/chains"),
+            chains_dir: config_dir.join("chains"),
             config_dir,
         })
     }
@@ -179,46 +179,41 @@ pub async fn run_migrations(paths: &SetupPaths, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Clone template repository from GitHub
-pub fn clone_template_repo(repo_url: &str, force: bool) -> Result<PathBuf> {
-    let current_dir = std::env::current_dir()
-        .context("Failed to get current directory")?;
+/// Clone template repository from GitHub into a temporary directory
+pub fn clone_template_repo(repo_url: &str, _force: bool) -> Result<PathBuf> {
+    // Create a temporary directory for the clone
+    let temp_dir = std::env::temp_dir()
+        .join(format!("abathur-template-{}", uuid::Uuid::new_v4()));
 
-    let template_dir = current_dir.join("template");
+    // Ensure temp directory exists
+    fs::create_dir_all(&temp_dir)
+        .context("Failed to create temporary directory for template clone")?;
 
-    // Check if template directory already exists
-    if template_dir.exists() {
-        if force {
-            fs::remove_dir_all(&template_dir)
-                .context("Failed to remove existing template directory")?;
-        } else {
-            return Ok(template_dir);
-        }
-    }
-
-    // Clone the repository using git command
+    // Clone the repository using git command into temp directory
     let output = Command::new("git")
         .arg("clone")
         .arg("--depth")
         .arg("1") // Shallow clone to save bandwidth
         .arg(repo_url)
-        .arg(&template_dir)
+        .arg(&temp_dir)
         .output()
         .context("Failed to execute git clone command. Is git installed?")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // Clean up temp directory on failure
+        let _ = fs::remove_dir_all(&temp_dir);
         anyhow::bail!("Failed to clone template repository: {}", stderr);
     }
 
-    // Remove .git directory from cloned template
-    let git_dir = template_dir.join(".git");
+    // Remove .git directory from cloned template to save space
+    let git_dir = temp_dir.join(".git");
     if git_dir.exists() {
         fs::remove_dir_all(&git_dir)
             .context("Failed to remove .git directory from template")?;
     }
 
-    Ok(template_dir)
+    Ok(temp_dir)
 }
 
 /// Copy agent templates from template directory to .claude/agents
@@ -395,7 +390,7 @@ pub fn merge_mcp_config(template_dir: &PathBuf, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Copy chain templates from template directory to template/chains
+/// Copy chain templates from template directory to .abathur/chains
 pub fn copy_chain_templates(paths: &SetupPaths, template_dir: &PathBuf, force: bool) -> Result<()> {
     let template_chains_dir = template_dir.join("chains");
 

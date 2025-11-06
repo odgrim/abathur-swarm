@@ -133,6 +133,15 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
         if !json_output {
             println!("✓ Copied chain templates");
         }
+
+        // Step 10: Clean up temporary template directory
+        if let Err(e) = std::fs::remove_dir_all(template_dir) {
+            if !json_output {
+                println!("⚠ Warning: Failed to clean up temporary template directory: {}", e);
+            }
+        } else if !json_output {
+            println!("✓ Cleaned up temporary files");
+        }
     }
 
     if json_output {
