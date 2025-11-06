@@ -235,16 +235,13 @@ steps:
 
 validation_rules:
   - step_id: analyze_requirements
-    rule_type:
-      type: json_schema
+    rule_type: json_schema
     error_message: "Requirements analysis must include tasks array"
 
   - step_id: implement_first_task
-    rule_type:
-      type: json_schema
+    rule_type: json_schema
     error_message: "Implementation must specify files and test count"
 
   - step_id: review_implementation
-    rule_type:
-      type: json_schema
+    rule_type: json_schema
     error_message: "Review must include rating and approval status"

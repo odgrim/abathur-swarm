@@ -157,11 +157,9 @@ steps:
 
 validation_rules:
   - step_id: identify_sources
-    rule_type:
-      type: json_schema
+    rule_type: json_schema
     error_message: "Source identification must return at least 3 valid sources with URLs and relevance scores"
 
   - step_id: extract_info
-    rule_type:
-      type: json_schema
+    rule_type: json_schema
     error_message: "Information extraction must include main points for each source"

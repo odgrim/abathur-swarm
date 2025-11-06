@@ -218,18 +218,15 @@ steps:
 
 validation_rules:
   - step_id: extract
-    rule_type:
-      type: json_schema
+    rule_type: json_schema
     error_message: "Extraction must include structured_data and metadata sections"
 
   - step_id: transform
-    rule_type:
-      type: json_schema
+    rule_type: json_schema
     error_message: "Transformation must include normalized_data, transformations_applied, and quality_metrics"
 
   - step_id: validate
-    rule_type:
-      type: json_schema
+    rule_type: json_schema
     error_message: "Validation must include status, quality score, checks, and data summary"
 
   - step_id: validate
