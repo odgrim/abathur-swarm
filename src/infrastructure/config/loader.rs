@@ -164,7 +164,7 @@ impl ConfigLoader {
 mod tests {
     use super::*;
     use crate::domain::models::config::{
-        DatabaseConfig, LoggingConfig, RateLimitConfig, RetryConfig, SubstratesConfig,
+        DatabaseConfig, LoggingConfig, RagConfig, RateLimitConfig, RetryConfig, SubstratesConfig,
     };
     use std::env;
 

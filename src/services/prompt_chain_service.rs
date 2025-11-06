@@ -513,7 +513,7 @@ impl Default for PromptChainService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::prompt_chain::{OutputFormat, PromptChain, PromptStep};
+    use crate::domain::models::prompt_chain::{ChainStatus, OutputFormat, PromptChain, PromptStep};
 
     #[tokio::test]
     async fn test_execute_simple_chain() {

@@ -5,4 +5,4 @@ rustflags = ["-D", "warnings"]
 rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
 
 [env]
-SQLX_OFFLINE = "true"
+DATABASE_URL = "sqlite:.abathur/test.db"
