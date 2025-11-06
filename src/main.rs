@@ -67,8 +67,9 @@ async fn main() -> Result<()> {
     let priority_calc = PriorityCalculator::new();
 
     // Initialize real memory service with repository and adapter
-    let real_memory_service = Arc::new(RealMemoryService::new(memory_repo));
-    let memory_service = MemoryServiceAdapter::new(real_memory_service.clone());
+    // Note: Vector store and chunker are None for now (graceful degradation)
+    let real_memory_service = Arc::new(RealMemoryService::new(memory_repo, None, None));
+    let memory_service = MemoryServiceAdapter::new(Arc::clone(&real_memory_service));
 
     // Initialize task service with memory service for cleanup
     let real_task_service = RealTaskQueueService::with_memory_service(

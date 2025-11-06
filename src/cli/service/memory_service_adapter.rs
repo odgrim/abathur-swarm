@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 
 use crate::domain::models::{Memory as DomainMemory, MemoryType};
@@ -8,11 +10,11 @@ use crate::services::MemoryService as RealMemoryService;
 /// This adapter wraps the real memory service and provides a compatible
 /// interface for CLI command handlers.
 pub struct MemoryServiceAdapter {
-    service: RealMemoryService,
+    service: Arc<RealMemoryService>,
 }
 
 impl MemoryServiceAdapter {
-    pub fn new(service: RealMemoryService) -> Self {
+    pub fn new(service: Arc<RealMemoryService>) -> Self {
         Self { service }
     }
 
