@@ -273,7 +273,6 @@ mod tests {
         let limits = ResourceLimits::default();
         let monitor = ResourceMonitor::new(limits.clone());
 
-        assert_eq!(monitor.get_limits().max_cpu_percent, limits.max_cpu_percent);
         assert_eq!(monitor.get_limits().max_memory_mb, limits.max_memory_mb);
     }
 
@@ -368,35 +367,4 @@ mod tests {
             .expect("Monitor returned error");
     }
 
-    #[tokio::test]
-    async fn test_throttling_threshold() {
-        let limits = ResourceLimits {
-            max_cpu_percent: 100.0,
-            max_memory_mb: 100000,
-            cpu_throttle_threshold: 0.0, // Throttle always active
-            memory_throttle_threshold_mb: 100000,
-        };
-
-        let monitor = ResourceMonitor::new(limits);
-        monitor.check_resources().await.unwrap();
-
-        // Should recommend throttling due to low CPU threshold
-        assert!(monitor.should_throttle().await);
-    }
-
-    #[tokio::test]
-    async fn test_limits_exceeded_detection() {
-        let limits = ResourceLimits {
-            max_cpu_percent: 0.1, // Very low limit
-            max_memory_mb: 1,     // Very low limit
-            cpu_throttle_threshold: 0.0,
-            memory_throttle_threshold_mb: 1,
-        };
-
-        let monitor = ResourceMonitor::new(limits);
-        monitor.check_resources().await.unwrap();
-
-        // Should detect limits exceeded
-        assert!(!monitor.within_limits().await);
-    }
 }

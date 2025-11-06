@@ -236,23 +236,39 @@ impl BranchCompletionDetector {
 mod tests {
     use super::*;
     use crate::domain::ports::TaskRepository;
-    use crate::infrastructure::database::TaskRepo;
+    use crate::infrastructure::database::TaskRepositoryImpl;
     use crate::services::{DependencyResolver, PriorityCalculator, TaskQueueService};
-    use std::path::PathBuf;
     use tempfile::tempdir;
 
-    async fn create_test_coordinator() -> Result<Arc<TaskCoordinator>> {
-        let temp_dir = tempdir()?;
-        let db_path = temp_dir.path().join("test.db");
+    async fn create_test_coordinator() -> Result<(Arc<TaskCoordinator>, Arc<dyn TaskRepository>)> {
+        use sqlx::sqlite::SqlitePoolOptions;
 
-        let repo = Arc::new(TaskRepo::new(db_path.to_str().unwrap()).await?);
+        // Create an in-memory SQLite database for testing
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+
+        // Run migrations
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await?;
+
+        let repo: Arc<dyn TaskRepository> = Arc::new(TaskRepositoryImpl::new(pool));
+        let dependency_resolver = Arc::new(DependencyResolver::new());
+        let priority_calc = Arc::new(PriorityCalculator::new());
         let queue_service = Arc::new(TaskQueueService::new(
             repo.clone(),
             DependencyResolver::new(),
             PriorityCalculator::new(),
         ));
 
-        Ok(Arc::new(TaskCoordinator::new(queue_service)))
+        let coordinator = Arc::new(TaskCoordinator::new(
+            queue_service,
+            dependency_resolver,
+            priority_calc,
+        ));
+        Ok((coordinator, repo))
     }
 
     async fn create_test_task_with_branch(
@@ -269,8 +285,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_completion_when_task_not_terminal() {
-        let coordinator = create_test_coordinator().await.unwrap();
-        let detector = BranchCompletionDetector::new(coordinator);
+        let (coordinator, repo) = create_test_coordinator().await.unwrap();
+        let detector = BranchCompletionDetector::new(coordinator, repo);
 
         let task = create_test_task_with_branch(
             Some("task/test-123".to_string()),
@@ -285,8 +301,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_completion_when_no_branch() {
-        let coordinator = create_test_coordinator().await.unwrap();
-        let detector = BranchCompletionDetector::new(coordinator);
+        let (coordinator, repo) = create_test_coordinator().await.unwrap();
+        let detector = BranchCompletionDetector::new(coordinator, repo);
 
         let task = create_test_task_with_branch(None, None, TaskStatus::Completed).await;
 
@@ -296,8 +312,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_branch_completion_with_single_task() {
-        let coordinator = create_test_coordinator().await.unwrap();
-        let detector = BranchCompletionDetector::new(coordinator.clone());
+        let (coordinator, repo) = create_test_coordinator().await.unwrap();
+        let detector = BranchCompletionDetector::new(coordinator.clone(), repo);
 
         let mut task = create_test_task_with_branch(
             Some("task/test-123".to_string()),
@@ -312,7 +328,7 @@ mod tests {
 
         // Complete the task
         coordinator
-            .update_task_status(task_id, TaskStatus::Completed)
+            .handle_task_completion(task_id)
             .await
             .unwrap();
 
@@ -333,8 +349,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_completion_with_pending_sibling_task() {
-        let coordinator = create_test_coordinator().await.unwrap();
-        let detector = BranchCompletionDetector::new(coordinator.clone());
+        let (coordinator, repo) = create_test_coordinator().await.unwrap();
+        let detector = BranchCompletionDetector::new(coordinator.clone(), repo);
 
         // Create two tasks in same branch
         let mut task1 = create_test_task_with_branch(
@@ -355,7 +371,7 @@ mod tests {
 
         // Complete task1, but task2 is still running
         coordinator
-            .update_task_status(task1_id, TaskStatus::Completed)
+            .handle_task_completion(task1_id)
             .await
             .unwrap();
 

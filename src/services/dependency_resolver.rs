@@ -398,6 +398,7 @@ mod tests {
             is_remediation: false,
             workflow_state: None,
             workflow_expectations: None,
+            chain_id: None,
         }
     }
 

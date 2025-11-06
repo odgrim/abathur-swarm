@@ -125,4 +125,16 @@ pub trait TaskQueueService: Send + Sync {
     /// * `Ok(None)` - No ready tasks available
     /// * `Err` - If database error
     async fn get_next_ready_task(&self) -> Result<Option<Task>>;
+
+    /// Submit a new task to the queue
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - The task to submit
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Uuid)` - The task ID
+    /// * `Err` - If submission fails
+    async fn submit_task(&self, task: Task) -> Result<Uuid>;
 }

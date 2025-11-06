@@ -752,6 +752,10 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
         let tasks = self.get_ready_tasks(Some(1)).await?;
         Ok(tasks.into_iter().next())
     }
+
+    async fn submit_task(&self, task: Task) -> Result<Uuid> {
+        self.submit(task).await
+    }
 }
 
 #[cfg(test)]
