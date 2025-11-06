@@ -221,8 +221,7 @@ steps:
       - type: merge_branch
         source: "task/{task_id}"
         target: "{target_branch}"
-        strategy:
-          type: rebase
+        strategy: auto
       # Clean up the worktree
       - type: delete_branch
         branch: "task/{task_id}"
