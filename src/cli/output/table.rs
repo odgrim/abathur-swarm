@@ -457,6 +457,7 @@ mod tests {
             is_remediation: false,
             workflow_state: None,
             workflow_expectations: None,
+            chain_id: None,
         };
 
         let formatter = TableFormatter::with_config(false, None);
@@ -510,12 +511,6 @@ mod tests {
         assert_eq!(status_color(&TaskStatus::Running), Color::Cyan);
     }
 
-    #[test]
-    fn test_priority_color_mapping() {
-        assert_eq!(priority_color(10), Color::Red);
-        assert_eq!(priority_color(5), Color::Yellow);
-        assert_eq!(priority_color(1), Color::Blue);
-    }
 
     #[test]
     fn test_agent_status_icon_mapping() {

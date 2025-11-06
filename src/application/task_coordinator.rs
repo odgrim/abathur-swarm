@@ -581,11 +581,9 @@ impl TaskCoordinator {
     /// # Note
     ///
     /// Currently a placeholder  - full implementation requires service access
-    pub async fn submit_task(&self, _task: Task) -> Result<Uuid> {
-        // TODO: Implement task submission when service is available
-        let task_id = Uuid::new_v4();
-        info!("Task submitted: {}", task_id);
-        Ok(task_id)
+    pub async fn submit_task(&self, task: Task) -> Result<Uuid> {
+        info!("Submitting task: {}", task.id);
+        self.task_queue.submit_task(task).await
     }
 
     /// Process all pending tasks on startup
@@ -780,6 +778,13 @@ mod tests {
                 })
                 .cloned())
         }
+
+        async fn submit_task(&self, task: Task) -> Result<Uuid> {
+            let task_id = task.id;
+            let mut tasks = self.tasks.lock().unwrap();
+            tasks.insert(task_id, task);
+            Ok(task_id)
+        }
     }
 
     // Mock PriorityCalculator for testing
@@ -841,6 +846,7 @@ mod tests {
             is_remediation: false,
             workflow_state: None,
             workflow_expectations: None,
+            chain_id: None,
         }
     }
 
