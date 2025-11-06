@@ -5,10 +5,8 @@
 
 pub mod chunker;
 pub mod embedding_service;
-pub mod model_cache;
 pub mod vector_store;
 
 pub use chunker::Chunker;
 pub use embedding_service::LocalEmbeddingService;
-pub use model_cache::{CacheStats, ModelCache};
 pub use vector_store::VectorStore;
