@@ -562,19 +562,23 @@ steps:
 
 validation_rules:
   - step_id: gather_requirements
-    rule_type: json_schema
+    rule_type:
+      type: json_schema
     error_message: "Requirements must include problem statement, functional requirements, and success criteria"
 
   - step_id: design_architecture
-    rule_type: json_schema
+    rule_type:
+      type: json_schema
     error_message: "Architecture must specify components and decomposition strategy"
 
   - step_id: create_technical_specs
-    rule_type: json_schema
+    rule_type:
+      type: json_schema
     error_message: "Technical specs must include components, phases, and required agents"
 
   - step_id: create_task_plan
-    rule_type: json_schema
+    rule_type:
+      type: json_schema
     error_message: "Task plan must include tasks array with agent assignments and execution order"
 
   - step_id: prepare_merge

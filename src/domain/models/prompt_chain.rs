@@ -370,7 +370,7 @@ impl StepResult {
 
 /// Status of chain execution
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "status", rename_all = "snake_case")]
+#[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum ChainStatus {
     /// Chain is currently executing
     Running,

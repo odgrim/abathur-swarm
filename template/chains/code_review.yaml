@@ -335,15 +335,18 @@ steps:
 
 validation_rules:
   - step_id: analyze_structure
-    rule_type: json_schema
+    rule_type:
+      type: json_schema
     error_message: "Structure analysis must include overall rating, concerns, and recommendations"
 
   - step_id: review_quality
-    rule_type: json_schema
+    rule_type:
+      type: json_schema
     error_message: "Quality review must include metrics, code smells, and refactoring suggestions"
 
   - step_id: security_analysis
-    rule_type: json_schema
+    rule_type:
+      type: json_schema
     error_message: "Security analysis must include rating, vulnerabilities list, and risk assessment"
 
   - step_id: generate_report

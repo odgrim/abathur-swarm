@@ -75,7 +75,7 @@ fn handle_tasks_list_tools(id: Option<Value>) -> JsonRpcResponse {
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "summary": { "type": "string", "description": "Brief task summary (max 140 chars)" },
+                            "summary": { "type": "string", "description": "Brief task summary (max 140 chars). If not provided, will be auto-generated from description." },
                             "description": { "type": "string", "description": "Detailed task description" },
                             "agent_type": { "type": "string", "default": "requirements-gatherer" },
                             "priority": { "type": "integer", "default": 5, "minimum": 0, "maximum": 10 },
@@ -84,7 +84,7 @@ fn handle_tasks_list_tools(id: Option<Value>) -> JsonRpcResponse {
                             "parent_task_id": { "type": "string" },
                             "chain_id": { "type": "string", "description": "Prompt chain ID to execute task through multi-step workflow" }
                         },
-                        "required": ["summary", "description"]
+                        "required": ["description"]
                     }
                 },
                 {
@@ -223,7 +223,17 @@ async fn task_enqueue(service: &TaskQueueService, arguments: Value) -> Result<St
     let params: TaskEnqueueRequest =
         serde_json::from_value(arguments).map_err(|e| format!("Invalid parameters: {}", e))?;
 
-    let mut task = Task::new(params.summary, params.description);
+    // Generate summary from description if not provided
+    // Take first 140 characters (max summary length)
+    let task_summary = params.summary.unwrap_or_else(|| {
+        if params.description.len() <= 140 {
+            params.description.clone()
+        } else {
+            format!("{}...", &params.description[..137])
+        }
+    });
+
+    let mut task = Task::new(task_summary, params.description);
     task.agent_type = params.agent_type;
     task.priority = params.priority;
 
@@ -247,6 +257,19 @@ async fn task_enqueue(service: &TaskQueueService, arguments: Value) -> Result<St
 
     // Set chain_id if provided
     task.chain_id = params.chain_id;
+
+    // Validate task before submission
+    task.validate_summary()
+        .map_err(|e| {
+            error!("Task validation failed: {}", e);
+            format!("Task validation failed: {}", e)
+        })?;
+
+    task.validate_priority()
+        .map_err(|e| {
+            error!("Task validation failed: {}", e);
+            format!("Task validation failed: {}", e)
+        })?;
 
     service
         .submit(task)

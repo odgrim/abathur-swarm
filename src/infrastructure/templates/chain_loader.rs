@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 /// Template structure for loading chains from YAML
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +100,13 @@ impl ChainLoader {
     /// Load a chain from YAML string
     pub fn load_from_yaml(&self, yaml: &str) -> Result<PromptChain> {
         let template: ChainTemplate = serde_yaml::from_str(yaml)
+            .map_err(|e| {
+                error!("YAML parsing error: {}", e);
+                if let Some(location) = e.location() {
+                    error!("Error at line {}, column {}", location.line(), location.column());
+                }
+                e
+            })
             .context("Failed to parse YAML template")?;
 
         info!("Loading chain template: {}", template.name);

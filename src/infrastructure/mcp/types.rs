@@ -99,7 +99,8 @@ pub struct MemoryDeleteRequest {
 /// Request parameters for enqueuing a task
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskEnqueueRequest {
-    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     pub description: String,
     #[serde(default = "default_agent_type")]
     pub agent_type: String,
