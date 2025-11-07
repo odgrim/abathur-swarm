@@ -263,7 +263,10 @@ Agent Type: {}
             source, target, task.summary, task.agent_type
         );
 
-        let mut merge_task = Task::new(format!("Merge {} into {}", source, target), description);
+        let mut merge_task = Task::new(
+            Task::create_summary_with_prefix("", &format!("Merge {} into {}", source, target)),
+            description,
+        );
         merge_task.agent_type = "git-worktree-merge-orchestrator".to_string();
         merge_task.priority = 8;
 

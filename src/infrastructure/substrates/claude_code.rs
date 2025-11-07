@@ -87,7 +87,6 @@ impl ClaudeCodeSubstrate {
     /// # Returns
     /// * `Some(PathBuf)` - Path to the agent file if found
     /// * `None` - Agent file not found
-    #[allow(dead_code)]
     fn find_agent_file(&self, agent_type: &str) -> Option<PathBuf> {
         let base_dir = self.config.working_dir.as_ref()
             .map(|p| p.to_path_buf())
@@ -222,21 +221,45 @@ impl ClaudeCodeSubstrate {
 
     /// Format the prompt for Claude CLI
     ///
-    /// Explicitly invokes the agent by name so Claude Code uses the agent
-    /// definition it discovers from .claude/agents/ directory.
-    fn format_prompt(&self, request: &SubstrateRequest) -> String {
+    /// Loads the agent's prompt from its markdown file and concatenates it with
+    /// the task-specific prompt. This ensures the agent's instructions are always
+    /// included without relying on Claude to interpret "Use the X subagent".
+    ///
+    /// # Arguments
+    /// * `request` - The substrate request containing agent_type and task prompt
+    ///
+    /// # Returns
+    /// * `Ok(String)` - Combined prompt (agent prompt + task prompt + context)
+    /// * `Err(SubstrateError)` - If agent file cannot be loaded
+    fn format_prompt(&self, request: &SubstrateRequest) -> Result<String, SubstrateError> {
         let mut prompt = String::new();
 
-        // Explicitly invoke the agent so Claude Code loads it from .claude/agents/
-        // This is necessary for Claude Code to use the agent's prompt and MCP servers
-        prompt.push_str(&format!("Use the {} subagent to complete this task.\n\n", request.agent_type));
+        // Find and load the agent file
+        let agent_path = self.find_agent_file(&request.agent_type)
+            .ok_or_else(|| SubstrateError::ExecutionFailed(
+                format!("Agent file not found for type: {}", request.agent_type)
+            ))?;
 
-        // Add the task description
+        // Read agent markdown file
+        let agent_content = std::fs::read_to_string(&agent_path)
+            .map_err(|e| SubstrateError::ExecutionFailed(
+                format!("Failed to read agent file: {}", e)
+            ))?;
+
+        // Extract the agent's prompt (everything after frontmatter)
+        let agent_prompt = AgentMetadata::extract_prompt_content(&agent_content)
+            .map_err(|e| SubstrateError::ExecutionFailed(
+                format!("Failed to extract agent prompt: {}", e)
+            ))?;
+
+        // Concatenate: agent prompt + task-specific instructions
+        prompt.push_str(&agent_prompt);
+        prompt.push_str("\n\n# Task Instructions\n\n");
         prompt.push_str(&request.prompt);
 
         // Add context if available
         if let Some(ref context) = request.context {
-            prompt.push_str("\n\nInput Data:\n");
+            prompt.push_str("\n\n# Input Data\n\n");
             if let Ok(pretty) = serde_json::to_string_pretty(context) {
                 prompt.push_str(&pretty);
             } else {
@@ -244,7 +267,7 @@ impl ClaudeCodeSubstrate {
             }
         }
 
-        prompt
+        Ok(prompt)
     }
 }
 
@@ -314,13 +337,14 @@ impl LlmSubstrate for ClaudeCodeSubstrate {
             .ok_or_else(|| SubstrateError::ExecutionFailed("Failed to get stderr handle".to_string()))?;
 
         // Format and write the prompt to stdin
-        let prompt = self.format_prompt(&request);
+        let prompt = self.format_prompt(&request)?;
 
         tracing::info!(
             task_id = %request.task_id,
+            agent_type = %request.agent_type,
             prompt_length = prompt.len(),
             prompt_preview = %prompt.chars().take(200).collect::<String>(),
-            "Sending prompt to Claude CLI"
+            "Sending prompt to Claude CLI (agent prompt + task instructions)"
         );
 
         stdin
@@ -436,9 +460,48 @@ impl LlmSubstrate for ClaudeCodeSubstrate {
                     serde_json::Value::Number(status.code().unwrap_or(0).into()),
                 );
 
+                // Claude CLI returns a JSON wrapper with the actual content in the "result" field
+                // Try to extract it, but fall back to raw output if parsing fails
+                let content = match serde_json::from_str::<serde_json::Value>(&output) {
+                    Ok(json) if json.is_object() => {
+                        // Look for the "result" field in the wrapper
+                        if let Some(result) = json.get("result") {
+                            if let Some(result_str) = result.as_str() {
+                                tracing::info!(
+                                    task_id = %request.task_id,
+                                    "Extracted agent output from Claude CLI result wrapper"
+                                );
+                                result_str.to_string()
+                            } else {
+                                // Result is not a string, use the whole thing
+                                tracing::warn!(
+                                    task_id = %request.task_id,
+                                    "Claude CLI result field is not a string, using raw output"
+                                );
+                                output
+                            }
+                        } else {
+                            // No result field, assume the whole output is the content
+                            tracing::debug!(
+                                task_id = %request.task_id,
+                                "No result field in Claude CLI output, using raw output"
+                            );
+                            output
+                        }
+                    }
+                    _ => {
+                        // Not JSON or not an object, use as-is
+                        tracing::debug!(
+                            task_id = %request.task_id,
+                            "Claude CLI output is not JSON, using raw output"
+                        );
+                        output
+                    }
+                };
+
                 Ok(SubstrateResponse {
                     task_id: request.task_id,
-                    content: output,
+                    content,
                     stop_reason: StopReason::EndTurn,
                     usage: None, // Claude CLI doesn't provide token usage
                     metadata,
@@ -506,14 +569,19 @@ mod tests {
         let substrate = ClaudeCodeSubstrate::new();
         let request = SubstrateRequest {
             task_id: Uuid::new_v4(),
-            agent_type: "test-agent".to_string(),
+            agent_type: "requirements-gatherer".to_string(), // Use real agent that exists
             prompt: "Hello, world!".to_string(),
             context: None,
             parameters: ExecutionParameters::default(),
         };
 
-        let formatted = substrate.format_prompt(&request);
-        assert!(formatted.contains("Use the test-agent subagent"));
+        // Should successfully load agent and format prompt
+        let result = substrate.format_prompt(&request);
+        assert!(result.is_ok(), "format_prompt should succeed with valid agent");
+
+        let formatted = result.unwrap();
+        // Should contain task instructions header and task prompt
+        assert!(formatted.contains("# Task Instructions"));
         assert!(formatted.contains("Hello, world!"));
     }
 
@@ -522,17 +590,37 @@ mod tests {
         let substrate = ClaudeCodeSubstrate::new();
         let request = SubstrateRequest {
             task_id: Uuid::new_v4(),
-            agent_type: "test-agent".to_string(),
+            agent_type: "requirements-gatherer".to_string(), // Use real agent that exists
             prompt: "Analyze this".to_string(),
             context: Some(serde_json::json!({"key": "value"})),
             parameters: ExecutionParameters::default(),
         };
 
-        let formatted = substrate.format_prompt(&request);
-        assert!(formatted.contains("Use the test-agent subagent"));
+        let result = substrate.format_prompt(&request);
+        assert!(result.is_ok(), "format_prompt should succeed with valid agent");
+
+        let formatted = result.unwrap();
+        // Should contain task instructions, task prompt, and context
+        assert!(formatted.contains("# Task Instructions"));
         assert!(formatted.contains("Analyze this"));
-        assert!(formatted.contains("Input Data:"));
+        assert!(formatted.contains("# Input Data"));
         assert!(formatted.contains("key"));
+    }
+
+    #[test]
+    fn test_format_prompt_missing_agent() {
+        let substrate = ClaudeCodeSubstrate::new();
+        let request = SubstrateRequest {
+            task_id: Uuid::new_v4(),
+            agent_type: "nonexistent-agent".to_string(),
+            prompt: "Test".to_string(),
+            context: None,
+            parameters: ExecutionParameters::default(),
+        };
+
+        // Should fail when agent file doesn't exist
+        let result = substrate.format_prompt(&request);
+        assert!(result.is_err(), "format_prompt should fail with missing agent");
     }
 
     #[test]

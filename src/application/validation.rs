@@ -222,7 +222,7 @@ Follow the task-salvage-specialist agent guidelines for detailed procedures.
     );
 
     let mut salvage_task = Task::new(
-        format!("Salvage: {}", failed_task.summary),
+        Task::create_summary_with_prefix("Salvage: ", &failed_task.summary),
         description,
     );
 
@@ -380,7 +380,7 @@ Store validation results in:
     );
 
     let mut validation_task = Task::new(
-        format!("Validate: {}", original_task.summary),
+        Task::create_summary_with_prefix("Validate: ", &original_task.summary),
         description,
     );
 
@@ -506,7 +506,7 @@ pub async fn spawn_remediation_task(
     );
 
     let mut remediation_task = Task::new(
-        format!("Fix: {}", original_task.summary),
+        Task::create_summary_with_prefix("Fix: ", &original_task.summary),
         description,
     );
 

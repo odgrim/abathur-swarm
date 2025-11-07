@@ -3,7 +3,7 @@ description: "Technical feature development workflow: requirements → architect
 
 steps:
   - id: gather_requirements
-    role: Requirements Analyst
+    role: requirements-gatherer
     prompt: |
       Analyze the following task and gather comprehensive requirements:
 
@@ -88,7 +88,7 @@ steps:
     timeout_secs: 300
 
   - id: design_architecture
-    role: Technical Architect
+    role: technical-architect
     prompt: |
       Based on these requirements, design the system architecture:
       {previous_output}
@@ -180,7 +180,7 @@ steps:
     timeout_secs: 420
 
   - id: create_technical_specs
-    role: Technical Requirements Specialist
+    role: technical-requirements-specialist
     prompt: |
       Translate this architecture into detailed technical specifications:
 
@@ -292,7 +292,7 @@ steps:
     timeout_secs: 480
 
   - id: create_task_plan
-    role: Task Planning Specialist
+    role: task-planner
     prompt: |
       Break down the technical specifications into atomic, executable tasks:
 
@@ -398,7 +398,7 @@ steps:
     timeout_secs: 360
 
   - id: monitor_implementation
-    role: Implementation Monitor
+    role: task-planner
     prompt: |
       Monitor the implementation tasks that were spawned:
 
@@ -467,7 +467,7 @@ steps:
     timeout_secs: 180
 
   - id: prepare_merge
-    role: Merge Preparation Specialist
+    role: git-worktree-merge-orchestrator
     prompt: |
       Prepare for merging all implementation work:
 

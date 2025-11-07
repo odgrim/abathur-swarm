@@ -200,6 +200,17 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
     let config = ConfigLoader::load()
         .context("Failed to load configuration")?;
 
+    // Load agent configuration
+    use crate::domain::models::AgentConfiguration;
+    let agents_config_path = std::env::current_dir()?.join(".abathur/agents.yaml");
+    if agents_config_path.exists() {
+        AgentConfiguration::init_global(&agents_config_path)
+            .context("Failed to load agent configuration from .abathur/agents.yaml")?;
+        tracing::info!("Loaded agent configuration from {:?}", agents_config_path);
+    } else {
+        tracing::warn!("Agent configuration not found at {:?}, using defaults", agents_config_path);
+    }
+
     eprintln!("Configuration loaded successfully");
 
     // Initialize database connection
@@ -389,6 +400,7 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
     let chain_service = Arc::new(
         crate::services::PromptChainService::new()
             .with_hook_executor(hook_executor)
+            .with_substrate_registry(substrate_registry.clone())
     );
     eprintln!("Prompt chain system initialized");
 

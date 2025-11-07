@@ -4,6 +4,7 @@
 //! These models are framework-agnostic and contain no infrastructure concerns.
 
 pub mod agent;
+pub mod agent_config;
 pub mod agent_contract;
 pub mod agent_metadata;
 pub mod chunking;
@@ -18,6 +19,7 @@ pub mod session;
 pub mod task;
 
 pub use agent::{Agent, AgentStatus};
+pub use agent_config::{AgentConfiguration, AgentContract, ValidationType as AgentValidationType};
 pub use agent_contract::AgentContractRegistry;
 pub use agent_metadata::{AgentMetadata, AgentMetadataRegistry};
 pub use chunking::{

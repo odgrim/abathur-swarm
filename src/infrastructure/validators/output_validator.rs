@@ -32,15 +32,65 @@ impl OutputValidator {
             .insert(name, validator);
     }
 
+    /// Strip markdown code blocks from output
+    ///
+    /// Many LLMs wrap JSON/XML in markdown code blocks even when instructed not to.
+    /// This helper strips those blocks to get to the actual content.
+    ///
+    /// Handles formats like:
+    /// - ```json\n{...}\n```
+    /// - ```\n{...}\n```
+    fn strip_markdown_code_blocks(output: &str) -> String {
+        let trimmed = output.trim();
+
+        // Check if wrapped in markdown code block
+        if trimmed.starts_with("```") && trimmed.ends_with("```") {
+            tracing::warn!(
+                input_length = trimmed.len(),
+                "Stripping markdown code blocks from output"
+            );
+
+            // Find the first newline after ```
+            let start = if let Some(pos) = trimmed.find('\n') {
+                pos + 1
+            } else {
+                3 // Just skip the ```
+            };
+
+            // Find the last ``` and go back to the newline before it
+            let end = trimmed.rfind("\n```").unwrap_or(trimmed.len() - 3);
+
+            let result = trimmed[start..end].trim().to_string();
+            tracing::warn!(
+                result_length = result.len(),
+                result_preview = &result[..result.len().min(200)],
+                "Stripped markdown: first 200 chars of result"
+            );
+            return result;
+        }
+
+        tracing::warn!(
+            input_length = trimmed.len(),
+            starts_with_backticks = trimmed.starts_with("```"),
+            ends_with_backticks = trimmed.ends_with("```"),
+            input_preview = &trimmed[..trimmed.len().min(200)],
+            "Output NOT wrapped in markdown, returning as-is"
+        );
+        output.to_string()
+    }
+
     /// Validate output against the expected format
     pub fn validate(&self, output: &str, format: &OutputFormat) -> Result<bool> {
         match format {
             OutputFormat::Json { schema } => {
+                // Strip markdown code blocks before validating JSON
+                let cleaned = Self::strip_markdown_code_blocks(output);
+
                 if let Some(schema_value) = schema {
-                    self.validate_json(output, schema_value)
+                    self.validate_json(&cleaned, schema_value)
                 } else {
                     // Just verify it's valid JSON
-                    serde_json::from_str::<serde_json::Value>(output)
+                    serde_json::from_str::<serde_json::Value>(&cleaned)
                         .context("Invalid JSON output")?;
                     Ok(true)
                 }
@@ -62,6 +112,13 @@ impl OutputValidator {
 
     /// Validate JSON output against a schema
     pub fn validate_json(&self, output: &str, schema: &serde_json::Value) -> Result<bool> {
+        // Log what we're validating for debugging
+        tracing::error!(
+            output_length = output.len(),
+            output_preview = &output[..output.len().min(500)],
+            "Validating JSON output against schema"
+        );
+
         // Parse the output as JSON
         let instance: serde_json::Value = serde_json::from_str(output)
             .context("Failed to parse output as JSON")?;

@@ -7,6 +7,8 @@ use crate::domain::models::prompt_chain::{
     ChainExecution, PromptChain, PromptStep, StepResult, ValidationRule,
 };
 use crate::domain::models::{HookContext, Task};
+use crate::domain::ports::{ExecutionParameters, SubstrateRequest};
+use crate::infrastructure::substrates::SubstrateRegistry;
 use crate::infrastructure::validators::OutputValidator;
 use crate::services::HookExecutor;
 use anyhow::{Context, Result};
@@ -46,6 +48,7 @@ use tracing::{debug, error, info, instrument, warn};
 pub struct PromptChainService {
     validator: Arc<OutputValidator>,
     hook_executor: Option<Arc<HookExecutor>>,
+    substrate_registry: Option<Arc<SubstrateRegistry>>,
     max_retries: u32,
     default_timeout: Duration,
 }
@@ -56,6 +59,7 @@ impl PromptChainService {
         Self {
             validator: Arc::new(OutputValidator::new()),
             hook_executor: None,
+            substrate_registry: None,
             max_retries: 3,
             default_timeout: Duration::from_secs(300), // 5 minutes
         }
@@ -66,6 +70,7 @@ impl PromptChainService {
         Self {
             validator,
             hook_executor: None,
+            substrate_registry: None,
             max_retries: 3,
             default_timeout: Duration::from_secs(300),
         }
@@ -74,6 +79,12 @@ impl PromptChainService {
     /// Create a service with hook executor
     pub fn with_hook_executor(mut self, hook_executor: Arc<HookExecutor>) -> Self {
         self.hook_executor = Some(hook_executor);
+        self
+    }
+
+    /// Set the substrate registry for executing prompts via LLM substrates
+    pub fn with_substrate_registry(mut self, substrate_registry: Arc<SubstrateRegistry>) -> Self {
+        self.substrate_registry = Some(substrate_registry);
         self
     }
 
@@ -276,14 +287,16 @@ impl PromptChainService {
         let duration = start.elapsed();
 
         // Validate output format
-        let validated = self
-            .validator
-            .validate(&output, &step.expected_output)
-            .is_ok();
-
-        if !validated {
-            warn!("Output format validation failed for step {}", step.id);
-        }
+        let validated = match self.validator.validate(&output, &step.expected_output) {
+            Ok(_) => true,
+            Err(e) => {
+                error!(
+                    "Output format validation failed for step {}: {}",
+                    step.id, e
+                );
+                false
+            }
+        };
 
         Ok(StepResult::new(
             step.id.clone(),
@@ -293,23 +306,57 @@ impl PromptChainService {
         ))
     }
 
-    /// Execute a prompt (placeholder for actual LLM integration)
+    /// Execute a prompt via LLM substrate (Claude Code CLI or Anthropic API)
     async fn execute_prompt(&self, prompt: &str, role: &str) -> Result<String> {
-        // TODO: Integrate with actual LLM API
-        // For now, return a mock response
         debug!("Executing prompt with role: {}", role);
-        debug!("Prompt: {}", prompt);
 
-        // Simulate API call delay
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Check if substrate registry is configured
+        let Some(ref registry) = self.substrate_registry else {
+            warn!("No substrate registry configured, returning mock response");
+            // Fallback to mock response if no substrate available (for tests)
+            return Ok(serde_json::json!({
+                "role": role,
+                "response": format!("Mock response (no substrate): {}", prompt),
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            })
+            .to_string());
+        };
 
-        // Return mock JSON response
-        Ok(serde_json::json!({
-            "role": role,
-            "response": format!("Mock response for prompt: {}", prompt),
-            "timestamp": chrono::Utc::now().to_rfc3339()
-        })
-        .to_string())
+        // Create a substrate request
+        let request = SubstrateRequest {
+            task_id: uuid::Uuid::new_v4(), // Generate ephemeral task ID for this step
+            agent_type: role.to_string(),
+            prompt: prompt.to_string(),
+            context: None,
+            parameters: ExecutionParameters {
+                model: None, // Use default model for role
+                max_tokens: Some(4096),
+                temperature: Some(0.7),
+                timeout_secs: None, // Use default timeout
+                extra: std::collections::HashMap::new(),
+            },
+        };
+
+        // Execute via substrate
+        info!(
+            role = %role,
+            prompt_length = prompt.len(),
+            "Executing prompt chain step via substrate"
+        );
+
+        let response = registry
+            .execute(request)
+            .await
+            .context("Failed to execute prompt via substrate")?;
+
+        info!(
+            role = %role,
+            output_length = response.content.len(),
+            stop_reason = ?response.stop_reason,
+            "Prompt chain step completed"
+        );
+
+        Ok(response.content)
     }
 
     /// Validate step output against validation rules

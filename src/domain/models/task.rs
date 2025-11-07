@@ -299,6 +299,36 @@ impl Task {
         }
     }
 
+    /// Create a summary with a prefix, ensuring total length doesn't exceed 140 characters
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - The prefix to add (e.g., "Validate: ", "Fix: ")
+    /// * `base_summary` - The base summary text
+    ///
+    /// # Returns
+    ///
+    /// A summary string that is guaranteed to be <= 140 characters
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use abathur::domain::models::Task;
+    ///
+    /// let summary = Task::create_summary_with_prefix("Fix: ", "Very long task summary that needs to be truncated");
+    /// assert!(summary.len() <= 140);
+    /// assert!(summary.starts_with("Fix: "));
+    /// ```
+    pub fn create_summary_with_prefix(prefix: &str, base_summary: &str) -> String {
+        let max_summary_len = 140 - prefix.len();
+        let truncated_summary = if base_summary.len() > max_summary_len {
+            format!("{}...", &base_summary[..max_summary_len.saturating_sub(3)])
+        } else {
+            base_summary.to_string()
+        };
+        format!("{}{}", prefix, truncated_summary)
+    }
+
     /// Validate summary length (max 140 chars)
     pub fn validate_summary(&self) -> Result<(), anyhow::Error> {
         if self.summary.len() > 140 {
@@ -595,6 +625,51 @@ mod tests {
 
     fn create_test_task() -> Task {
         Task::new("Test task".to_string(), "Test description".to_string())
+    }
+
+    // ========================
+    // Summary Tests
+    // ========================
+
+    #[test]
+    fn test_create_summary_with_prefix_short_summary() {
+        let summary = Task::create_summary_with_prefix("Fix: ", "Short summary");
+        assert_eq!(summary, "Fix: Short summary");
+        assert!(summary.len() <= 140);
+    }
+
+    #[test]
+    fn test_create_summary_with_prefix_long_summary() {
+        // Create a summary that's 135 chars (close to limit)
+        let long_summary = "a".repeat(135);
+        let summary = Task::create_summary_with_prefix("Validate: ", &long_summary);
+
+        // "Validate: " is 10 chars, so max base summary is 130 chars
+        // Should truncate to 127 chars + "..." = 130 chars
+        // Total: 10 + 130 = 140 chars
+        assert_eq!(summary.len(), 140);
+        assert!(summary.starts_with("Validate: "));
+        assert!(summary.ends_with("..."));
+    }
+
+    #[test]
+    fn test_create_summary_with_prefix_exactly_at_limit() {
+        // Create a summary that when combined with prefix is exactly 140 chars
+        let base_summary = "a".repeat(130); // "Validate: " (10) + 130 = 140
+        let summary = Task::create_summary_with_prefix("Validate: ", &base_summary);
+
+        assert_eq!(summary.len(), 140);
+        assert!(summary.starts_with("Validate: "));
+        assert!(!summary.ends_with("..."));
+    }
+
+    #[test]
+    fn test_create_summary_with_prefix_no_prefix() {
+        let long_summary = "a".repeat(150);
+        let summary = Task::create_summary_with_prefix("", &long_summary);
+
+        assert_eq!(summary.len(), 140);
+        assert!(summary.ends_with("..."));
     }
 
     // ========================
