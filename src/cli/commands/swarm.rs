@@ -410,6 +410,7 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
         agent_metadata_registry,
         chain_loader,
         chain_service,
+        config.clone(),
     ));
 
     // Create resource monitor with default limits (monitoring only, no enforcement)

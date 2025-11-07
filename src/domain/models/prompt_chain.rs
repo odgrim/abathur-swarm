@@ -18,11 +18,6 @@ pub enum OutputFormat {
         #[serde(skip_serializing_if = "Option::is_none")]
         schema: Option<serde_json::Value>,
     },
-    /// XML output with optional schema validation
-    Xml {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        schema: Option<String>,
-    },
     /// Markdown formatted output
     Markdown,
     /// Plain text output
@@ -250,8 +245,6 @@ pub struct ValidationRule {
 pub enum ValidationType {
     /// Validate against JSON schema
     JsonSchema,
-    /// Validate against XML schema
-    XmlSchema,
     /// Validate using regex pattern
     RegexMatch { pattern: String },
     /// Custom validator function

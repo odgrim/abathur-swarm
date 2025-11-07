@@ -3,7 +3,6 @@
 use crate::domain::models::prompt_chain::{OutputFormat, ValidationType};
 use anyhow::{Context, Result};
 use jsonschema::{Draft, JSONSchema};
-use quick_xml::Reader;
 use regex::Regex;
 use std::sync::Arc;
 
@@ -34,7 +33,7 @@ impl OutputValidator {
 
     /// Strip markdown code blocks from output
     ///
-    /// Many LLMs wrap JSON/XML in markdown code blocks even when instructed not to.
+    /// Many LLMs wrap JSON in markdown code blocks even when instructed not to.
     /// This helper strips those blocks to get to the actual content.
     ///
     /// Handles formats like:
@@ -95,14 +94,6 @@ impl OutputValidator {
                     Ok(true)
                 }
             }
-            OutputFormat::Xml { schema } => {
-                if let Some(schema_str) = schema {
-                    self.validate_xml(output, schema_str)
-                } else {
-                    // Just verify it's valid XML
-                    self.validate_xml_wellformed(output)
-                }
-            }
             OutputFormat::Markdown | OutputFormat::Plain => {
                 // No validation needed for plain formats
                 Ok(true)
@@ -144,36 +135,6 @@ impl OutputValidator {
         }
     }
 
-    /// Validate XML output against a schema
-    pub fn validate_xml(&self, output: &str, _schema: &str) -> Result<bool> {
-        // First check if it's well-formed
-        self.validate_xml_wellformed(output)?;
-
-        // TODO: Implement full XSD validation
-        // For now, we just verify well-formedness
-        Ok(true)
-    }
-
-    /// Check if XML is well-formed
-    pub fn validate_xml_wellformed(&self, output: &str) -> Result<bool> {
-        let mut reader = Reader::from_str(output);
-        reader.check_end_names(true);
-
-        let mut buf = Vec::new();
-        loop {
-            match reader.read_event_into(&mut buf) {
-                Ok(quick_xml::events::Event::Eof) => break,
-                Err(e) => {
-                    anyhow::bail!("XML parsing error at position {}: {}", reader.buffer_position(), e);
-                }
-                _ => {}
-            }
-            buf.clear();
-        }
-
-        Ok(true)
-    }
-
     /// Validate using a validation rule
     pub fn validate_with_rule(
         &self,
@@ -187,16 +148,6 @@ impl OutputValidator {
                     self.validate_json(output, schema_value)
                 } else {
                     anyhow::bail!("JSON schema validation requires a schema");
-                }
-            }
-            ValidationType::XmlSchema => {
-                if let Some(schema_value) = schema {
-                    let schema_str = schema_value
-                        .as_str()
-                        .context("XML schema must be a string")?;
-                    self.validate_xml(output, schema_str)
-                } else {
-                    anyhow::bail!("XML schema validation requires a schema");
                 }
             }
             ValidationType::RegexMatch { pattern } => {
@@ -314,16 +265,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_xml_wellformed() {
-        let validator = OutputValidator::new();
-        let valid_xml = r#"<?xml version="1.0"?><root><child>value</child></root>"#;
-        assert!(validator.validate_xml_wellformed(valid_xml).is_ok());
-
-        let invalid_xml = r#"<root><child>value</root>"#; // Mismatched tags
-        assert!(validator.validate_xml_wellformed(invalid_xml).is_err());
-    }
-
-    #[test]
     fn test_validate_regex() {
         let validator = OutputValidator::new();
         let output = "Hello, World!";
@@ -363,15 +304,6 @@ mod tests {
         let validator = OutputValidator::new();
         let output = r#"{"test": "value"}"#;
         let format = OutputFormat::Json { schema: None };
-
-        assert!(validator.validate(output, &format).is_ok());
-    }
-
-    #[test]
-    fn test_validate_output_format_xml() {
-        let validator = OutputValidator::new();
-        let output = r#"<?xml version="1.0"?><root><test>value</test></root>"#;
-        let format = OutputFormat::Xml { schema: None };
 
         assert!(validator.validate(output, &format).is_ok());
     }

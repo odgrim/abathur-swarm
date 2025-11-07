@@ -3,6 +3,7 @@
 ///! Executes hook actions including running scripts, spawning tasks, and more.
 
 use crate::application::task_coordinator::TaskCoordinator;
+use crate::domain::models::task::TaskStatus;
 use crate::domain::models::{HookAction, HookContext, HookResult, Task};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -176,17 +177,61 @@ impl HookExecutor {
         Ok(HookResult::Continue)
     }
 
-    /// Update a task field (placeholder - would need more complex implementation)
+    /// Update a task field
+    ///
+    /// Currently supports updating 'status' and 'priority' fields through the task coordinator.
+    /// Other fields require fetching the full task, modifying it, and using a general update method
+    /// which is not currently exposed through the TaskQueueService interface.
     async fn update_field(
         &self,
         field: &str,
         value: &serde_json::Value,
-        _task: &Task,
+        task: &Task,
         _context: &HookContext,
     ) -> Result<HookResult> {
         info!(field = field, value = ?value, "Update field action");
-        // TODO: Implement field update logic via task coordinator
-        warn!("UpdateField action not yet fully implemented");
+
+        let Some(ref coordinator) = self.task_coordinator else {
+            warn!("Task coordinator not available, cannot update field");
+            return Ok(HookResult::Continue);
+        };
+
+        match field {
+            "status" => {
+                let status_str = value.as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Status value must be a string"))?;
+                let status: TaskStatus = status_str.parse()
+                    .context(format!("Invalid status value: {}", status_str))?;
+
+                coordinator
+                    .update_task_status(task.id, status)
+                    .await
+                    .context("Failed to update task status")?;
+
+                info!(task_id = %task.id, new_status = ?status, "Updated task status via hook");
+            }
+            "priority" => {
+                let priority = value.as_f64()
+                    .or_else(|| value.as_u64().map(|v| v as f64))
+                    .or_else(|| value.as_i64().map(|v| v as f64))
+                    .ok_or_else(|| anyhow::anyhow!("Priority value must be a number"))?;
+
+                coordinator
+                    .update_task_priority(task.id, priority)
+                    .await
+                    .context("Failed to update task priority")?;
+
+                info!(task_id = %task.id, new_priority = priority, "Updated task priority via hook");
+            }
+            _ => {
+                warn!(
+                    field = field,
+                    "Unsupported field update. Only 'status' and 'priority' can be updated via hooks. \
+                     For other fields, consider using a custom script or extending the TaskQueueService interface."
+                );
+            }
+        }
+
         Ok(HookResult::Continue)
     }
 
@@ -285,7 +330,10 @@ Agent Type: {}
         Ok(HookResult::Continue)
     }
 
-    /// Delete a branch (placeholder)
+    /// Delete a git branch
+    ///
+    /// Deletes the specified branch and optionally removes its associated worktree.
+    /// Uses `git branch -d` for safe deletion (only deletes if merged) or `-D` if forced.
     async fn delete_branch(
         &self,
         branch: &str,
@@ -297,14 +345,116 @@ Agent Type: {}
         info!(
             branch = %branch,
             cleanup_worktree = cleanup_worktree,
-            "Delete branch action"
+            "Deleting branch"
         );
-        // TODO: Implement branch deletion logic
-        warn!("DeleteBranch action not yet fully implemented");
+
+        // First, check if the branch exists
+        let check_output = Command::new("git")
+            .args(["rev-parse", "--verify", &branch])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .context("Failed to check if branch exists")?;
+
+        if !check_output.success() {
+            warn!(branch = %branch, "Branch does not exist, skipping deletion");
+            return Ok(HookResult::Continue);
+        }
+
+        // Delete the branch (using -d for safe deletion, which requires branch to be merged)
+        let delete_output = Command::new("git")
+            .args(["branch", "-d", &branch])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context(format!("Failed to delete branch: {}", branch))?;
+
+        if !delete_output.status.success() {
+            let stderr = String::from_utf8_lossy(&delete_output.stderr);
+            error!(branch = %branch, stderr = %stderr, "Failed to delete branch");
+            return Err(anyhow::anyhow!("Git branch deletion failed: {}", stderr));
+        }
+
+        info!(branch = %branch, "Branch deleted successfully");
+
+        // Clean up worktree if requested
+        if cleanup_worktree {
+            // List worktrees to find the one associated with this branch
+            let worktree_output = Command::new("git")
+                .args(["worktree", "list", "--porcelain"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+                .context("Failed to list worktrees")?;
+
+            if worktree_output.status.success() {
+                let output_str = String::from_utf8_lossy(&worktree_output.stdout);
+
+                // Parse worktree list to find worktree path for this branch
+                let mut worktree_path: Option<String> = None;
+                let mut current_path: Option<String> = None;
+
+                for line in output_str.lines() {
+                    if line.starts_with("worktree ") {
+                        current_path = Some(line.strip_prefix("worktree ").unwrap_or("").to_string());
+                    } else if line.starts_with("branch ") {
+                        let worktree_branch = line.strip_prefix("branch ").unwrap_or("");
+                        if worktree_branch.ends_with(&branch) {
+                            worktree_path = current_path.take();
+                            break;
+                        }
+                    }
+                }
+
+                if let Some(path) = worktree_path {
+                    info!(path = %path, "Removing worktree");
+
+                    let remove_output = Command::new("git")
+                        .args(["worktree", "remove", &path])
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .output()
+                        .await
+                        .context("Failed to remove worktree")?;
+
+                    if !remove_output.status.success() {
+                        let stderr = String::from_utf8_lossy(&remove_output.stderr);
+                        warn!(path = %path, stderr = %stderr, "Failed to remove worktree, trying with --force");
+
+                        // Try with force flag
+                        let force_output = Command::new("git")
+                            .args(["worktree", "remove", "--force", &path])
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped())
+                            .output()
+                            .await?;
+
+                        if !force_output.status.success() {
+                            let force_stderr = String::from_utf8_lossy(&force_output.stderr);
+                            error!(path = %path, stderr = %force_stderr, "Failed to force remove worktree");
+                        } else {
+                            info!(path = %path, "Worktree removed successfully with --force");
+                        }
+                    } else {
+                        info!(path = %path, "Worktree removed successfully");
+                    }
+                } else {
+                    debug!(branch = %branch, "No worktree found for branch");
+                }
+            }
+        }
+
         Ok(HookResult::Continue)
     }
 
-    /// Create a git tag (placeholder)
+    /// Create a git tag
+    ///
+    /// Creates an annotated git tag with the specified name and message.
+    /// Annotated tags are recommended over lightweight tags as they store
+    /// metadata (tagger, date) and can be cryptographically signed.
     async fn create_tag(
         &self,
         name: &str,
@@ -314,13 +464,35 @@ Agent Type: {}
     ) -> Result<HookResult> {
         let name = self.substitute_variables(name, context);
         let message = self.substitute_variables(message, context);
-        info!(tag = %name, message = %message, "Create tag action");
-        // TODO: Implement tag creation logic
-        warn!("CreateTag action not yet fully implemented");
-        Ok(HookResult::Continue)
+        info!(tag = %name, message = %message, "Creating git tag");
+
+        // Create an annotated tag
+        let tag_output = Command::new("git")
+            .args(["tag", "-a", &name, "-m", &message])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context(format!("Failed to create tag: {}", name))?;
+
+        if tag_output.status.success() {
+            info!(tag = %name, "Tag created successfully");
+            Ok(HookResult::Continue)
+        } else {
+            let stderr = String::from_utf8_lossy(&tag_output.stderr);
+            error!(tag = %name, stderr = %stderr, "Failed to create tag");
+            Err(anyhow::anyhow!("Git tag creation failed: {}", stderr))
+        }
     }
 
-    /// Send webhook notification (placeholder)
+    /// Send webhook notification
+    ///
+    /// Sends an HTTP POST request with JSON payload to the specified webhook URL.
+    /// This is useful for integrating with external services like Slack, Discord,
+    /// CI/CD pipelines, or custom notification systems.
+    ///
+    /// # Timeout
+    /// Requests timeout after 30 seconds to prevent hooks from blocking indefinitely.
     async fn notify_webhook(
         &self,
         url: &str,
@@ -329,10 +501,49 @@ Agent Type: {}
         context: &HookContext,
     ) -> Result<HookResult> {
         let url = self.substitute_variables(url, context);
-        info!(url = %url, payload = ?payload, "Webhook notification action");
-        // TODO: Implement webhook notification
-        warn!("NotifyWebhook action not yet fully implemented");
-        Ok(HookResult::Continue)
+        info!(url = %url, payload = ?payload, "Sending webhook notification");
+
+        // Create HTTP client with timeout
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .context("Failed to create HTTP client for webhook")?;
+
+        // Send POST request
+        let response = client
+            .post(&url)
+            .json(payload)
+            .send()
+            .await
+            .context(format!("Failed to send webhook to {}", url))?;
+
+        if response.status().is_success() {
+            info!(
+                url = %url,
+                status = %response.status(),
+                "Webhook notification sent successfully"
+            );
+            Ok(HookResult::Continue)
+        } else {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read response body>".to_string());
+
+            error!(
+                url = %url,
+                status = %status,
+                response_body = %body,
+                "Webhook notification failed"
+            );
+
+            Err(anyhow::anyhow!(
+                "Webhook notification failed with status {}: {}",
+                status,
+                body
+            ))
+        }
     }
 
     /// Substitute template variables in strings

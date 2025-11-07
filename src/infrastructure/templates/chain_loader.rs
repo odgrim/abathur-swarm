@@ -45,10 +45,6 @@ pub enum OutputFormatTemplate {
         #[serde(skip_serializing_if = "Option::is_none")]
         schema: Option<serde_json::Value>,
     },
-    Xml {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        schema: Option<String>,
-    },
     Markdown,
     Plain,
 }
@@ -68,7 +64,6 @@ pub struct ValidationRuleTemplate {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ValidationTypeTemplate {
     JsonSchema,
-    XmlSchema,
     RegexMatch { pattern: String },
     CustomValidator { name: String },
 }
@@ -140,7 +135,6 @@ impl ChainLoader {
     fn template_to_step(&self, template: StepTemplate) -> Result<PromptStep> {
         let output_format = match template.expected_output {
             OutputFormatTemplate::Json { schema } => OutputFormat::Json { schema },
-            OutputFormatTemplate::Xml { schema } => OutputFormat::Xml { schema },
             OutputFormatTemplate::Markdown => OutputFormat::Markdown,
             OutputFormatTemplate::Plain => OutputFormat::Plain,
         };
@@ -178,7 +172,6 @@ impl ChainLoader {
     ) -> Result<ValidationRule> {
         let rule_type = match template.rule_type {
             ValidationTypeTemplate::JsonSchema => ValidationType::JsonSchema,
-            ValidationTypeTemplate::XmlSchema => ValidationType::XmlSchema,
             ValidationTypeTemplate::RegexMatch { pattern } => {
                 ValidationType::RegexMatch { pattern }
             }
@@ -268,9 +261,6 @@ impl ChainLoader {
             OutputFormat::Json { schema } => OutputFormatTemplate::Json {
                 schema: schema.clone(),
             },
-            OutputFormat::Xml { schema } => OutputFormatTemplate::Xml {
-                schema: schema.clone(),
-            },
             OutputFormat::Markdown => OutputFormatTemplate::Markdown,
             OutputFormat::Plain => OutputFormatTemplate::Plain,
         };
@@ -294,7 +284,6 @@ impl ChainLoader {
     ) -> Result<ValidationRuleTemplate> {
         let rule_type = match &rule.rule_type {
             ValidationType::JsonSchema => ValidationTypeTemplate::JsonSchema,
-            ValidationType::XmlSchema => ValidationTypeTemplate::XmlSchema,
             ValidationType::RegexMatch { pattern } => {
                 ValidationTypeTemplate::RegexMatch {
                     pattern: pattern.clone(),

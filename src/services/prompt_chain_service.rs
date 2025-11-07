@@ -344,10 +344,21 @@ impl PromptChainService {
             "Executing prompt chain step via substrate"
         );
 
-        let response = registry
-            .execute(request)
-            .await
-            .context("Failed to execute prompt via substrate")?;
+        let response = match registry.execute(request).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                error!(
+                    role = %role,
+                    prompt_length = prompt.len(),
+                    error = %e,
+                    "Substrate execution failed"
+                );
+                return Err(anyhow::anyhow!(
+                    "Failed to execute prompt via substrate: {}",
+                    e
+                ));
+            }
+        };
 
         info!(
             role = %role,

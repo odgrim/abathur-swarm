@@ -7,7 +7,7 @@ use crate::services::DependencyResolver;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 /// Status update message for task lifecycle events
@@ -455,16 +455,149 @@ impl TaskCoordinator {
             })
             .await;
 
-        // TODO: Implement retry logic
-        // - Check retry_count vs max_retries
-        // - Reset task to pending if retries remain
-        // - Exponential backoff for retry scheduling
+        // Implement retry logic
+        let mut task = self
+            .task_queue
+            .get_task(task_id)
+            .await
+            .context("Failed to get task for retry check")?;
 
-        // TODO: Implement cascade failure logic
-        // - Optionally mark dependent tasks as blocked or cancelled
-        // - Provide configuration for failure handling strategy
+        if task.can_retry() {
+            // Task can be retried - increment retry count and reset to Pending
+            info!(
+                task_id = %task_id,
+                retry_count = task.retry_count,
+                max_retries = task.max_retries,
+                "Task failed but can be retried, resetting to Pending"
+            );
+
+            // Use the domain model's retry method to handle state transition
+            task.retry()
+                .context("Failed to transition task to retry state")?;
+
+            // Update the task in the database
+            self.task_queue
+                .update_task_status(task_id, TaskStatus::Pending)
+                .await
+                .context("Failed to update task status for retry")?;
+
+            // Re-coordinate the task lifecycle to check dependencies and set priority
+            self.coordinate_task_lifecycle(task_id)
+                .await
+                .context("Failed to re-coordinate task after retry")?;
+
+            info!(
+                task_id = %task_id,
+                retry_count = task.retry_count,
+                "Task retry initiated successfully"
+            );
+        } else {
+            // Max retries exceeded or cannot retry
+            warn!(
+                task_id = %task_id,
+                retry_count = task.retry_count,
+                max_retries = task.max_retries,
+                "Task failed and max retries exceeded, implementing cascade failure"
+            );
+
+            // Implement cascade failure logic
+            // Get all dependent tasks
+            let dependent_tasks = self
+                .task_queue
+                .get_dependent_tasks(task_id)
+                .await
+                .context("Failed to get dependent tasks for cascade failure")?;
+
+            if !dependent_tasks.is_empty() {
+                info!(
+                    task_id = %task_id,
+                    dependent_count = dependent_tasks.len(),
+                    "Cascading failure to dependent tasks"
+                );
+
+                // Mark all dependent tasks as failed due to dependency failure
+                for dependent_task in dependent_tasks {
+                    if !dependent_task.is_terminal() {
+                        let cascade_error = format!(
+                            "Dependency task {} failed after max retries: {}",
+                            task_id,
+                            task.error_message.as_deref().unwrap_or("unknown error")
+                        );
+
+                        warn!(
+                            dependent_task_id = %dependent_task.id,
+                            "Marking dependent task as failed due to dependency failure"
+                        );
+
+                        // Mark dependent task as failed
+                        self.task_queue
+                            .mark_task_failed(dependent_task.id, cascade_error)
+                            .await
+                            .context("Failed to mark dependent task as failed")?;
+
+                        // Recursively handle cascade failures for this dependent task
+                        // (without retries since this is a cascade failure)
+                        self.cascade_failure_to_dependents(dependent_task.id)
+                            .await
+                            .context("Failed to cascade failure to nested dependents")?;
+                    }
+                }
+            }
+        }
 
         Ok(())
+    }
+
+    /// Cascade failure to dependent tasks recursively
+    ///
+    /// Marks all dependent tasks as failed when a dependency fails.
+    /// This is called recursively to handle nested dependencies.
+    ///
+    /// # Arguments
+    ///
+    /// * `failed_task_id` - UUID of the task that failed
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Cascade completed
+    /// * `Err` - If database operations fail
+    fn cascade_failure_to_dependents<'a>(
+        &'a self,
+        failed_task_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let dependent_tasks = self
+                .task_queue
+                .get_dependent_tasks(failed_task_id)
+                .await
+                .context("Failed to get dependent tasks for cascade")?;
+
+            for dependent_task in dependent_tasks {
+                if !dependent_task.is_terminal() {
+                    let cascade_error = format!(
+                        "Dependency task {} failed (cascade failure)",
+                        failed_task_id
+                    );
+
+                    debug!(
+                        dependent_task_id = %dependent_task.id,
+                        failed_task_id = %failed_task_id,
+                        "Cascading failure to dependent task"
+                    );
+
+                    self.task_queue
+                        .mark_task_failed(dependent_task.id, cascade_error)
+                        .await
+                        .context("Failed to mark cascaded dependent task as failed")?;
+
+                    // Recursively cascade to nested dependents
+                    self.cascade_failure_to_dependents(dependent_task.id)
+                        .await?;
+                }
+            }
+
+            Ok(())
+        })
     }
 
     /// Get a task by ID
@@ -621,6 +754,50 @@ impl TaskCoordinator {
 
         info!("Finished processing {} pending tasks", task_count);
         Ok(task_count)
+    }
+
+    /// Update a task's status directly
+    ///
+    /// This method bypasses the normal lifecycle coordination and directly updates
+    /// the task status. Use with caution - prefer lifecycle methods like
+    /// `mark_task_running`, `handle_task_completion`, etc. when possible.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - UUID of the task to update
+    /// * `status` - New status to set
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Status updated successfully
+    /// * `Err` - If task not found or database error
+    pub async fn update_task_status(&self, task_id: Uuid, status: TaskStatus) -> Result<()> {
+        self.task_queue
+            .update_task_status(task_id, status)
+            .await
+            .context("Failed to update task status")
+    }
+
+    /// Update a task's calculated priority directly
+    ///
+    /// This method bypasses the normal priority calculation and directly updates
+    /// the task priority. Use with caution - prefer `coordinate_task_lifecycle`
+    /// which recalculates priority based on the priority calculator.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - UUID of the task to update
+    /// * `priority` - New calculated priority value
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Priority updated successfully
+    /// * `Err` - If task not found or database error
+    pub async fn update_task_priority(&self, task_id: Uuid, priority: f64) -> Result<()> {
+        self.task_queue
+            .update_task_priority(task_id, priority)
+            .await
+            .context("Failed to update task priority")
     }
 
     // Private helper methods

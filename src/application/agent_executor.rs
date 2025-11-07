@@ -120,6 +120,9 @@ pub struct AgentExecutor {
 
     /// Prompt chain service for executing multi-step workflows
     chain_service: Arc<PromptChainService>,
+
+    /// Configuration for task execution
+    config: Config,
 }
 
 impl AgentExecutor {
@@ -130,17 +133,20 @@ impl AgentExecutor {
     /// * `agent_metadata_registry` - Registry for loading agent metadata
     /// * `chain_loader` - Loader for prompt chain templates
     /// * `chain_service` - Service for executing prompt chains
+    /// * `config` - Configuration for task execution
     pub fn new(
         substrate_registry: Arc<SubstrateRegistry>,
         agent_metadata_registry: Arc<Mutex<AgentMetadataRegistry>>,
         chain_loader: Arc<ChainLoader>,
         chain_service: Arc<PromptChainService>,
+        config: Config,
     ) -> Self {
         Self {
             substrate_registry,
             agent_metadata_registry,
             chain_loader,
             chain_service,
+            config,
         }
     }
 
@@ -178,10 +184,14 @@ impl AgentExecutor {
                 task.id,
                 task.agent_type.clone(),
                 task.description.clone(),
-                Config::default(), // TODO: Pass actual config
+                self.config.clone(),
             );
 
-            self.execute(ctx).await
+            self.execute_with_timeout(
+                ctx,
+                Duration::from_secs(task.max_execution_timeout_seconds as u64),
+            )
+            .await
         }
     }
 
@@ -241,6 +251,33 @@ impl AgentExecutor {
                 ))
             })?;
 
+        // Check if chain execution succeeded
+        use crate::domain::models::prompt_chain::ChainStatus;
+        match &execution.status {
+            ChainStatus::ValidationFailed(error) => {
+                return Err(ExecutionError::ExecutionFailed(format!(
+                    "Chain validation failed for '{}': {}",
+                    chain_id, error
+                )));
+            }
+            ChainStatus::Failed(error) => {
+                return Err(ExecutionError::ExecutionFailed(format!(
+                    "Chain execution failed for '{}': {}",
+                    chain_id, error
+                )));
+            }
+            ChainStatus::Completed => {
+                // Chain completed successfully
+            }
+            ChainStatus::Running => {
+                // Chain still running (shouldn't happen, but handle gracefully)
+                return Err(ExecutionError::ExecutionFailed(format!(
+                    "Chain '{}' returned with Running status (unexpected)",
+                    chain_id
+                )));
+            }
+        }
+
         // Return execution result as JSON
         serde_json::to_string_pretty(&execution).map_err(|e| {
             ExecutionError::ExecutionFailed(format!("Failed to serialize chain result: {}", e))
@@ -263,10 +300,13 @@ impl AgentExecutor {
     /// ```ignore
     /// let result = executor.execute(ctx).await?;
     /// ```
+    ///
+    /// # Note
+    /// This method uses a default timeout of 1 hour. For task-specific timeouts,
+    /// use `execute_with_timeout` directly with the task's `max_execution_timeout_seconds`.
     pub async fn execute(&self, ctx: ExecutionContext) -> Result<String, ExecutionError> {
-        // Get timeout from config, default to 1 hour
-        let timeout_secs = 3600; // TODO: Get from task.max_execution_timeout_seconds
-        let timeout_duration = Duration::from_secs(timeout_secs);
+        // Default timeout to 1 hour
+        let timeout_duration = Duration::from_secs(3600);
 
         self.execute_with_timeout(ctx, timeout_duration).await
     }
@@ -748,7 +788,13 @@ mod tests {
         let chain_loader = Arc::new(ChainLoader::default());
         let chain_service = Arc::new(PromptChainService::new());
 
-        AgentExecutor::new(registry, metadata_registry, chain_loader, chain_service)
+        AgentExecutor::new(
+            registry,
+            metadata_registry,
+            chain_loader,
+            chain_service,
+            Config::default(),
+        )
     }
 
     #[tokio::test]
