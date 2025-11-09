@@ -252,6 +252,10 @@ pub struct Task {
 
     /// Prompt chain ID (if task should execute through a multi-step chain)
     pub chain_id: Option<String>,
+
+    /// Current step index in the prompt chain (0-based)
+    #[serde(default)]
+    pub chain_step_index: usize,
 }
 
 impl Task {
@@ -296,6 +300,7 @@ impl Task {
             workflow_state: None,
             workflow_expectations: None,
             chain_id: None,
+            chain_step_index: 0,
         }
     }
 

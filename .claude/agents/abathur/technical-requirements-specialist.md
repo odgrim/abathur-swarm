@@ -61,6 +61,9 @@ Third step in workflow (after technical-architect). Translate architectural guid
 8. **Store Specifications**: Save all technical decisions in memory
 
 9. **Complete**: Output JSON summary (see Output Format below) and stop
+   - **CRITICAL**: Output ONLY raw JSON - no markdown code blocks, no explanations, no summaries
+   - **CRITICAL**: Do NOT wrap JSON in markdown code blocks like ```json
+   - **CRITICAL**: The output should start with `{` and end with `}`
 
 **NOTE:** Do NOT spawn task-planner tasks manually. The chain will automatically proceed to the next step.
 
@@ -132,6 +135,8 @@ You only need to determine the feature name and store it in memory for downstrea
 - Suggest agent specializations in output for task-planner to use
 
 ## Output Format
+
+**CRITICAL:** Output ONLY raw JSON - no markdown, no explanations, no code blocks. The output validator expects pure JSON starting with `{` and ending with `}`.
 
 ```json
 {

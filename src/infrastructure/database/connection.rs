@@ -30,10 +30,17 @@ impl DatabaseConnection {
     /// - Max lifetime: 30 minutes
     /// - Acquire timeout: 10 seconds
     ///
+    /// # Extensions
+    /// - sqlite-vec: Registered via sqlite3_auto_extension for vector operations
+    ///
     /// # Returns
     /// * `Ok(DatabaseConnection)` on success
     /// * `Err` if database URL is invalid or connection fails
     pub async fn new(database_url: &str) -> Result<Self> {
+        // Register sqlite-vec extension before creating any connections
+        // This must be done first so the extension is available when the pool is created
+        crate::infrastructure::database::extensions::register_sqlite_vec();
+
         // Configure connection options
         let options = SqliteConnectOptions::from_str(database_url)
             .context("invalid database URL")?

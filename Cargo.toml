@@ -54,15 +54,18 @@ uuid = { version = "1.11.0", features = ["v4", "serde"] }
 candle-core = "0.8"
 candle-nn = "0.8"
 candle-transformers = "0.8"
-hf-hub = "0.3"  # For downloading models from HuggingFace
+hf-hub = { version = "0.3", features = ["tokio"] }  # For downloading models from HuggingFace
 sqlite-vec = "0.1"
+libsqlite3-sys = "0.30"  # Required to register sqlite-vec via sqlite3_auto_extension
 zerocopy = "0.7"
 tiktoken-rs = "0.5"
+tokenizers = "0.20"  # WordPiece tokenization with padding/truncation for BERT
 
 [dev-dependencies]
 assert_cmd = "2.0"
 mockall = "0.13.1"
 predicates = "3.1"
+proptest = "1.5"
 tempfile = "3.23.0"
 tokio-test = "0.4.4"
 tokio-stream = "0.1"

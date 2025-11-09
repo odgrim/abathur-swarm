@@ -276,6 +276,54 @@ impl HookRegistry {
             }
         }
 
+        // Check has_metadata_key - verify required task metadata keys are present
+        if let Some(ref required_keys) = condition.has_metadata_key {
+            for key in required_keys {
+                let has_key = match key.as_str() {
+                    "worktree_path" => task.worktree_path.is_some(),
+                    "task_branch" => task.task_branch.is_some(),
+                    "feature_branch" => task.feature_branch.is_some(),
+                    "parent_task_id" => task.parent_task_id.is_some(),
+                    _ => {
+                        warn!(key = %key, "Unknown metadata key in has_metadata_key condition");
+                        false
+                    }
+                };
+                if !has_key {
+                    return Ok(false);
+                }
+            }
+        }
+
+        // Check agent_type_pattern - match agent type by regex
+        if let Some(ref pattern) = condition.agent_type_pattern {
+            let regex = Regex::new(pattern).context("Invalid agent_type_pattern regex")?;
+            if !regex.is_match(&task.agent_type) {
+                return Ok(false);
+            }
+        }
+
+        // Check exclude_agent_types - exclude specific agent types
+        if let Some(ref excluded_types) = condition.exclude_agent_types {
+            if excluded_types.contains(&task.agent_type) {
+                return Ok(false);
+            }
+        }
+
+        // Check task_status - match specific task status
+        if let Some(ref expected_status) = condition.task_status {
+            if &task.status.to_string() != expected_status {
+                return Ok(false);
+            }
+        }
+
+        // Check priority_min - minimum priority level
+        if let Some(min_priority) = condition.priority_min {
+            if task.priority < min_priority {
+                return Ok(false);
+            }
+        }
+
         Ok(true)
     }
 

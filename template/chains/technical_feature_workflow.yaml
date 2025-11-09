@@ -77,15 +77,16 @@ steps:
           - problem_statement
           - functional_requirements
           - success_criteria
-    post_hooks:
+    # post_hooks:
       # Store requirements in memory for future reference
-      - type: run_script
-        script_path: scripts/store_requirements.sh
-        args:
-          - "{task_id}"
-          - "requirements"
+      # TODO: Implement scripts/store_requirements.sh
+      # - type: run_script
+      #   script_path: scripts/store_requirements.sh
+      #   args:
+      #     - "{task_id}"
+      #     - "requirements"
     next: design_architecture
-    timeout_secs: 300
+    timeout_secs: 600
 
   - id: design_architecture
     role: technical-architect
@@ -160,24 +161,25 @@ steps:
           - architecture_overview
           - components
           - decomposition
-    post_hooks:
+    # post_hooks:
       # Store architecture in memory
-      - type: run_script
-        script_path: scripts/store_architecture.sh
-        args:
-          - "{task_id}"
-          - "architecture"
+      # TODO: Implement scripts/store_architecture.sh and scripts/create_feature_branch.sh
+      # - type: run_script
+      #   script_path: scripts/store_architecture.sh
+      #   args:
+      #     - "{task_id}"
+      #     - "architecture"
       # Create feature branch for this work
-      - type: run_script
-        script_path: scripts/create_feature_branch.sh
-        args:
-          - "{task_id}"
-          - "{decomposition.strategy}"
-      - type: log_message
-        level: info
-        message: "Architecture designed and feature branch created for task {task_id}"
+      # - type: run_script
+      #   script_path: scripts/create_feature_branch.sh
+      #   args:
+      #     - "{task_id}"
+      #     - "{decomposition.strategy}"
+      # - type: log_message
+      #   level: info
+      #   message: "Architecture designed and feature branch created for task {task_id}"
     next: create_technical_specs
-    timeout_secs: 420
+    timeout_secs: 600
 
   - id: create_technical_specs
     role: technical-requirements-specialist
@@ -271,25 +273,27 @@ steps:
           - implementation_phases
           - required_agents
           - feature_branch
-    pre_hooks:
+    # pre_hooks:
       # Checkout and prepare feature branch worktree
-      - type: run_script
-        script_path: scripts/prepare_feature_worktree.sh
-        args:
-          - "{task_id}"
-          - "feature/{task_id}"
-    post_hooks:
+      # TODO: Implement scripts/prepare_feature_worktree.sh
+      # - type: run_script
+      #   script_path: scripts/prepare_feature_worktree.sh
+      #   args:
+      #     - "{task_id}"
+      #     - "feature/{task_id}"
+    # post_hooks:
       # Store technical specs in memory
-      - type: run_script
-        script_path: scripts/store_technical_specs.sh
-        args:
-          - "{task_id}"
-          - "technical_specs"
-      - type: log_message
-        level: info
-        message: "Technical specifications created for {components.length} components"
+      # TODO: Implement scripts/store_technical_specs.sh
+      # - type: run_script
+      #   script_path: scripts/store_technical_specs.sh
+      #   args:
+      #     - "{task_id}"
+      #     - "technical_specs"
+      # - type: log_message
+      #   level: info
+      #   message: "Technical specifications created for {components.length} components"
     next: create_task_plan
-    timeout_secs: 480
+    timeout_secs: 600
 
   - id: create_task_plan
     role: task-planner
@@ -378,24 +382,25 @@ steps:
         required:
           - tasks
           - execution_order
-    post_hooks:
+    # post_hooks:
       # Create task branches and worktrees for tasks that need them
-      - type: run_script
-        script_path: scripts/create_task_worktrees.sh
-        args:
-          - "{task_id}"
-          - "tasks_json"
+      # TODO: Implement scripts/create_task_worktrees.sh and scripts/spawn_implementation_tasks.sh
+      # - type: run_script
+      #   script_path: scripts/create_task_worktrees.sh
+      #   args:
+      #     - "{task_id}"
+      #     - "tasks_json"
       # Spawn implementation tasks via task queue
-      - type: run_script
-        script_path: scripts/spawn_implementation_tasks.sh
-        args:
-          - "{task_id}"
-          - "tasks_json"
-      - type: log_message
-        level: info
-        message: "Created {tasks.length} implementation tasks for execution"
+      # - type: run_script
+      #   script_path: scripts/spawn_implementation_tasks.sh
+      #   args:
+      #     - "{task_id}"
+      #     - "tasks_json"
+      # - type: log_message
+      #   level: info
+      #   message: "Created {tasks.length} implementation tasks for execution"
     next: monitor_implementation
-    timeout_secs: 360
+    timeout_secs: 420
 
   - id: monitor_implementation
     role: task-planner
@@ -456,15 +461,16 @@ steps:
           - total_tasks
           - completed
           - ready_for_merge
-    post_hooks:
+    # post_hooks:
       # Update task status in memory
-      - type: run_script
-        script_path: scripts/update_progress.sh
-        args:
-          - "{task_id}"
-          - "{progress_percentage}"
+      # TODO: Implement scripts/update_progress.sh
+      # - type: run_script
+      #   script_path: scripts/update_progress.sh
+      #   args:
+      #     - "{task_id}"
+      #     - "{progress_percentage}"
     next: prepare_merge
-    timeout_secs: 180
+    timeout_secs: 300
 
   - id: prepare_merge
     role: git-worktree-merge-orchestrator
@@ -522,67 +528,42 @@ steps:
           - ready_to_merge
           - verification_results
           - branches_to_merge
-    pre_hooks:
+    # pre_hooks:
       # Run comprehensive test suite
-      - type: run_script
-        script_path: scripts/run_all_tests.sh
-        args:
-          - "{task_id}"
+      # TODO: Implement scripts/run_all_tests.sh and scripts/quality_checks.sh
+      # - type: run_script
+      #   script_path: scripts/run_all_tests.sh
+      #   args:
+      #     - "{task_id}"
       # Run quality checks
-      - type: run_script
-        script_path: scripts/quality_checks.sh
-        args:
-          - "{task_id}"
-    post_hooks:
+      # - type: run_script
+      #   script_path: scripts/quality_checks.sh
+      #   args:
+      #     - "{task_id}"
+    # post_hooks:
       # Merge all task branches to feature branch
-      - type: run_script
-        script_path: scripts/merge_task_branches.sh
-        args:
-          - "{task_id}"
-          - "branches_json"
+      # TODO: Implement scripts/merge_task_branches.sh and scripts/cleanup_all_worktrees.sh
+      # - type: run_script
+      #   script_path: scripts/merge_task_branches.sh
+      #   args:
+      #     - "{task_id}"
+      #     - "branches_json"
       # Merge feature branch to main
-      - type: merge_branch
-        source: "feature/{task_id}"
-        target: "main"
-        strategy: auto
+      # - type: merge_branch
+      #   source: "feature/{task_id}"
+      #   target: "main"
+      #   strategy: auto
       # Clean up all worktrees and branches
-      - type: run_script
-        script_path: scripts/cleanup_all_worktrees.sh
-        args:
-          - "{task_id}"
+      # - type: run_script
+      #   script_path: scripts/cleanup_all_worktrees.sh
+      #   args:
+      #     - "{task_id}"
       # Create release tag
-      - type: create_tag
-        name: "release/{task_id}"
-        message: "Completed: {gather_requirements.problem_statement}"
+      # - type: create_tag
+      #   name: "release/{task_id}"
+      #   message: "Completed: {gather_requirements.problem_statement}"
       # Final status log
-      - type: log_message
-        level: info
-        message: "Successfully completed full workflow for task {task_id} - merged to main"
+      # - type: log_message
+      #   level: info
+      #   message: "Successfully completed full workflow for task {task_id} - merged to main"
     timeout_secs: 300
-
-validation_rules:
-  - step_id: gather_requirements
-    rule_type:
-      type: json_schema
-    error_message: "Requirements must include problem statement, functional requirements, and success criteria"
-
-  - step_id: design_architecture
-    rule_type:
-      type: json_schema
-    error_message: "Architecture must specify components and decomposition strategy"
-
-  - step_id: create_technical_specs
-    rule_type:
-      type: json_schema
-    error_message: "Technical specs must include components, phases, and required agents"
-
-  - step_id: create_task_plan
-    rule_type:
-      type: json_schema
-    error_message: "Task plan must include tasks array with agent assignments and execution order"
-
-  - step_id: prepare_merge
-    rule_type:
-      type: custom_validator
-      name: merge_readiness
-    error_message: "Cannot merge - not all verification checks passed"

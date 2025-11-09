@@ -19,6 +19,12 @@ Decompose complex tasks into atomic, independently executable units with explici
 
 **IMPORTANT:** This agent is designed to work within the `technical_feature_workflow` chain. Complete steps 1-9 and output the task plan. The chain's post-hook will spawn the actual implementation tasks.
 
+**CRITICAL OUTPUT REQUIREMENT:**
+- Your final output MUST be ONLY raw JSON
+- Do NOT include any markdown formatting, code blocks, or explanatory text
+- The output validator expects pure JSON starting with `{` and ending with `}`
+- Any markdown or extra text will cause validation to fail
+
 1. **Load Technical Specs**: Retrieve from memory namespace `task:{tech_spec_id}:technical_specs`
 
 2. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
@@ -77,6 +83,10 @@ Decompose complex tasks into atomic, independently executable units with explici
 8. **Build Dependency Graph**: Establish task prerequisites and execution order
 
 9. **Complete**: Output task plan JSON (see Output Format below) and stop
+   - **CRITICAL**: Output ONLY the raw JSON object - no markdown code blocks, no explanations, no summaries
+   - **CRITICAL**: Do NOT wrap JSON in markdown code blocks like ```json
+   - **CRITICAL**: Do NOT add any text before or after the JSON
+   - The output should start with `{` and end with `}`
 
 **NOTE:**
 - Do NOT spawn implementation tasks manually - the chain's post-hook `spawn_implementation_tasks.sh` handles this
@@ -373,8 +383,20 @@ Task branch merged to feature branch, worktree cleaned up
 
 ## Output Format
 
-**CRITICAL:** Output the task plan as JSON. The chain's post-hook will read this JSON and spawn the actual tasks.
+**CRITICAL:** Output the task plan as raw JSON - NO markdown, NO explanations, NO summaries.
 
+**WRONG - Do NOT do this:**
+```markdown
+## Task Planning Complete
+
+I've created 21 tasks...
+
+```json
+{...}
+```
+```
+
+**CORRECT - Do this:**
 ```json
 {
   "status": "completed",

@@ -190,7 +190,10 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
                 .with_writer(std::io::stderr) // Write to stderr so it can be captured
                 .with_ansi(false) // Disable colors for log files
         )
-        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        )
         .init();
 
     tracing::info!("Starting Abathur swarm daemon with max_agents={}", max_agents);
@@ -401,8 +404,9 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
         crate::services::PromptChainService::new()
             .with_hook_executor(hook_executor)
             .with_substrate_registry(substrate_registry.clone())
+            .with_task_queue_service(task_queue_service.clone())
     );
-    eprintln!("Prompt chain system initialized");
+    eprintln!("Prompt chain system initialized (task spawning enabled)");
 
     // Create AgentExecutor with substrate registry, agent metadata, and chain support
     let agent_executor = Arc::new(AgentExecutor::new(

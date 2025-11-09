@@ -111,6 +111,9 @@ impl TaskRepositoryImpl {
                 .as_ref()
                 .and_then(|s| serde_json::from_str(s).ok()),
             chain_id: row.get("chain_id"),
+            chain_step_index: row
+                .get::<Option<i64>, _>("chain_step_index")
+                .unwrap_or(0) as usize,
         })
     }
 }
@@ -153,6 +156,7 @@ impl TaskRepository for TaskRepositoryImpl {
         let workflow_expectations = task.workflow_expectations
             .as_ref()
             .and_then(|e| serde_json::to_string(e).ok());
+        let chain_step_index = task.chain_step_index as i64;
 
         sqlx::query!(
             r#"
@@ -165,9 +169,9 @@ impl TaskRepository for TaskRepositoryImpl {
                 deadline, estimated_duration_seconds, feature_branch, task_branch,
                 worktree_path, validation_requirement, validation_task_id,
                 validating_task_id, remediation_count, is_remediation,
-                workflow_state, workflow_expectations, chain_id
+                workflow_state, workflow_expectations, chain_id, chain_step_index
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             id,
             task.summary,
@@ -205,7 +209,8 @@ impl TaskRepository for TaskRepositoryImpl {
             task.is_remediation,
             workflow_state,
             workflow_expectations,
-            task.chain_id
+            task.chain_id,
+            chain_step_index
         )
         .execute(&self.pool)
         .await?;

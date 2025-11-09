@@ -580,6 +580,10 @@ Agent Type: {}
             vars.insert("task_branch".to_string(), task_branch.clone());
         }
 
+        if let Some(ref worktree_path) = task.worktree_path {
+            vars.insert("worktree_path".to_string(), worktree_path.clone());
+        }
+
         // Branch-level variables
         if let Some(ref branch_ctx) = context.branch_context {
             vars.insert("branch_name".to_string(), branch_ctx.branch_name.clone());

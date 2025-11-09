@@ -139,7 +139,8 @@ pub struct PromptStep {
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "serialize_duration",
-        deserialize_with = "deserialize_duration"
+        deserialize_with = "deserialize_duration",
+        rename = "timeout_secs"
     )]
     pub timeout: Option<Duration>,
     /// Hook actions to execute before this step

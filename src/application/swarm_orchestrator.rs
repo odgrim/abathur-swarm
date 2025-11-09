@@ -405,7 +405,13 @@ impl SwarmOrchestrator {
                         // Try to get a ready task
                         match task_coordinator.get_next_ready_task().await {
                             Ok(Some(task)) => {
-                                debug!(task_id = %task.id, "Found ready task");
+                                info!(
+                                    task_id = %task.id,
+                                    agent_type = %task.agent_type,
+                                    summary = %task.summary,
+                                    priority = task.calculated_priority,
+                                    "Picked up task for execution"
+                                );
 
                                 // Spawn agent worker for this task
                                 if let Err(e) = Self::spawn_agent_worker(
@@ -430,11 +436,26 @@ impl SwarmOrchestrator {
                         }
                     }
 
-                    // Process agent completion events
+                    // Process agent completion events (for stats and worker cleanup only)
+                    // Note: Task status is updated IMMEDIATELY in the spawned task, not here
                     Some(event) = agent_event_rx.recv() => {
                         match event {
                             AgentEvent::TaskCompleted { agent_id, task_id } => {
-                                info!(%agent_id, %task_id, "Agent completed task");
+                                // Fetch task details for logging
+                                match task_coordinator.get_task(task_id).await {
+                                    Ok(task) => {
+                                        info!(
+                                            agent_id = %agent_id,
+                                            task_id = %task_id,
+                                            agent_type = %task.agent_type,
+                                            summary = %task.summary,
+                                            "Task completed successfully (status already updated)"
+                                        );
+                                    }
+                                    Err(_) => {
+                                        info!(%agent_id, %task_id, "Task completed successfully (status already updated)");
+                                    }
+                                }
 
                                 // Remove worker from tracking
                                 workers.write().await.remove(&agent_id);
@@ -442,13 +463,28 @@ impl SwarmOrchestrator {
                                 // Increment processed counter
                                 *tasks_processed.write().await += 1;
 
-                                // Handle task completion (trigger dependents)
-                                if let Err(e) = task_coordinator.handle_task_completion(task_id).await {
-                                    error!(error = ?e, %task_id, "Failed to handle task completion");
-                                }
+                                // NOTE: Task status, hooks, and dependent triggering already handled
+                                // in the spawned task immediately after subprocess exit
                             }
                             AgentEvent::TaskFailed { agent_id, task_id, error } => {
-                                warn!(%agent_id, %task_id, %error, "Agent failed task");
+                                // Fetch task details for logging
+                                match task_coordinator.get_task(task_id).await {
+                                    Ok(task) => {
+                                        warn!(
+                                            agent_id = %agent_id,
+                                            task_id = %task_id,
+                                            agent_type = %task.agent_type,
+                                            summary = %task.summary,
+                                            retry_count = task.retry_count,
+                                            max_retries = task.max_retries,
+                                            error = %error,
+                                            "Task failed (status already updated)"
+                                        );
+                                    }
+                                    Err(_) => {
+                                        warn!(%agent_id, %task_id, %error, "Task failed (status already updated)");
+                                    }
+                                }
 
                                 // Remove worker from tracking
                                 workers.write().await.remove(&agent_id);
@@ -456,18 +492,16 @@ impl SwarmOrchestrator {
                                 // Increment failed counter
                                 *tasks_failed.write().await += 1;
 
-                                // Handle task failure
-                                if let Err(e) = task_coordinator.handle_task_failure(task_id, error).await {
-                                    error!(error = ?e, %task_id, "Failed to handle task failure");
-                                }
+                                // NOTE: Task status, error message, retry logic already handled
+                                // in the spawned task immediately after subprocess exit
                             }
                             AgentEvent::ValidationRequested { agent_id, task_id } => {
-                                info!(%agent_id, %task_id, "Validation requested for task");
+                                info!(%agent_id, %task_id, "Validation requested for task (status already updated)");
 
                                 // Remove worker from tracking
                                 workers.write().await.remove(&agent_id);
 
-                                // Task is now AwaitingValidation status
+                                // Task is now AwaitingValidation status (already updated in spawned task)
                                 // Validation task will run via normal task queue
                                 // Don't increment completed counter yet - wait for validation
                                 info!(%task_id, "Task awaiting validation, validation task will run next");
@@ -541,8 +575,10 @@ impl SwarmOrchestrator {
             // Execute task (automatically detects and executes prompt chains if chain_id is present)
             let result = agent_executor.execute_task(&task).await;
 
-            // Determine event based on execution result and validation requirements
-            let event = match result {
+            // CRITICAL: Update task status IMMEDIATELY after subprocess exits,
+            // BEFORE sending event to ensure database reflects reality
+            // even if event loop is not running or channel is full.
+            let event = match &result {
                 Ok(_output) => {
                     // Check if this agent type requires validation
                     use crate::domain::models::AgentContractRegistry;
@@ -552,8 +588,11 @@ impl SwarmOrchestrator {
 
                     match validation_req {
                         crate::domain::models::ValidationRequirement::None => {
-                            // No validation required - mark as completed
-                            info!(%task_id, agent_type = %task.agent_type, "No validation required");
+                            // No validation required - mark as completed IMMEDIATELY
+                            info!(%task_id, agent_type = %task.agent_type, "No validation required, marking as completed");
+                            if let Err(e) = task_coordinator.handle_task_completion(task_id).await {
+                                error!(%task_id, error = ?e, "Failed to mark task as completed");
+                            }
                             AgentEvent::TaskCompleted { agent_id, task_id }
                         }
 
@@ -562,23 +601,34 @@ impl SwarmOrchestrator {
                             info!(%task_id, agent_type = %task.agent_type, "Running contract validation");
                             match validate_task_completion(task_id, &task, &task_coordinator).await {
                                 Ok(ValidationResult::Passed) => {
-                                    info!(%task_id, "Contract validation passed");
+                                    info!(%task_id, "Contract validation passed, marking as completed");
+                                    if let Err(e) = task_coordinator.handle_task_completion(task_id).await {
+                                        error!(%task_id, error = ?e, "Failed to mark task as completed");
+                                    }
                                     AgentEvent::TaskCompleted { agent_id, task_id }
                                 }
                                 Ok(ValidationResult::Failed { reason }) => {
-                                    error!(%task_id, reason = %reason, "Contract validation failed");
+                                    error!(%task_id, reason = %reason, "Contract validation failed, marking as failed");
+                                    let error_msg = format!("Contract validation failed: {}", reason);
+                                    if let Err(e) = task_coordinator.handle_task_failure(task_id, error_msg.clone()).await {
+                                        error!(%task_id, error = ?e, "Failed to mark task as failed");
+                                    }
                                     AgentEvent::TaskFailed {
                                         agent_id,
                                         task_id,
-                                        error: format!("Contract validation failed: {}", reason),
+                                        error: error_msg,
                                     }
                                 }
                                 Err(e) => {
-                                    error!(%task_id, error = ?e, "Validation error");
+                                    error!(%task_id, error = ?e, "Validation error, marking as failed");
+                                    let error_msg = format!("Validation error: {}", e);
+                                    if let Err(err) = task_coordinator.handle_task_failure(task_id, error_msg.clone()).await {
+                                        error!(%task_id, error = ?err, "Failed to mark task as failed");
+                                    }
                                     AgentEvent::TaskFailed {
                                         agent_id,
                                         task_id,
-                                        error: format!("Validation error: {}", e),
+                                        error: error_msg,
                                     }
                                 }
                             }
@@ -589,15 +639,20 @@ impl SwarmOrchestrator {
                             info!(%task_id, agent_type = %task.agent_type, "Spawning validation task");
                             match spawn_validation_task(task_id, &task, &task_coordinator).await {
                                 Ok(validation_task_id) => {
-                                    info!(%task_id, %validation_task_id, "Validation task spawned");
+                                    info!(%task_id, %validation_task_id, "Validation task spawned, marking as awaiting validation");
+                                    // Task status is updated to AwaitingValidation in spawn_validation_task
                                     AgentEvent::ValidationRequested { agent_id, task_id }
                                 }
                                 Err(e) => {
-                                    error!(%task_id, error = ?e, "Failed to spawn validation task");
+                                    error!(%task_id, error = ?e, "Failed to spawn validation task, marking as failed");
+                                    let error_msg = format!("Failed to spawn validation: {}", e);
+                                    if let Err(err) = task_coordinator.handle_task_failure(task_id, error_msg.clone()).await {
+                                        error!(%task_id, error = ?err, "Failed to mark task as failed");
+                                    }
                                     AgentEvent::TaskFailed {
                                         agent_id,
                                         task_id,
-                                        error: format!("Failed to spawn validation: {}", e),
+                                        error: error_msg,
                                     }
                                 }
                             }
@@ -605,16 +660,21 @@ impl SwarmOrchestrator {
                     }
                 }
                 Err(e) => {
-                    error!(%task_id, error = ?e, "Task execution failed");
+                    error!(%task_id, error = ?e, "Task execution failed, marking as failed IMMEDIATELY");
+                    let error_msg = e.to_string();
+                    // Mark as failed IMMEDIATELY - don't wait for event loop
+                    if let Err(err) = task_coordinator.handle_task_failure(task_id, error_msg.clone()).await {
+                        error!(%task_id, error = ?err, "Failed to mark task as failed");
+                    }
                     AgentEvent::TaskFailed {
                         agent_id,
                         task_id,
-                        error: e.to_string(),
+                        error: error_msg,
                     }
                 }
             };
 
-            // Send event (don't fail if receiver dropped during shutdown)
+            // Send event for monitoring/stats (best-effort, don't fail if receiver dropped during shutdown)
             let _ = agent_event_tx.send(event).await;
 
             // Release semaphore permit (automatically dropped)
@@ -804,6 +864,7 @@ mod tests {
             workflow_state: None,
             workflow_expectations: None,
             chain_id: None,
+            chain_step_index: 0,
         }
     }
 

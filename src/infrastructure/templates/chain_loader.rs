@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Template structure for loading chains from YAML
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,8 +139,15 @@ impl ChainLoader {
             OutputFormatTemplate::Plain => OutputFormat::Plain,
         };
 
+        // TODO: TEMPORARY DEBUG - Remove this logging once timeout issue is resolved
+        debug!(
+            step_id = %template.id,
+            timeout_secs = ?template.timeout_secs,
+            "ChainLoader: Loading step template from YAML"
+        );
+
         let mut step = PromptStep::new(
-            template.id,
+            template.id.clone(),
             template.prompt,
             template.role,
             output_format,
@@ -151,7 +158,26 @@ impl ChainLoader {
         }
 
         if let Some(timeout_secs) = template.timeout_secs {
+            // TODO: TEMPORARY DEBUG - Remove this logging once timeout issue is resolved
+            info!(
+                step_id = %template.id,
+                timeout_secs = timeout_secs,
+                "ChainLoader: Setting step timeout from YAML"
+            );
             step = step.with_timeout(Duration::from_secs(timeout_secs));
+
+            // TODO: TEMPORARY DEBUG - Verify timeout was actually set
+            info!(
+                step_id = %template.id,
+                step_timeout_after_set = ?step.timeout,
+                "ChainLoader: Step timeout after with_timeout() call"
+            );
+        } else {
+            // TODO: TEMPORARY DEBUG - Remove this logging once timeout issue is resolved
+            warn!(
+                step_id = %template.id,
+                "ChainLoader: No timeout_secs in YAML, step will use default"
+            );
         }
 
         if !template.pre_hooks.is_empty() {

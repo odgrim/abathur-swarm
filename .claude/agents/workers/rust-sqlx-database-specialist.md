@@ -1,7 +1,7 @@
 ---
 name: rust-sqlx-database-specialist
 description: "Use proactively for implementing Rust async database layer with sqlx and SQLite following repository pattern. Keywords: sqlx, SQLite, async database, migrations, repository pattern, WAL mode, connection pooling, compile-time queries"
-model: thinking
+model: sonnet
 color: Purple
 tools:
   - Read

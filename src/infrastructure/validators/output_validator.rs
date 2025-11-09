@@ -39,41 +39,51 @@ impl OutputValidator {
     /// Handles formats like:
     /// - ```json\n{...}\n```
     /// - ```\n{...}\n```
+    /// - Text before code block\n```json\n{...}\n```
     fn strip_markdown_code_blocks(output: &str) -> String {
         let trimmed = output.trim();
 
-        // Check if wrapped in markdown code block
-        if trimmed.starts_with("```") && trimmed.ends_with("```") {
+        // Look for code block anywhere in the output (not just at the start)
+        if let Some(start_pos) = trimmed.find("```") {
             tracing::warn!(
                 input_length = trimmed.len(),
-                "Stripping markdown code blocks from output"
+                code_block_starts_at = start_pos,
+                "Found markdown code block in output"
             );
 
-            // Find the first newline after ```
-            let start = if let Some(pos) = trimmed.find('\n') {
-                pos + 1
+            // Find the closing ``` after the opening one
+            let search_start = start_pos + 3;
+            if let Some(end_offset) = trimmed[search_start..].find("```") {
+                let end_pos = search_start + end_offset;
+
+                // Extract content between the markers
+                let block_start = start_pos + 3;
+
+                // Skip the language identifier line if present (e.g., "json")
+                let content_start = if let Some(newline) = trimmed[block_start..end_pos].find('\n') {
+                    block_start + newline + 1
+                } else {
+                    block_start
+                };
+
+                let result = trimmed[content_start..end_pos].trim().to_string();
+                tracing::warn!(
+                    result_length = result.len(),
+                    result_preview = &result[..result.len().min(200)],
+                    "Stripped markdown code block: first 200 chars of result"
+                );
+                return result;
             } else {
-                3 // Just skip the ```
-            };
-
-            // Find the last ``` and go back to the newline before it
-            let end = trimmed.rfind("\n```").unwrap_or(trimmed.len() - 3);
-
-            let result = trimmed[start..end].trim().to_string();
-            tracing::warn!(
-                result_length = result.len(),
-                result_preview = &result[..result.len().min(200)],
-                "Stripped markdown: first 200 chars of result"
-            );
-            return result;
+                tracing::warn!(
+                    "Found opening ``` but no closing ```, treating as incomplete code block"
+                );
+            }
         }
 
         tracing::warn!(
             input_length = trimmed.len(),
-            starts_with_backticks = trimmed.starts_with("```"),
-            ends_with_backticks = trimmed.ends_with("```"),
             input_preview = &trimmed[..trimmed.len().min(200)],
-            "Output NOT wrapped in markdown, returning as-is"
+            "No markdown code blocks found, returning as-is"
         );
         output.to_string()
     }
@@ -104,7 +114,7 @@ impl OutputValidator {
     /// Validate JSON output against a schema
     pub fn validate_json(&self, output: &str, schema: &serde_json::Value) -> Result<bool> {
         // Log what we're validating for debugging
-        tracing::error!(
+        tracing::debug!(
             output_length = output.len(),
             output_preview = &output[..output.len().min(500)],
             "Validating JSON output against schema"

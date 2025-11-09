@@ -11,8 +11,8 @@ hooks:
   - id: auto-merge-successful-task-branch
     description: "Automatically spawn merge orchestrator when all tasks in a branch succeed"
     event:
-      on_branch_complete:
-        branch_type: task_branch
+      type: on_branch_complete
+      branch_type: task_branch
     conditions:
       - all_tasks_succeeded: true
         min_tasks_completed: 1
@@ -53,8 +53,8 @@ hooks:
   - id: notify-branch-failures
     description: "Spawn failure analyst when branch completes with failures"
     event:
-      on_branch_complete:
-        branch_type: task_branch
+      type: on_branch_complete
+      branch_type: task_branch
     conditions:
       - all_tasks_succeeded: false
         branch_pattern: "^task/.*"
@@ -95,8 +95,8 @@ hooks:
   - id: feature-branch-integration-test
     description: "Run integration tests when feature branch work completes"
     event:
-      on_branch_complete:
-        branch_type: feature_branch
+      type: on_branch_complete
+      branch_type: feature_branch
     conditions:
       - all_tasks_succeeded: true
         branch_pattern: "^feature/.*"
@@ -242,9 +242,10 @@ hooks:
     event:
       type: pre_start
     conditions:
-      - has_metadata_key: worktree_path
-        has_metadata_key: task_branch
-        has_metadata_key: feature_branch
+      - has_metadata_key:
+          - worktree_path
+          - task_branch
+          - feature_branch
     actions:
       - type: run_script
         script_path: ./.abathur/hooks/create_task_worktree.sh
@@ -311,7 +312,8 @@ hooks:
           - rust-testing-specialist
           - rust-validation-specialist
         task_status: completed
-        has_metadata_key: worktree_path
+        has_metadata_key:
+          - worktree_path
     actions:
       - type: spawn_task
         agent_type: rust-testing-specialist

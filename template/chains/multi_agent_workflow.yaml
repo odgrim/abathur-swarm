@@ -3,7 +3,7 @@ description: "Multi-agent workflow with worktree preparation and cleanup hooks"
 
 steps:
   - id: analyze_requirements
-    role: Requirements Analyst
+    role: requirements-gatherer
     prompt: |
       Analyze the following requirements and break them down into implementable tasks:
       {requirements}
@@ -60,7 +60,7 @@ steps:
     timeout_secs: 120
 
   - id: implement_first_task
-    role: Implementation Specialist
+    role: task-planner
     prompt: |
       Implement the first task from the analysis:
       {tasks}
@@ -122,7 +122,7 @@ steps:
     timeout_secs: 600
 
   - id: review_implementation
-    role: Code Reviewer
+    role: swarm-enhancement-agent
     prompt: |
       Review the following implementation:
       {previous_output}
@@ -179,7 +179,7 @@ steps:
     timeout_secs: 300
 
   - id: merge_if_approved
-    role: Merge Coordinator
+    role: git-worktree-merge-orchestrator
     prompt: |
       Based on the review results:
       {previous_output}

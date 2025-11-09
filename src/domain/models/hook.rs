@@ -80,6 +80,26 @@ pub struct HookCondition {
     /// Require specific agent types in completed tasks
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_agent_types_include: Option<Vec<String>>,
+
+    /// Require specific metadata keys to be present on the task
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_metadata_key: Option<Vec<String>>,
+
+    /// Match agent types by regex pattern
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_type_pattern: Option<String>,
+
+    /// Exclude specific agent types (used with agent_type_pattern)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude_agent_types: Option<Vec<String>>,
+
+    /// Match task status
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_status: Option<String>,
+
+    /// Minimum priority level
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority_min: Option<u8>,
 }
 
 impl Default for HookCondition {
@@ -94,6 +114,11 @@ impl Default for HookCondition {
             all_tasks_succeeded: None,
             min_tasks_completed: None,
             completed_agent_types_include: None,
+            has_metadata_key: None,
+            agent_type_pattern: None,
+            exclude_agent_types: None,
+            task_status: None,
+            priority_min: None,
         }
     }
 }

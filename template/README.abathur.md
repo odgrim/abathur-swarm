@@ -78,7 +78,7 @@ Create new agent definitions in `.claude/agents/`:
 ---
 name: my-custom-agent
 description: What this agent does
-model: thinking
+model: sonnet
 color: Blue
 tools: Read, Edit, Bash
 ---

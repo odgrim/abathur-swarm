@@ -1,7 +1,7 @@
 ---
 name: rust-http-api-client-specialist
 description: "Use proactively for implementing HTTP API clients in Rust with reqwest, rate limiting, and retry logic. Keywords: reqwest, HTTP client, rate limiting, token bucket, exponential backoff, retry logic, async HTTP, API client, REST API"
-model: thinking
+model: sonnet
 color: Cyan
 tools:
   - Read

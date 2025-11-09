@@ -39,7 +39,7 @@ pub async fn start_memory_server(db_path: String, port: u16) -> Result<()> {
     info!("Database initialized successfully");
 
     // Initialize vector search components (optional)
-    let (vector_store, chunker) = match initialize_vector_components(db.pool().clone()) {
+    let (vector_store, chunker) = match initialize_vector_components(db.pool().clone()).await {
         Ok((vs, ch)) => {
             info!("Vector search components initialized successfully");
             (Some(vs), Some(ch))
@@ -131,7 +131,7 @@ fn init_tracing() {
 }
 
 /// Initialize RAG service with embedding service, vector store, and chunker
-fn initialize_vector_components(
+async fn initialize_vector_components(
     pool: sqlx::SqlitePool,
 ) -> Result<(
     Arc<dyn crate::domain::ports::EmbeddingRepository>,
@@ -142,8 +142,9 @@ fn initialize_vector_components(
         .context("Failed to create embedding service")?;
     let embedding_service = Arc::new(embedding_service);
 
-    // Create vector store
+    // Create vector store (now async - initializes vec0 extension with fallback)
     let vector_store = VectorStore::new(Arc::new(pool), embedding_service.clone())
+        .await
         .context("Failed to create vector store")?;
     let vector_store: Arc<dyn crate::domain::ports::EmbeddingRepository> = Arc::new(vector_store);
 

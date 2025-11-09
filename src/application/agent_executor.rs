@@ -195,16 +195,16 @@ impl AgentExecutor {
         }
     }
 
-    /// Execute a task using a prompt chain
+    /// Execute a single step of a prompt chain
     ///
-    /// Loads the chain from a YAML file and executes all steps in sequence.
+    /// Loads the chain, executes the current step, and enqueues the next step if needed.
     ///
     /// # Arguments
-    /// * `task` - The task to execute
+    /// * `task` - The task to execute (contains chain_id and chain_step_index)
     /// * `chain_id` - ID of the chain template to load (e.g., "technical_feature_workflow")
     ///
     /// # Returns
-    /// * `Ok(String)` - Chain execution result as JSON
+    /// * `Ok(String)` - Step execution result as JSON
     /// * `Err(ExecutionError)` - Chain loading or execution failed
     async fn execute_with_chain(
         &self,
@@ -223,65 +223,192 @@ impl AgentExecutor {
                 ))
             })?;
 
+        let step_index = task.chain_step_index;
+
+        // Validate step index
+        if step_index >= chain.steps.len() {
+            return Err(ExecutionError::ExecutionFailed(format!(
+                "Invalid step index {} for chain '{}' (has {} steps)",
+                step_index,
+                chain_id,
+                chain.steps.len()
+            )));
+        }
+
+        let step = &chain.steps[step_index];
+
+        // TODO: TEMPORARY DEBUG - Remove this logging once timeout issue is resolved
+        info!(
+            task_id = %task.id,
+            step_id = %step.id,
+            step_timeout = ?step.timeout,
+            step_timeout_secs = step.timeout.as_ref().map(|d| d.as_secs()),
+            "AgentExecutor: About to execute chain step with timeout"
+        );
+
         info!(
             task_id = %task.id,
             chain_name = %chain.name,
-            steps = chain.steps.len(),
-            "Loaded prompt chain"
+            step_index = step_index,
+            step_id = %step.id,
+            total_steps = chain.steps.len(),
+            "Executing chain step {}/{}",
+            step_index + 1,
+            chain.steps.len()
         );
 
-        // Prepare initial input for the chain
-        let initial_input = serde_json::json!({
-            "task_id": task.id.to_string(),
-            "task_description": task.description,
-            "task_summary": task.summary,
-            "agent_type": task.agent_type,
-            "input_data": task.input_data,
+        // Prepare input for this step (from task.input_data or initial input)
+        let step_input = task.input_data.clone().unwrap_or_else(|| {
+            serde_json::json!({
+                "task_id": task.id.to_string(),
+                "task_description": task.description,
+                "task_summary": task.summary,
+            })
         });
 
-        // Execute the chain
-        let execution = self
+        // Execute this single step
+        let result = self
             .chain_service
-            .execute_chain_with_task(&chain, initial_input, Some(task))
+            .execute_single_step(&chain, step, &step_input, Some(task))
             .await
             .map_err(|e| {
                 ExecutionError::ExecutionFailed(format!(
-                    "Chain execution failed for '{}': {}",
-                    chain_id, e
+                    "Step {} execution failed for '{}': {}",
+                    step.id, chain_id, e
                 ))
             })?;
 
-        // Check if chain execution succeeded
-        use crate::domain::models::prompt_chain::ChainStatus;
-        match &execution.status {
-            ChainStatus::ValidationFailed(error) => {
-                return Err(ExecutionError::ExecutionFailed(format!(
-                    "Chain validation failed for '{}': {}",
-                    chain_id, error
-                )));
-            }
-            ChainStatus::Failed(error) => {
-                return Err(ExecutionError::ExecutionFailed(format!(
-                    "Chain execution failed for '{}': {}",
-                    chain_id, error
-                )));
-            }
-            ChainStatus::Completed => {
-                // Chain completed successfully
-            }
-            ChainStatus::Running => {
-                // Chain still running (shouldn't happen, but handle gracefully)
-                return Err(ExecutionError::ExecutionFailed(format!(
-                    "Chain '{}' returned with Running status (unexpected)",
-                    chain_id
-                )));
-            }
+        info!(
+            task_id = %task.id,
+            step_id = %step.id,
+            step_index = step_index,
+            output_length = result.output.len(),
+            "Chain step completed successfully"
+        );
+
+        // Enqueue the next step if there is one
+        let next_step_index = step_index + 1;
+        if next_step_index < chain.steps.len() {
+            info!(
+                task_id = %task.id,
+                next_step_index = next_step_index,
+                next_step_id = %chain.steps[next_step_index].id,
+                "Enqueueing next chain step"
+            );
+
+            self.enqueue_next_chain_step(task, &chain, next_step_index, &result.output)
+                .await
+                .map_err(|e| {
+                    ExecutionError::ExecutionFailed(format!(
+                        "Failed to enqueue next step: {}",
+                        e
+                    ))
+                })?;
+        } else {
+            info!(
+                task_id = %task.id,
+                chain_id = %chain_id,
+                "Chain execution complete (all steps finished)"
+            );
         }
 
-        // Return execution result as JSON
-        serde_json::to_string_pretty(&execution).map_err(|e| {
-            ExecutionError::ExecutionFailed(format!("Failed to serialize chain result: {}", e))
+        // Return step result as JSON
+        serde_json::to_string_pretty(&result).map_err(|e| {
+            ExecutionError::ExecutionFailed(format!("Failed to serialize step result: {}", e))
         })
+    }
+
+    /// Enqueue the next step of a chain as a new task
+    async fn enqueue_next_chain_step(
+        &self,
+        current_task: &Task,
+        chain: &crate::domain::models::prompt_chain::PromptChain,
+        next_step_index: usize,
+        previous_output: &str,
+    ) -> anyhow::Result<uuid::Uuid> {
+        use crate::domain::models::{DependencyType, TaskSource, TaskStatus};
+
+        let next_step = &chain.steps[next_step_index];
+
+        // Parse previous output as input_data for next step
+        let input_data = match serde_json::from_str(previous_output) {
+            Ok(value) => value,
+            Err(_) => {
+                // If not JSON, wrap it
+                serde_json::json!({
+                    "previous_output": previous_output,
+                    "previous_step_index": current_task.chain_step_index
+                })
+            }
+        };
+
+        let now = chrono::Utc::now();
+
+        // Create task for next step
+        let next_task = Task {
+            id: uuid::Uuid::new_v4(),
+            summary: format!(
+                "Chain: {} - Step {}/{}",
+                chain.name,
+                next_step_index + 1,
+                chain.steps.len()
+            ),
+            description: format!(
+                "Execute step '{}' of chain '{}'",
+                next_step.id, chain.id
+            ),
+            agent_type: next_step.role.clone(),
+            priority: current_task.priority,
+            calculated_priority: current_task.calculated_priority,
+            status: TaskStatus::Pending,
+            dependencies: Some(vec![current_task.id]), // Depend on current task
+            dependency_type: DependencyType::Sequential,
+            dependency_depth: current_task.dependency_depth + 1,
+            input_data: Some(input_data),
+            result_data: None,
+            error_message: None,
+            retry_count: 0,
+            max_retries: 3,
+            max_execution_timeout_seconds: 3600,
+            submitted_at: now,
+            started_at: None,
+            completed_at: None,
+            last_updated_at: now,
+            created_by: Some("chain-orchestrator".to_string()),
+            parent_task_id: current_task.parent_task_id,
+            session_id: current_task.session_id,
+            source: TaskSource::AgentPlanner,
+            deadline: current_task.deadline,
+            estimated_duration_seconds: None,
+            feature_branch: current_task.feature_branch.clone(),
+            task_branch: None,
+            worktree_path: None,
+            validation_requirement: crate::domain::models::ValidationRequirement::None,
+            validation_task_id: None,
+            validating_task_id: None,
+            remediation_count: 0,
+            is_remediation: false,
+            workflow_state: None,
+            workflow_expectations: None,
+            chain_id: current_task.chain_id.clone(),
+            chain_step_index: next_step_index,
+        };
+
+        // Get task queue service from chain service
+        let task_id = self
+            .chain_service
+            .submit_task(next_task)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to submit next step task: {}", e))?;
+
+        info!(
+            next_task_id = %task_id,
+            next_step_id = %next_step.id,
+            next_step_index = next_step_index,
+            "Enqueued next chain step"
+        );
+
+        Ok(task_id)
     }
 
     /// Execute a task with the configured timeout

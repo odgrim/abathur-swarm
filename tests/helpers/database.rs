@@ -16,6 +16,7 @@ pub async fn setup_test_db() -> SqlitePool {
 }
 
 /// Teardown test database
+#[allow(dead_code)]
 pub async fn teardown_test_db(pool: SqlitePool) {
     pool.close().await;
 }

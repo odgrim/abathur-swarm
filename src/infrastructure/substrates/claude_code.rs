@@ -375,36 +375,73 @@ impl LlmSubstrate for ClaudeCodeSubstrate {
                 .unwrap_or(self.config.default_timeout_secs),
         );
 
+        // TODO: TEMPORARY DEBUG - Remove this logging once timeout issue is resolved
+        tracing::info!(
+            task_id = %request.task_id,
+            request_timeout_secs = request.parameters.timeout_secs,
+            default_timeout_secs = self.config.default_timeout_secs,
+            final_timeout_secs = timeout_duration.as_secs(),
+            used_default = request.parameters.timeout_secs.is_none(),
+            "ClaudeCodeSubstrate: Timeout configuration for execution"
+        );
+
         // Read output with timeout
+        // IMPORTANT: Read stdout and stderr concurrently to avoid blocking
+        // if one stream fills up while we're reading the other
         let result = timeout(timeout_duration, async {
-            // Read stdout
-            let mut stdout_reader = BufReader::new(stdout);
-            let mut output = String::new();
-            let mut line = String::new();
+            // Spawn concurrent tasks to read stdout and stderr
+            let stdout_task = tokio::spawn(async move {
+                let mut stdout_reader = BufReader::new(stdout);
+                let mut output = String::new();
+                let mut line = String::new();
 
-            while stdout_reader.read_line(&mut line).await.map_err(|e| {
-                SubstrateError::ExecutionFailed(format!("Failed to read output: {}", e))
-            })? > 0 {
-                output.push_str(&line);
-                line.clear();
-            }
+                while stdout_reader.read_line(&mut line).await.map_err(|e| {
+                    SubstrateError::ExecutionFailed(format!("Failed to read output: {}", e))
+                })? > 0 {
+                    output.push_str(&line);
+                    line.clear();
+                }
 
-            // Read stderr for any errors
-            let mut stderr_reader = BufReader::new(stderr);
-            let mut errors = String::new();
-            let mut error_line = String::new();
+                Ok::<String, SubstrateError>(output)
+            });
 
-            while stderr_reader.read_line(&mut error_line).await.map_err(|e| {
-                SubstrateError::ExecutionFailed(format!("Failed to read stderr: {}", e))
-            })? > 0 {
-                errors.push_str(&error_line);
-                error_line.clear();
-            }
+            let stderr_task = tokio::spawn(async move {
+                let mut stderr_reader = BufReader::new(stderr);
+                let mut errors = String::new();
+                let mut error_line = String::new();
 
-            // Wait for process to complete
+                while stderr_reader.read_line(&mut error_line).await.map_err(|e| {
+                    SubstrateError::ExecutionFailed(format!("Failed to read stderr: {}", e))
+                })? > 0 {
+                    errors.push_str(&error_line);
+                    error_line.clear();
+                }
+
+                Ok::<String, SubstrateError>(errors)
+            });
+
+            // Wait for both reading tasks to complete
+            let (stdout_result, stderr_result) = tokio::try_join!(stdout_task, stderr_task)
+                .map_err(|e| SubstrateError::ExecutionFailed(format!("Task join error: {}", e)))?;
+
+            let output = stdout_result?;
+            let errors = stderr_result?;
+
+            // Wait for process to complete (should be nearly instant since stdout/stderr are closed)
+            tracing::debug!(
+                task_id = %request.task_id,
+                "Stdout and stderr reading complete, waiting for process exit"
+            );
+
             let status = child.wait().await.map_err(|e| {
                 SubstrateError::ExecutionFailed(format!("Failed to wait for process: {}", e))
             })?;
+
+            tracing::debug!(
+                task_id = %request.task_id,
+                exit_code = ?status.code(),
+                "Process exited"
+            );
 
             Ok::<_, SubstrateError>((output, errors, status))
         })

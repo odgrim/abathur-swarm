@@ -1024,6 +1024,7 @@ mod tests {
             workflow_state: None,
             workflow_expectations: None,
             chain_id: None,
+            chain_step_index: 0,
         }
     }
 

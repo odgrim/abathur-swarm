@@ -258,7 +258,7 @@ match task.agent_type.as_str() {
 
 Chains produce detailed logs at each step:
 ```
-INFO Executing step 1/6: gather_requirements (role: Requirements Analyst)
+INFO Executing step 1/6: gather_requirements (role: requirements-gatherer)
 INFO Executing 1 pre-hooks for step gather_requirements
 INFO Hook 1/1 executed successfully
 INFO Step gather_requirements completed successfully in 45.2s

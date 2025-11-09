@@ -97,7 +97,7 @@ Meta-agent responsible for spawning hyperspecialized agents on-demand when capab
 ---
 name: {language}-{domain}-specialist
 description: "Use proactively for [single micro-task] in {language} projects. Keywords: {language}, {domain}, [3-5 more keywords]"
-model: [thinking|sonnet|haiku]
+model: [opus|sonnet|haiku]
 color: [Red|Blue|Green|Yellow|Purple|Orange|Pink|Cyan]
 tools:
   - Read
