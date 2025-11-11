@@ -19,12 +19,6 @@ Decompose complex tasks into atomic, independently executable units with explici
 
 **IMPORTANT:** This agent is designed to work within the `technical_feature_workflow` chain. Complete steps 1-9 and output the task plan. The chain's post-hook will spawn the actual implementation tasks.
 
-**CRITICAL OUTPUT REQUIREMENT:**
-- Your final output MUST be ONLY raw JSON
-- Do NOT include any markdown formatting, code blocks, or explanatory text
-- The output validator expects pure JSON starting with `{` and ending with `}`
-- Any markdown or extra text will cause validation to fail
-
 1. **Load Technical Specs**: Retrieve from memory namespace `task:{tech_spec_id}:technical_specs`
 
 2. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
@@ -82,11 +76,7 @@ Decompose complex tasks into atomic, independently executable units with explici
 
 8. **Build Dependency Graph**: Establish task prerequisites and execution order
 
-9. **Complete**: Output task plan JSON (see Output Format below) and stop
-   - **CRITICAL**: Output ONLY the raw JSON object - no markdown code blocks, no explanations, no summaries
-   - **CRITICAL**: Do NOT wrap JSON in markdown code blocks like ```json
-   - **CRITICAL**: Do NOT add any text before or after the JSON
-   - The output should start with `{` and end with `}`
+9. **Complete**: Output task plan as specified by the chain prompt
 
 **NOTE:**
 - Do NOT spawn implementation tasks manually - the chain's post-hook `spawn_implementation_tasks.sh` handles this
@@ -381,66 +371,12 @@ Task branch merged to feature branch, worktree cleaned up
 3. Validation tasks - depend on implementation task
 4. Merge tasks - depend on validation task
 
-## Output Format
+## Task Plan Components Reference
 
-**CRITICAL:** Output the task plan as raw JSON - NO markdown, NO explanations, NO summaries.
+When creating a comprehensive task plan, include:
 
-**WRONG - Do NOT do this:**
-```markdown
-## Task Planning Complete
-
-I've created 21 tasks...
-
-```json
-{...}
-```
-```
-
-**CORRECT - Do this:**
-```json
-{
-  "status": "completed",
-  "planning_stored": "task:{task_id}:planning",
-  "tasks": [
-    {
-      "id": "task-001",
-      "summary": "Implement User domain model",
-      "description": "Create User struct with validation logic...",
-      "agent_type": "rust-domain-models-specialist",
-      "phase": 1,
-      "estimated_effort": "small|medium|large",
-      "dependencies": [],
-      "deliverables": [
-        {"type": "code", "path": "src/domain/models/user.rs"},
-        {"type": "test", "path": "tests/unit/user_tests.rs"}
-      ],
-      "validation_criteria": [
-        "All fields properly typed and validated",
-        "Unit tests achieve >90% coverage",
-        "Follows domain model patterns"
-      ],
-      "needs_worktree": true
-    }
-  ],
-  "execution_order": [
-    {"batch": 1, "tasks": ["task-001", "task-002"], "can_parallelize": true},
-    {"batch": 2, "tasks": ["task-003"], "can_parallelize": false}
-  ],
-  "agent_workload": [
-    {
-      "agent_type": "rust-domain-models-specialist",
-      "task_count": 3,
-      "total_effort": "medium"
-    }
-  ],
-  "estimated_total_duration": "2-3 hours",
-  "critical_path": ["task-001", "task-005", "task-008"],
-  "summary": {
-    "total_tasks": N,
-    "components": ["..."],
-    "agents_needed": ["rust-domain-models-specialist", "rust-validation-specialist"],
-    "estimated_hours": N
-  },
-  "next_step": "The chain's post-hook will spawn these implementation tasks automatically"
-}
-```
+**Tasks Array**: Each task with id, summary, description, agent_type, phase, estimated_effort, dependencies, deliverables, validation_criteria, needs_worktree flag
+**Execution Order**: Batches of tasks with parallelization opportunities
+**Agent Workload**: Agent types needed, task counts per agent, total effort estimates
+**Estimated Duration**: Total time estimate and critical path
+**Summary**: Total task count, major components, agents needed, estimated hours

@@ -60,7 +60,7 @@ Third step in workflow (after technical-architect). Translate architectural guid
 
 8. **Store Specifications**: Save all technical decisions in memory
 
-9. **Complete**: Output JSON summary (see Output Format below) and stop
+9. **Complete**: Output technical specifications as specified by the chain prompt
 
 **NOTE:** Do NOT spawn task-planner tasks manually. The chain will automatically proceed to the next step.
 
@@ -131,20 +131,13 @@ You only need to determine the feature name and store it in memory for downstrea
 - **DO NOT spawn task-planner tasks manually** - the chain handles workflow progression
 - Suggest agent specializations in output for task-planner to use
 
-## Output Format
+## Technical Specifications Reference
 
-```json
-{
-  "status": "completed",
-  "specs_stored": "task:{task_id}:technical_specs",
-  "feature_branch": "{branch_name}",
-  "summary": {
-    "components_defined": ["..."],
-    "api_endpoints": N,
-    "data_models": N,
-    "implementation_phases": N,
-    "suggested_agents": ["rust-domain-models-specialist", "rust-service-layer-specialist"]
-  },
-  "next_step": "The chain will automatically proceed to task planning"
-}
-```
+When creating technical specifications, ensure comprehensive detail:
+
+**Components**: Language, framework, entry point, key modules
+**Data Models**: Entity names, fields with types and constraints, relationships
+**API Specifications**: Endpoints, methods, request/response schemas, authentication requirements
+**Implementation Phases**: Phase number, name, deliverables, estimated effort
+**Testing Requirements**: Unit tests, integration tests, performance targets
+**Agent Specializations**: Suggested agent types (language-prefixed), reasons, estimated task counts

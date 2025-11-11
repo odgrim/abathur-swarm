@@ -404,9 +404,10 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
         crate::services::PromptChainService::new()
             .with_hook_executor(hook_executor)
             .with_substrate_registry(substrate_registry.clone())
+            .with_agent_metadata_registry(agent_metadata_registry.clone())
             .with_task_queue_service(task_queue_service.clone())
     );
-    eprintln!("Prompt chain system initialized (task spawning enabled)");
+    eprintln!("Prompt chain system initialized (agent definitions + task spawning enabled)");
 
     // Create AgentExecutor with substrate registry, agent metadata, and chain support
     let agent_executor = Arc::new(AgentExecutor::new(

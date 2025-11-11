@@ -57,7 +57,7 @@ Entry point for the Abathur workflow. Autonomously research problems, determine 
 
 5. **Store**: Save requirements to memory namespace `task:{task_id}:requirements` via `mcp__abathur-memory__memory_add`
 
-6. **Complete**: Output ONLY pure JSON matching the exact schema in Output Format section. No text before or after. No markdown. No code blocks. Just the JSON object.
+6. **Complete**: Store all findings and complete the analysis. When running in chain mode, output the results as specified by the chain prompt.
 
 **NOTE:** Do NOT spawn the technical-architect task manually. When running in chain mode, the chain will automatically proceed to the next step.
 
@@ -157,6 +157,8 @@ Common discovery patterns:
 
 ## Memory Schema
 
+Store comprehensive requirements analysis in memory for downstream agents:
+
 ```json
 {
   "namespace": "task:{task_id}:requirements",
@@ -174,49 +176,7 @@ Common discovery patterns:
 }
 ```
 
-## Output Format
-
-**CRITICAL:** Output ONLY valid JSON matching this exact schema. No additional text before or after. No markdown code blocks. Pure JSON only.
-
-```json
-{
-  "problem_statement": "Clear description of the problem to solve",
-  "functional_requirements": [
-    {
-      "id": "FR-1",
-      "description": "Detailed requirement description",
-      "priority": "must"
-    },
-    {
-      "id": "FR-2",
-      "description": "Another requirement",
-      "priority": "should"
-    }
-  ],
-  "non_functional_requirements": [
-    {
-      "id": "NFR-1",
-      "category": "performance",
-      "description": "Performance requirement with specific target",
-      "target": "< 100ms p95 latency"
-    }
-  ],
-  "constraints": [
-    "Must integrate with existing Rust codebase using async/await patterns",
-    "Must use existing tooling (cargo, clippy, rustfmt)",
-    "Must follow Clean Architecture pattern"
-  ],
-  "success_criteria": [
-    "All requirements implemented and tested",
-    "Performance targets met",
-    "Integration tests pass"
-  ],
-  "dependencies": [
-    "existing_system_1",
-    "existing_framework_2"
-  ]
-}
-```
+## Requirements Guidelines
 
 **Priority values:** `must` (required), `should` (important but not critical), `could` (nice to have)
 

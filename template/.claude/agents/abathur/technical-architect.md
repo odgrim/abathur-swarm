@@ -115,18 +115,11 @@ When the architecture decomposes into distinct features/components, spawn multip
 11. **Assess Risks**: Identify technical risks with mitigation strategies
 
 12. **Output Result**:
-    - **CRITICAL**: Output MUST be valid JSON matching the exact schema shown in "Output Format" section
-    - **CRITICAL**: Output ONLY raw JSON - no markdown code blocks, no explanations, no summaries
-    - **CRITICAL**: Do NOT wrap JSON in markdown code blocks like ```json
-    - **CRITICAL**: The output should start with `{` and end with `}`
-    - **Mode 1 (single feature)**: Output architecture JSON with `decomposition.strategy: "single"`, chain will proceed automatically
+    - **Mode 1 (single feature)**: Complete architecture analysis, output as specified by chain prompt, chain will proceed automatically
     - **Mode 2 (multiple features)**:
       1. Spawn technical-requirements-specialist tasks (see Spawning Section)
       2. Collect spawned task IDs
-      3. Output architecture JSON with `decomposition.strategy: "multiple"` and include spawned task IDs
-    - Do NOT wrap output in status/metadata objects
-    - Do NOT include "status", "mode", or "next_step" fields
-    - Return ONLY the architecture JSON object with required fields: architecture_overview, components, decomposition
+      3. Complete architecture analysis and include spawned task IDs in output
 
 ## Decomposition Criteria
 
@@ -204,108 +197,13 @@ Each spawned task becomes an independent workflow that goes through: tech-spec â
 - **Mode 1 (single feature)**: Let chain proceed automatically
 - **Mode 2 (multiple features)**: Spawn tasks manually with `chain_id` set
 
-## Output Format
+## Architecture Components Reference
 
-**CRITICAL:** Output MUST match the chain's expected schema exactly. Return ONLY the JSON object with these required fields.
+When documenting architecture decisions, ensure comprehensive coverage:
 
-**Output ONLY raw JSON - no markdown, no explanations, no code blocks. The output validator expects pure JSON starting with `{` and ending with `}`.**
-
-### Mode 1 (Single Feature - Chain Continues)
-```json
-{
-  "architecture_overview": "High-level architectural description: {architectural_style} architecture with {major_components}. Extends existing {project_language} {architecture_pattern} pattern.",
-  "components": [
-    {
-      "name": "component_name",
-      "responsibility": "what it does",
-      "interfaces": ["interface1", "interface2"],
-      "dependencies": ["dep1", "dep2"]
-    }
-  ],
-  "technology_stack": [
-    {
-      "layer": "frontend|backend|database|infrastructure",
-      "technology": "specific_tech_name",
-      "justification": "Why this technology - prefer existing frameworks"
-    }
-  ],
-  "data_models": [
-    {
-      "entity": "EntityName",
-      "fields": ["field1", "field2", "field3"],
-      "relationships": ["has_many_other", "belongs_to_parent"]
-    }
-  ],
-  "api_contracts": [
-    {
-      "endpoint": "/api/resource",
-      "method": "GET|POST|PUT|DELETE",
-      "request_schema": {},
-      "response_schema": {}
-    }
-  ],
-  "decomposition": {
-    "strategy": "single",
-    "subprojects": [],
-    "rationale": "Single cohesive feature with <5 major deliverables, tightly coupled components"
-  },
-  "architectural_decisions": [
-    {
-      "decision": "Use existing framework X",
-      "rationale": "Already in use, proven in codebase",
-      "alternatives_considered": ["framework Y", "framework Z"]
-    }
-  ]
-}
-```
-
-### Mode 2 (Multiple Features - Tasks Spawned)
-When spawning multiple tasks, STILL output the same schema but with `strategy: "multiple"` and list spawned subprojects:
-
-```json
-{
-  "architecture_overview": "High-level architectural description decomposed into {N} distinct features: {feature_list}",
-  "components": [
-    {
-      "name": "feature_1_component",
-      "responsibility": "handles feature 1",
-      "interfaces": ["api", "events"],
-      "dependencies": []
-    },
-    {
-      "name": "feature_2_component",
-      "responsibility": "handles feature 2",
-      "interfaces": ["api"],
-      "dependencies": ["feature_1_component"]
-    }
-  ],
-  "technology_stack": [
-    {
-      "layer": "backend",
-      "technology": "existing_framework",
-      "justification": "Already in use"
-    }
-  ],
-  "data_models": [
-    {
-      "entity": "SharedEntity",
-      "fields": ["id", "created_at"],
-      "relationships": []
-    }
-  ],
-  "api_contracts": [],
-  "decomposition": {
-    "strategy": "multiple",
-    "subprojects": ["feature_1_name", "feature_2_name"],
-    "rationale": "2+ major features with clear boundaries, each >20 hours, parallel development possible",
-    "spawned_task_ids": ["{uuid_1}", "{uuid_2}"]
-  },
-  "architectural_decisions": [
-    {
-      "decision": "Decompose into separate features",
-      "rationale": "Clear boundaries and parallel development path",
-      "alternatives_considered": ["single monolithic implementation"]
-    }
-  ]
-}
-```
+**Components**: Name, responsibility, interfaces, dependencies
+**Technology Stack**: Layer, technology choice, justification (prefer existing frameworks)
+**Data Models**: Entity name, fields, relationships
+**API Contracts**: Endpoints, methods, request/response schemas
+**Decomposition**: Strategy (single/multiple), subprojects list, rationale
+**Architectural Decisions**: Decision, rationale, alternatives considered

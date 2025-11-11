@@ -6,13 +6,14 @@
 use crate::domain::models::prompt_chain::{
     ChainExecution, PromptChain, PromptStep, StepResult, ValidationRule,
 };
-use crate::domain::models::{HookContext, Task};
+use crate::domain::models::{AgentMetadata, AgentMetadataRegistry, HookContext, Task};
 use crate::domain::ports::{ExecutionParameters, SubstrateRequest, TaskQueueService};
 use crate::infrastructure::substrates::SubstrateRegistry;
 use crate::infrastructure::validators::OutputValidator;
 use crate::services::HookExecutor;
 use anyhow::{Context, Result};
-use std::sync::Arc;
+use std::fmt::Write as _;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, error, info, instrument, warn};
@@ -49,6 +50,7 @@ pub struct PromptChainService {
     validator: Arc<OutputValidator>,
     hook_executor: Option<Arc<HookExecutor>>,
     substrate_registry: Option<Arc<SubstrateRegistry>>,
+    agent_metadata_registry: Option<Arc<Mutex<AgentMetadataRegistry>>>,
     task_queue_service: Option<Arc<dyn TaskQueueService>>,
     max_retries: u32,
     default_timeout: Duration,
@@ -61,6 +63,7 @@ impl PromptChainService {
             validator: Arc::new(OutputValidator::new()),
             hook_executor: None,
             substrate_registry: None,
+            agent_metadata_registry: None,
             task_queue_service: None,
             max_retries: 3,
             default_timeout: Duration::from_secs(300), // 5 minutes
@@ -73,6 +76,7 @@ impl PromptChainService {
             validator,
             hook_executor: None,
             substrate_registry: None,
+            agent_metadata_registry: None,
             task_queue_service: None,
             max_retries: 3,
             default_timeout: Duration::from_secs(300),
@@ -88,6 +92,12 @@ impl PromptChainService {
     /// Set the substrate registry for executing prompts via LLM substrates
     pub fn with_substrate_registry(mut self, substrate_registry: Arc<SubstrateRegistry>) -> Self {
         self.substrate_registry = Some(substrate_registry);
+        self
+    }
+
+    /// Set the agent metadata registry for loading agent definitions
+    pub fn with_agent_metadata_registry(mut self, agent_metadata_registry: Arc<Mutex<AgentMetadataRegistry>>) -> Self {
+        self.agent_metadata_registry = Some(agent_metadata_registry);
         self
     }
 
@@ -449,6 +459,70 @@ impl PromptChainService {
         ))
     }
 
+    /// Build complete prompt by combining agent definition with step-specific prompt
+    ///
+    /// This matches the behavior of AgentExecutor.build_prompt() to ensure consistent
+    /// prompt construction across single-agent and chain executions.
+    fn build_chain_step_prompt(&self, step_prompt: &str, role: &str) -> String {
+        let mut full_prompt = String::new();
+
+        // Load the agent definition if registry is available
+        if let Some(ref registry) = self.agent_metadata_registry {
+            if let Ok(agent_file_path) = registry
+                .lock()
+                .unwrap()
+                .get_agent_file_path(role)
+            {
+                // Read the agent file and extract the prompt content
+                match std::fs::read_to_string(&agent_file_path) {
+                    Ok(file_content) => {
+                        match AgentMetadata::extract_prompt_content(&file_content) {
+                            Ok(agent_prompt) => {
+                                // Add the full agent definition as base prompt
+                                let _ = write!(full_prompt, "{}\n\n", agent_prompt);
+
+                                debug!(
+                                    role = %role,
+                                    agent_prompt_length = agent_prompt.len(),
+                                    "Loaded agent definition for chain step"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    role = %role,
+                                    error = %e,
+                                    "Failed to extract agent prompt content, using step prompt only"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            role = %role,
+                            error = %e,
+                            "Failed to read agent file, using step prompt only"
+                        );
+                    }
+                }
+            } else {
+                warn!(
+                    role = %role,
+                    "Could not find agent file, using step prompt only"
+                );
+            }
+        } else {
+            debug!(
+                role = %role,
+                "No agent metadata registry configured, using step prompt only"
+            );
+        }
+
+        // Add the step-specific prompt (task instructions from chain YAML)
+        let _ = write!(full_prompt, "{}", step_prompt);
+
+        full_prompt
+    }
+
     /// Execute a prompt via LLM substrate (Claude Code CLI or Anthropic API)
     async fn execute_prompt(&self, prompt: &str, role: &str, timeout_secs: u64) -> Result<String> {
         // TODO: TEMPORARY DEBUG - Remove this logging once timeout issue is resolved
@@ -460,23 +534,33 @@ impl PromptChainService {
 
         debug!("Executing prompt with role: {}", role);
 
+        // Build complete prompt with agent definition + step prompt
+        let full_prompt = self.build_chain_step_prompt(prompt, role);
+
+        debug!(
+            role = %role,
+            step_prompt_length = prompt.len(),
+            full_prompt_length = full_prompt.len(),
+            "Built complete prompt with agent definition"
+        );
+
         // Check if substrate registry is configured
         let Some(ref registry) = self.substrate_registry else {
             warn!("No substrate registry configured, returning mock response");
             // Fallback to mock response if no substrate available (for tests)
             return Ok(serde_json::json!({
                 "role": role,
-                "response": format!("Mock response (no substrate): {}", prompt),
+                "response": format!("Mock response (no substrate): {}", full_prompt),
                 "timestamp": chrono::Utc::now().to_rfc3339()
             })
             .to_string());
         };
 
-        // Create a substrate request
+        // Create a substrate request with full prompt
         let request = SubstrateRequest {
             task_id: uuid::Uuid::new_v4(), // Generate ephemeral task ID for this step
             agent_type: role.to_string(),
-            prompt: prompt.to_string(),
+            prompt: full_prompt,
             context: None,
             parameters: ExecutionParameters {
                 model: None, // Use default model for role
