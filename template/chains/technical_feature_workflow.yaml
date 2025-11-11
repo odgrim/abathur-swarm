@@ -5,25 +5,10 @@ steps:
   - id: gather_requirements
     role: requirements-gatherer
     prompt: |
-      Analyze the following task and gather comprehensive requirements:
-
       Task: {task_description}
       Project Context: {project_context}
 
-      Research:
-      1. Search existing codebase for similar patterns and conventions
-      2. Research industry best practices for this type of task
-      3. Check for prior work in memory
-      4. Identify constraints and success criteria
-
-      Determine:
-      - Functional requirements (what the system must do)
-      - Non-functional requirements (performance, scalability, security)
-      - Technical constraints
-      - Success criteria
-      - Dependencies on existing systems
-
-      Return comprehensive requirements in JSON:
+      Output the requirements analysis in JSON format:
       {
         "problem_statement": "Clear description of the problem to solve",
         "functional_requirements": [
@@ -91,23 +76,10 @@ steps:
   - id: design_architecture
     role: technical-architect
     prompt: |
-      Based on these requirements, design the system architecture:
+      Requirements from previous step:
       {previous_output}
 
-      Analyze:
-      1. Research architectural patterns suitable for these requirements
-      2. Evaluate technology choices based on project stack and constraints
-      3. Identify if this requires multiple subprojects or single implementation
-      4. Determine component boundaries and interfaces
-
-      Design:
-      - High-level architecture (components, data flow, integration points)
-      - Technology recommendations with justification
-      - Data models and schemas
-      - API contracts and interfaces
-      - Decomposition strategy (single project vs multiple subprojects)
-
-      Return architecture design in JSON:
+      Output the architecture design in JSON format:
       {
         "architecture_overview": "High-level description",
         "components": [
@@ -184,20 +156,10 @@ steps:
   - id: create_technical_specs
     role: technical-requirements-specialist
     prompt: |
-      Translate this architecture into detailed technical specifications:
-
       Requirements: {gather_requirements.output}
       Architecture: {previous_output}
 
-      Create:
-      1. Detailed technical specifications for each component
-      2. Data models with field types and constraints
-      3. API specifications with request/response schemas
-      4. Phased implementation plan
-      5. Testing requirements
-      6. List of specialized agents needed
-
-      Return technical specifications in JSON:
+      Output the technical specifications in JSON format:
       {
         "components": [
           {
@@ -298,17 +260,9 @@ steps:
   - id: create_task_plan
     role: task-planner
     prompt: |
-      Break down the technical specifications into atomic, executable tasks:
-
       Technical Specs: {previous_output}
 
-      For each component and phase, create:
-      1. Atomic tasks with clear deliverables
-      2. Task dependencies (what must complete before what)
-      3. Agent assignments based on required_agents
-      4. Validation criteria for each task
-
-      Return task plan in JSON:
+      Output the task plan in JSON format:
       {
         "tasks": [
           {
@@ -405,17 +359,9 @@ steps:
   - id: monitor_implementation
     role: task-planner
     prompt: |
-      Monitor the implementation tasks that were spawned:
-
       Task Plan: {previous_output}
 
-      Check:
-      1. Status of all spawned tasks
-      2. Any blocked or failed tasks
-      3. Overall progress
-      4. Quality of completed work
-
-      Return monitoring status in JSON:
+      Output the monitoring status in JSON format:
       {
         "total_tasks": 10,
         "completed": 7,
@@ -475,18 +421,9 @@ steps:
   - id: prepare_merge
     role: git-worktree-merge-orchestrator
     prompt: |
-      Prepare for merging all implementation work:
-
       Implementation Status: {previous_output}
 
-      Verify:
-      1. All tasks completed successfully
-      2. All tests passing
-      3. Code quality meets standards
-      4. No conflicts with main branch
-      5. Documentation updated
-
-      Return merge readiness assessment in JSON:
+      Output the merge readiness assessment in JSON format:
       {
         "ready_to_merge": true,
         "verification_results": {
@@ -567,3 +504,30 @@ steps:
       #   level: info
       #   message: "Successfully completed full workflow for task {task_id} - merged to main"
     timeout_secs: 300
+
+validation_rules:
+  - step_id: gather_requirements
+    rule_type:
+      type: json_schema
+    error_message: "Requirements must include problem statement, functional requirements, and success criteria"
+
+  - step_id: design_architecture
+    rule_type:
+      type: json_schema
+    error_message: "Architecture must specify components and decomposition strategy"
+
+  - step_id: create_technical_specs
+    rule_type:
+      type: json_schema
+    error_message: "Technical specs must include components, phases, and required agents"
+
+  - step_id: create_task_plan
+    rule_type:
+      type: json_schema
+    error_message: "Task plan must include tasks array with agent assignments and execution order"
+
+  - step_id: prepare_merge
+    rule_type:
+      type: custom_validator
+      name: merge_readiness
+    error_message: "Cannot merge - not all verification checks passed"
