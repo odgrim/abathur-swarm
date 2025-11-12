@@ -85,6 +85,10 @@ fi
 
 log_info "Using feature branch: $FEATURE_BRANCH"
 
+# Extract feature name from feature branch (remove "feature/" prefix)
+FEATURE_NAME=$(echo "$FEATURE_BRANCH" | sed 's|^feature/||')
+log_info "Feature name: $FEATURE_NAME"
+
 # Create worktrees directory
 mkdir -p .abathur/worktrees/tasks
 
@@ -109,9 +113,10 @@ while IFS= read -r task_json; do
     SUBTASK_ID=$(echo "$task_json" | jq -r '.id')
     SUBTASK_SUMMARY=$(echo "$task_json" | jq -r '.summary')
 
-    # Create sanitized task branch name
-    TASK_BRANCH="task/${SUBTASK_ID}"
-    TASK_PATH=$(echo "$SUBTASK_ID" | sed 's|/|-|g')
+    # Create sanitized task branch name with feature name prefix
+    TASK_BRANCH="task/${FEATURE_NAME}/${SUBTASK_ID}"
+    TASK_PATH="${FEATURE_NAME}-${SUBTASK_ID}"
+    TASK_PATH=$(echo "$TASK_PATH" | sed 's|/|-|g')
     WORKTREE_PATH=".abathur/worktrees/tasks/${TASK_PATH}"
 
     log_info "Processing task: $SUBTASK_ID"

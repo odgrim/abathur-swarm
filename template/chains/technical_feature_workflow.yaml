@@ -62,14 +62,13 @@ steps:
           - problem_statement
           - functional_requirements
           - success_criteria
-    # post_hooks:
+    post_hooks:
       # Store requirements in memory for future reference
-      # TODO: Implement scripts/store_requirements.sh
-      # - type: run_script
-      #   script_path: scripts/store_requirements.sh
-      #   args:
-      #     - "{task_id}"
-      #     - "requirements"
+      - type: run_script
+        script_path: .abathur/scripts/store_requirements.sh
+        args:
+          - "{task_id}"
+          - "requirements"
     next: design_architecture
     timeout_secs: 600
 
@@ -81,6 +80,7 @@ steps:
 
       Output the architecture design in JSON format:
       {
+        "feature_name": "Short kebab-case name for this feature (e.g., user-authentication, payment-integration)",
         "architecture_overview": "High-level description",
         "components": [
           {
@@ -113,6 +113,8 @@ steps:
       schema:
         type: object
         properties:
+          feature_name:
+            type: string
           architecture_overview:
             type: string
           components:
@@ -130,34 +132,38 @@ steps:
             required:
               - strategy
         required:
+          - feature_name
           - architecture_overview
           - components
           - decomposition
-    # post_hooks:
+    post_hooks:
       # Store architecture in memory
-      # TODO: Implement scripts/store_architecture.sh and scripts/create_feature_branch.sh
-      # - type: run_script
-      #   script_path: scripts/store_architecture.sh
-      #   args:
-      #     - "{task_id}"
-      #     - "architecture"
+      - type: run_script
+        script_path: .abathur/scripts/store_architecture.sh
+        args:
+          - "{task_id}"
+          - "architecture"
       # Create feature branch for this work
-      # - type: run_script
-      #   script_path: scripts/create_feature_branch.sh
-      #   args:
-      #     - "{task_id}"
-      #     - "{decomposition.strategy}"
-      # - type: log_message
-      #   level: info
-      #   message: "Architecture designed and feature branch created for task {task_id}"
+      - type: run_script
+        script_path: .abathur/scripts/create_feature_branch.sh
+        args:
+          - "{task_id}"
+          - "{feature_name}"
+          - "{decomposition.strategy}"
+      - type: log_message
+        level: info
+        message: "Architecture designed and feature branch created for task {task_id}"
     next: create_technical_specs
     timeout_secs: 600
 
   - id: create_technical_specs
     role: technical-requirements-specialist
+    working_directory: ".abathur/worktrees/feature-{feature_name}"
     prompt: |
       Requirements: {gather_requirements.output}
       Architecture: {previous_output}
+
+      IMPORTANT: The feature branch is named "feature/{feature_name}" and uses worktree at ".abathur/worktrees/feature-{feature_name}"
 
       Output the technical specifications in JSON format:
       {
@@ -211,9 +217,7 @@ steps:
             "reason": "Implement async business logic",
             "estimated_tasks": 3
           }
-        ],
-        "feature_branch": "feature/{task_id}",
-        "branching_strategy": "task-per-worktree"
+        ]
       }
     expected_output:
       type: json
@@ -228,45 +232,44 @@ steps:
             type: object
           required_agents:
             type: array
-          feature_branch:
-            type: string
         required:
           - components
           - implementation_phases
           - required_agents
-          - feature_branch
-    # pre_hooks:
+    pre_hooks:
       # Checkout and prepare feature branch worktree
-      # TODO: Implement scripts/prepare_feature_worktree.sh
-      # - type: run_script
-      #   script_path: scripts/prepare_feature_worktree.sh
-      #   args:
-      #     - "{task_id}"
-      #     - "feature/{task_id}"
-    # post_hooks:
+      - type: run_script
+        script_path: .abathur/scripts/prepare_feature_worktree.sh
+        args:
+          - "{task_id}"
+          - "{feature_name}"
+    post_hooks:
       # Store technical specs in memory
-      # TODO: Implement scripts/store_technical_specs.sh
-      # - type: run_script
-      #   script_path: scripts/store_technical_specs.sh
-      #   args:
-      #     - "{task_id}"
-      #     - "technical_specs"
-      # - type: log_message
-      #   level: info
-      #   message: "Technical specifications created for {components.length} components"
+      - type: run_script
+        script_path: .abathur/scripts/store_technical_specs.sh
+        args:
+          - "{task_id}"
+          - "technical_specs"
+      - type: log_message
+        level: info
+        message: "Technical specifications created for task {task_id}"
     next: create_task_plan
     timeout_secs: 600
 
   - id: create_task_plan
     role: task-planner
+    working_directory: ".abathur/worktrees/feature-{feature_name}"
     prompt: |
       Technical Specs: {previous_output}
+
+      IMPORTANT: The feature branch is named "feature/{feature_name}".
+      Task branches will be named "task/{feature_name}/{task-id}" where task-id is a kebab-case slug derived from the task summary.
 
       Output the task plan in JSON format:
       {
         "tasks": [
           {
-            "id": "task-001",
+            "id": "implement-user-model",
             "summary": "Implement User domain model",
             "description": "Create User struct with validation logic...",
             "agent_type": "rust-domain-models-specialist",
@@ -333,26 +336,22 @@ steps:
                 - deliverables
           execution_order:
             type: array
-        required:
-          - tasks
-          - execution_order
-    # post_hooks:
+    post_hooks:
       # Create task branches and worktrees for tasks that need them
-      # TODO: Implement scripts/create_task_worktrees.sh and scripts/spawn_implementation_tasks.sh
-      # - type: run_script
-      #   script_path: scripts/create_task_worktrees.sh
-      #   args:
-      #     - "{task_id}"
-      #     - "tasks_json"
+      - type: run_script
+        script_path: .abathur/scripts/create_task_worktrees.sh
+        args:
+          - "{task_id}"
+          - "tasks_json"
       # Spawn implementation tasks via task queue
-      # - type: run_script
-      #   script_path: scripts/spawn_implementation_tasks.sh
-      #   args:
-      #     - "{task_id}"
-      #     - "tasks_json"
-      # - type: log_message
-      #   level: info
-      #   message: "Created {tasks.length} implementation tasks for execution"
+      - type: run_script
+        script_path: .abathur/scripts/spawn_implementation_tasks.sh
+        args:
+          - "{task_id}"
+          - "tasks_json"
+      - type: log_message
+        level: info
+        message: "Created implementation tasks for execution"
     next: monitor_implementation
     timeout_secs: 420
 
@@ -407,14 +406,13 @@ steps:
           - total_tasks
           - completed
           - ready_for_merge
-    # post_hooks:
+    post_hooks:
       # Update task status in memory
-      # TODO: Implement scripts/update_progress.sh
-      # - type: run_script
-      #   script_path: scripts/update_progress.sh
-      #   args:
-      #     - "{task_id}"
-      #     - "{progress_percentage}"
+      - type: run_script
+        script_path: .abathur/scripts/update_progress.sh
+        args:
+          - "{task_id}"
+          - "{progress_percentage}"
     next: prepare_merge
     timeout_secs: 300
 
@@ -465,44 +463,32 @@ steps:
           - ready_to_merge
           - verification_results
           - branches_to_merge
-    # pre_hooks:
+    pre_hooks:
       # Run comprehensive test suite
-      # TODO: Implement scripts/run_all_tests.sh and scripts/quality_checks.sh
-      # - type: run_script
-      #   script_path: scripts/run_all_tests.sh
-      #   args:
-      #     - "{task_id}"
+      - type: run_script
+        script_path: scripts/run_all_tests.sh
+        args:
+          - "{task_id}"
       # Run quality checks
-      # - type: run_script
-      #   script_path: scripts/quality_checks.sh
-      #   args:
-      #     - "{task_id}"
-    # post_hooks:
+      - type: run_script
+        script_path: scripts/quality_checks.sh
+        args:
+          - "{task_id}"
+    post_hooks:
       # Merge all task branches to feature branch
-      # TODO: Implement scripts/merge_task_branches.sh and scripts/cleanup_all_worktrees.sh
-      # - type: run_script
-      #   script_path: scripts/merge_task_branches.sh
-      #   args:
-      #     - "{task_id}"
-      #     - "branches_json"
-      # Merge feature branch to main
-      # - type: merge_branch
-      #   source: "feature/{task_id}"
-      #   target: "main"
-      #   strategy: auto
+      - type: run_script
+        script_path: .abathur/scripts/merge_task_branches.sh
+        args:
+          - "{task_id}"
+          - "branches_json"
       # Clean up all worktrees and branches
-      # - type: run_script
-      #   script_path: scripts/cleanup_all_worktrees.sh
-      #   args:
-      #     - "{task_id}"
-      # Create release tag
-      # - type: create_tag
-      #   name: "release/{task_id}"
-      #   message: "Completed: {gather_requirements.problem_statement}"
-      # Final status log
-      # - type: log_message
-      #   level: info
-      #   message: "Successfully completed full workflow for task {task_id} - merged to main"
+      - type: run_script
+        script_path: .abathur/scripts/cleanup_all_worktrees.sh
+        args:
+          - "{task_id}"
+      - type: log_message
+        level: info
+        message: "Successfully completed full workflow for task {task_id}"
     timeout_secs: 300
 
 validation_rules:

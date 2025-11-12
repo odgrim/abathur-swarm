@@ -31,6 +31,10 @@ pub struct SubstrateRequest {
 
     /// Execution parameters (model, temperature, etc.)
     pub parameters: ExecutionParameters,
+
+    /// Optional working directory for agent execution
+    /// If specified, the agent will have its PWD set to this directory
+    pub working_directory: Option<String>,
 }
 
 /// Parameters for controlling LLM execution

@@ -149,6 +149,11 @@ pub struct PromptStep {
     /// Hook actions to execute after this step
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub post_hooks: Vec<HookAction>,
+    /// Optional working directory for agent execution
+    /// If specified, the agent will have its PWD set to this directory
+    /// Supports variable substitution like {task_id}
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
 }
 
 impl PromptStep {
@@ -168,6 +173,7 @@ impl PromptStep {
             timeout: None,
             pre_hooks: Vec::new(),
             post_hooks: Vec::new(),
+            working_directory: None,
         }
     }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # prepare_feature_worktree.sh - Prepares a git worktree for the feature branch
 #
-# Usage: ./prepare_feature_worktree.sh <task_id> <feature_branch>
+# Usage: ./prepare_feature_worktree.sh <task_id> <feature_name>
 #
 # This hook creates a git worktree for the feature branch to enable
 # isolated development without affecting the main working directory.
@@ -9,7 +9,7 @@
 set -euo pipefail
 
 TASK_ID="${1:-}"
-FEATURE_BRANCH="${2:-}"
+FEATURE_NAME="${2:-}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -35,13 +35,13 @@ if [[ -z "$TASK_ID" ]]; then
     exit 1
 fi
 
-if [[ -z "$FEATURE_BRANCH" ]]; then
-    log_error "Feature branch is required"
+if [[ -z "$FEATURE_NAME" ]]; then
+    log_error "Feature name is required"
     exit 1
 fi
 
 log_info "Preparing feature worktree for task: $TASK_ID"
-log_info "Feature branch: $FEATURE_BRANCH"
+log_info "Feature name: $FEATURE_NAME"
 
 # Check if we're in a git repository
 if ! git rev-parse --git-dir > /dev/null 2>&1; then
@@ -49,9 +49,14 @@ if ! git rev-parse --git-dir > /dev/null 2>&1; then
     exit 1
 fi
 
-# Clean up branch name for path (remove feature/ prefix)
-BRANCH_PATH=$(echo "$FEATURE_BRANCH" | sed 's|^feature/||' | sed 's|/|-|g')
-WORKTREE_PATH=".abathur/worktrees/feature-${BRANCH_PATH}"
+# Sanitize feature name for branch (convert to kebab-case, lowercase, remove special chars)
+SANITIZED_NAME=$(echo "$FEATURE_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//')
+
+# Construct branch name and worktree path
+FEATURE_BRANCH="feature/${SANITIZED_NAME}"
+WORKTREE_PATH=".abathur/worktrees/feature-${SANITIZED_NAME}"
+
+log_info "Feature branch: $FEATURE_BRANCH"
 
 log_info "Worktree path: $WORKTREE_PATH"
 

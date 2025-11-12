@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # create_feature_branch.sh - Creates a feature branch for the task
 #
-# Usage: ./create_feature_branch.sh <task_id> <decomposition_strategy>
+# Usage: ./create_feature_branch.sh <task_id> <feature_name> <decomposition_strategy>
 #
-# This hook creates a feature branch based on the task ID and decomposition strategy.
+# This hook creates a feature branch with a human-readable name based on the feature being implemented.
 # For single projects, it creates a simple feature branch.
 # For multiple projects, it may create additional branches.
 
 set -euo pipefail
 
 TASK_ID="${1:-}"
-DECOMPOSITION_STRATEGY="${2:-single}"
+FEATURE_NAME="${2:-}"
+DECOMPOSITION_STRATEGY="${3:-single}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -36,11 +37,20 @@ if [[ -z "$TASK_ID" ]]; then
     exit 1
 fi
 
+if [[ -z "$FEATURE_NAME" ]]; then
+    log_error "Feature name is required"
+    exit 1
+fi
+
 log_info "Creating feature branch for task: $TASK_ID"
+log_info "Feature name: $FEATURE_NAME"
 log_info "Decomposition strategy: $DECOMPOSITION_STRATEGY"
 
-# Create sanitized branch name
-BRANCH_NAME="feature/task-${TASK_ID}"
+# Sanitize feature name for use in branch (convert to kebab-case, lowercase, remove special chars)
+SANITIZED_NAME=$(echo "$FEATURE_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//')
+
+# Create branch name
+BRANCH_NAME="feature/${SANITIZED_NAME}"
 
 log_info "Branch name: $BRANCH_NAME"
 
@@ -50,19 +60,18 @@ if ! git rev-parse --git-dir > /dev/null 2>&1; then
     exit 1
 fi
 
+# Get current branch name for branch point
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+log_info "Current branch: $CURRENT_BRANCH"
+
 # Check if branch already exists
 if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
     log_warn "Branch $BRANCH_NAME already exists"
-    log_info "Checking out existing branch"
-    git checkout "$BRANCH_NAME"
+    log_info "Skipping branch creation"
 else
-    log_info "Creating new feature branch from current branch"
-    # Get current branch name
-    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-    log_info "Current branch: $CURRENT_BRANCH"
-
-    # Create new branch
-    git checkout -b "$BRANCH_NAME"
+    log_info "Creating new feature branch from $CURRENT_BRANCH (without checkout)"
+    # Create new branch without checking it out - everything uses worktrees
+    git branch "$BRANCH_NAME" "$CURRENT_BRANCH"
     log_info "✓ Created branch: $BRANCH_NAME"
 fi
 

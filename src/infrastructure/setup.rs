@@ -92,6 +92,7 @@ pub struct SetupPaths {
     pub hooks_dir: PathBuf,
     pub hooks_file: PathBuf,
     pub chains_dir: PathBuf,
+    pub scripts_dir: PathBuf,
 }
 
 impl SetupPaths {
@@ -108,6 +109,7 @@ impl SetupPaths {
             hooks_dir: config_dir.join("hooks"),
             hooks_file: config_dir.join("hooks.yaml"),
             chains_dir: config_dir.join("chains"),
+            scripts_dir: config_dir.join("scripts"),
             config_dir,
         })
     }
@@ -309,6 +311,54 @@ pub fn copy_hook_scripts(paths: &SetupPaths, template_dir: &PathBuf, force: bool
 
             if file_name_str.ends_with(".sh") || file_name_str == "README.md" {
                 let dest_path = paths.hooks_dir.join(&file_name);
+
+                if !dest_path.exists() || force {
+                    fs::copy(&path, &dest_path)
+                        .with_context(|| format!("Failed to copy {} to {}", path.display(), dest_path.display()))?;
+
+                    // Make .sh files executable on Unix systems
+                    #[cfg(unix)]
+                    if file_name_str.ends_with(".sh") {
+                        use std::os::unix::fs::PermissionsExt;
+                        let mut perms = fs::metadata(&dest_path)?.permissions();
+                        perms.set_mode(0o755); // rwxr-xr-x
+                        fs::set_permissions(&dest_path, perms)?;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Copy core Abathur scripts from template
+pub fn copy_scripts(paths: &SetupPaths, template_dir: &PathBuf, force: bool) -> Result<()> {
+    let template_scripts_dir = template_dir.join(".abathur/scripts");
+
+    // Check if template scripts directory exists
+    if !template_scripts_dir.exists() {
+        return Ok(());
+    }
+
+    // Create target scripts directory
+    if !paths.scripts_dir.exists() || force {
+        fs::create_dir_all(&paths.scripts_dir)
+            .context("Failed to create scripts directory")?;
+    }
+
+    // Copy scripts
+    for entry in fs::read_dir(&template_scripts_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        // Only copy .sh files and README.md
+        if path.is_file() {
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+
+            if file_name_str.ends_with(".sh") || file_name_str == "README.md" {
+                let dest_path = paths.scripts_dir.join(&file_name);
 
                 if !dest_path.exists() || force {
                     fs::copy(&path, &dest_path)

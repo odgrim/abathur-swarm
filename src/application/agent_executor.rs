@@ -601,22 +601,22 @@ impl AgentExecutor {
         // Build prompt
         let prompt = self.build_prompt(&ctx);
 
-        // Build extra parameters - include worktree_path if available
-        let mut extra_params = std::collections::HashMap::new();
+        // Build extra parameters
+        let extra_params = std::collections::HashMap::new();
 
-        // Check if task has a worktree path and pass it to the substrate
+        // Check if task has a worktree path and use it as working directory
         // This allows Claude Code to cd into the correct worktree directory
-        if let Some(ref worktree_path) = ctx.input_data.as_ref()
+        let working_directory = ctx.input_data.as_ref()
             .and_then(|data| data.get("worktree_path"))
             .and_then(|v| v.as_str())
-        {
-            tracing::info!(
-                task_id = %ctx.task_id,
-                worktree_path = %worktree_path,
-                "Task has worktree_path, passing to substrate"
-            );
-            extra_params.insert("worktree_path".to_string(), serde_json::json!(worktree_path));
-        }
+            .map(|s| {
+                tracing::info!(
+                    task_id = %ctx.task_id,
+                    working_directory = %s,
+                    "Task has worktree_path, using as working directory"
+                );
+                s.to_string()
+            });
 
         // Create substrate request
         let request = SubstrateRequest {
@@ -631,6 +631,7 @@ impl AgentExecutor {
                 timeout_secs: None, // Handled by outer timeout
                 extra: extra_params,
             },
+            working_directory,
         };
 
         // Execute via substrate registry (automatically routes to best substrate)

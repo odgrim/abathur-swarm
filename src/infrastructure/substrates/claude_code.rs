@@ -172,17 +172,28 @@ impl ClaudeCodeSubstrate {
         let mut cmd = Command::new(&self.config.claude_path);
 
         // Set working directory with priority:
-        // 1. Task-specific worktree_path (from request.parameters.extra)
-        // 2. Config working_dir
-        // 3. Current directory
-        let working_dir = if let Some(worktree_path_value) = request.parameters.extra.get("worktree_path") {
-            // Task has a specific worktree - use it
+        // 1. Request working_directory (from chain step)
+        // 2. Task-specific worktree_path (from request.parameters.extra - backward compat)
+        // 3. Config working_dir
+        // 4. Current directory
+        let working_dir = if let Some(ref wd) = request.working_directory {
+            // Request has a specific working directory - use it
+            let worktree_path = PathBuf::from(wd);
+            tracing::info!(
+                task_id = %request.task_id,
+                working_directory = %worktree_path.display(),
+                "Using request-specified working directory"
+            );
+            cmd.current_dir(&worktree_path);
+            worktree_path.display().to_string()
+        } else if let Some(worktree_path_value) = request.parameters.extra.get("worktree_path") {
+            // Task has a specific worktree - use it (backward compatibility)
             if let Some(worktree_path_str) = worktree_path_value.as_str() {
                 let worktree_path = PathBuf::from(worktree_path_str);
                 tracing::info!(
                     task_id = %request.task_id,
                     worktree_path = %worktree_path.display(),
-                    "Using task-specific worktree directory"
+                    "Using task-specific worktree directory (legacy)"
                 );
                 cmd.current_dir(&worktree_path);
                 worktree_path.display().to_string()

@@ -122,6 +122,12 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
             println!("✓ Copied hook scripts");
         }
 
+        // Step 7.5: Copy core Abathur scripts
+        setup::copy_scripts(&paths, template_dir, force)?;
+        if !json_output {
+            println!("✓ Copied core Abathur scripts");
+        }
+
         // Step 8: Merge MCP server configuration
         setup::merge_mcp_config(template_dir, force)?;
         if !json_output {
@@ -153,6 +159,7 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
             "agents_dir": paths.agents_dir.display().to_string(),
             "hooks_file": paths.hooks_file.display().to_string(),
             "hooks_dir": paths.hooks_dir.display().to_string(),
+            "scripts_dir": paths.scripts_dir.display().to_string(),
             "chains_dir": paths.chains_dir.display().to_string(),
             "initial_task": {
                 "id": scanner_task.id.to_string(),
@@ -170,6 +177,7 @@ pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, jso
         println!("Database: {}", paths.database_file.display());
         println!("Agents: {}", paths.agents_dir.display());
         println!("Hooks: {}", paths.hooks_file.display());
+        println!("Scripts: {}", paths.scripts_dir.display());
         println!("Chains: {}", paths.chains_dir.display());
         println!();
         println!("Initial task enqueued:");

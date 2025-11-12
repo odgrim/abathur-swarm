@@ -169,8 +169,15 @@ impl PromptChainService {
 
         debug!("Built prompt for step {}: {}", step.id, prompt);
 
+        // Substitute variables in working_directory if specified
+        let working_directory = if let Some(ref wd_template) = step.working_directory {
+            Some(Self::substitute_variables(wd_template, input)?)
+        } else {
+            None
+        };
+
         // Execute the step with retries
-        let result = self.execute_step_with_retry(step, &prompt).await?;
+        let result = self.execute_step_with_retry(step, &prompt, working_directory.as_deref()).await?;
 
         // Validate output
         if let Err(e) = self.validate_step_output(step, &result, &chain.validation_rules) {
@@ -288,8 +295,15 @@ impl PromptChainService {
 
             debug!("Built prompt for step {}: {}", step.id, prompt);
 
+            // Substitute variables in working_directory if specified
+            let working_directory = if let Some(ref wd_template) = step.working_directory {
+                Some(Self::substitute_variables(wd_template, &current_input)?)
+            } else {
+                None
+            };
+
             // Execute the step with retries
-            let result = self.execute_step_with_retry(step, &prompt).await?;
+            let result = self.execute_step_with_retry(step, &prompt, working_directory.as_deref()).await?;
 
             // Validate output - returns Err with detailed message if validation fails
             if let Err(e) = self.validate_step_output(step, &result, &chain.validation_rules) {
@@ -351,12 +365,13 @@ impl PromptChainService {
         &self,
         step: &PromptStep,
         prompt: &str,
+        working_directory: Option<&str>,
     ) -> Result<StepResult> {
         let mut retry_count = 0;
         let mut last_error = None;
 
         while retry_count <= self.max_retries {
-            match self.execute_step(step, prompt).await {
+            match self.execute_step(step, prompt, working_directory).await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
                     warn!(
@@ -385,7 +400,7 @@ impl PromptChainService {
 
     /// Execute a single step
     #[instrument(skip(self, step, prompt), fields(step_id = %step.id, role = %step.role))]
-    async fn execute_step(&self, step: &PromptStep, prompt: &str) -> Result<StepResult> {
+    async fn execute_step(&self, step: &PromptStep, prompt: &str, working_directory: Option<&str>) -> Result<StepResult> {
         let start = Instant::now();
 
         // TODO: TEMPORARY DEBUG - Remove this logging once timeout issue is resolved
@@ -415,7 +430,7 @@ impl PromptChainService {
 
         // Execute the prompt (this would call the actual LLM API)
         // Pass the timeout to the prompt execution
-        let output = match timeout(step_timeout, self.execute_prompt(prompt, &step.role, step_timeout.as_secs())).await {
+        let output = match timeout(step_timeout, self.execute_prompt(prompt, &step.role, step_timeout.as_secs(), working_directory)).await {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => return Err(e),
             Err(_) => {
@@ -523,8 +538,26 @@ impl PromptChainService {
         full_prompt
     }
 
+    /// Substitute variables in a template string
+    fn substitute_variables(template: &str, variables: &serde_json::Value) -> Result<String> {
+        let mut result = template.to_string();
+
+        if let Some(vars) = variables.as_object() {
+            for (key, value) in vars {
+                let placeholder = format!("{{{}}}", key);
+                let replacement = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => value.to_string(),
+                };
+                result = result.replace(&placeholder, &replacement);
+            }
+        }
+
+        Ok(result)
+    }
+
     /// Execute a prompt via LLM substrate (Claude Code CLI or Anthropic API)
-    async fn execute_prompt(&self, prompt: &str, role: &str, timeout_secs: u64) -> Result<String> {
+    async fn execute_prompt(&self, prompt: &str, role: &str, timeout_secs: u64, working_directory: Option<&str>) -> Result<String> {
         // TODO: TEMPORARY DEBUG - Remove this logging once timeout issue is resolved
         info!(
             role = %role,
@@ -569,6 +602,7 @@ impl PromptChainService {
                 timeout_secs: Some(timeout_secs), // Use configured timeout
                 extra: std::collections::HashMap::new(),
             },
+            working_directory: working_directory.map(|s| s.to_string()),
         };
 
         // TODO: TEMPORARY DEBUG - Remove this logging once timeout issue is resolved
@@ -793,7 +827,15 @@ impl PromptChainService {
             );
 
             let prompt = step.build_prompt(&current_input)?;
-            let result = self.execute_step_with_retry(step, &prompt).await?;
+
+            // Substitute variables in working_directory if specified
+            let working_directory = if let Some(ref wd_template) = step.working_directory {
+                Some(Self::substitute_variables(wd_template, &current_input)?)
+            } else {
+                None
+            };
+
+            let result = self.execute_step_with_retry(step, &prompt, working_directory.as_deref()).await?;
 
             // Validate output - returns Err with detailed message if validation fails
             if let Err(e) = self.validate_step_output(step, &result, &chain.validation_rules) {
