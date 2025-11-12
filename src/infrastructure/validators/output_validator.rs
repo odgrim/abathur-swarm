@@ -113,15 +113,18 @@ impl OutputValidator {
 
     /// Validate JSON output against a schema
     pub fn validate_json(&self, output: &str, schema: &serde_json::Value) -> Result<bool> {
+        // Strip markdown code blocks before validating (LLMs often wrap JSON in code blocks)
+        let cleaned = Self::strip_markdown_code_blocks(output);
+
         // Log what we're validating for debugging
         tracing::debug!(
-            output_length = output.len(),
-            output_preview = &output[..output.len().min(500)],
+            output_length = cleaned.len(),
+            output_preview = &cleaned[..cleaned.len().min(500)],
             "Validating JSON output against schema"
         );
 
         // Parse the output as JSON
-        let instance: serde_json::Value = serde_json::from_str(output)
+        let instance: serde_json::Value = serde_json::from_str(&cleaned)
             .context("Failed to parse output as JSON")?;
 
         // Compile the schema - we need to own the schema to satisfy lifetime requirements
@@ -325,5 +328,28 @@ mod tests {
         let format = OutputFormat::Plain;
 
         assert!(validator.validate(output, &format).is_ok());
+    }
+
+    #[test]
+    fn test_validate_json_strips_markdown_code_blocks() {
+        let validator = OutputValidator::new();
+        // This is what the requirements-gatherer agent actually outputs
+        let output_with_markdown = r#"```json
+{
+  "name": "Alice",
+  "age": 30
+}
+```"#;
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "number"}
+            },
+            "required": ["name", "age"]
+        });
+
+        // This should pass because validate_json now strips markdown
+        assert!(validator.validate_json(output_with_markdown, &schema).is_ok());
     }
 }
