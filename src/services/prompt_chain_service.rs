@@ -172,7 +172,7 @@ impl PromptChainService {
         // Execute pre-hooks if any
         if !step.pre_hooks.is_empty() {
             info!("Executing {} pre-hooks for step {}", step.pre_hooks.len(), step.id);
-            self.execute_hooks(&step.pre_hooks, task, &step.id, "pre").await?;
+            self.execute_hooks(&step.pre_hooks, task, &step.id, "pre", None).await?;
         }
 
         // Build the prompt with current variables
@@ -207,7 +207,7 @@ impl PromptChainService {
         // Execute post-hooks if any
         if !step.post_hooks.is_empty() {
             info!("Executing {} post-hooks for step {}", step.post_hooks.len(), step.id);
-            self.execute_hooks(&step.post_hooks, task, &step.id, "post").await?;
+            self.execute_hooks(&step.post_hooks, task, &step.id, "post", Some(&result)).await?;
         }
 
         // Check if this step should spawn implementation tasks
@@ -298,7 +298,7 @@ impl PromptChainService {
             // Execute pre-hooks if any
             if !step.pre_hooks.is_empty() {
                 info!("Executing {} pre-hooks for step {}", step.pre_hooks.len(), step.id);
-                self.execute_hooks(&step.pre_hooks, task, &step.id, "pre").await?;
+                self.execute_hooks(&step.pre_hooks, task, &step.id, "pre", None).await?;
             }
 
             // Build the prompt with current variables
@@ -334,7 +334,7 @@ impl PromptChainService {
             // Execute post-hooks if any
             if !step.post_hooks.is_empty() {
                 info!("Executing {} post-hooks for step {}", step.post_hooks.len(), step.id);
-                self.execute_hooks(&step.post_hooks, task, &step.id, "post").await?;
+                self.execute_hooks(&step.post_hooks, task, &step.id, "post", Some(&result)).await?;
             }
 
             // Parse the output as the input for the next step
@@ -733,6 +733,62 @@ impl PromptChainService {
         }
     }
 
+    /// Extract JSON fields into variables map for hook substitution
+    ///
+    /// Recursively extracts fields from JSON, creating dot-notation keys for nested objects.
+    /// For example: {"decomposition": {"strategy": "single"}} becomes "decomposition.strategy" = "single"
+    ///
+    /// # Arguments
+    /// * `value` - JSON value to extract from
+    /// * `prefix` - Dot-notation prefix for nested fields
+    /// * `variables` - Mutable map to insert extracted variables into
+    fn extract_json_fields_to_variables(
+        value: &serde_json::Value,
+        prefix: &str,
+        variables: &mut std::collections::HashMap<String, String>,
+    ) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, val) in map {
+                    let field_name = if prefix.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{}.{}", prefix, key)
+                    };
+
+                    match val {
+                        serde_json::Value::String(s) => {
+                            variables.insert(field_name, s.clone());
+                        }
+                        serde_json::Value::Number(n) => {
+                            variables.insert(field_name, n.to_string());
+                        }
+                        serde_json::Value::Bool(b) => {
+                            variables.insert(field_name, b.to_string());
+                        }
+                        serde_json::Value::Object(_) => {
+                            // Recursively extract nested objects
+                            Self::extract_json_fields_to_variables(val, &field_name, variables);
+                        }
+                        serde_json::Value::Array(_) => {
+                            // Arrays are serialized as JSON strings
+                            variables.insert(field_name, val.to_string());
+                        }
+                        serde_json::Value::Null => {
+                            variables.insert(field_name, "null".to_string());
+                        }
+                    }
+                }
+            }
+            _ => {
+                // If root is not an object, just convert to string
+                if !prefix.is_empty() {
+                    variables.insert(prefix.to_string(), value.to_string());
+                }
+            }
+        }
+    }
+
     /// Execute a list of hook actions
     ///
     /// # Arguments
@@ -747,6 +803,7 @@ impl PromptChainService {
         task: Option<&Task>,
         step_id: &str,
         hook_type: &str,
+        step_result: Option<&StepResult>,
     ) -> Result<()> {
         let Some(executor) = &self.hook_executor else {
             warn!("Hook executor not configured, skipping {} hooks for step {}", hook_type, step_id);
@@ -767,6 +824,22 @@ impl PromptChainService {
 
         if let Some(parent_id) = &task.parent_task_id {
             variables.insert("parent_task_id".to_string(), parent_id.to_string());
+        }
+
+        // Extract JSON fields from step output if available
+        if let Some(result) = step_result {
+            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&result.output) {
+                debug!(
+                    step_id = %step_id,
+                    "Extracting JSON fields from step output for hook variable substitution"
+                );
+                Self::extract_json_fields_to_variables(&json_value, "", &mut variables);
+            } else {
+                debug!(
+                    step_id = %step_id,
+                    "Step output is not valid JSON, skipping field extraction"
+                );
+            }
         }
 
         let context = HookContext {

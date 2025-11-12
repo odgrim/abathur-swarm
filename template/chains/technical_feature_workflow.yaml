@@ -67,7 +67,7 @@ steps:
       - type: run_script
         script_path: .abathur/scripts/store_requirements.sh
         args:
-          - "{task_id}"
+          - "${task_id}"
           - "requirements"
     next: design_architecture
     timeout_secs: 600
@@ -141,18 +141,18 @@ steps:
       - type: run_script
         script_path: .abathur/scripts/store_architecture.sh
         args:
-          - "{task_id}"
+          - "${task_id}"
           - "architecture"
       # Create feature branch for this work
       - type: run_script
         script_path: .abathur/scripts/create_feature_branch.sh
         args:
-          - "{task_id}"
-          - "{feature_name}"
-          - "{decomposition.strategy}"
+          - "${task_id}"
+          - "${feature_name}"
+          - "${decomposition.strategy}"
       - type: log_message
         level: info
-        message: "Architecture designed and feature branch created for task {task_id}"
+        message: "Architecture designed and feature branch created for task ${task_id}"
     next: create_technical_specs
     timeout_secs: 600
 
@@ -241,11 +241,11 @@ steps:
       - type: run_script
         script_path: .abathur/scripts/store_technical_specs.sh
         args:
-          - "{task_id}"
+          - "${task_id}"
           - "technical_specs"
       - type: log_message
         level: info
-        message: "Technical specifications created for task {task_id}"
+        message: "Technical specifications created for task ${task_id}"
     next: create_task_plan
     timeout_secs: 600
 
@@ -334,7 +334,7 @@ steps:
       - type: run_script
         script_path: .abathur/scripts/spawn_implementation_tasks.sh
         args:
-          - "{task_id}"
+          - "${task_id}"
           - "tasks_json"
       - type: log_message
         level: info
@@ -398,8 +398,8 @@ steps:
       - type: run_script
         script_path: .abathur/scripts/update_progress.sh
         args:
-          - "{task_id}"
-          - "{progress_percentage}"
+          - "${task_id}"
+          - "${progress_percentage}"
     next: prepare_merge
     timeout_secs: 300
 
@@ -455,27 +455,27 @@ steps:
       - type: run_script
         script_path: scripts/run_all_tests.sh
         args:
-          - "{task_id}"
+          - "${task_id}"
       # Run quality checks
       - type: run_script
         script_path: scripts/quality_checks.sh
         args:
-          - "{task_id}"
+          - "${task_id}"
     post_hooks:
       # Merge all task branches to feature branch
       - type: run_script
         script_path: .abathur/scripts/merge_task_branches.sh
         args:
-          - "{task_id}"
+          - "${task_id}"
           - "branches_json"
       # Clean up all worktrees and branches
       - type: run_script
         script_path: .abathur/scripts/cleanup_all_worktrees.sh
         args:
-          - "{task_id}"
+          - "${task_id}"
       - type: log_message
         level: info
-        message: "Successfully completed full workflow for task {task_id}"
+        message: "Successfully completed full workflow for task ${task_id}"
     timeout_secs: 300
 
 validation_rules:
