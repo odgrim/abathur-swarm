@@ -356,7 +356,7 @@ mod tests {
     }
 
     fn create_test_executor() -> Arc<HookExecutor> {
-        Arc::new(HookExecutor::new(None))
+        Arc::new(HookExecutor::new(None, None))
     }
 
     #[test]

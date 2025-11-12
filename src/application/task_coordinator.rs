@@ -932,6 +932,12 @@ mod tests {
             }
         }
 
+        async fn update_task(&self, task: &Task) -> Result<()> {
+            let mut tasks = self.tasks.lock().unwrap();
+            tasks.insert(task.id, task.clone());
+            Ok(())
+        }
+
         async fn mark_task_failed(&self, task_id: Uuid, error_message: String) -> Result<()> {
             let mut tasks = self.tasks.lock().unwrap();
             if let Some(task) = tasks.get_mut(&task_id) {
@@ -1210,7 +1216,7 @@ mod tests {
         let config = HooksConfig { hooks: vec![hook] };
 
         // Initialize hooks
-        let hook_executor = Arc::new(HookExecutor::new(Some(coordinator.clone())));
+        let hook_executor = Arc::new(HookExecutor::new(Some(coordinator.clone()), None));
         let mut hook_registry = HookRegistry::new(hook_executor);
         hook_registry.load_from_config(config).unwrap();
 
@@ -1271,7 +1277,7 @@ mod tests {
         let config = HooksConfig { hooks: vec![hook] };
 
         // Initialize hooks
-        let hook_executor = Arc::new(HookExecutor::new(Some(coordinator.clone())));
+        let hook_executor = Arc::new(HookExecutor::new(Some(coordinator.clone()), None));
         let mut hook_registry = HookRegistry::new(hook_executor);
         hook_registry.load_from_config(config).unwrap();
 
@@ -1328,7 +1334,7 @@ mod tests {
         let config = HooksConfig { hooks: vec![hook] };
 
         // Initialize hooks
-        let hook_executor = Arc::new(HookExecutor::new(Some(coordinator.clone())));
+        let hook_executor = Arc::new(HookExecutor::new(Some(coordinator.clone()), None));
         let mut hook_registry = HookRegistry::new(hook_executor);
         hook_registry.load_from_config(config).unwrap();
 

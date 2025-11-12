@@ -161,6 +161,10 @@ pub async fn run_migrations(paths: &SetupPaths, force: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Register sqlite-vec extension before creating connection
+    // This must be done before any database connections are created
+    crate::infrastructure::database::extensions::register_sqlite_vec();
+
     // Create database connection
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)

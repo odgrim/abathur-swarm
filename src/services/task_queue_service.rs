@@ -720,6 +720,13 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
             .context("Failed to update task priority")
     }
 
+    async fn update_task(&self, task: &Task) -> Result<()> {
+        self.repo
+            .update(task)
+            .await
+            .context("Failed to update task")
+    }
+
     async fn mark_task_failed(&self, task_id: Uuid, error_message: String) -> Result<()> {
         let mut task = self
             .get_task(task_id)

@@ -52,4 +52,10 @@ echo "[INFO] Task branch worktree created successfully"
 echo "[INFO] Task Branch: $TASK_BRANCH"
 echo "[INFO] Worktree Path: $WORKTREE_PATH"
 
+# Output structured data for hook executor to parse and update task fields
+# These values will be captured and used to update the task's task_branch and worktree_path fields
+echo "ABATHUR_TASK_BRANCH=$TASK_BRANCH"
+echo "ABATHUR_FEATURE_BRANCH=$FEATURE_BRANCH"
+echo "ABATHUR_WORKTREE_PATH=$WORKTREE_PATH"
+
 exit 0

@@ -372,7 +372,10 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
 
     // Initialize hook system
     eprintln!("Initializing hook system...");
-    let hook_executor = Arc::new(HookExecutor::new(Some(task_coordinator.clone())));
+    let hook_executor = Arc::new(HookExecutor::new(
+        Some(task_coordinator.clone()),
+        Some(task_queue_service.clone()),
+    ));
     let mut hook_registry = HookRegistry::new(hook_executor.clone());
 
     // Load hooks configuration

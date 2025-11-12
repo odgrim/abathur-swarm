@@ -179,13 +179,29 @@ impl AgentExecutor {
                 "Executing task as single agent (no chain_id)"
             );
 
-            let ctx = ExecutionContext::new(
+            let mut ctx = ExecutionContext::new(
                 Uuid::new_v4(), // agent_id
                 task.id,
                 task.agent_type.clone(),
                 task.description.clone(),
                 self.config.clone(),
             );
+
+            // If task has input_data, use it; otherwise create new input_data with worktree info
+            let mut input_data = task.input_data.clone().unwrap_or_else(|| serde_json::json!({}));
+
+            // Add worktree_path, task_branch, and feature_branch to input_data if they exist on the task
+            if let Some(ref worktree_path) = task.worktree_path {
+                input_data["worktree_path"] = serde_json::json!(worktree_path);
+            }
+            if let Some(ref task_branch) = task.task_branch {
+                input_data["task_branch"] = serde_json::json!(task_branch);
+            }
+            if let Some(ref feature_branch) = task.feature_branch {
+                input_data["feature_branch"] = serde_json::json!(feature_branch);
+            }
+
+            ctx.input_data = Some(input_data);
 
             self.execute_with_timeout(
                 ctx,
@@ -258,13 +274,24 @@ impl AgentExecutor {
         );
 
         // Prepare input for this step (from task.input_data or initial input)
-        let step_input = task.input_data.clone().unwrap_or_else(|| {
+        let mut step_input = task.input_data.clone().unwrap_or_else(|| {
             serde_json::json!({
                 "task_id": task.id.to_string(),
                 "task_description": task.description,
                 "task_summary": task.summary,
             })
         });
+
+        // Ensure worktree information is included in step input
+        if let Some(ref worktree_path) = task.worktree_path {
+            step_input["worktree_path"] = serde_json::json!(worktree_path);
+        }
+        if let Some(ref task_branch) = task.task_branch {
+            step_input["task_branch"] = serde_json::json!(task_branch);
+        }
+        if let Some(ref feature_branch) = task.feature_branch {
+            step_input["feature_branch"] = serde_json::json!(feature_branch);
+        }
 
         // Execute this single step
         let result = self
@@ -574,6 +601,23 @@ impl AgentExecutor {
         // Build prompt
         let prompt = self.build_prompt(&ctx);
 
+        // Build extra parameters - include worktree_path if available
+        let mut extra_params = std::collections::HashMap::new();
+
+        // Check if task has a worktree path and pass it to the substrate
+        // This allows Claude Code to cd into the correct worktree directory
+        if let Some(ref worktree_path) = ctx.input_data.as_ref()
+            .and_then(|data| data.get("worktree_path"))
+            .and_then(|v| v.as_str())
+        {
+            tracing::info!(
+                task_id = %ctx.task_id,
+                worktree_path = %worktree_path,
+                "Task has worktree_path, passing to substrate"
+            );
+            extra_params.insert("worktree_path".to_string(), serde_json::json!(worktree_path));
+        }
+
         // Create substrate request
         let request = SubstrateRequest {
             task_id: ctx.task_id,
@@ -585,7 +629,7 @@ impl AgentExecutor {
                 max_tokens: Some(4096),
                 temperature: Some(0.7),
                 timeout_secs: None, // Handled by outer timeout
-                extra: std::collections::HashMap::new(),
+                extra: extra_params,
             },
         };
 

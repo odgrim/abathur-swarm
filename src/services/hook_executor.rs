@@ -5,23 +5,33 @@
 use crate::application::task_coordinator::TaskCoordinator;
 use crate::domain::models::task::TaskStatus;
 use crate::domain::models::{HookAction, HookContext, HookResult, Task};
+use crate::domain::ports::TaskQueueService;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
 use tracing::{debug, error, info, instrument, warn};
+use uuid::Uuid;
 
 /// Executor for hook actions
 pub struct HookExecutor {
     /// Optional task coordinator for spawning tasks
     task_coordinator: Option<Arc<TaskCoordinator>>,
+    /// Optional task queue service for updating task fields
+    task_queue: Option<Arc<dyn TaskQueueService>>,
 }
 
 impl HookExecutor {
     /// Create a new hook executor
-    pub fn new(task_coordinator: Option<Arc<TaskCoordinator>>) -> Self {
-        Self { task_coordinator }
+    pub fn new(
+        task_coordinator: Option<Arc<TaskCoordinator>>,
+        task_queue: Option<Arc<dyn TaskQueueService>>,
+    ) -> Self {
+        Self {
+            task_coordinator,
+            task_queue,
+        }
     }
 
     /// Execute a single hook action
@@ -114,6 +124,37 @@ impl HookExecutor {
             if !stdout.is_empty() {
                 debug!(output = %stdout, "Script output");
             }
+
+            // Parse ABATHUR_* variables from script output
+            let mut updates = HashMap::new();
+            for line in stdout.lines() {
+                if line.starts_with("ABATHUR_") {
+                    if let Some((key, value)) = line.split_once('=') {
+                        let key = key.trim().to_string();
+                        let value = value.trim().to_string();
+                        debug!(key = %key, value = %value, "Parsed hook output variable");
+                        updates.insert(key, value);
+                    }
+                }
+            }
+
+            // Update task fields if we have updates and task_queue is available
+            if !updates.is_empty() {
+                if let Some(ref task_queue) = self.task_queue {
+                    info!(
+                        task_id = %task.id,
+                        update_count = updates.len(),
+                        "Updating task fields from hook script output"
+                    );
+                    self.update_task_fields(task.id, updates, task_queue).await?;
+                } else {
+                    warn!(
+                        task_id = %task.id,
+                        "Task queue not available, cannot update task fields from hook output"
+                    );
+                }
+            }
+
             Ok(HookResult::Continue)
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -124,6 +165,50 @@ impl HookExecutor {
                 stderr
             ))
         }
+    }
+
+    /// Update task fields from hook script output
+    ///
+    /// Parses ABATHUR_* variables and updates the corresponding task fields.
+    async fn update_task_fields(
+        &self,
+        task_id: Uuid,
+        updates: HashMap<String, String>,
+        task_queue: &Arc<dyn TaskQueueService>,
+    ) -> Result<()> {
+        // Fetch current task
+        let mut task = task_queue.get_task(task_id).await
+            .context("Failed to fetch task for field update")?;
+
+        let mut updated = false;
+
+        // Apply updates
+        if let Some(feature_branch) = updates.get("ABATHUR_FEATURE_BRANCH") {
+            task.feature_branch = Some(feature_branch.clone());
+            info!(task_id = %task_id, feature_branch = %feature_branch, "Updated task feature_branch");
+            updated = true;
+        }
+
+        if let Some(task_branch) = updates.get("ABATHUR_TASK_BRANCH") {
+            task.task_branch = Some(task_branch.clone());
+            info!(task_id = %task_id, task_branch = %task_branch, "Updated task task_branch");
+            updated = true;
+        }
+
+        if let Some(worktree_path) = updates.get("ABATHUR_WORKTREE_PATH") {
+            task.worktree_path = Some(worktree_path.clone());
+            info!(task_id = %task_id, worktree_path = %worktree_path, "Updated task worktree_path");
+            updated = true;
+        }
+
+        // Save updated task if any fields were changed
+        if updated {
+            task_queue.update_task(&task).await
+                .context("Failed to save updated task")?;
+            info!(task_id = %task_id, "Task fields successfully updated in database");
+        }
+
+        Ok(())
     }
 
     /// Spawn a new task
@@ -624,7 +709,7 @@ mod tests {
 
     #[test]
     fn test_substitute_variables() {
-        let executor = HookExecutor::new(None);
+        let executor = HookExecutor::new(None, None);
 
         let mut variables = HashMap::new();
         variables.insert("task_id".to_string(), "123".to_string());
@@ -655,7 +740,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_log_message_action() {
-        let executor = HookExecutor::new(None);
+        let executor = HookExecutor::new(None, None);
         let task = create_test_task();
         let context = HookContext::from_task(task.id, HashMap::new());
 
@@ -669,7 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_block_transition_action() {
-        let executor = HookExecutor::new(None);
+        let executor = HookExecutor::new(None, None);
         let task = create_test_task();
         let context = HookContext::from_task(task.id, HashMap::new());
 

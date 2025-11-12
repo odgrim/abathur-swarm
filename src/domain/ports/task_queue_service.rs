@@ -102,6 +102,21 @@ pub trait TaskQueueService: Send + Sync {
     /// * `Err` - If task not found or database error
     async fn update_task_priority(&self, task_id: Uuid, priority: f64) -> Result<()>;
 
+    /// Update a task's fields
+    ///
+    /// Updates the entire task record. Useful for updating multiple fields
+    /// at once, such as worktree_path, task_branch, and feature_branch.
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - The task with updated fields
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Task updated successfully
+    /// * `Err` - If task not found or database error
+    async fn update_task(&self, task: &Task) -> Result<()>;
+
     /// Mark a task as failed with an error message
     ///
     /// # Arguments

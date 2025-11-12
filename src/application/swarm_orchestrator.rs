@@ -776,6 +776,12 @@ mod tests {
             }
         }
 
+        async fn update_task(&self, task: &Task) -> Result<()> {
+            let mut tasks = self.tasks.lock().unwrap();
+            tasks.insert(task.id, task.clone());
+            Ok(())
+        }
+
         async fn mark_task_failed(&self, task_id: Uuid, error_message: String) -> Result<()> {
             let mut tasks = self.tasks.lock().unwrap();
             if let Some(task) = tasks.get_mut(&task_id) {

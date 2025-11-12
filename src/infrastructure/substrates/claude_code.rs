@@ -171,12 +171,38 @@ impl ClaudeCodeSubstrate {
     fn build_command(&self, request: &SubstrateRequest) -> Result<Command, SubstrateError> {
         let mut cmd = Command::new(&self.config.claude_path);
 
-        // Set working directory to project root (critical for MCP server discovery)
-        // This allows Claude CLI to:
-        // 1. Discover .mcp.json and connect to running MCP servers
-        // 2. Find .claude/agents/ directory for agent definitions
-        // 3. Read .claude/settings.json for permissions
-        let working_dir = if let Some(ref wd) = self.config.working_dir {
+        // Set working directory with priority:
+        // 1. Task-specific worktree_path (from request.parameters.extra)
+        // 2. Config working_dir
+        // 3. Current directory
+        let working_dir = if let Some(worktree_path_value) = request.parameters.extra.get("worktree_path") {
+            // Task has a specific worktree - use it
+            if let Some(worktree_path_str) = worktree_path_value.as_str() {
+                let worktree_path = PathBuf::from(worktree_path_str);
+                tracing::info!(
+                    task_id = %request.task_id,
+                    worktree_path = %worktree_path.display(),
+                    "Using task-specific worktree directory"
+                );
+                cmd.current_dir(&worktree_path);
+                worktree_path.display().to_string()
+            } else {
+                tracing::warn!(
+                    task_id = %request.task_id,
+                    "worktree_path parameter is not a string, using default"
+                );
+                if let Some(ref wd) = self.config.working_dir {
+                    cmd.current_dir(wd);
+                    wd.display().to_string()
+                } else if let Ok(cwd) = std::env::current_dir() {
+                    let cwd_str = cwd.display().to_string();
+                    cmd.current_dir(&cwd);
+                    cwd_str
+                } else {
+                    "<not set>".to_string()
+                }
+            }
+        } else if let Some(ref wd) = self.config.working_dir {
             cmd.current_dir(wd);
             wd.display().to_string()
         } else {
