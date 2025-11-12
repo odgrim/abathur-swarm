@@ -4,7 +4,8 @@
 //! and error handling between steps.
 
 use crate::domain::models::prompt_chain::{
-    ChainExecution, PromptChain, PromptStep, StepResult, ValidationRule,
+    ChainExecution, OutputFormat, PromptChain, PromptStep, StepResult, ValidationRule,
+    ValidationType,
 };
 use crate::domain::models::{AgentMetadata, AgentMetadataRegistry, HookContext, Task};
 use crate::domain::ports::{ExecutionParameters, SubstrateRequest, TaskQueueService};
@@ -665,9 +666,22 @@ impl PromptChainService {
         let step_rules: Vec<&ValidationRule> = rules.iter().filter(|r| r.step_id == step.id).collect();
 
         for rule in step_rules {
+            // If the rule doesn't provide a schema but requires one (JsonSchema type),
+            // try to use the schema from step's expected_output
+            let schema_to_use = if rule.schema.is_none()
+                && matches!(rule.rule_type, ValidationType::JsonSchema) {
+                // Extract schema from step's expected_output if it's JSON format
+                match &step.expected_output {
+                    OutputFormat::Json { schema } => schema.as_ref(),
+                    _ => None,
+                }
+            } else {
+                rule.schema.as_ref()
+            };
+
             match self
                 .validator
-                .validate_with_rule(&result.output, &rule.rule_type, rule.schema.as_ref())
+                .validate_with_rule(&result.output, &rule.rule_type, schema_to_use)
             {
                 Ok(true) => continue,
                 Ok(false) => {
