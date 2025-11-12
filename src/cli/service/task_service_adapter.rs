@@ -313,6 +313,8 @@ fn convert_domain_to_cli_task(domain_task: DomainTask) -> CliTask {
         started_at: domain_task.started_at,
         completed_at: domain_task.completed_at,
         chain_id: domain_task.chain_id,
+        feature_branch: domain_task.feature_branch,
+        task_branch: domain_task.task_branch,
     }
 }
 

@@ -311,8 +311,8 @@ pub fn format_task_table(tasks: &[crate::cli::models::Task]) -> String {
         source: crate::domain::models::task::TaskSource::Human,
         deadline: None,
         estimated_duration_seconds: None,
-        feature_branch: None,
-        task_branch: None,
+        feature_branch: t.feature_branch.clone(),
+        task_branch: t.task_branch.clone(),
         worktree_path: None,
         validation_requirement: crate::domain::models::task::ValidationRequirement::None,
         validation_task_id: None,
@@ -459,6 +459,7 @@ mod tests {
             workflow_state: None,
             workflow_expectations: None,
             chain_id: None,
+            chain_step_index: 0,
         };
 
         let formatter = TableFormatter::with_config(false, None);

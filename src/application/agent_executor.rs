@@ -313,6 +313,19 @@ impl AgentExecutor {
             "Chain step completed successfully"
         );
 
+        // Reload task from database to get any updates from post-hooks
+        // (e.g., feature_branch, worktree_path set by create_feature_branch.sh)
+        let updated_task = self
+            .chain_service
+            .get_task_from_repo(task.id)
+            .await
+            .map_err(|e| {
+                ExecutionError::ExecutionFailed(format!("Failed to reload task after step execution: {}", e))
+            })?
+            .ok_or_else(|| {
+                ExecutionError::ExecutionFailed(format!("Task {} not found after step execution", task.id))
+            })?;
+
         // Enqueue the next step if there is one
         let next_step_index = step_index + 1;
         if next_step_index < chain.steps.len() {
@@ -323,7 +336,7 @@ impl AgentExecutor {
                 "Enqueueing next chain step"
             );
 
-            self.enqueue_next_chain_step(task, &chain, next_step_index, &result.output)
+            self.enqueue_next_chain_step(&updated_task, &chain, next_step_index, &result.output)
                 .await
                 .map_err(|e| {
                     ExecutionError::ExecutionFailed(format!(
@@ -409,7 +422,7 @@ impl AgentExecutor {
             estimated_duration_seconds: None,
             feature_branch: current_task.feature_branch.clone(),
             task_branch: None,
-            worktree_path: None,
+            worktree_path: current_task.worktree_path.clone(),
             validation_requirement: crate::domain::models::ValidationRequirement::None,
             validation_task_id: None,
             validating_task_id: None,

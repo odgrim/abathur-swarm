@@ -149,3 +149,115 @@ When reporting merge results, include:
 **Test Results**: Whether tests passed
 **Cleanup Status**: Whether worktree was cleaned up
 **Next Action**: Whether to continue or if remediation was spawned
+
+## Merge Readiness Assessment
+
+When performing a merge readiness check (before actual merge), output JSON in this format:
+
+```json
+{
+  "ready_to_merge": true|false,
+  "verification_results": {
+    "all_tasks_complete": true|false,
+    "tests_passing": true|false,
+    "quality_checks_passed": true|false,
+    "no_conflicts": true|false,
+    "documentation_complete": true|false
+  },
+  "test_summary": {
+    "unit_tests": {"total": N, "passed": N, "failed": N},
+    "integration_tests": {"total": N, "passed": N, "failed": N},
+    "coverage_percentage": N
+  },
+  "branches_to_merge": [
+    {"source": "task/branch-name", "target": "feature/branch-name"}
+  ],
+  "final_deliverables": [
+    {"type": "code", "count": N, "loc": N},
+    {"type": "tests", "count": N, "coverage": "N%"},
+    {"type": "docs", "count": N}
+  ],
+  "merge_strategy": "rebase|merge|squash",
+  "post_merge_actions": ["cleanup_worktrees", "tag_release", "update_docs"],
+  "blocking_issues": [
+    {"type": "test_failure|conflict|missing_review", "details": "..."}
+  ]
+}
+```
+
+## Merge Workflow Modes
+
+This agent operates in two modes:
+
+### 1. Assessment Mode (Pre-merge)
+- Triggered when checking if branches are ready to merge
+- Performs dry-run validation without making changes
+- Outputs merge readiness assessment JSON
+- Checks for:
+  - All dependent tasks completed
+  - Tests passing in all task branches
+  - No merge conflicts
+  - Documentation updated
+  - Quality gates passed
+
+### 2. Execution Mode (Actual merge)
+- Triggered when ready_to_merge is true
+- Performs actual merge operations
+- Runs comprehensive tests post-merge
+- Cleans up worktrees and branches
+- Stores merge results in memory
+
+## Assessment Workflow
+
+```bash
+# For each task branch to assess:
+
+# 1. Check task completion status
+cargo run --bin abathur -- task get ${task_id}
+
+# 2. Verify tests pass in task worktree
+cd ${task_worktree_path}
+cargo test --all-features
+
+# 3. Test merge (dry-run)
+cd ${feature_worktree_path}
+git merge ${task_branch} --no-commit --no-ff
+if [ $? -eq 0 ]; then
+  # No conflicts
+  git merge --abort
+else
+  # Has conflicts
+  git merge --abort
+  echo "conflicts detected"
+fi
+
+# 4. Check code quality
+cargo clippy -- -D warnings
+cargo fmt -- --check
+
+# 5. Verify documentation
+# Check for updated docs in docs/
+
+# 6. Generate assessment JSON
+```
+
+## Integration with Task Queue
+
+The orchestrator integrates with the task queue to:
+
+1. **Query Task Status**: Check if all tasks in a feature branch are completed
+2. **Spawn Remediation**: Create new tasks for conflict resolution or test fixes
+3. **Update Task Metadata**: Mark tasks as merged after successful merge
+4. **Store Results**: Save merge outcomes in memory for audit trail
+
+```rust
+// Example: Query tasks for a feature
+task_list --filter "feature_branch=feature/my-feature" --status completed
+
+// Example: Spawn remediation task
+task_enqueue \
+  --description "Resolve merge conflicts in ${files}" \
+  --agent-type "${original_agent_type}" \
+  --priority 6 \
+  --parent-task-id "${original_task_id}"
+```

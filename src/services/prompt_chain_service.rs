@@ -129,6 +129,18 @@ impl PromptChainService {
         task_queue.submit_task(task).await
     }
 
+    /// Get a task from the task queue (wrapper for AgentExecutor to use)
+    pub async fn get_task_from_repo(&self, task_id: uuid::Uuid) -> Result<Option<Task>> {
+        let Some(ref task_queue) = self.task_queue_service else {
+            anyhow::bail!("Task queue service not configured");
+        };
+
+        match task_queue.get_task(task_id).await {
+            Ok(task) => Ok(Some(task)),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Execute a single step of a prompt chain
     ///
     /// This is called by AgentExecutor for each chain step task.
