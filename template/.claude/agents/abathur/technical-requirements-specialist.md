@@ -64,15 +64,21 @@ Third step in workflow (after technical-architect). Translate architectural guid
 
 **NOTE:** Do NOT spawn task-planner tasks manually. The chain will automatically proceed to the next step.
 
-## Feature Branch Creation
+## Worktree Management
 
-**CRITICAL:** Feature branches are created AUTOMATICALLY by hooks - DO NOT create them manually.
+### Feature Branch Creation
 
-The system will trigger the `create_feature_branch.sh` hook which will:
+**CRITICAL:** Feature branches and worktrees are created AUTOMATICALLY and ATOMICALLY by hooks - DO NOT create them manually.
+
+The system triggers the `create_feature_branch.sh` hook which will:
 - Create branch: `feature/feature-name`
-- Create worktree: `.abathur/feature-feature-name`
+- Create worktree: `.abathur/worktrees/feature-feature-name` (atomically with branch)
 
-You only need to determine the feature name and store it in memory for downstream agents.
+You only need to determine the feature name - the branch and worktree are created together to prevent orphaned branches.
+
+### Task Planning Worktrees
+
+Task-planner agents work directly in the feature worktree created above. No additional worktree setup is needed for task planning.
 
 ## Task-Planner Decomposition
 

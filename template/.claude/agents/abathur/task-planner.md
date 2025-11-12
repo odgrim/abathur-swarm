@@ -86,16 +86,27 @@ Decompose complex tasks into atomic, independently executable units with explici
 
 ## Git Worktree Management
 
-**CRITICAL:** Task worktrees are created AUTOMATICALLY by hooks - DO NOT create them manually.
+**CRITICAL:** Worktrees are created AUTOMATICALLY by hooks - DO NOT create them manually.
 
-The system will trigger the `create_task_worktree.sh` hook which will:
-- Create branch: `task/feature-name/task-id`
-- Create worktree: `.abathur/feature-name-task-id`
+### Planning Worktrees
+
+**ALREADY CREATED:** When you start, your planning worktree already exists (created by technical-requirements-specialist post-hook).
+
+You will run in an isolated worktree:
+- Single planner: Uses feature branch worktree (`.abathur/feature-{name}`)
+- Multiple planners: Each gets dedicated planning worktree (`.abathur/planning-{component}`)
+
+### Implementation Task Worktrees
+
+When you spawn implementation tasks, they will receive their own worktrees:
+- Created by task execution system when tasks start
+- Branch: `task/feature-name/task-id`
+- Worktree: `.abathur/task-{feature-name}-{task-id}`
 
 You only need to:
-1. Determine the task ID and feature name
-2. Pass worktree information to implementation tasks via metadata
-3. The hook will be triggered automatically when the task starts
+1. Define tasks in your task plan output
+2. Specify which tasks need worktrees (`needs_worktree: true`)
+3. The system handles worktree creation automatically
 
 ## Task Decomposition Principles
 

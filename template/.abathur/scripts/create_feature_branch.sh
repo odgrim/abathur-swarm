@@ -64,18 +64,33 @@ fi
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 log_info "Current branch: $CURRENT_BRANCH"
 
+# Create worktrees directory if it doesn't exist
+mkdir -p .abathur/worktrees
+
+# Construct worktree path
+WORKTREE_PATH=".abathur/worktrees/feature-${SANITIZED_NAME}"
+
 # Check if branch already exists
 if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
     log_warn "Branch $BRANCH_NAME already exists"
-    log_info "Skipping branch creation"
+
+    # Check if worktree exists
+    if [[ -d "$WORKTREE_PATH" ]] && git worktree list | grep -q "$WORKTREE_PATH"; then
+        log_info "Worktree already exists, skipping creation"
+    else
+        log_info "Creating worktree for existing branch"
+        git worktree add "$WORKTREE_PATH" "$BRANCH_NAME"
+        log_info "✓ Created worktree: $WORKTREE_PATH"
+    fi
 else
-    log_info "Creating new feature branch from $CURRENT_BRANCH (without checkout)"
-    # Create new branch without checking it out - everything uses worktrees
-    git branch "$BRANCH_NAME" "$CURRENT_BRANCH"
+    log_info "Creating new feature branch with worktree from $CURRENT_BRANCH"
+    # Create new branch AND worktree atomically
+    git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" "$CURRENT_BRANCH"
     log_info "✓ Created branch: $BRANCH_NAME"
+    log_info "✓ Created worktree: $WORKTREE_PATH"
 fi
 
-# Store branch name in memory for later use
+# Store branch name and worktree path in memory for later use
 if command -v abathur &> /dev/null; then
     NAMESPACE="task:${TASK_ID}:git"
     if abathur memory add \
@@ -88,10 +103,22 @@ if command -v abathur &> /dev/null; then
     else
         log_warn "Could not store branch name in memory (non-fatal)"
     fi
+
+    if abathur memory add \
+        --namespace "$NAMESPACE" \
+        --key "feature_worktree_path" \
+        --value "\"$WORKTREE_PATH\"" \
+        --type "episodic" \
+        --created-by "technical_feature_workflow"; then
+        log_info "✓ Worktree path stored in memory"
+    else
+        log_warn "Could not store worktree path in memory (non-fatal)"
+    fi
 fi
 
-log_info "✓ Feature branch creation complete"
+log_info "✓ Feature branch and worktree creation complete"
 log_info "  Branch: $BRANCH_NAME"
+log_info "  Worktree: $WORKTREE_PATH"
 log_info "  Strategy: $DECOMPOSITION_STRATEGY"
 
 exit 0
