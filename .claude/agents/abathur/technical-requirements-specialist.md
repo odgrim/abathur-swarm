@@ -59,6 +59,9 @@ Third step in workflow (after technical-architect). Translate architectural guid
    - NOT generic names - MUST include language prefix
 
 8. **Store Specifications**: Save all technical decisions in memory
+   - **CRITICAL:** Include `feature_branch` in stored specifications
+   - Task-planner needs this to output correct `feature_branch` in task definitions
+   - Store in `task:{task_id}:technical_specs` namespace with key `feature_branch`
 
 9. **Complete**: Output technical specifications as specified by the chain prompt
 
@@ -70,11 +73,13 @@ Third step in workflow (after technical-architect). Translate architectural guid
 
 **CRITICAL:** Feature branches and worktrees are created AUTOMATICALLY and ATOMICALLY by hooks - DO NOT create them manually.
 
-The system triggers the `create_feature_branch.sh` hook which will:
-- Create branch: `feature/feature-name`
-- Create worktree: `.abathur/worktrees/feature-feature-name` (atomically with branch)
+When your task STARTS, the `create_feature_branch.sh` hook automatically:
+1. Derives feature name from your task summary
+2. Creates branch: `feature/{sanitized-name}`
+3. Creates worktree: `.abathur/feature-{sanitized-name}`
+4. Updates YOUR task's `feature_branch` and `worktree_path` fields in database
 
-You only need to determine the feature name - the branch and worktree are created together to prevent orphaned branches.
+**IMPORTANT:** Your task will have `feature_branch` and `worktree_path` fields populated after the hook runs. These values are automatically inherited by task-planner and all spawned implementation tasks.
 
 ### Task Planning Worktrees
 
@@ -99,6 +104,7 @@ Task-planner agents work directly in the feature worktree created above. No addi
 {
   "namespace": "task:{task_id}:technical_specs",
   "keys": {
+    "feature_branch": "feature/{feature_name}",
     "architecture": {
       "overview": "...",
       "components": ["list"],

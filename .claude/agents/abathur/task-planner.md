@@ -26,6 +26,8 @@ Decompose complex tasks into atomic, independently executable units with explici
 Without these fields, task branches will NOT be created and tasks will fail!
 
 1. **Load Technical Specs**: Retrieve from memory namespace `task:{tech_spec_id}:technical_specs`
+   - **CRITICAL:** Extract `feature_branch` from technical specs for use in all task definitions
+   - This value was set by technical-requirements-specialist when its hook created the feature branch
 
 2. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
    ```json

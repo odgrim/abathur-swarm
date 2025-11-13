@@ -166,11 +166,16 @@ When the architecture decomposes into distinct features/components, spawn multip
 
 **When to spawn (Mode 2):** Architecture decomposes into 2+ distinct features with clear boundaries.
 
-**CRITICAL:** Each spawned task MUST include `chain_id: "technical_feature_workflow"` so it continues through the full workflow chain.
+**CRITICAL REQUIREMENTS:**
+- Each spawned task MUST include `chain_id: "technical_feature_workflow"` so it continues through the full workflow chain
+- Summary MUST start with the feature name for proper branch naming (the hook will use this to create `feature/{feature-name}`)
+- Use concise, kebab-case friendly names in summary (e.g., "user-auth-api" not "User Authentication API System")
+
+**Recommended Summary Format:** `"{kebab-case-feature-name}: {brief description}"`
 
 ```json
 {
-  "summary": "Technical requirements for: {feature_name}",
+  "summary": "user-auth-api: Technical requirements for user authentication",
   "agent_type": "technical-requirements-specialist",
   "priority": 7,
   "parent_task_id": "{your_task_id}",
@@ -179,12 +184,32 @@ When the architecture decomposes into distinct features/components, spawn multip
 }
 ```
 
+**Branch Naming:** The hook will sanitize and use the summary to create the feature branch. For example:
+- Summary: "user-auth-api: Technical requirements..." → Branch: `feature/user-auth-api-technical-requirements`
+- Summary: "oauth-integration" → Branch: `feature/oauth-integration`
+
 **Example - Authentication System with 3 features:**
-1. Spawn task for "User Authentication API" (login, logout, sessions)
-2. Spawn task for "Password Management" (reset, change, validation)
-3. Spawn task for "OAuth2 Integration" (external providers)
+1. Spawn task with summary: "user-auth-api: Authentication API for login and sessions"
+   - Creates branch: `feature/user-auth-api-authentication-api-for-login-and-sessions`
+   - Better: "user-auth-api" → `feature/user-auth-api`
+
+2. Spawn task with summary: "password-mgmt: Password reset and validation"
+   - Creates branch: `feature/password-mgmt-password-reset-and-validation`
+   - Better: "password-mgmt" → `feature/password-mgmt`
+
+3. Spawn task with summary: "oauth-integration: OAuth2 provider integration"
+   - Creates branch: `feature/oauth-integration-oauth2-provider-integration`
+   - Better: "oauth-integration" → `feature/oauth-integration`
+
+**BEST PRACTICE:** Keep summaries concise with kebab-case feature name first, minimal description after colon.
 
 Each spawned task becomes an independent workflow that goes through: tech-spec → task-planning → implementation → merge.
+
+**Branch Creation:** When each technical-requirements-specialist task STARTS, the `create-feature-branch-on-tech-spec-start` hook automatically:
+1. Sanitizes the task summary to create a branch name
+2. Creates `feature/{sanitized-name}` branch
+3. Creates `.abathur/feature-{sanitized-name}` worktree
+4. Updates task's `feature_branch` and `worktree_path` fields in database
 
 ## Key Requirements
 
@@ -195,7 +220,10 @@ Each spawned task becomes an independent workflow that goes through: tech-spec �
 - Define clear boundaries when decomposing
 - Store all decisions in memory with proper namespacing
 - **Mode 1 (single feature)**: Let chain proceed automatically
-- **Mode 2 (multiple features)**: Spawn tasks manually with `chain_id` set
+- **Mode 2 (multiple features)**:
+  - Spawn tasks manually with `chain_id: "technical_feature_workflow"` set
+  - Use concise, kebab-case summaries for proper branch naming
+  - Each spawned task will get its feature branch created automatically when it starts
 
 ## Architecture Components Reference
 
