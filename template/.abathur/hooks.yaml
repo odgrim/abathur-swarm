@@ -230,7 +230,7 @@ hooks:
     actions:
       - type: run_script
         script_path: ./.abathur/hooks/create_feature_branch.sh
-        args: ["${task_id}", "${task_summary}"]
+        args: ["${task_id}", "${task_summary}", "${feature_branch}"]
       - type: log_message
         level: info
         message: "Creating feature branch for ${task_summary}"

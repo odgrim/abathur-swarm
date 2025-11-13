@@ -1,19 +1,50 @@
 #!/usr/bin/env bash
 # create_feature_branch.sh - Creates a feature branch with git worktree
 #
-# Usage: ./create_feature_branch.sh <task_id> <feature_name>
+# Usage: ./create_feature_branch.sh <task_id> <feature_name> [existing_feature_branch]
 #
 # This hook is triggered when a technical-requirements-specialist task starts.
 # It creates a feature branch worktree for isolated development.
+# If existing_feature_branch is provided and non-empty, this script will use it instead.
 
 set -euo pipefail
 
 TASK_ID="${1:-}"
 FEATURE_NAME="${2:-}"
+EXISTING_FEATURE_BRANCH="${3:-}"
 
 if [[ -z "$TASK_ID" || -z "$FEATURE_NAME" ]]; then
-    echo "[ERROR] Usage: $0 <task_id> <feature_name>"
+    echo "[ERROR] Usage: $0 <task_id> <feature_name> [existing_feature_branch]"
     exit 1
+fi
+
+# If task already has a feature_branch set (from chain workflow), use it
+if [[ -n "$EXISTING_FEATURE_BRANCH" ]]; then
+    echo "[INFO] Task already has feature_branch set: $EXISTING_FEATURE_BRANCH"
+    echo "[INFO] Skipping branch creation (using existing from chain workflow)"
+    # Don't output ABATHUR_FEATURE_BRANCH - we don't want to override what's already set
+    exit 0
+fi
+
+# For chain workflows, check if parent task stored feature_branch in memory
+# The architecture step stores feature_branch in memory for the chain
+if command -v abathur &> /dev/null; then
+    # Try to get feature_branch from memory using parent task pattern
+    # Memory namespace pattern: task:${parent_task_id}:git:feature_branch
+    PARENT_TASK_ID=$(abathur memory search --namespace-prefix "task:" 2>/dev/null | grep -o "task:[^:]*:git" | sed 's/:git$//' | sed 's/^task://' | head -1 || echo "")
+
+    if [[ -n "$PARENT_TASK_ID" ]]; then
+        MEMORY_BRANCH=$(abathur memory get --namespace "task:${PARENT_TASK_ID}:git" --key "feature_branch" 2>/dev/null | grep -v "^$" || echo "")
+        # Remove quotes if present
+        MEMORY_BRANCH=$(echo "$MEMORY_BRANCH" | sed 's/^"//;s/"$//')
+
+        if [[ -n "$MEMORY_BRANCH" && "$MEMORY_BRANCH" != "null" ]]; then
+            echo "[INFO] Found feature_branch in parent task memory: $MEMORY_BRANCH"
+            echo "[INFO] Using feature branch from chain context"
+            echo "ABATHUR_FEATURE_BRANCH=$MEMORY_BRANCH"
+            exit 0
+        fi
+    fi
 fi
 
 # Sanitize feature name (remove spaces, special chars, lowercase)
