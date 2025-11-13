@@ -23,8 +23,8 @@ FEATURE_NAME_CLEAN=$(echo "$FEATURE_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/
 FEATURE_NAME_CLEAN=$(echo "$FEATURE_NAME_CLEAN" | cut -c1-50)
 
 FEATURE_BRANCH="feature/${FEATURE_NAME_CLEAN}"
-# Feature branches: feature/my-feature -> .abathur/feature-my-feature
-WORKTREE_PATH=".abathur/feature-${FEATURE_NAME_CLEAN}"
+# Feature branches: feature/my-feature -> .abathur/worktrees/feature-my-feature
+WORKTREE_PATH=".abathur/worktrees/feature-${FEATURE_NAME_CLEAN}"
 
 echo "[INFO] Creating feature branch worktree"
 echo "[INFO]   Task ID: $TASK_ID"

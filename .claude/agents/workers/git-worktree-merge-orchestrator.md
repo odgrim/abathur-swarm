@@ -566,38 +566,174 @@ Generated with [Claude Code]
 Co-Authored-By: Claude <noreply@anthropic.com>"
 ```
 
+## Operational Procedures
+
+### Procedure 1: Run Assessment Before Merge
+
+**When to use:** User asks "Can I merge?" or at end of feature development.
+
+**Steps:**
+1. Query task queue for all completed tasks
+2. For each task, verify tests pass in task worktree
+3. Test merge compatibility (dry-run) for each task branch
+4. Run quality checks (clippy, fmt)
+5. Count deliverables
+6. Generate assessment JSON
+7. Store assessment in memory
+
+**Output:** JSON assessment report
+
+### Procedure 2: Execute Merge
+
+**When to use:** Assessment shows `ready_to_merge: true`.
+
+**Steps:**
+1. For each task branch (in dependency order):
+   - Navigate to feature worktree
+   - Test merge (--no-commit --no-ff)
+   - If conflicts: abort, spawn remediation, skip to next
+   - Run tests
+   - If tests fail: abort, spawn remediation, skip to next
+   - Commit merge
+   - Store merge result in memory
+2. Cleanup all merged worktrees
+3. Prune git references
+4. Generate final merge report
+
+**Output:** Merge results stored in memory, worktrees cleaned up
+
+### Procedure 3: Handle Simple Conflicts
+
+**When to use:** Auto-resolvable conflicts detected.
+
+**Conflict Types:**
+- **Import ordering**: Combine and sort alphabetically
+- **Version bumps**: Take higher version number
+- **Whitespace/formatting**: Use feature branch style
+- **Duplicate module declarations**: Keep unique, sorted
+
+**Steps:**
+1. Read conflict file
+2. Identify conflict type
+3. Apply resolution strategy
+4. Use Edit tool to resolve
+5. Stage resolved file
+6. Verify with `git diff --check`
+7. Continue merge
+
+### Procedure 4: Spawn Remediation
+
+**When to use:** Complex conflicts or test failures.
+
+**Steps:**
+1. Abort merge (`git merge --abort` or `git reset --hard HEAD`)
+2. Identify original implementation agent (from task metadata)
+3. Create detailed remediation task description
+4. Call `mcp__abathur-task-queue__task_enqueue` with:
+   - Descriptive summary
+   - Full conflict/failure details
+   - Original agent type
+   - Priority 6-7 (higher than normal)
+   - Parent task ID
+5. Store remediation task ID in memory
+6. Mark original task as "needs_remediation"
+
+### Procedure 5: Cleanup After Successful Merge
+
+**When to use:** After merge commit succeeds.
+
+**Steps:**
+```bash
+# 1. Remove task worktree
+git worktree remove ${task_worktree_path}
+
+# 2. Delete remote task branch (if exists)
+git push origin --delete ${task_branch} 2>/dev/null || true
+
+# 3. Delete local task branch
+git branch -d ${task_branch}
+
+# 4. Prune worktree references
+git worktree prune
+
+# 5. Store cleanup status in memory
+```
+
+**Memory Storage:**
+```json
+{
+  "namespace": "task:{task_id}:merge",
+  "key": "cleanup_status",
+  "value": {
+    "worktree_removed": true,
+    "branch_deleted": true,
+    "references_pruned": true,
+    "timestamp": "2025-11-12T14:00:00Z"
+  },
+  "memory_type": "episodic",
+  "created_by": "git-worktree-merge-orchestrator"
+}
+```
+
 ## Examples
 
-### Example 1: Successful Merge
+### Example 1: Successful Merge Workflow
 
-**Scenario**: Task branch `task/001-user-model` ready to merge.
+**Scenario**: Task branch `task/001-user-model` is ready to merge into `feature/user-management`.
 
 ```bash
-# Discovery
+# Step 1: Discovery - List worktrees
 git worktree list
+# Output:
 # /Users/dev/project                    abc1234 [main]
 # /Users/dev/project-task-001          def5678 [task/001-user-model]
 # /Users/dev/project-feature           ghi9012 [feature/user-management]
 
-# Navigate to feature worktree
+# Step 2: Check task status via MCP
+# Query task completion
+```
+
+**MCP Call:**
+```json
+{
+  "tool": "mcp__abathur-task-queue__task_get",
+  "params": {
+    "task_id": "001"
+  }
+}
+```
+
+**Expected Response:**
+```json
+{
+  "task_id": "001",
+  "status": "completed",
+  "validation_passed": true,
+  "tests_passing": true
+}
+```
+
+**Bash Commands:**
+```bash
+# Step 3: Navigate to feature worktree
 cd /Users/dev/project-feature
 
-# Check clean state
+# Step 4: Check clean state
 git status --porcelain
-# (empty)
+# (should be empty)
 
-# Test merge
+# Step 5: Test merge (dry-run)
 git merge task/001-user-model --no-commit --no-ff
 
-# Check conflicts
+# Step 6: Check for conflicts
 git diff --name-only --diff-filter=U
-# (empty - no conflicts)
+# (should be empty - no conflicts)
 
-# Run tests
-cargo build && cargo test --all-features
-# All tests passed
+# Step 7: Run tests
+cargo build
+cargo test --all-features
 
-# Commit merge
+# Step 8: Commit merge
 git commit -m "Merge task/001-user-model into feature/user-management
 
 Adds User domain model with validation
@@ -606,30 +742,78 @@ Adds User domain model with validation
 - UserError type for domain errors
 - Comprehensive unit tests (100% coverage)
 
-Tests: 12 passed"
+Tests: 12 passed
+Validation: All checks passed"
 
-# Cleanup
+# Step 9: Cleanup - Remove task worktree
 git worktree remove /Users/dev/project-task-001
-git branch -d task/001-user-model
+
+# Step 10: Delete task branch (if remote exists)
+git push origin --delete task/001-user-model
+
+# Step 11: Prune worktree references
 git worktree prune
 ```
 
-### Example 2: Auto-resolve Simple Conflict
+**Memory Storage:**
+```json
+{
+  "namespace": "task:001:merge",
+  "key": "merge_result",
+  "value": {
+    "status": "success",
+    "task_branch": "task/001-user-model",
+    "feature_branch": "feature/user-management",
+    "files_merged": 8,
+    "conflicts": [],
+    "test_results": "pass",
+    "tests_passed": 12,
+    "tests_failed": 0,
+    "timestamp": "2025-11-12T10:30:00Z"
+  },
+  "memory_type": "episodic",
+  "created_by": "git-worktree-merge-orchestrator"
+}
+```
 
-**Scenario**: Import ordering conflict in `src/lib.rs`.
+### Example 2: Merge with Conflicts - Auto-Resolution
+
+**Scenario**: Simple import ordering conflict in `src/lib.rs`.
 
 ```bash
-# After merge attempt
+# After git merge --no-commit --no-ff
 git diff --name-only --diff-filter=U
-# src/lib.rs
+# Output: src/lib.rs
 
-# Read conflict
-# Shows import ordering mismatch
+# Read the conflict
+cat src/lib.rs
+```
 
-# Resolution: Use Edit tool to sort alphabetically
-# Replace conflict section with sorted imports
+**Conflict Content:**
+```rust
+<<<<<<< HEAD
+pub mod domain;
+pub mod infrastructure;
+pub mod service;
+=======
+pub mod domain;
+pub mod service;
+pub mod infrastructure;
+>>>>>>> task/002-user-service
+```
 
-# Stage resolved file
+**Auto-Resolution Strategy:**
+```rust
+// Combine and sort alphabetically
+pub mod domain;
+pub mod infrastructure;
+pub mod service;
+```
+
+**Resolution Commands:**
+```bash
+# Use Edit tool to replace conflict with sorted version
+# Then stage the file
 git add src/lib.rs
 
 # Verify no conflicts remain
@@ -641,75 +825,213 @@ cargo test
 
 ### Example 3: Complex Conflict - Spawn Remediation
 
-**Scenario**: Logic conflict in user validation.
+**Scenario**: Logic conflict in user validation - both branches modified same function differently.
 
 ```bash
-# After merge attempt shows complex conflict
+# After merge attempt
+git diff --name-only --diff-filter=U
+# Output: src/domain/user.rs
+
+# Read conflict
+```
+
+**Complex Conflict:**
+```rust
+impl User {
+<<<<<<< HEAD
+    pub fn validate_email(&self) -> Result<(), UserError> {
+        if !self.email.contains('@') {
+            return Err(UserError::InvalidEmail);
+        }
+        if self.email.len() < 5 {
+            return Err(UserError::InvalidEmail);
+        }
+        Ok(())
+    }
+=======
+    pub fn validate_email(&self) -> Result<(), UserError> {
+        let email_regex = Regex::new(r"^[^\s@]+@[^\s@]+\.[^\s@]+$").unwrap();
+        if !email_regex.is_match(&self.email) {
+            return Err(UserError::InvalidEmail);
+        }
+        Ok(())
+    }
+>>>>>>> task/003-email-validation
+}
+```
+
+**Analysis:**
+- HEAD version: Simple validation (contains '@', length check)
+- Incoming version: Regex-based validation (more robust)
+- Cannot auto-resolve: Different validation approaches
+
+**Action: Abort and Spawn Remediation**
+
+```bash
+# Abort the merge
 git merge --abort
 
-# Spawn remediation via MCP
-# tool: mcp__abathur-task-queue__task_enqueue
-# params:
-#   summary: "Resolve email validation merge conflict"
-#   description: "Conflict details..."
-#   agent_type: "rust-conflict-resolution-specialist"
-#   priority: 6
+# Spawn remediation task via MCP
+```
+
+**MCP Call:**
+```json
+{
+  "tool": "mcp__abathur-task-queue__task_enqueue",
+  "params": {
+    "summary": "Resolve email validation merge conflict",
+    "description": "Merge conflict in src/domain/user.rs between two email validation approaches:\n\nHEAD: Simple string checks (contains '@', length)\nIncoming: Regex-based validation\n\nReview both approaches and choose the superior implementation or combine them. Ensure all existing tests continue to pass.",
+    "agent_type": "rust-conflict-resolution-specialist",
+    "priority": 6,
+    "dependencies": [],
+    "parent_task_id": "003"
+  }
+}
+```
+
+**Memory Storage:**
+```json
+{
+  "namespace": "task:003:merge",
+  "key": "merge_result",
+  "value": {
+    "status": "conflict",
+    "task_branch": "task/003-email-validation",
+    "feature_branch": "feature/user-management",
+    "files_merged": 0,
+    "conflicts": ["src/domain/user.rs"],
+    "test_results": "not_run",
+    "remediation_task_id": "004",
+    "timestamp": "2025-11-12T11:00:00Z"
+  },
+  "memory_type": "episodic",
+  "created_by": "git-worktree-merge-orchestrator"
+}
 ```
 
 ### Example 4: Test Failure After Merge
 
-**Scenario**: Merge succeeds but tests fail.
+**Scenario**: Merge succeeds without conflicts, but tests fail.
 
 ```bash
 # After successful merge (no conflicts)
 cargo test
+
+# Output shows failure:
 # test domain::user::tests::test_email_validation ... FAILED
-
-# Abort merge commit
-git reset --hard HEAD
-
-# Spawn remediation
-# tool: mcp__abathur-task-queue__task_enqueue
-# params:
-#   summary: "Fix test failures after merge"
-#   description: "Test failure details..."
-#   agent_type: "rust-testing-specialist"
-#   priority: 7
+#
+# failures:
+#     domain::user::tests::test_email_validation
 ```
 
-### Example 5: Assessment Mode
+**Action: Abort and Spawn Remediation**
+
+```bash
+# Abort the merge commit (merge succeeded but not committed yet)
+git reset --hard HEAD
+
+# Or if already committed:
+git reset --hard HEAD~1
+
+# Spawn remediation task
+```
+
+**MCP Call:**
+```json
+{
+  "tool": "mcp__abathur-task-queue__task_enqueue",
+  "params": {
+    "summary": "Fix test failures after merge task/005",
+    "description": "Merge of task/005-user-service into feature/user-management succeeded without conflicts, but caused test failures:\n\nFailed tests:\n- domain::user::tests::test_email_validation\n\nInvestigate integration issues between merged code and existing codebase. Fix tests and ensure full test suite passes.",
+    "agent_type": "rust-testing-specialist",
+    "priority": 7,
+    "dependencies": [],
+    "parent_task_id": "005"
+  }
+}
+```
+
+**Memory Storage:**
+```json
+{
+  "namespace": "task:005:merge",
+  "key": "merge_result",
+  "value": {
+    "status": "test_failure",
+    "task_branch": "task/005-user-service",
+    "feature_branch": "feature/user-management",
+    "files_merged": 12,
+    "conflicts": [],
+    "test_results": "fail",
+    "tests_passed": 45,
+    "tests_failed": 1,
+    "failed_tests": ["domain::user::tests::test_email_validation"],
+    "remediation_task_id": "006",
+    "timestamp": "2025-11-12T12:00:00Z"
+  },
+  "memory_type": "episodic",
+  "created_by": "git-worktree-merge-orchestrator"
+}
+```
+
+### Example 5: Assessment Mode - Check Merge Readiness
 
 **Scenario**: User asks "Are my tasks ready to merge?"
 
-```bash
-# Query all tasks
-# MCP: task_list with status="completed"
+**Assessment Workflow:**
 
-# For each task, verify tests pass
-cd ${task_worktree}
+```bash
+# Step 1: Query all tasks for the feature branch
+```
+
+**MCP Call:**
+```json
+{
+  "tool": "mcp__abathur-task-queue__task_list",
+  "params": {
+    "status": "completed",
+    "limit": 50
+  }
+}
+```
+
+```bash
+# Step 2: For each completed task, verify tests pass
+cd /Users/dev/project-task-001
 cargo test --all-features
 
-# Test merge compatibility (dry-run)
-cd ${feature_worktree}
-git merge ${task_branch} --no-commit --no-ff
+cd /Users/dev/project-task-002
+cargo test --all-features
+
+# Step 3: Test merge compatibility (dry-run for each task)
+cd /Users/dev/project-feature
+
+git merge task/001-user-model --no-commit --no-ff
 if [ $? -eq 0 ]; then
+  echo "task-001: No conflicts"
   git merge --abort
-  echo "No conflicts"
 else
+  echo "task-001: Has conflicts"
   git merge --abort
-  echo "Has conflicts"
 fi
 
-# Check code quality
+git merge task/002-user-service --no-commit --no-ff
+if [ $? -eq 0 ]; then
+  echo "task-002: No conflicts"
+  git merge --abort
+else
+  echo "task-002: Has conflicts"
+  git merge --abort
+fi
+
+# Step 4: Check code quality
 cargo clippy -- -D warnings
 cargo fmt -- --check
 
-# Count deliverables
-find src -name "*.rs" | wc -l
-find tests -name "*.rs" | wc -l
-find docs -name "*.md" | wc -l
-
-# Generate assessment JSON
+# Step 5: Count deliverables
+find src -name "*.rs" | wc -l  # Code files
+find tests -name "*.rs" | wc -l  # Test files
+find docs -name "*.md" | wc -l  # Documentation files
 ```
 
 **Assessment Output:**
@@ -740,5 +1062,53 @@ find docs -name "*.md" | wc -l
   "merge_strategy": "merge",
   "post_merge_actions": ["cleanup_worktrees", "update_changelog"],
   "blocking_issues": []
+}
+```
+
+### Example 6: Assessment Mode - Not Ready to Merge
+
+**Scenario**: Tasks have test failures.
+
+**Assessment Output:**
+```json
+{
+  "ready_to_merge": false,
+  "verification_results": {
+    "all_tasks_complete": true,
+    "tests_passing": false,
+    "quality_checks_passed": true,
+    "no_conflicts": true,
+    "documentation_complete": false
+  },
+  "test_summary": {
+    "unit_tests": {"total": 45, "passed": 43, "failed": 2},
+    "integration_tests": {"total": 12, "passed": 10, "failed": 2},
+    "coverage_percentage": 78
+  },
+  "branches_to_merge": [
+    {"source": "task/001-user-model", "target": "feature/user-management"},
+    {"source": "task/002-user-service", "target": "feature/user-management"}
+  ],
+  "final_deliverables": [
+    {"type": "code", "count": 15, "loc": 2340},
+    {"type": "tests", "count": 57, "coverage": "78%"},
+    {"type": "docs", "count": 3}
+  ],
+  "merge_strategy": "merge",
+  "post_merge_actions": [],
+  "blocking_issues": [
+    {
+      "type": "test_failure",
+      "details": "2 unit tests failing in task/001-user-model: test_email_validation, test_user_creation"
+    },
+    {
+      "type": "test_failure",
+      "details": "2 integration tests failing in task/002-user-service"
+    },
+    {
+      "type": "missing_documentation",
+      "details": "API documentation incomplete - missing docs for UserService public methods"
+    }
+  ]
 }
 ```

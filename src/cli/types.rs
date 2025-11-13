@@ -78,6 +78,14 @@ pub enum TaskCommands {
         /// Prompt chain ID to execute (default: "technical_feature_workflow", use "none" to disable)
         #[arg(short, long)]
         chain: Option<String>,
+
+        /// Feature branch name (e.g., "feature/user-auth")
+        #[arg(long)]
+        feature_branch: Option<String>,
+
+        /// Task needs a dedicated worktree and task branch
+        #[arg(long)]
+        needs_worktree: bool,
     },
 
     /// List tasks in the queue

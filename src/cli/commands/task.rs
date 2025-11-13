@@ -13,6 +13,8 @@ pub async fn handle_submit(
     priority: u8,
     dependencies: Vec<String>,
     chain_id: Option<String>,
+    feature_branch: Option<String>,
+    needs_worktree: bool,
     json: bool,
 ) -> Result<()> {
     // Resolve dependency prefixes to full UUIDs
@@ -53,6 +55,8 @@ pub async fn handle_submit(
             priority,
             resolved_deps.clone(),
             effective_chain_id.clone(),
+            feature_branch.clone(),
+            needs_worktree,
         )
         .await
         .context("Failed to submit task")?;

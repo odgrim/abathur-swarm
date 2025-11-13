@@ -25,15 +25,46 @@ impl TaskQueueServiceAdapter {
         priority: u8,
         dependencies: Vec<Uuid>,
         chain_id: Option<String>,
+        feature_branch: Option<String>,
+        needs_worktree: bool,
     ) -> Result<Uuid> {
         // Create domain task
-        let mut task = DomainTask::new(summary, description);
+        let mut task = DomainTask::new(summary.clone(), description);
         task.agent_type = agent_type;
         task.priority = priority;
         if !dependencies.is_empty() {
             task.dependencies = Some(dependencies);
         }
         task.chain_id = chain_id;
+        task.feature_branch = feature_branch.clone();
+
+        // Generate task_branch and worktree_path if needs_worktree is true
+        if needs_worktree && feature_branch.is_some() {
+            let feature_name = feature_branch
+                .as_ref()
+                .and_then(|fb| fb.strip_prefix("feature/"))
+                .unwrap_or("unknown");
+
+            let task_uuid = Uuid::new_v4();
+
+            // Generate task_id slug from summary (simplified version - take first few words)
+            let task_id_slug = summary
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { '-' })
+                .collect::<String>()
+                .split('-')
+                .filter(|s| !s.is_empty())
+                .take(3)
+                .collect::<Vec<&str>>()
+                .join("-");
+
+            // Generate branch name: task/{feature_name}/{task_id_slug}
+            task.task_branch = Some(format!("task/{}/{}", feature_name, task_id_slug));
+
+            // Generate worktree path: .abathur/worktrees/task-{uuid}
+            task.worktree_path = Some(format!(".abathur/worktrees/task-{}", task_uuid));
+        }
 
         // Submit via real service
         self.service.submit(task).await

@@ -97,9 +97,22 @@ async fn main() -> Result<()> {
                 priority,
                 dependencies,
                 chain,
+                feature_branch,
+                needs_worktree,
             } => {
-                task::handle_submit(&task_service, description, agent_type, summary, priority, dependencies, chain, cli.json)
-                    .await?;
+                task::handle_submit(
+                    &task_service,
+                    description,
+                    agent_type,
+                    summary,
+                    priority,
+                    dependencies,
+                    chain,
+                    feature_branch,
+                    needs_worktree,
+                    cli.json,
+                )
+                .await?;
             }
             TaskCommands::List { status, limit } => {
                 let status_filter = status.and_then(|s| s.parse().ok());
