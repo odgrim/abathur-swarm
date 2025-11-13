@@ -79,10 +79,10 @@ Decompose complex tasks into atomic, independently executable units with explici
 9. **Complete**: Output task plan as specified by the chain prompt
 
 **NOTE:**
-- Do NOT spawn implementation tasks manually - the chain's post-hook `spawn_implementation_tasks.sh` handles this
-- Do NOT spawn validation tasks manually - each implementation task is automatically validated
-- Do NOT spawn merge tasks manually - the chain handles merging in the final step
-- You MAY spawn agent-creator tasks if needed agents don't exist
+- Tasks are spawned AUTOMATICALLY from your JSON output by PromptChainService.should_spawn_tasks()
+- Include `needs_worktree: true` and `feature_branch` in each task definition
+- Branch names (task_branch, worktree_path) are AUTO-GENERATED from your task IDs
+- You MAY spawn agent-creator tasks manually if needed agents don't exist (via MCP task queue)
 
 ## Git Worktree Management
 
@@ -227,44 +227,43 @@ if agent_type in agent_creation_tasks:
 
 ## Spawning Implementation Tasks
 
-**CRITICAL: Build Prerequisites Correctly**
+**IMPORTANT:** Tasks are spawned automatically by the PromptChainService when you output a JSON task plan.
 
-For EACH implementation task, build prerequisites in this order:
+Your task plan output should include for EACH task:
 
-```python
-# 1. Check if agent was created
-agent_type = "rust-domain-models-specialist"  # Example
-prerequisites = []
+```json
+{
+  "id": "implement-user-model",
+  "summary": "Implement User domain model",
+  "description": "Create User struct with validation logic...",
+  "agent_type": "rust-domain-models-specialist",
+  "phase": 1,
+  "estimated_effort": "small",
+  "dependencies": [],
+  "deliverables": [
+    {"type": "code", "path": "src/domain/models/user.rs"}
+  ],
+  "validation_criteria": ["All fields properly typed"],
+  "needs_worktree": true,
+  "feature_branch": "feature/{feature_name}"
+}
+```
 
-# 2. Add agent-creator task ID if agent was created
-if agent_type in agent_creation_tasks:
-    prerequisites.append(agent_creation_tasks[agent_type])
+**Branch Metadata (AUTO-GENERATED):**
+- If `needs_worktree: true` and `feature_branch` is provided, the system will auto-generate:
+  - `task_branch`: `task/{feature_name}/{id}` (e.g., "task/user-auth/implement-user-model")
+  - `worktree_path`: `.abathur/worktrees/task-{uuid}`
+- These fields trigger the `create_task_worktree.sh` hook to create the actual git worktree
 
-# 3. Add task dependencies (other impl tasks this depends on)
-if has_task_dependencies:
-    prerequisites.extend(dependency_task_ids)
-
-# 4. Validate prerequisites
-if agent_type in agent_creation_tasks:
-    assert agent_creation_tasks[agent_type] in prerequisites, \
-        f"CRITICAL: Missing agent-creator dependency for {agent_type}"
-
-# 5. Spawn with validated prerequisites
-task_enqueue({
-    "summary": "Implement {specific_component}",
-    "agent_type": agent_type,
-    "priority": 5,
-    "parent_task_id": current_task_id,
-    "prerequisite_task_ids": prerequisites,  # VALIDATED prerequisites
-    "metadata": {
-        "worktree_path": ".abathur/tasks/{N}",
-        "task_branch": "task/{N}-{name}",
-        "feature_branch": "{feature_branch}",
-        "requires_agent": agent_type,
-        "agent_was_created": agent_type in agent_creation_tasks
-    },
-    "description": "Component: {name}\nDeliverable: {file}\nSpecs: task:{spec_id}:technical_specs"
-})
+**Prerequisites:**
+Dependencies should reference other task IDs in the plan (not UUIDs):
+```json
+{
+  "id": "implement-user-service",
+  "dependencies": ["implement-user-model"],
+  "needs_worktree": true,
+  "feature_branch": "feature/{feature_name}"
+}
 ```
 
 **Prerequisite Chain Example:**

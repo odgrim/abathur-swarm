@@ -828,7 +828,10 @@ impl PromptChainService {
 
         // Extract JSON fields from step output if available
         if let Some(result) = step_result {
-            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&result.output) {
+            // Strip markdown code blocks before parsing (agents often wrap JSON in ```json...```)
+            let cleaned_output = OutputValidator::strip_markdown_code_blocks(&result.output);
+
+            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&cleaned_output) {
                 debug!(
                     step_id = %step_id,
                     "Extracting JSON fields from step output for hook variable substitution"
@@ -1092,10 +1095,42 @@ impl PromptChainService {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        // Extract or inherit feature_branch
+        // Priority: 1) explicit in task_def, 2) from parent task
         let feature_branch = if needs_worktree {
-            parent_task.and_then(|t| t.feature_branch.clone())
+            task_def
+                .get("feature_branch")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| parent_task.and_then(|t| t.feature_branch.clone()))
         } else {
             None
+        };
+
+        // Generate task_branch and worktree_path if needs_worktree is true
+        let (task_branch, worktree_path) = if needs_worktree && feature_branch.is_some() {
+            let task_id_slug = task_def
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("task");
+
+            // Extract feature name from feature_branch (e.g., "feature/user-auth" -> "user-auth")
+            let feature_name = feature_branch
+                .as_ref()
+                .and_then(|fb| fb.strip_prefix("feature/"))
+                .unwrap_or("unknown");
+
+            let task_uuid = uuid::Uuid::new_v4();
+
+            // Generate branch name: task/{feature_name}/{task_id_slug}
+            let branch = format!("task/{}/{}", feature_name, task_id_slug);
+
+            // Generate worktree path: .abathur/worktrees/task-{uuid}
+            let worktree = format!(".abathur/worktrees/task-{}", task_uuid);
+
+            (Some(branch), Some(worktree))
+        } else {
+            (None, None)
         };
 
         let input_data = task_def.get("input_data").cloned();
@@ -1131,8 +1166,8 @@ impl PromptChainService {
             deadline: None,
             estimated_duration_seconds: None,
             feature_branch,
-            task_branch: None,
-            worktree_path: None,
+            task_branch,
+            worktree_path,
             validation_requirement: crate::domain::models::ValidationRequirement::None,
             validation_task_id: None,
             validating_task_id: None,

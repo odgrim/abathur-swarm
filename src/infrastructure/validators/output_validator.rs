@@ -40,7 +40,7 @@ impl OutputValidator {
     /// - ```json\n{...}\n```
     /// - ```\n{...}\n```
     /// - Text before code block\n```json\n{...}\n```
-    fn strip_markdown_code_blocks(output: &str) -> String {
+    pub fn strip_markdown_code_blocks(output: &str) -> String {
         let trimmed = output.trim();
 
         // Look for code block anywhere in the output (not just at the start)

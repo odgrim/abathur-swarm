@@ -647,6 +647,7 @@ mod tests {
             prompt: "Hello, world!".to_string(),
             context: None,
             parameters: ExecutionParameters::default(),
+            working_directory: None,
         };
 
         // Should successfully load agent and format prompt
@@ -668,6 +669,7 @@ mod tests {
             prompt: "Analyze this".to_string(),
             context: Some(serde_json::json!({"key": "value"})),
             parameters: ExecutionParameters::default(),
+            working_directory: None,
         };
 
         let result = substrate.format_prompt(&request);
@@ -690,6 +692,7 @@ mod tests {
             prompt: "Test".to_string(),
             context: None,
             parameters: ExecutionParameters::default(),
+            working_directory: None,
         };
 
         // Should fail when agent file doesn't exist
@@ -709,6 +712,7 @@ mod tests {
             prompt: "Test".to_string(),
             context: None,
             parameters: params,
+            working_directory: None,
         };
 
         let cmd = substrate.build_command(&request).expect("build_command should succeed");
@@ -728,6 +732,7 @@ mod tests {
             prompt: "Test".to_string(),
             context: None,
             parameters: ExecutionParameters::default(),
+            working_directory: None,
         };
 
         let cmd = substrate.build_command(&request).expect("build_command should succeed");

@@ -428,7 +428,6 @@ impl SwarmOrchestrator {
                             }
                             Ok(None) => {
                                 // No ready tasks, continue polling
-                                debug!("No ready tasks available");
                             }
                             Err(e) => {
                                 error!(error = ?e, "Failed to fetch next ready task");
