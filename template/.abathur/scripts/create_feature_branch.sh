@@ -121,4 +121,9 @@ log_info "  Branch: $BRANCH_NAME"
 log_info "  Worktree: $WORKTREE_PATH"
 log_info "  Strategy: $DECOMPOSITION_STRATEGY"
 
+# Output structured data for hook executor to parse and update task fields
+# These values will be captured and used to update the task's feature_branch and worktree_path fields
+echo "ABATHUR_FEATURE_BRANCH=$BRANCH_NAME"
+echo "ABATHUR_WORKTREE_PATH=$WORKTREE_PATH"
+
 exit 0

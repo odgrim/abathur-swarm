@@ -384,27 +384,11 @@ impl AgentExecutor {
 
         let now = chrono::Utc::now();
 
-        // Generate task_branch for chain steps that have a feature_branch
-        // Chain steps share the feature worktree but get their own task_branch for tracking
-        let task_branch = if let Some(ref feature_branch) = current_task.feature_branch {
-            // Extract feature name from feature_branch (e.g., "feature/user-auth" -> "user-auth")
-            let feature_name = feature_branch
-                .strip_prefix("feature/")
-                .unwrap_or("unknown");
-
-            // Use step ID as task identifier (sanitize it for branch name)
-            let step_id_slug = next_step.id
-                .to_lowercase()
-                .replace('_', "-")
-                .chars()
-                .filter(|c| c.is_alphanumeric() || *c == '-')
-                .collect::<String>();
-
-            // Generate task branch: task/{feature_name}/{step_id}
-            Some(format!("task/{}/{}", feature_name, step_id_slug))
-        } else {
-            None
-        };
+        // DO NOT generate task_branch for chain orchestration steps
+        // Chain orchestration steps (technical-architect, technical-requirements-specialist, task-planner)
+        // work directly in the feature worktree without their own task branches
+        // Only implementation tasks (spawned from task-planner output) get task_branch values
+        let task_branch = None;
 
         // Create task for next step
         let next_task = Task {
