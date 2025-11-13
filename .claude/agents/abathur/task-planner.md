@@ -19,6 +19,12 @@ Decompose complex tasks into atomic, independently executable units with explici
 
 **IMPORTANT:** This agent is designed to work within the `technical_feature_workflow` chain. Complete steps 1-9 and output the task plan. The chain's post-hook will spawn the actual implementation tasks.
 
+**CRITICAL OUTPUT REQUIREMENT:** Every task in your JSON output MUST include:
+- `needs_worktree: true`
+- `feature_branch: "feature/{feature_name}"`
+
+Without these fields, task branches will NOT be created and tasks will fail!
+
 1. **Load Technical Specs**: Retrieve from memory namespace `task:{tech_spec_id}:technical_specs`
 
 2. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
@@ -229,6 +235,8 @@ if agent_type in agent_creation_tasks:
 
 **IMPORTANT:** Tasks are spawned automatically by the PromptChainService when you output a JSON task plan.
 
+**CRITICAL:** Every implementation task MUST include `needs_worktree: true` and `feature_branch` to enable branch creation!
+
 Your task plan output should include for EACH task:
 
 ```json
@@ -248,6 +256,10 @@ Your task plan output should include for EACH task:
   "feature_branch": "feature/{feature_name}"
 }
 ```
+
+**REQUIRED FIELDS FOR ALL IMPLEMENTATION TASKS:**
+- `needs_worktree: true` - MUST be set for all implementation, validation, and merge tasks
+- `feature_branch: "feature/{feature_name}"` - MUST match the feature branch created by technical-requirements-specialist
 
 **Branch Metadata (AUTO-GENERATED):**
 - If `needs_worktree: true` and `feature_branch` is provided, the system will auto-generate:
@@ -302,14 +314,15 @@ Validation is MANDATORY - all implementations must pass quality gates:
 
 ```json
 {
+  "id": "validate-{component}",
   "summary": "Validate {component} implementation",
+  "description": "Run all validation checks for {component}...",
   "agent_type": "{validation_agent from project_context}",
   "priority": 4,
-  "prerequisite_task_ids": ["{implementation_task_id}"],
+  "dependencies": ["{implementation_task_id}"],
+  "needs_worktree": true,
+  "feature_branch": "{feature_branch}",
   "metadata": {
-    "worktree_path": "{same_as_implementation}",
-    "task_branch": "{same_as_implementation}",
-    "feature_branch": "{feature_branch}",
     "implementation_task_id": "{impl_task_id}",
     "original_agent_type": "{implementation_agent}",
     "validation_checks": [
@@ -334,18 +347,18 @@ Validation is MANDATORY - all implementations must pass quality gates:
 
 ```json
 {
+  "id": "merge-{component}",
   "summary": "Merge {task_branch} into {feature_branch}",
+  "description": "Merge validated task branch {task_branch} into feature branch {feature_branch}.\n\nValidation passed - all tests successful.\nCleanup after merge: Remove worktree and delete task branch.",
   "agent_type": "git-worktree-merge-orchestrator",
   "priority": 3,
-  "prerequisite_task_ids": ["{validation_task_id}"],
+  "dependencies": ["{validation_task_id}"],
+  "needs_worktree": true,
+  "feature_branch": "{feature_branch}",
   "metadata": {
-    "worktree_path": "{same_as_implementation}",
-    "task_branch": "{task_branch}",
-    "feature_branch": "{feature_branch}",
     "implementation_task_id": "{impl_task_id}",
     "validation_task_id": "{validation_task_id}"
-  },
-  "description": "Merge validated task branch {task_branch} into feature branch {feature_branch}.\n\nValidation passed - all tests successful.\nWorktree: {worktree_path}\nCleanup after merge: Remove worktree and delete task branch."
+  }
 }
 ```
 
@@ -374,6 +387,7 @@ Task branch merged to feature branch, worktree cleaned up
 - Provide rich context in every task description
 - **ALWAYS spawn implementation, validation, AND merge tasks** - workflow depends on this
 - Every task branch MUST have a corresponding merge task to return to feature branch
+- **CRITICAL:** EVERY task MUST include `needs_worktree: true` and `feature_branch` in output JSON
 
 **Dependency Order:**
 1. Agent-creator tasks (if needed) - no prerequisites
@@ -385,8 +399,28 @@ Task branch merged to feature branch, worktree cleaned up
 
 When creating a comprehensive task plan, include:
 
-**Tasks Array**: Each task with id, summary, description, agent_type, phase, estimated_effort, dependencies, deliverables, validation_criteria, needs_worktree flag
+**Tasks Array**: Each task with:
+- `id` (kebab-case identifier)
+- `summary` (concise description)
+- `description` (detailed context)
+- `agent_type` (language-specific specialist)
+- `phase` (execution phase number)
+- `estimated_effort` (small/medium/large)
+- `dependencies` (array of task IDs)
+- `deliverables` (what will be created)
+- `validation_criteria` (success criteria)
+- **`needs_worktree: true`** (REQUIRED for all tasks)
+- **`feature_branch: "feature/{name}"`** (REQUIRED for all tasks)
+
 **Execution Order**: Batches of tasks with parallelization opportunities
 **Agent Workload**: Agent types needed, task counts per agent, total effort estimates
 **Estimated Duration**: Total time estimate and critical path
 **Summary**: Total task count, major components, agents needed, estimated hours
+
+**VALIDATION CHECKLIST BEFORE OUTPUT:**
+✓ Every task has `needs_worktree: true`
+✓ Every task has `feature_branch` set
+✓ Every task has unique `id`
+✓ Every task has `dependencies` array (empty if none)
+✓ Validation task for each implementation task
+✓ Merge task for each validation task
