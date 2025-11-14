@@ -19,7 +19,8 @@ if [[ -z "$TASK_ID" || -z "$FEATURE_NAME" ]]; then
 fi
 
 # If task already has a feature_branch set (from chain workflow), use it
-if [[ -n "$EXISTING_FEATURE_BRANCH" ]]; then
+# Only use existing branch if it's not empty/null
+if [[ -n "$EXISTING_FEATURE_BRANCH" && "$EXISTING_FEATURE_BRANCH" != "null" && "$EXISTING_FEATURE_BRANCH" != "" ]]; then
     echo "[INFO] Task already has feature_branch set: $EXISTING_FEATURE_BRANCH"
     echo "[INFO] Skipping branch creation (using existing from chain workflow)"
     # Don't output ABATHUR_FEATURE_BRANCH - we don't want to override what's already set

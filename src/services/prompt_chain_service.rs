@@ -1097,15 +1097,12 @@ impl PromptChainService {
 
         // Extract or inherit feature_branch
         // Priority: 1) explicit in task_def, 2) from parent task
-        let feature_branch = if needs_worktree {
-            task_def
-                .get("feature_branch")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| parent_task.and_then(|t| t.feature_branch.clone()))
-        } else {
-            None
-        };
+        // ALWAYS inherit from parent in chain workflows for context continuity
+        let feature_branch = task_def
+            .get("feature_branch")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| parent_task.and_then(|t| t.feature_branch.clone()));
 
         // Generate task_branch and worktree_path if needs_worktree is true
         let (task_branch, worktree_path) = if needs_worktree && feature_branch.is_some() {
