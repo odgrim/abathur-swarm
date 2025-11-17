@@ -148,6 +148,23 @@ hooks:
     priority: 10
     enabled: true
 
+  - id: process-architect-decomposition
+    description: "Process technical-architect decomposition plan (Mode 2: Multiple features)"
+    event:
+      type: post_complete
+    conditions:
+      - agent_type: technical-architect
+        task_status: completed
+    actions:
+      - type: run_script
+        script_path: ./.abathur/hooks/process_architect_decomposition.sh
+        args: ["${task_id}"]
+      - type: log_message
+        level: info
+        message: "Processing architect decomposition for ${task_summary}"
+    priority: 10
+    enabled: true
+
   - id: spawn-tech-spec-after-architect
     description: "Automatically spawn technical-requirements-specialist after architecture completes"
     event:

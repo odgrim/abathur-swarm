@@ -12,13 +12,68 @@ Hooks enable automated workflows such as:
 
 ## Available Scripts
 
-### `create_feature_branch.sh`
+### `process_architect_decomposition.sh`
 
-Creates a feature branch with git worktree when a technical-requirements-specialist task starts.
+Processes technical-architect decomposition plan (Mode 2: Multiple features). When the technical-architect completes with a decomposition plan, this hook reads the plan from memory, creates feature branches, and spawns technical-requirements-specialist tasks with pre-populated `feature_branch` fields.
 
 **Usage:**
 ```bash
-./create_feature_branch.sh <task_id> <feature_name>
+./process_architect_decomposition.sh <task_id>
+```
+
+**What it does:**
+1. Reads decomposition plan from `task:{task_id}:decomposition:plan` in memory
+2. For each feature in the plan:
+   - Sanitizes the feature name
+   - Creates `feature/{name}` branch with git worktree
+   - Spawns technical-requirements-specialist task with `--feature-branch` flag
+3. Gracefully exits if no plan exists (Mode 1: single feature)
+
+**Memory Schema (stored by technical-architect):**
+```json
+[
+  {
+    "name": "user-auth-api",
+    "summary": "user-auth-api: Technical requirements for user authentication",
+    "description": "Architecture in memory: task:{task_id}:architecture...",
+    "priority": 7
+  },
+  {
+    "name": "password-mgmt",
+    "summary": "password-mgmt: Password reset and validation",
+    "description": "Password security features...",
+    "priority": 7
+  }
+]
+```
+
+**Hook Configuration:**
+```yaml
+- id: process-architect-decomposition
+  description: "Process technical-architect decomposition plan (Mode 2: Multiple features)"
+  event:
+    type: post_complete
+  conditions:
+    - agent_type: technical-architect
+      task_status: completed
+  actions:
+    - type: run_script
+      script_path: ./.abathur/hooks/process_architect_decomposition.sh
+      args: ["${task_id}"]
+    - type: log_message
+      level: info
+      message: "Processing architect decomposition for ${task_summary}"
+  priority: 10
+  enabled: true
+```
+
+### `create_feature_branch.sh`
+
+Creates a feature branch with git worktree when a technical-requirements-specialist task starts. This is used for Mode 1 (single feature) scenarios or as a fallback.
+
+**Usage:**
+```bash
+./create_feature_branch.sh <task_id> <feature_name> [existing_feature_branch]
 ```
 
 **Hook Configuration:**
@@ -29,7 +84,7 @@ Creates a feature branch with git worktree when a technical-requirements-special
   actions:
     - type: run_script
       script_path: ./.abathur/hooks/create_feature_branch.sh
-      args: ["${task_id}", "${task_summary}"]
+      args: ["${task_id}", "${task_summary}", "${feature_branch}"]
 ```
 
 ### `create_task_worktree.sh`
