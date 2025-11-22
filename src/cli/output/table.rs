@@ -76,7 +76,10 @@ impl TableFormatter {
                 Cell::new(&chain_display)
             };
 
-            let branch = task.branch.as_deref().unwrap_or("-");
+            // Display task branch if set, otherwise fall back to feature branch
+            let branch = task.branch.as_deref()
+                .or(task.feature_branch.as_deref())
+                .unwrap_or("-");
 
             table.add_row(vec![
                 Cell::new(id_short),
