@@ -172,7 +172,7 @@ Located in `scripts/`:
 - **spawn_implementation_tasks.sh** - Create implementation tasks
 - **run_all_tests.sh** - Execute full test suite
 - **quality_checks.sh** - Run quality checks
-- **merge_task_branches.sh** - Merge task branches to feature branch
+- **merge_branches.sh** - Merge task branches to feature branch
 
 ## Creating Custom Chains
 

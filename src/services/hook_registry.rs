@@ -281,7 +281,7 @@ impl HookRegistry {
             for key in required_keys {
                 let has_key = match key.as_str() {
                     "worktree_path" => task.worktree_path.is_some(),
-                    "task_branch" => task.task_branch.is_some(),
+                    "branch" => task.branch.is_some(),
                     "feature_branch" => task.feature_branch.is_some(),
                     "parent_task_id" => task.parent_task_id.is_some(),
                     _ => {

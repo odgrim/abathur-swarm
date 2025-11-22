@@ -38,7 +38,7 @@ impl TaskQueueServiceAdapter {
         task.chain_id = chain_id;
         task.feature_branch = feature_branch.clone();
 
-        // Generate task_branch and worktree_path if needs_worktree is true
+        // Generate branch and worktree_path if needs_worktree is true
         if needs_worktree && feature_branch.is_some() {
             let feature_name = feature_branch
                 .as_ref()
@@ -60,7 +60,7 @@ impl TaskQueueServiceAdapter {
                 .join("-");
 
             // Generate branch name: task/{feature_name}/{task_id_slug}
-            task.task_branch = Some(format!("task/{}/{}", feature_name, task_id_slug));
+            task.branch = Some(format!("task/{}/{}", feature_name, task_id_slug));
 
             // Generate worktree path: .abathur/worktrees/task-{uuid}
             task.worktree_path = Some(format!(".abathur/worktrees/task-{}", task_uuid));
@@ -345,7 +345,7 @@ fn convert_domain_to_cli_task(domain_task: DomainTask) -> CliTask {
         completed_at: domain_task.completed_at,
         chain_id: domain_task.chain_id,
         feature_branch: domain_task.feature_branch,
-        task_branch: domain_task.task_branch,
+        branch: domain_task.branch,
     }
 }
 

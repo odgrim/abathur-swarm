@@ -274,11 +274,11 @@ pub struct TaskFilters {
     /// Filter by maximum priority (inclusive)
     pub priority_max: Option<u8>,
 
+    /// Filter by branch name
+    pub branch: Option<String>,
+
     /// Filter by feature branch name
     pub feature_branch: Option<String>,
-
-    /// Filter by task branch name
-    pub task_branch: Option<String>,
 
     /// Filter by session ID
     pub session_id: Option<uuid::Uuid>,

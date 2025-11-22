@@ -78,8 +78,8 @@ impl TaskRepositoryImpl {
             estimated_duration_seconds: row
                 .get::<Option<i64>, _>("estimated_duration_seconds")
                 .map(|v| v as u32),
+            branch: row.get("branch"),
             feature_branch: row.get("feature_branch"),
-            task_branch: row.get("task_branch"),
             worktree_path: row.get("worktree_path"),
 
             // Validation and workflow tracking fields
@@ -166,7 +166,7 @@ impl TaskRepository for TaskRepositoryImpl {
                 input_data, result_data, error_message, retry_count, max_retries,
                 max_execution_timeout_seconds, submitted_at, started_at, completed_at,
                 last_updated_at, created_by, parent_task_id, session_id, source,
-                deadline, estimated_duration_seconds, feature_branch, task_branch,
+                deadline, estimated_duration_seconds, branch, feature_branch,
                 worktree_path, validation_requirement, validation_task_id,
                 validating_task_id, remediation_count, is_remediation,
                 workflow_state, workflow_expectations, chain_id, chain_step_index
@@ -199,8 +199,8 @@ impl TaskRepository for TaskRepositoryImpl {
             source,
             deadline,
             task.estimated_duration_seconds,
+            task.branch,
             task.feature_branch,
-            task.task_branch,
             task.worktree_path,
             validation_requirement,
             validation_task_id,
@@ -297,8 +297,8 @@ impl TaskRepository for TaskRepositoryImpl {
                 source = ?,
                 deadline = ?,
                 estimated_duration_seconds = ?,
+                branch = ?,
                 feature_branch = ?,
-                task_branch = ?,
                 worktree_path = ?,
                 validation_requirement = ?,
                 validation_task_id = ?,
@@ -334,8 +334,8 @@ impl TaskRepository for TaskRepositoryImpl {
             source,
             deadline,
             task.estimated_duration_seconds,
+            task.branch,
             task.feature_branch,
-            task.task_branch,
             task.worktree_path,
             validation_requirement,
             validation_task_id,

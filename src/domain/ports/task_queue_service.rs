@@ -105,7 +105,7 @@ pub trait TaskQueueService: Send + Sync {
     /// Update a task's fields
     ///
     /// Updates the entire task record. Useful for updating multiple fields
-    /// at once, such as worktree_path, task_branch, and feature_branch.
+    /// at once, such as worktree_path, branch, and feature_branch.
     ///
     /// # Arguments
     ///

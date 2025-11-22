@@ -38,7 +38,7 @@ cd ${feature_worktree_path}
 git status --porcelain
 
 # Test merge first
-git merge ${task_branch} --no-commit --no-ff
+git merge ${branch} --no-commit --no-ff
 
 # Check for conflicts
 git diff --name-only --diff-filter=U
@@ -47,7 +47,7 @@ git diff --name-only --diff-filter=U
 cargo build && cargo test
 
 # If tests pass, commit
-git commit -m "Merge task branch ${task_branch}"
+git commit -m "Merge task branch ${branch}"
 
 # If conflicts or test failures
 git merge --abort
@@ -69,7 +69,7 @@ git merge --abort
   "priority": 6,
   "metadata": {
     "conflict_type": "merge",
-    "task_branch": "{branch}",
+    "branch": "{branch}",
     "feature_branch": "{target}",
     "conflicted_files": ["list"]
   },
@@ -84,7 +84,7 @@ git merge --abort
 git worktree remove ${task_worktree_path}
 
 # Delete remote branch if exists
-git push origin --delete ${task_branch}
+git push origin --delete ${branch}
 
 # Prune worktree references
 git worktree prune
@@ -98,7 +98,7 @@ git worktree prune
   "keys": {
     "merge_result": {
       "status": "success|conflict|test_failure",
-      "task_branch": "name",
+      "branch": "name",
       "feature_branch": "name",
       "files_merged": N,
       "conflicts": ["files"],
@@ -221,7 +221,7 @@ cargo test --all-features
 
 # 3. Test merge (dry-run)
 cd ${feature_worktree_path}
-git merge ${task_branch} --no-commit --no-ff
+git merge ${branch} --no-commit --no-ff
 if [ $? -eq 0 ]; then
   # No conflicts
   git merge --abort
@@ -349,7 +349,7 @@ git worktree prune
   "key": "merge_result",
   "value": {
     "status": "success",
-    "task_branch": "task/001-user-model",
+    "branch": "task/001-user-model",
     "feature_branch": "feature/user-management",
     "files_merged": 8,
     "conflicts": [],
@@ -483,7 +483,7 @@ git merge --abort
   "key": "merge_result",
   "value": {
     "status": "conflict",
-    "task_branch": "task/003-email-validation",
+    "branch": "task/003-email-validation",
     "feature_branch": "feature/user-management",
     "files_merged": 0,
     "conflicts": ["src/domain/user.rs"],
@@ -545,7 +545,7 @@ git reset --hard HEAD~1
   "key": "merge_result",
   "value": {
     "status": "test_failure",
-    "task_branch": "task/005-user-service",
+    "branch": "task/005-user-service",
     "feature_branch": "feature/user-management",
     "files_merged": 12,
     "conflicts": [],
@@ -782,10 +782,10 @@ find docs -name "*.md" | wc -l  # Documentation files
 git worktree remove ${task_worktree_path}
 
 # 2. Delete remote task branch (if exists)
-git push origin --delete ${task_branch} 2>/dev/null || true
+git push origin --delete ${branch} 2>/dev/null || true
 
 # 3. Delete local task branch
-git branch -d ${task_branch}
+git branch -d ${branch}
 
 # 4. Prune worktree references
 git worktree prune

@@ -190,12 +190,12 @@ impl AgentExecutor {
             // If task has input_data, use it; otherwise create new input_data with worktree info
             let mut input_data = task.input_data.clone().unwrap_or_else(|| serde_json::json!({}));
 
-            // Add worktree_path, task_branch, and feature_branch to input_data if they exist on the task
+            // Add worktree_path, branch, and feature_branch to input_data if they exist on the task
             if let Some(ref worktree_path) = task.worktree_path {
                 input_data["worktree_path"] = serde_json::json!(worktree_path);
             }
-            if let Some(ref task_branch) = task.task_branch {
-                input_data["task_branch"] = serde_json::json!(task_branch);
+            if let Some(ref branch) = task.branch {
+                input_data["branch"] = serde_json::json!(branch);
             }
             if let Some(ref feature_branch) = task.feature_branch {
                 input_data["feature_branch"] = serde_json::json!(feature_branch);
@@ -286,8 +286,8 @@ impl AgentExecutor {
         if let Some(ref worktree_path) = task.worktree_path {
             step_input["worktree_path"] = serde_json::json!(worktree_path);
         }
-        if let Some(ref task_branch) = task.task_branch {
-            step_input["task_branch"] = serde_json::json!(task_branch);
+        if let Some(ref branch) = task.branch {
+            step_input["branch"] = serde_json::json!(branch);
         }
         if let Some(ref feature_branch) = task.feature_branch {
             step_input["feature_branch"] = serde_json::json!(feature_branch);
@@ -384,11 +384,10 @@ impl AgentExecutor {
 
         let now = chrono::Utc::now();
 
-        // DO NOT generate task_branch for chain orchestration steps
         // Chain orchestration steps (technical-architect, technical-requirements-specialist, task-planner)
-        // work directly in the feature worktree without their own task branches
-        // Only implementation tasks (spawned from task-planner output) get task_branch values
-        let task_branch = None;
+        // work in the same branch as their parent (typically a feature branch)
+        // They inherit both branch and feature_branch from the parent task
+        // Implementation tasks spawned later will get new task branch values
 
         // Create task for next step
         let next_task = Task {
@@ -426,8 +425,8 @@ impl AgentExecutor {
             source: TaskSource::AgentPlanner,
             deadline: current_task.deadline,
             estimated_duration_seconds: None,
+            branch: current_task.branch.clone(),
             feature_branch: current_task.feature_branch.clone(),
-            task_branch,
             worktree_path: current_task.worktree_path.clone(),
             validation_requirement: crate::domain::models::ValidationRequirement::None,
             validation_task_id: None,

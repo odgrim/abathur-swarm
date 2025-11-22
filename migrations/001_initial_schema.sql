@@ -36,11 +36,22 @@ CREATE TABLE IF NOT EXISTS tasks (
     source TEXT NOT NULL CHECK(source IN ('human', 'agent_requirements', 'agent_planner', 'agent_implementation')),
     deadline TEXT,  -- ISO 8601
     estimated_duration_seconds INTEGER,
+    branch TEXT,
     feature_branch TEXT,
-    task_branch TEXT,
     worktree_path TEXT,
+    validation_requirement TEXT NOT NULL DEFAULT '{"type":"none"}',  -- JSON
+    validation_task_id TEXT,
+    validating_task_id TEXT,
+    remediation_count INTEGER NOT NULL DEFAULT 0,
+    is_remediation INTEGER NOT NULL DEFAULT 0 CHECK(is_remediation IN (0, 1)),
+    workflow_state TEXT,  -- JSON
+    workflow_expectations TEXT,  -- JSON
+    chain_id TEXT,
+    chain_step_index INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (parent_task_id) REFERENCES tasks(id) ON DELETE SET NULL,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL,
+    FOREIGN KEY (validation_task_id) REFERENCES tasks(id) ON DELETE SET NULL,
+    FOREIGN KEY (validating_task_id) REFERENCES tasks(id) ON DELETE SET NULL
 );
 
 -- Indexes for tasks table
@@ -68,6 +79,22 @@ CREATE INDEX IF NOT EXISTS idx_tasks_session_id
 CREATE INDEX IF NOT EXISTS idx_tasks_feature_branch
     ON tasks(feature_branch)
     WHERE feature_branch IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_tasks_branch
+    ON tasks(branch)
+    WHERE branch IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_tasks_validation_task_id
+    ON tasks(validation_task_id)
+    WHERE validation_task_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_tasks_validating_task_id
+    ON tasks(validating_task_id)
+    WHERE validating_task_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_tasks_chain_id
+    ON tasks(chain_id)
+    WHERE chain_id IS NOT NULL;
 
 -- =============================================================================
 -- Table: agents

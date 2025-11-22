@@ -38,7 +38,7 @@ cd ${feature_worktree_path}
 git status --porcelain
 
 # Test merge first
-git merge ${task_branch} --no-commit --no-ff
+git merge ${branch} --no-commit --no-ff
 
 # Check for conflicts
 git diff --name-only --diff-filter=U
@@ -47,7 +47,7 @@ git diff --name-only --diff-filter=U
 cargo build && cargo test
 
 # If tests pass, commit
-git commit -m "Merge task branch ${task_branch}"
+git commit -m "Merge task branch ${branch}"
 
 # If conflicts or test failures
 git merge --abort
@@ -69,7 +69,7 @@ git merge --abort
   "priority": 6,
   "metadata": {
     "conflict_type": "merge",
-    "task_branch": "{branch}",
+    "branch": "{branch}",
     "feature_branch": "{target}",
     "conflicted_files": ["list"]
   },
@@ -84,7 +84,7 @@ git merge --abort
 git worktree remove ${task_worktree_path}
 
 # Delete remote branch if exists
-git push origin --delete ${task_branch}
+git push origin --delete ${branch}
 
 # Prune worktree references
 git worktree prune
@@ -98,7 +98,7 @@ git worktree prune
   "keys": {
     "merge_result": {
       "status": "success|conflict|test_failure",
-      "task_branch": "name",
+      "branch": "name",
       "feature_branch": "name",
       "files_merged": N,
       "conflicts": ["files"],

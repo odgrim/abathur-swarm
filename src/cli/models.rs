@@ -19,8 +19,8 @@ pub struct Task {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub chain_id: Option<String>,
+    pub branch: Option<String>,
     pub feature_branch: Option<String>,
-    pub task_branch: Option<String>,
 }
 
 /// Task status enum

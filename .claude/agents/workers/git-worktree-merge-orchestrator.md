@@ -71,7 +71,7 @@ cargo test --all-features
 
 # Step 3: Test merge compatibility (dry-run for each task)
 cd ${feature_worktree_path}
-git merge ${task_branch} --no-commit --no-ff
+git merge ${branch} --no-commit --no-ff
 if [ $? -eq 0 ]; then
   echo "No conflicts"
   git merge --abort
@@ -156,7 +156,7 @@ git merge HEAD 2>&1 | grep -q "not something we can merge" || echo "ERROR: Merge
 **Step 3: Test Merge (Dry-run)**
 ```bash
 # Test merge first with --no-commit
-git merge ${task_branch} --no-commit --no-ff
+git merge ${branch} --no-commit --no-ff
 
 # Check for conflicts
 git diff --name-only --diff-filter=U
@@ -193,7 +193,7 @@ cargo clippy -- -D warnings
 
 If tests pass:
 ```bash
-git commit -m "Merge ${task_branch} into ${feature_branch}
+git commit -m "Merge ${branch} into ${feature_branch}
 
 ${summary_of_changes}
 
@@ -211,8 +211,8 @@ If tests fail:
 git worktree remove ${task_worktree_path}
 
 # Delete task branch (local and remote if exists)
-git branch -d ${task_branch}
-git push origin --delete ${task_branch} 2>/dev/null || true
+git branch -d ${branch}
+git push origin --delete ${branch} 2>/dev/null || true
 
 # Prune worktree references
 git worktree prune
@@ -227,7 +227,7 @@ Store merge results in memory using MCP tool:
   "key": "merge_result",
   "value": {
     "status": "success|conflict|test_failure",
-    "task_branch": "${task_branch}",
+    "branch": "${branch}",
     "feature_branch": "${feature_branch}",
     "files_merged": N,
     "conflicts": [],
@@ -417,7 +417,7 @@ Store merge results:
   "key": "merge_result",
   "value": {
     "status": "success|conflict|test_failure",
-    "task_branch": "name",
+    "branch": "name",
     "feature_branch": "name",
     "files_merged": N,
     "conflicts": ["files"],
@@ -459,18 +459,18 @@ Store cleanup status:
 ```bash
 cd ${feature_worktree}
 git status --porcelain  # Verify clean
-git merge ${task_branch} --no-commit --no-ff
+git merge ${branch} --no-commit --no-ff
 git diff --name-only --diff-filter=U  # Check conflicts
 cargo build && cargo test  # Validate
-git commit -m "Merge ${task_branch}"
+git commit -m "Merge ${branch}"
 git worktree remove ${task_worktree}
-git branch -d ${task_branch}
+git branch -d ${branch}
 git worktree prune
 ```
 
 **Pattern: Conflict detection and remediation**
 ```bash
-git merge ${task_branch} --no-commit --no-ff
+git merge ${branch} --no-commit --no-ff
 if [ $? -ne 0 ]; then
   git merge --abort
   # Spawn remediation via MCP
@@ -504,7 +504,7 @@ git commit -m "..."
   },
   "merges": [
     {
-      "task_branch": "task/001-user-model",
+      "branch": "task/001-user-model",
       "feature_branch": "feature/user-management",
       "status": "success|conflict|test_failure",
       "files_merged": 8,
@@ -648,10 +648,10 @@ Co-Authored-By: Claude <noreply@anthropic.com>"
 git worktree remove ${task_worktree_path}
 
 # 2. Delete remote task branch (if exists)
-git push origin --delete ${task_branch} 2>/dev/null || true
+git push origin --delete ${branch} 2>/dev/null || true
 
 # 3. Delete local task branch
-git branch -d ${task_branch}
+git branch -d ${branch}
 
 # 4. Prune worktree references
 git worktree prune
@@ -762,7 +762,7 @@ git worktree prune
   "key": "merge_result",
   "value": {
     "status": "success",
-    "task_branch": "task/001-user-model",
+    "branch": "task/001-user-model",
     "feature_branch": "feature/user-management",
     "files_merged": 8,
     "conflicts": [],
@@ -896,7 +896,7 @@ git merge --abort
   "key": "merge_result",
   "value": {
     "status": "conflict",
-    "task_branch": "task/003-email-validation",
+    "branch": "task/003-email-validation",
     "feature_branch": "feature/user-management",
     "files_merged": 0,
     "conflicts": ["src/domain/user.rs"],
@@ -958,7 +958,7 @@ git reset --hard HEAD~1
   "key": "merge_result",
   "value": {
     "status": "test_failure",
-    "task_branch": "task/005-user-service",
+    "branch": "task/005-user-service",
     "feature_branch": "feature/user-management",
     "files_merged": 12,
     "conflicts": [],

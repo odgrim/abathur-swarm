@@ -57,7 +57,7 @@ proptest! {
                 deadline: None,
                 estimated_duration_seconds: None,
                 feature_branch: None,
-                task_branch: None,
+                branch: None,
                 worktree_path: None,
             });
         }
@@ -127,7 +127,7 @@ proptest! {
                 deadline: None,
                 estimated_duration_seconds: None,
                 feature_branch: None,
-                task_branch: None,
+                branch: None,
                 worktree_path: None,
             });
         }
@@ -193,7 +193,7 @@ proptest! {
                 deadline: None,
                 estimated_duration_seconds: None,
                 feature_branch: None,
-                task_branch: None,
+                branch: None,
                 worktree_path: None,
             });
         }
@@ -251,7 +251,7 @@ proptest! {
                 deadline: None,
                 estimated_duration_seconds: None,
                 feature_branch: None,
-                task_branch: None,
+                branch: None,
                 worktree_path: None,
             });
         }

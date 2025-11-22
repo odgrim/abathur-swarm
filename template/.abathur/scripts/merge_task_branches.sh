@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# merge_task_branches.sh - Merge task branches to feature branch
+# merge_branches.sh - Merge task branches to feature branch
 #
-# Usage: ./merge_task_branches.sh <task_id> <branches_json>
+# Usage: ./merge_branches.sh <task_id> <branches_json>
 #
 # This hook merges all task branches into the feature branch.
 # It reads the branches to merge from JSON input.

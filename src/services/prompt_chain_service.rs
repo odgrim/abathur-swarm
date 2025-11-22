@@ -1104,8 +1104,8 @@ impl PromptChainService {
             .map(|s| s.to_string())
             .or_else(|| parent_task.and_then(|t| t.feature_branch.clone()));
 
-        // Generate task_branch and worktree_path if needs_worktree is true
-        let (task_branch, worktree_path) = if needs_worktree && feature_branch.is_some() {
+        // Generate branch and worktree_path if needs_worktree is true
+        let (branch_value, worktree_path) = if needs_worktree && feature_branch.is_some() {
             let task_id_slug = task_def
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -1162,8 +1162,8 @@ impl PromptChainService {
             source: TaskSource::AgentPlanner,
             deadline: None,
             estimated_duration_seconds: None,
+            branch: branch_value,
             feature_branch,
-            task_branch,
             worktree_path,
             validation_requirement: crate::domain::models::ValidationRequirement::None,
             validation_task_id: None,

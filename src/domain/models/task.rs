@@ -219,8 +219,8 @@ pub struct Task {
     pub source: TaskSource,
     pub deadline: Option<DateTime<Utc>>,
     pub estimated_duration_seconds: Option<u32>,
+    pub branch: Option<String>,
     pub feature_branch: Option<String>,
-    pub task_branch: Option<String>,
     pub worktree_path: Option<String>,
 
     // Validation and workflow tracking fields
@@ -289,8 +289,8 @@ impl Task {
             source: TaskSource::Human,
             deadline: None,
             estimated_duration_seconds: None,
+            branch: None,
             feature_branch: None,
-            task_branch: None,
             worktree_path: None,
             validation_requirement: ValidationRequirement::None,
             validation_task_id: None,
@@ -1233,7 +1233,7 @@ mod tests {
             "deadline": null,
             "estimated_duration_seconds": null,
             "feature_branch": null,
-            "task_branch": null,
+            "branch": null,
             "worktree_path": null
         }"#;
 

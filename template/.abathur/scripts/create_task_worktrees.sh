@@ -114,14 +114,14 @@ while IFS= read -r task_json; do
     SUBTASK_SUMMARY=$(echo "$task_json" | jq -r '.summary')
 
     # Create sanitized task branch name with feature name prefix
-    TASK_BRANCH="task/${FEATURE_NAME}/${SUBTASK_ID}"
+    BRANCH="task/${FEATURE_NAME}/${SUBTASK_ID}"
     TASK_PATH="${FEATURE_NAME}-${SUBTASK_ID}"
     TASK_PATH=$(echo "$TASK_PATH" | sed 's|/|-|g')
     WORKTREE_PATH=".abathur/worktrees/tasks/${TASK_PATH}"
 
     log_info "Processing task: $SUBTASK_ID"
     log_info "  Summary: $SUBTASK_SUMMARY"
-    log_info "  Branch: $TASK_BRANCH"
+    log_info "  Branch: $BRANCH"
     log_info "  Path: $WORKTREE_PATH"
 
     # Check if worktree already exists
@@ -132,7 +132,7 @@ while IFS= read -r task_json; do
     fi
 
     # Create worktree
-    if git worktree add -b "$TASK_BRANCH" "$WORKTREE_PATH" "$FEATURE_BRANCH" 2>&1; then
+    if git worktree add -b "$BRANCH" "$WORKTREE_PATH" "$FEATURE_BRANCH" 2>&1; then
         log_info "  ✓ Worktree created successfully"
         ((CREATED_COUNT++))
 
@@ -148,7 +148,7 @@ while IFS= read -r task_json; do
             abathur memory add \
                 --namespace "$SUB_NAMESPACE" \
                 --key "branch_name" \
-                --value "\"$TASK_BRANCH\"" \
+                --value "\"$BRANCH\"" \
                 --type "episodic" \
                 --created-by "technical_feature_workflow" 2>/dev/null || true
         fi

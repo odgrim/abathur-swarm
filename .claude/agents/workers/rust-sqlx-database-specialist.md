@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     deadline TEXT,
     estimated_duration_seconds INTEGER,
     feature_branch TEXT,
-    task_branch TEXT,
+    branch TEXT,
     worktree_path TEXT,
     FOREIGN KEY (parent_task_id) REFERENCES tasks(id) ON DELETE SET NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL
@@ -268,7 +268,7 @@ impl TaskRepository for TaskRepositoryImpl {
                 input_data, result_data, error_message, retry_count, max_retries,
                 max_execution_timeout_seconds, submitted_at, started_at, completed_at,
                 last_updated_at, created_by, parent_task_id, session_id, source,
-                deadline, estimated_duration_seconds, feature_branch, task_branch,
+                deadline, estimated_duration_seconds, feature_branch, branch,
                 worktree_path
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -300,7 +300,7 @@ impl TaskRepository for TaskRepositoryImpl {
             task.deadline.map(|dt| dt.to_rfc3339()),
             task.estimated_duration_seconds,
             task.feature_branch,
-            task.task_branch,
+            task.branch,
             task.worktree_path
         )
         .execute(&self.pool)
@@ -370,7 +370,7 @@ impl TaskRepository for TaskRepositoryImpl {
                         .map(|dt| dt.with_timezone(&Utc)),
                     estimated_duration_seconds: r.estimated_duration_seconds.map(|v| v as u32),
                     feature_branch: r.feature_branch,
-                    task_branch: r.task_branch,
+                    branch: r.branch,
                     worktree_path: r.worktree_path,
                 };
                 Ok(Some(task))
@@ -408,7 +408,7 @@ impl TaskRepository for TaskRepositoryImpl {
                 deadline = ?,
                 estimated_duration_seconds = ?,
                 feature_branch = ?,
-                task_branch = ?,
+                branch = ?,
                 worktree_path = ?
             WHERE id = ?
             "#,
@@ -437,7 +437,7 @@ impl TaskRepository for TaskRepositoryImpl {
             task.deadline.map(|dt| dt.to_rfc3339()),
             task.estimated_duration_seconds,
             task.feature_branch,
-            task.task_branch,
+            task.branch,
             task.worktree_path,
             task.id.to_string()
         )
@@ -655,7 +655,7 @@ async fn test_insert_and_get_task() {
         deadline: None,
         estimated_duration_seconds: None,
         feature_branch: None,
-        task_branch: None,
+        branch: None,
         worktree_path: None,
     };
 

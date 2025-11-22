@@ -859,7 +859,7 @@ mod tests {
             deadline: None,
             estimated_duration_seconds: None,
             feature_branch: None,
-            task_branch: None,
+            branch: None,
             worktree_path: None,
             validation_requirement: ValidationRequirement::None,
             validation_task_id: None,

@@ -1020,7 +1020,7 @@ mod tests {
             deadline: None,
             estimated_duration_seconds: None,
             feature_branch: None,
-            task_branch: None,
+            branch: None,
             worktree_path: None,
             validation_requirement: crate::domain::models::task::ValidationRequirement::None,
             validation_task_id: None,

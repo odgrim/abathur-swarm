@@ -89,7 +89,7 @@ Without these fields, task branches will NOT be created and tasks will fail!
 **NOTE:**
 - Tasks are spawned AUTOMATICALLY from your JSON output by PromptChainService.should_spawn_tasks()
 - Include `needs_worktree: true` and `feature_branch` in each task definition
-- Branch names (task_branch, worktree_path) are AUTO-GENERATED from your task IDs
+- Branch names (branch, worktree_path) are AUTO-GENERATED from your task IDs
 - You MAY spawn agent-creator tasks manually if needed agents don't exist (via MCP task queue)
 
 ## Git Worktree Management
@@ -265,7 +265,7 @@ Your task plan output should include for EACH task:
 
 **Branch Metadata (AUTO-GENERATED):**
 - If `needs_worktree: true` and `feature_branch` is provided, the system will auto-generate:
-  - `task_branch`: `task/{feature_name}/{id}` (e.g., "task/user-auth/implement-user-model")
+  - `branch`: `task/{feature_name}/{id}` (e.g., "task/user-auth/implement-user-model")
   - `worktree_path`: `.abathur/worktrees/task-{uuid}`
 - These fields trigger the `create_task_worktree.sh` hook to create the actual git worktree
 
@@ -350,8 +350,8 @@ Validation is MANDATORY - all implementations must pass quality gates:
 ```json
 {
   "id": "merge-{component}",
-  "summary": "Merge {task_branch} into {feature_branch}",
-  "description": "Merge validated task branch {task_branch} into feature branch {feature_branch}.\n\nValidation passed - all tests successful.\nCleanup after merge: Remove worktree and delete task branch.",
+  "summary": "Merge {branch} into {feature_branch}",
+  "description": "Merge validated task branch {branch} into feature branch {feature_branch}.\n\nValidation passed - all tests successful.\nCleanup after merge: Remove worktree and delete task branch.",
   "agent_type": "git-worktree-merge-orchestrator",
   "priority": 3,
   "dependencies": ["{validation_task_id}"],

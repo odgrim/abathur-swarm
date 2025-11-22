@@ -189,9 +189,9 @@ impl HookExecutor {
             updated = true;
         }
 
-        if let Some(task_branch) = updates.get("ABATHUR_TASK_BRANCH") {
-            task.task_branch = Some(task_branch.clone());
-            info!(task_id = %task_id, task_branch = %task_branch, "Updated task task_branch");
+        if let Some(branch) = updates.get("ABATHUR_BRANCH") {
+            task.branch = Some(branch.clone());
+            info!(task_id = %task_id, branch = %branch, "Updated task branch");
             updated = true;
         }
 
@@ -657,12 +657,12 @@ Agent Type: {}
             vars.insert("parent_task_id".to_string(), parent_id.to_string());
         }
 
-        if let Some(ref feature_branch) = task.feature_branch {
-            vars.insert("feature_branch".to_string(), feature_branch.clone());
+        if let Some(ref branch) = task.branch {
+            vars.insert("branch".to_string(), branch.clone());
         }
 
-        if let Some(ref task_branch) = task.task_branch {
-            vars.insert("task_branch".to_string(), task_branch.clone());
+        if let Some(ref feature_branch) = task.feature_branch {
+            vars.insert("feature_branch".to_string(), feature_branch.clone());
         }
 
         if let Some(ref worktree_path) = task.worktree_path {

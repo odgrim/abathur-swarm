@@ -76,7 +76,7 @@ impl TableFormatter {
                 Cell::new(&chain_display)
             };
 
-            let branch = task.task_branch.as_deref().unwrap_or("-");
+            let branch = task.branch.as_deref().unwrap_or("-");
 
             table.add_row(vec![
                 Cell::new(id_short),
@@ -311,8 +311,8 @@ pub fn format_task_table(tasks: &[crate::cli::models::Task]) -> String {
         source: crate::domain::models::task::TaskSource::Human,
         deadline: None,
         estimated_duration_seconds: None,
+        branch: t.branch.clone(),
         feature_branch: t.feature_branch.clone(),
-        task_branch: t.task_branch.clone(),
         worktree_path: None,
         validation_requirement: crate::domain::models::task::ValidationRequirement::None,
         validation_task_id: None,
@@ -449,7 +449,7 @@ mod tests {
             deadline: None,
             estimated_duration_seconds: None,
             feature_branch: None,
-            task_branch: Some("test-branch".to_string()),
+            branch: Some("test-branch".to_string()),
             worktree_path: None,
             validation_requirement: crate::domain::models::task::ValidationRequirement::None,
             validation_task_id: None,

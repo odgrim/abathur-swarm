@@ -31,7 +31,7 @@ This directory contains the core Abathur framework scripts that manage branch cr
 ### Task Orchestration
 
 - **spawn_implementation_tasks.sh** - Spawns implementation tasks via task queue
-- **merge_task_branches.sh** - Merges task branches back to feature branch
+- **merge_branches.sh** - Merges task branches back to feature branch
 - **cleanup_all_worktrees.sh** - Cleans up completed worktrees and branches
 
 ## Branch Naming Conventions

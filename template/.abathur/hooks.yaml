@@ -8,7 +8,7 @@ hooks:
   # BRANCH COMPLETION HOOKS
   # ============================================================================
 
-  - id: auto-merge-successful-task-branch
+  - id: auto-merge-successful-branch
     description: "Automatically spawn merge orchestrator when all tasks in a branch succeed"
     event:
       type: on_branch_complete
@@ -149,7 +149,7 @@ hooks:
     enabled: true
 
   - id: process-architect-decomposition
-    description: "Process technical-architect decomposition plan (Mode 2: Multiple features)"
+    description: "Process technical-architect decomposition - spawns tech-req-spec tasks for all subprojects (single or multiple)"
     event:
       type: post_complete
     conditions:
@@ -166,7 +166,7 @@ hooks:
     enabled: true
 
   - id: spawn-tech-spec-after-architect
-    description: "Automatically spawn technical-requirements-specialist after architecture completes"
+    description: "[DISABLED] Automatically spawn technical-requirements-specialist after architecture completes - Chain workflow handles this now"
     event:
       type: post_complete
     conditions:
@@ -198,7 +198,7 @@ hooks:
         level: info
         message: "Architecture complete - spawning technical-requirements-specialist"
     priority: 10
-    enabled: true
+    enabled: false
 
   - id: spawn-planner-after-tech-spec
     description: "Automatically spawn task-planner after technical specifications complete"
@@ -239,7 +239,7 @@ hooks:
   # ============================================================================
 
   - id: create-feature-branch-on-tech-spec-start
-    description: "Create feature branch worktree when technical-requirements-specialist starts"
+    description: "[DISABLED] Create feature branch worktree when technical-requirements-specialist starts - Chain workflow creates branch after architect completes"
     event:
       type: post_start
     conditions:
@@ -252,7 +252,7 @@ hooks:
         level: info
         message: "Creating feature branch for ${task_summary}"
     priority: 9
-    enabled: true
+    enabled: false
 
   - id: create-worktree-before-implementation
     description: "Create task branch worktree before implementation tasks start"
@@ -261,15 +261,15 @@ hooks:
     conditions:
       - has_metadata_key:
           - worktree_path
-          - task_branch
+          - branch
           - feature_branch
     actions:
       - type: run_script
         script_path: ./.abathur/hooks/create_task_worktree.sh
-        args: ["${task_id}", "${task_branch}", "${feature_branch}", "${worktree_path}"]
+        args: ["${task_id}", "${branch}", "${feature_branch}", "${worktree_path}"]
       - type: log_message
         level: info
-        message: "Creating worktree for ${task_branch}"
+        message: "Creating worktree for ${branch}"
     priority: 10
     enabled: true
 
@@ -342,7 +342,7 @@ hooks:
           - Original Task: ${task_summary}
           - Agent Type: ${task_agent_type}
           - Worktree: ${worktree_path}
-          - Task Branch: ${task_branch}
+          - Task Branch: ${branch}
           - Feature Branch: ${feature_branch}
 
           ## Your Mission
@@ -444,6 +444,6 @@ hooks:
   #   actions:
   #     - type: run_script
   #       script_path: ./hooks/doc_check.sh
-  #       args: ["${task_branch}"]
+  #       args: ["${branch}"]
   #   priority: 5
   #   enabled: false

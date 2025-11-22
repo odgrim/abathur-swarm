@@ -366,7 +366,7 @@ Store validation results in:
             .as_ref()
             .unwrap_or(&"N/A".to_string()),
         original_task
-            .task_branch
+            .branch
             .as_ref()
             .unwrap_or(&"N/A".to_string()),
         original_task
@@ -390,7 +390,7 @@ Store validation results in:
     validation_task.validating_task_id = Some(original_task_id);
     validation_task.dependencies = Some(vec![original_task_id]);
     validation_task.worktree_path = original_task.worktree_path.clone();
-    validation_task.task_branch = original_task.task_branch.clone();
+    validation_task.branch = original_task.branch.clone();
     validation_task.feature_branch = original_task.feature_branch.clone();
     validation_task.validation_requirement = ValidationRequirement::None; // Don't validate the validator
 
@@ -493,7 +493,7 @@ pub async fn spawn_remediation_task(
             .as_ref()
             .unwrap_or(&"N/A".to_string()),
         original_task
-            .task_branch
+            .branch
             .as_ref()
             .unwrap_or(&"N/A".to_string()),
         original_task
@@ -515,7 +515,7 @@ pub async fn spawn_remediation_task(
     remediation_task.parent_task_id = original_task.parent_task_id;
     remediation_task.dependencies = Some(vec![original_task_id]);
     remediation_task.worktree_path = original_task.worktree_path.clone();
-    remediation_task.task_branch = original_task.task_branch.clone();
+    remediation_task.branch = original_task.branch.clone();
     remediation_task.feature_branch = original_task.feature_branch.clone();
     remediation_task.remediation_count = original_task.remediation_count + 1;
     remediation_task.is_remediation = true;

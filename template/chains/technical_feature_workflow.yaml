@@ -464,7 +464,7 @@ steps:
     post_hooks:
       # Merge all task branches to feature branch
       - type: run_script
-        script_path: .abathur/scripts/merge_task_branches.sh
+        script_path: .abathur/scripts/merge_branches.sh
         args:
           - "${task_id}"
           - "branches_json"

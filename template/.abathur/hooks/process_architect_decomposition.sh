@@ -24,41 +24,40 @@ if ! command -v abathur &> /dev/null; then
     exit 1
 fi
 
-# Read the decomposition plan from memory
-# Expected namespace: task:{task_id}:decomposition
-# Expected key: plan
-# Expected format: JSON array of features
-DECOMPOSITION_JSON=$(abathur memory get --namespace "task:${TASK_ID}:decomposition" --key "plan" 2>/dev/null || echo "")
+# Read the architecture from memory
+# Expected namespace: task:{task_id}:architecture
+# Expected key: overview
+ARCH_JSON=$(abathur memory get --namespace "task:${TASK_ID}:architecture" --key "overview" 2>/dev/null || echo "")
 
-if [[ -z "$DECOMPOSITION_JSON" || "$DECOMPOSITION_JSON" == "null" ]]; then
-    echo "[WARN] No decomposition plan found in memory at task:${TASK_ID}:decomposition:plan"
-    echo "[INFO] This may be a Mode 1 (single feature) scenario - no action needed"
+if [[ -z "$ARCH_JSON" || "$ARCH_JSON" == "null" ]]; then
+    echo "[WARN] No architecture found in memory at task:${TASK_ID}:architecture:overview"
+    echo "[INFO] Cannot process decomposition without architecture"
     exit 0
 fi
 
-echo "[INFO] Found decomposition plan in memory"
-echo "[DEBUG] Plan: $DECOMPOSITION_JSON"
+echo "[INFO] Found architecture in memory"
 
-# Parse JSON array and process each feature
-# We expect the JSON to be an array of objects with at least a "name" field
-# Example: [{"name": "user-auth", "description": "User authentication"}, ...]
+# Extract decomposition information
+DECOMPOSITION_STRATEGY=$(echo "$ARCH_JSON" | jq -r '.decomposition.strategy // "single"' 2>/dev/null || echo "single")
+SUBPROJECTS=$(echo "$ARCH_JSON" | jq -r '.decomposition.subprojects // []' 2>/dev/null || echo "[]")
+SUBPROJECT_COUNT=$(echo "$SUBPROJECTS" | jq '. | length' 2>/dev/null || echo "0")
 
-# Count features
-FEATURE_COUNT=$(echo "$DECOMPOSITION_JSON" | jq '. | length' 2>/dev/null || echo "0")
+echo "[INFO] Decomposition strategy: $DECOMPOSITION_STRATEGY"
+echo "[INFO] Subproject count: $SUBPROJECT_COUNT"
 
-if [[ "$FEATURE_COUNT" -eq 0 ]]; then
-    echo "[WARN] Decomposition plan is empty or invalid"
+if [[ "$SUBPROJECT_COUNT" -eq 0 ]]; then
+    echo "[WARN] No subprojects found in decomposition"
     exit 0
 fi
 
-echo "[INFO] Processing $FEATURE_COUNT features"
+echo "[INFO] Processing $SUBPROJECT_COUNT subproject(s)"
 
-# Process each feature
-for i in $(seq 0 $((FEATURE_COUNT - 1))); do
-    FEATURE_NAME=$(echo "$DECOMPOSITION_JSON" | jq -r ".[$i].name" 2>/dev/null || echo "")
-    FEATURE_SUMMARY=$(echo "$DECOMPOSITION_JSON" | jq -r ".[$i].summary" 2>/dev/null || echo "")
-    FEATURE_DESC=$(echo "$DECOMPOSITION_JSON" | jq -r ".[$i].description" 2>/dev/null || echo "")
-    FEATURE_PRIORITY=$(echo "$DECOMPOSITION_JSON" | jq -r ".[$i].priority // 7" 2>/dev/null || echo "7")
+# Process each subproject
+for i in $(seq 0 $((SUBPROJECT_COUNT - 1))); do
+    FEATURE_NAME=$(echo "$SUBPROJECTS" | jq -r ".[$i].name // .[$i]" 2>/dev/null || echo "")
+    FEATURE_DESC=$(echo "$SUBPROJECTS" | jq -r ".[$i].description // \"\"" 2>/dev/null || echo "")
+    FEATURE_SCOPE=$(echo "$SUBPROJECTS" | jq -r ".[$i].scope // \"\"" 2>/dev/null || echo "")
+    FEATURE_PRIORITY=7
 
     if [[ -z "$FEATURE_NAME" || "$FEATURE_NAME" == "null" ]]; then
         echo "[WARN] Feature at index $i has no name, skipping"
@@ -81,33 +80,36 @@ for i in $(seq 0 $((FEATURE_COUNT - 1))); do
     echo "[INFO]   Branch: $FEATURE_BRANCH"
     echo "[INFO]   Worktree: $WORKTREE_PATH"
 
-    # Check if worktree already exists
-    if [[ -d "$WORKTREE_PATH" ]]; then
-        echo "[WARN]   Worktree already exists at $WORKTREE_PATH, reusing"
+    # Branches are already created by create_feature_branch.sh, so just verify
+    if ! git show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"; then
+        echo "[WARN]   Branch $FEATURE_BRANCH does not exist (should have been created by create_feature_branch.sh)"
+        echo "[INFO]   Creating branch now"
+        git worktree add -b "$FEATURE_BRANCH" "$WORKTREE_PATH" 2>&1 | sed 's/^/[GIT]     /' || echo "[ERROR] Failed to create branch"
     else
-        # Check if branch already exists
-        if git show-ref --verify --quiet "refs/heads/$FEATURE_BRANCH"; then
-            echo "[INFO]   Branch $FEATURE_BRANCH already exists, creating worktree"
-            git worktree add "$WORKTREE_PATH" "$FEATURE_BRANCH" 2>&1 | sed 's/^/[GIT]     /'
-        else
-            echo "[INFO]   Creating new feature branch and worktree"
-            git worktree add -b "$FEATURE_BRANCH" "$WORKTREE_PATH" 2>&1 | sed 's/^/[GIT]     /'
-        fi
-        echo "[INFO]   ✓ Feature branch created successfully"
+        echo "[INFO]   Branch $FEATURE_BRANCH exists"
     fi
 
     # Prepare task summary and description
-    if [[ -z "$FEATURE_SUMMARY" || "$FEATURE_SUMMARY" == "null" ]]; then
-        TASK_SUMMARY="${FEATURE_NAME}: Technical requirements"
-    else
-        TASK_SUMMARY="$FEATURE_SUMMARY"
-    fi
+    TASK_SUMMARY="${FEATURE_NAME}: Technical requirements"
 
-    if [[ -z "$FEATURE_DESC" || "$FEATURE_DESC" == "null" ]]; then
-        TASK_DESC="Technical requirements and specifications for ${FEATURE_NAME}. Architecture stored in memory: task:${TASK_ID}:architecture"
-    else
-        TASK_DESC="$FEATURE_DESC"
-    fi
+    TASK_DESC="Subproject: ${FEATURE_NAME}
+Description: ${FEATURE_DESC}
+Scope: ${FEATURE_SCOPE}
+
+Architecture in memory: task:${TASK_ID}:architecture
+Requirements in memory: task:${TASK_ID}:requirements (if available)
+
+Your mission:
+1. Load architecture from parent task's memory (task:${TASK_ID}:architecture)
+2. Define detailed technical specifications for THIS subproject
+3. Create data models and API specifications
+4. Plan implementation phases
+5. Identify required specialized agents
+
+Expected Deliverables:
+- Detailed technical specifications for ${FEATURE_NAME}
+- Implementation plan with phases
+- Suggested agent specializations"
 
     # Submit technical-requirements-specialist task with feature_branch set
     echo "[INFO]   Spawning technical-requirements-specialist task"
@@ -117,11 +119,11 @@ for i in $(seq 0 $((FEATURE_COUNT - 1))); do
     echo "[INFO]     Parent task: $TASK_ID"
 
     # Use abathur task submit with --feature-branch flag
+    # NOTE: We don't use --chain here because the progression is handled by hooks
     TASK_OUTPUT=$(abathur task submit \
         --agent-type technical-requirements-specialist \
         --summary "$TASK_SUMMARY" \
         --priority "$FEATURE_PRIORITY" \
-        --chain technical_feature_workflow \
         --feature-branch "$FEATURE_BRANCH" \
         --dependencies "$TASK_ID" \
         "$TASK_DESC" 2>&1)

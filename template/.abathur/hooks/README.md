@@ -93,7 +93,7 @@ Creates a task branch with git worktree when an implementation task starts.
 
 **Usage:**
 ```bash
-./create_task_worktree.sh <task_id> <task_branch> <feature_branch> <worktree_path>
+./create_task_worktree.sh <task_id> <branch> <feature_branch> <worktree_path>
 ```
 
 **Hook Configuration:**
@@ -101,12 +101,12 @@ Creates a task branch with git worktree when an implementation task starts.
 - event: pre_start
   conditions:
     - has_metadata_key: worktree_path
-      has_metadata_key: task_branch
+      has_metadata_key: branch
       has_metadata_key: feature_branch
   actions:
     - type: run_script
       script_path: ./.abathur/hooks/create_task_worktree.sh
-      args: ["${task_id}", "${task_branch}", "${feature_branch}", "${worktree_path}"]
+      args: ["${task_id}", "${branch}", "${feature_branch}", "${worktree_path}"]
 ```
 
 ### `validate_tech_requirements.sh`
@@ -209,7 +209,7 @@ Hook configurations support variable substitution:
 - `${task_agent_type}` - Agent type
 - `${task_summary}` - Task summary
 - `${task_status}` - Current status
-- `${task_branch}` - Task branch name
+- `${branch}` - Task branch name
 - `${feature_branch}` - Feature branch name
 - `${parent_task_id}` - Parent task UUID
 

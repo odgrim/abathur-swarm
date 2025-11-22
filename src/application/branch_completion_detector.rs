@@ -48,11 +48,17 @@ impl BranchCompletionDetector {
         }
 
         // Determine which branch to check
-        let (branch_name, branch_type) = if let Some(ref task_branch) = completed_task.task_branch
-        {
-            (task_branch.clone(), BranchType::TaskBranch)
-        } else if let Some(ref feature_branch) = completed_task.feature_branch {
-            (feature_branch.clone(), BranchType::FeatureBranch)
+        let (branch_name, branch_type) = if let Some(ref branch) = completed_task.branch {
+            // Determine branch type based on branch name prefix
+            let branch_type = if branch.starts_with("task/") {
+                BranchType::TaskBranch
+            } else if branch.starts_with("feature/") {
+                BranchType::FeatureBranch
+            } else {
+                debug!("Branch '{}' doesn't match known patterns (task/* or feature/*), skipping", branch);
+                return Ok(None);
+            };
+            (branch.clone(), branch_type)
         } else {
             debug!("Task has no branch association, skipping check");
             return Ok(None);
@@ -135,15 +141,15 @@ impl BranchCompletionDetector {
     ) -> Result<Vec<Task>> {
         match branch_type {
             BranchType::TaskBranch => {
-                // Get tasks by task_branch field
+                // Get tasks by branch field
                 let filters = TaskFilters {
-                    task_branch: Some(branch_name.to_string()),
+                    branch: Some(branch_name.to_string()),
                     ..Default::default()
                 };
                 self.repository
                     .list(&filters)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to get tasks by task branch: {}", e))
+                    .map_err(|e| anyhow::anyhow!("Failed to get tasks by branch: {}", e))
             }
             BranchType::FeatureBranch => {
                 // Get tasks by feature_branch field
@@ -179,11 +185,13 @@ impl BranchCompletionDetector {
             std::collections::HashMap::new();
 
         for task in all_tasks {
-            if let Some(task_branch) = &task.task_branch {
-                task_branches
-                    .entry(task_branch.clone())
-                    .or_default()
-                    .push(task.clone());
+            if let Some(branch) = &task.branch {
+                if branch.starts_with("task/") {
+                    task_branches
+                        .entry(branch.clone())
+                        .or_default()
+                        .push(task.clone());
+                }
             }
             if let Some(feature_branch) = &task.feature_branch {
                 feature_branches
@@ -272,12 +280,12 @@ mod tests {
     }
 
     async fn create_test_task_with_branch(
-        task_branch: Option<String>,
+        branch: Option<String>,
         feature_branch: Option<String>,
         status: TaskStatus,
     ) -> Task {
         let mut task = Task::new("Test task".to_string(), "Test description".to_string());
-        task.task_branch = task_branch;
+        task.branch = branch;
         task.feature_branch = feature_branch;
         task.status = status;
         task
