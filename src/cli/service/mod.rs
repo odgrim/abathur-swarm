@@ -62,6 +62,7 @@ impl TaskQueueService {
             chain_id: None,
             feature_branch: None,
             branch: None,
+            worktree_path: None,
         };
 
         let mut tasks = self.tasks.lock().await;

@@ -21,6 +21,7 @@ pub struct Task {
     pub chain_id: Option<String>,
     pub branch: Option<String>,
     pub feature_branch: Option<String>,
+    pub worktree_path: Option<String>,
 }
 
 /// Task status enum

@@ -346,6 +346,7 @@ fn convert_domain_to_cli_task(domain_task: DomainTask) -> CliTask {
         chain_id: domain_task.chain_id,
         feature_branch: domain_task.feature_branch,
         branch: domain_task.branch,
+        worktree_path: domain_task.worktree_path,
     }
 }
 

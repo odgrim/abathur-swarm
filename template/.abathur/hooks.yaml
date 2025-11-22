@@ -201,38 +201,21 @@ hooks:
     enabled: false
 
   - id: spawn-planner-after-tech-spec
-    description: "Automatically spawn task-planner after technical specifications complete"
+    description: "[DISABLED] Create task branch and spawn task-planner - Chain workflow handles this automatically"
     event:
       type: post_complete
     conditions:
       - agent_type: technical-requirements-specialist
         task_status: completed
     actions:
-      - type: spawn_task
-        agent_type: task-planner
-        summary: "Task planning for: ${task_summary}"
-        description: |
-          Feature branch: ${feature_branch}
-          Technical specs in memory: task:${task_id}:technical_specs
-
-          Your mission:
-          1. Load technical specifications from memory
-          2. Decompose work into atomic implementation tasks
-          3. Identify required specialized agents
-          4. Spawn agent-creator for missing agents
-          5. Spawn implementation tasks with proper dependencies
-          6. Workflow will automatically spawn validation and merge tasks
-
-          Expected Deliverables:
-          - Atomic task breakdown
-          - Agent creation tasks (if needed)
-          - Implementation tasks with dependencies
-        priority: 6
+      - type: run_script
+        script_path: ./.abathur/hooks/spawn_task_planner.sh
+        args: ["${task_id}", "${feature_branch}"]
       - type: log_message
         level: info
-        message: "Technical specs complete - spawning task-planner"
+        message: "Technical specs complete - creating task branch and spawning task-planner"
     priority: 10
-    enabled: true
+    enabled: false
 
   # ============================================================================
   # GIT INFRASTRUCTURE HOOKS
@@ -252,6 +235,24 @@ hooks:
         level: info
         message: "Creating feature branch for ${task_summary}"
     priority: 9
+    enabled: false
+
+  - id: setup-task-planner-branch
+    description: "[DISABLED] Generate branch and worktree metadata for task-planner - Chain orchestrator handles this via inheritance"
+    event:
+      type: pre_start
+    conditions:
+      - agent_type: task-planner
+        has_metadata_key:
+          - feature_branch
+    actions:
+      - type: run_script
+        script_path: ./.abathur/hooks/setup_task_planner_branch.sh
+        args: ["${task_id}", "${feature_branch}"]
+      - type: log_message
+        level: info
+        message: "Setting up task branch for task-planner ${task_id}"
+    priority: 11
     enabled: false
 
   - id: create-worktree-before-implementation

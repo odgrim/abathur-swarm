@@ -179,6 +179,23 @@ pub async fn handle_show(service: &TaskQueueServiceAdapter, task_id_prefix: Stri
             println!("  Chain ID: {}", chain_id);
         }
 
+        // Branch and worktree information - always display with None indication
+        println!("\n  Git Branch Information:");
+        match &task.feature_branch {
+            Some(fb) => println!("    Feature Branch: {}", fb),
+            None => println!("    Feature Branch: <not set>"),
+        }
+
+        match &task.branch {
+            Some(b) => println!("    Task Branch: {}", b),
+            None => println!("    Task Branch: <not set>"),
+        }
+
+        match &task.worktree_path {
+            Some(wp) => println!("    Worktree Path: {}", wp),
+            None => println!("    Worktree Path: <not set>"),
+        }
+
         if !task.dependencies.is_empty() {
             println!("  Dependencies:");
             for dep in &task.dependencies {

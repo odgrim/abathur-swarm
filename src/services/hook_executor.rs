@@ -218,7 +218,7 @@ impl HookExecutor {
         summary: &str,
         description: &str,
         priority: u8,
-        _task: &Task,
+        task: &Task,
         context: &HookContext,
     ) -> Result<HookResult> {
         let Some(ref coordinator) = self.task_coordinator else {
@@ -247,9 +247,16 @@ impl HookExecutor {
             new_task.dependencies = Some(vec![task_id]);
         }
 
-        // Inherit branch context if available
+        // Inherit branch context if available (from branch completion events)
         if let Some(ref branch_ctx) = context.branch_context {
             new_task.feature_branch = branch_ctx.feature_branch.clone();
+        }
+
+        // Inherit branch metadata from parent task if not already set
+        // This ensures that tasks spawned via PostComplete/PostStart hooks
+        // inherit feature_branch even when branch_context is not available
+        if new_task.feature_branch.is_none() {
+            new_task.feature_branch = task.feature_branch.clone();
         }
 
         let spawned_id = coordinator.submit_task(new_task).await?;
