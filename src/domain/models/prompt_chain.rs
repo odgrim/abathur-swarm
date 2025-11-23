@@ -154,6 +154,11 @@ pub struct PromptStep {
     /// Supports variable substitution like {task_id}
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
+    /// Whether this step should execute in its own task branch
+    /// If true, creates task/{feature_name}/{step_id} branch
+    /// If false, uses the feature branch directly or inherits from parent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_task_branch: Option<bool>,
 }
 
 impl PromptStep {
@@ -174,6 +179,7 @@ impl PromptStep {
             pre_hooks: Vec::new(),
             post_hooks: Vec::new(),
             working_directory: None,
+            needs_task_branch: None,
         }
     }
 
@@ -210,6 +216,12 @@ impl PromptStep {
     /// Add multiple post-hooks
     pub fn with_post_hooks(mut self, hooks: Vec<HookAction>) -> Self {
         self.post_hooks.extend(hooks);
+        self
+    }
+
+    /// Set whether this step needs a task branch
+    pub fn with_needs_task_branch(mut self, needs_task_branch: bool) -> Self {
+        self.needs_task_branch = Some(needs_task_branch);
         self
     }
 

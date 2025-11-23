@@ -425,9 +425,28 @@ impl AgentExecutor {
             source: TaskSource::AgentPlanner,
             deadline: current_task.deadline,
             estimated_duration_seconds: None,
-            branch: current_task.branch.clone(),
+            branch: {
+                // Generate branch and worktree if step needs task branch
+                if next_step.needs_task_branch.unwrap_or(false) && current_task.feature_branch.is_some() {
+                    let feature_name = current_task.feature_branch.as_ref()
+                        .and_then(|fb| fb.strip_prefix("feature/"))
+                        .unwrap_or("unknown");
+                    Some(format!("task/{}/{}", feature_name, next_step.id))
+                } else {
+                    // No task branch - inherit from parent or None
+                    current_task.branch.clone()
+                }
+            },
             feature_branch: current_task.feature_branch.clone(),
-            worktree_path: current_task.worktree_path.clone(),
+            worktree_path: {
+                // Generate worktree if step needs task branch
+                if next_step.needs_task_branch.unwrap_or(false) && current_task.feature_branch.is_some() {
+                    Some(format!(".abathur/worktrees/task-{}", uuid::Uuid::new_v4()))
+                } else {
+                    // No task branch - use feature branch worktree or inherit from parent
+                    current_task.worktree_path.clone()
+                }
+            },
             validation_requirement: crate::domain::models::ValidationRequirement::None,
             validation_task_id: None,
             validating_task_id: None,

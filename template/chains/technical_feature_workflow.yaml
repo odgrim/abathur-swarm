@@ -251,6 +251,7 @@ steps:
 
   - id: create_task_plan
     role: task-planner
+    needs_task_branch: true
     working_directory: ".abathur/worktrees/feature-{feature_name}"
     prompt: |
       Technical Specs: {previous_output}
@@ -344,6 +345,7 @@ steps:
 
   - id: monitor_implementation
     role: task-planner
+    needs_task_branch: true
     prompt: |
       Task Plan: {previous_output}
 
