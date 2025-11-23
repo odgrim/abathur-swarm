@@ -219,6 +219,12 @@ impl PromptStep {
         self
     }
 
+    /// Set the working directory for this step
+    pub fn with_working_directory(mut self, working_directory: String) -> Self {
+        self.working_directory = Some(working_directory);
+        self
+    }
+
     /// Set whether this step needs a task branch
     pub fn with_needs_task_branch(mut self, needs_task_branch: bool) -> Self {
         self.needs_task_branch = Some(needs_task_branch);

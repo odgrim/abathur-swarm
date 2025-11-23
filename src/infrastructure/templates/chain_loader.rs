@@ -35,6 +35,10 @@ pub struct StepTemplate {
     pub pre_hooks: Vec<HookAction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub post_hooks: Vec<HookAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_task_branch: Option<bool>,
 }
 
 /// Template for output format specification
@@ -188,6 +192,14 @@ impl ChainLoader {
             step = step.with_post_hooks(template.post_hooks);
         }
 
+        if let Some(working_dir) = template.working_directory {
+            step = step.with_working_directory(working_dir);
+        }
+
+        if let Some(needs_task_branch) = template.needs_task_branch {
+            step = step.with_needs_task_branch(needs_task_branch);
+        }
+
         Ok(step)
     }
 
@@ -300,6 +312,8 @@ impl ChainLoader {
             timeout_secs: step.timeout.map(|d| d.as_secs()),
             pre_hooks: step.pre_hooks.clone(),
             post_hooks: step.post_hooks.clone(),
+            working_directory: step.working_directory.clone(),
+            needs_task_branch: step.needs_task_branch,
         })
     }
 
