@@ -553,6 +553,12 @@ impl PromptChainService {
 
     /// Substitute variables in a template string
     fn substitute_variables(template: &str, variables: &serde_json::Value) -> Result<String> {
+        debug!(
+            template = %template,
+            variables = %serde_json::to_string(variables).unwrap_or_else(|_| "{}".to_string()),
+            "Substituting variables in template"
+        );
+
         let mut result = template.to_string();
 
         if let Some(vars) = variables.as_object() {
@@ -565,6 +571,12 @@ impl PromptChainService {
                 result = result.replace(&placeholder, &replacement);
             }
         }
+
+        debug!(
+            template = %template,
+            result = %result,
+            "Variable substitution result"
+        );
 
         Ok(result)
     }
@@ -1104,28 +1116,81 @@ impl PromptChainService {
             .map(|s| s.to_string())
             .or_else(|| parent_task.and_then(|t| t.feature_branch.clone()));
 
-        // Generate branch and worktree_path if needs_worktree is true
-        let (branch_value, worktree_path) = if needs_worktree && feature_branch.is_some() {
-            let task_id_slug = task_def
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("task");
+        // Determine branch and worktree_path
+        // If needs_worktree is true:
+        //   1. First try to inherit from parent (for implementation tasks under task-planner)
+        //   2. Otherwise generate new task branch (for standalone tasks)
+        // If needs_worktree is false:
+        //   No branch or worktree
+        let (branch_value, worktree_path) = if needs_worktree {
+            // Try to inherit from parent task first (implementation tasks inherit planner's branch)
+            if let Some(parent) = parent_task {
+                if parent.branch.is_some() && parent.worktree_path.is_some() {
+                    info!(
+                        parent_branch = ?parent.branch,
+                        parent_worktree = ?parent.worktree_path,
+                        "Implementation task inheriting branch and worktree from parent"
+                    );
+                    (parent.branch.clone(), parent.worktree_path.clone())
+                } else if feature_branch.is_some() {
+                    // Parent has no task branch, so this must be creating a new task branch
+                    let task_id_slug = task_def
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("task");
 
-            // Extract feature name from feature_branch (e.g., "feature/user-auth" -> "user-auth")
-            let feature_name = feature_branch
-                .as_ref()
-                .and_then(|fb| fb.strip_prefix("feature/"))
-                .unwrap_or("unknown");
+                    // Extract feature name from feature_branch
+                    let feature_name = feature_branch
+                        .as_ref()
+                        .and_then(|fb| fb.strip_prefix("feature/"))
+                        .unwrap_or("unknown");
 
-            let task_uuid = uuid::Uuid::new_v4();
+                    let task_uuid = uuid::Uuid::new_v4();
 
-            // Generate branch name: task/{feature_name}/{task_id_slug}
-            let branch = format!("task/{}/{}", feature_name, task_id_slug);
+                    // Generate branch name: task/{feature_name}/{task_id_slug}
+                    let branch = format!("task/{}/{}", feature_name, task_id_slug);
 
-            // Generate worktree path: .abathur/worktrees/task-{uuid}
-            let worktree = format!(".abathur/worktrees/task-{}", task_uuid);
+                    // Generate worktree path: .abathur/worktrees/task-{uuid}
+                    let worktree = format!(".abathur/worktrees/task-{}", task_uuid);
 
-            (Some(branch), Some(worktree))
+                    info!(
+                        branch = %branch,
+                        worktree = %worktree,
+                        "Generated new task branch (parent has no task branch)"
+                    );
+
+                    (Some(branch), Some(worktree))
+                } else {
+                    warn!("needs_worktree is true but no parent task branch or feature_branch available");
+                    (None, None)
+                }
+            } else if feature_branch.is_some() {
+                // No parent task, generate new task branch
+                let task_id_slug = task_def
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("task");
+
+                let feature_name = feature_branch
+                    .as_ref()
+                    .and_then(|fb| fb.strip_prefix("feature/"))
+                    .unwrap_or("unknown");
+
+                let task_uuid = uuid::Uuid::new_v4();
+                let branch = format!("task/{}/{}", feature_name, task_id_slug);
+                let worktree = format!(".abathur/worktrees/task-{}", task_uuid);
+
+                info!(
+                    branch = %branch,
+                    worktree = %worktree,
+                    "Generated new task branch (no parent task)"
+                );
+
+                (Some(branch), Some(worktree))
+            } else {
+                warn!("needs_worktree is true but no feature_branch available");
+                (None, None)
+            }
         } else {
             (None, None)
         };

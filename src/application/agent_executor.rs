@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::timeout;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// Context for agent task execution
@@ -291,7 +291,33 @@ impl AgentExecutor {
         }
         if let Some(ref feature_branch) = task.feature_branch {
             step_input["feature_branch"] = serde_json::json!(feature_branch);
+            // Extract feature_name from feature_branch for template substitution
+            // Example: "feature/user-auth" -> "user-auth"
+            if let Some(feature_name) = feature_branch.strip_prefix("feature/") {
+                step_input["feature_name"] = serde_json::json!(feature_name);
+                info!(
+                    task_id = %task.id,
+                    step_id = %step.id,
+                    feature_branch = %feature_branch,
+                    feature_name = %feature_name,
+                    "Extracted feature_name from feature_branch for template substitution"
+                );
+            }
+        } else {
+            warn!(
+                task_id = %task.id,
+                step_id = %step.id,
+                "Task has no feature_branch set - cannot extract feature_name for template substitution"
+            );
         }
+
+        // Log the complete step_input for debugging
+        debug!(
+            task_id = %task.id,
+            step_id = %step.id,
+            step_input = %serde_json::to_string_pretty(&step_input).unwrap_or_else(|_| "{}".to_string()),
+            "Step input prepared for execution"
+        );
 
         // Execute this single step
         let result = self
