@@ -154,11 +154,24 @@ pub struct PromptStep {
     /// Supports variable substitution like {task_id}
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
-    /// Whether this step should execute in its own task branch
-    /// If true, creates task/{feature_name}/{step_id} branch
-    /// If false, uses the feature branch directly or inherits from parent
+    /// Whether this step should create its own git branch/worktree
+    /// If true, creates a branch according to branch_name_template
+    /// If false, inherits branch from parent task
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub needs_task_branch: Option<bool>,
+    pub needs_branch: Option<bool>,
+    /// What to branch from (used when needs_branch is true)
+    /// - "main": Branch from main/master
+    /// - "feature_branch": Branch from task's feature_branch field
+    /// - "parent_branch": Branch from parent task's branch field
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_parent: Option<String>,
+    /// Branch name template with variable substitution
+    /// Examples:
+    ///   "feature/{feature_name}"
+    ///   "task/{feature_name}/{step_id}"
+    /// Variables available: feature_name, step_id, task_id, and any from step output
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_name_template: Option<String>,
 }
 
 impl PromptStep {
@@ -179,7 +192,9 @@ impl PromptStep {
             pre_hooks: Vec::new(),
             post_hooks: Vec::new(),
             working_directory: None,
-            needs_task_branch: None,
+            needs_branch: None,
+            branch_parent: None,
+            branch_name_template: None,
         }
     }
 
@@ -225,9 +240,21 @@ impl PromptStep {
         self
     }
 
-    /// Set whether this step needs a task branch
-    pub fn with_needs_task_branch(mut self, needs_task_branch: bool) -> Self {
-        self.needs_task_branch = Some(needs_task_branch);
+    /// Set whether this step needs a branch
+    pub fn with_needs_branch(mut self, needs_branch: bool) -> Self {
+        self.needs_branch = Some(needs_branch);
+        self
+    }
+
+    /// Set the branch parent
+    pub fn with_branch_parent(mut self, branch_parent: String) -> Self {
+        self.branch_parent = Some(branch_parent);
+        self
+    }
+
+    /// Set the branch name template
+    pub fn with_branch_name_template(mut self, branch_name_template: String) -> Self {
+        self.branch_name_template = Some(branch_name_template);
         self
     }
 

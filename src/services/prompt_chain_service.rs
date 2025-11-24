@@ -141,6 +141,15 @@ impl PromptChainService {
         }
     }
 
+    /// Update a task in the task queue (wrapper for AgentExecutor to use)
+    pub async fn update_task(&self, task: &Task) -> Result<()> {
+        let Some(ref task_queue) = self.task_queue_service else {
+            anyhow::bail!("Task queue service not configured");
+        };
+
+        task_queue.update_task(task).await
+    }
+
     /// Execute a single step of a prompt chain
     ///
     /// This is called by AgentExecutor for each chain step task.

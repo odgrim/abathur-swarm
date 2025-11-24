@@ -74,6 +74,9 @@ steps:
 
   - id: design_architecture
     role: technical-architect
+    needs_branch: true
+    branch_parent: "main"
+    branch_name_template: "feature/{feature_name}"
     prompt: |
       Requirements from previous step:
       {previous_output}
@@ -143,22 +146,14 @@ steps:
         args:
           - "${task_id}"
           - "architecture"
-      # Create feature branch for this work
-      - type: run_script
-        script_path: .abathur/scripts/create_feature_branch.sh
-        args:
-          - "${task_id}"
-          - "${feature_name}"
-          - "${decomposition.strategy}"
       - type: log_message
         level: info
-        message: "Architecture designed and feature branch created for task ${task_id}"
+        message: "Architecture designed for task ${task_id}"
     next: create_technical_specs
     timeout_secs: 600
 
   - id: create_technical_specs
     role: technical-requirements-specialist
-    working_directory: ".abathur/worktrees/feature-{feature_name}"
     prompt: |
       Requirements: {gather_requirements.output}
       Architecture: {previous_output}
@@ -251,13 +246,19 @@ steps:
 
   - id: create_task_plan
     role: task-planner
-    needs_task_branch: true
-    working_directory: ".abathur/worktrees/feature-{feature_name}"
+    needs_branch: true
+    branch_parent: "feature_branch"
+    branch_name_template: "task/{feature_name}/{step_id}"
+    working_directory: "{worktree_path}"
     prompt: |
       Technical Specs: {previous_output}
 
-      IMPORTANT: The feature branch is named "feature/{feature_name}".
-      Task branches will be named "task/{feature_name}/{task-id}" where task-id is a kebab-case slug derived from the task summary.
+      IMPORTANT: Branch Strategy
+      - Feature branch: "feature/{feature_name}"
+      - You are working in task branch: "task/{feature_name}/planning"
+      - ALL implementation tasks will inherit YOUR task branch and worktree
+      - All implementation work happens in the SAME branch you're in
+      - When all tasks complete, this single task branch merges into the feature branch
 
       Output the task plan in JSON format:
       {
@@ -345,7 +346,8 @@ steps:
 
   - id: monitor_implementation
     role: task-planner
-    needs_task_branch: true
+    needs_branch: false
+    working_directory: "{worktree_path}"
     prompt: |
       Task Plan: {previous_output}
 

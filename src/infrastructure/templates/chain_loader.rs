@@ -38,6 +38,13 @@ pub struct StepTemplate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_branch: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_parent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_name_template: Option<String>,
+    // DEPRECATED: For backwards compatibility with old configs
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_task_branch: Option<bool>,
 }
 
@@ -196,8 +203,33 @@ impl ChainLoader {
             step = step.with_working_directory(working_dir);
         }
 
-        if let Some(needs_task_branch) = template.needs_task_branch {
-            step = step.with_needs_task_branch(needs_task_branch);
+        // Handle new branch system
+        if let Some(needs_branch) = template.needs_branch {
+            step = step.with_needs_branch(needs_branch);
+        } else if let Some(needs_task_branch) = template.needs_task_branch {
+            // DEPRECATED: Auto-migrate old needs_task_branch to new system
+            tracing::warn!(
+                step_id = %template.id,
+                "Step uses deprecated 'needs_task_branch' field. Please migrate to 'needs_branch' with 'branch_parent' and 'branch_name_template'"
+            );
+            step = step.with_needs_branch(needs_task_branch);
+            // Auto-set defaults for backwards compatibility
+            if needs_task_branch {
+                if template.branch_parent.is_none() {
+                    step = step.with_branch_parent("feature_branch".to_string());
+                }
+                if template.branch_name_template.is_none() {
+                    step = step.with_branch_name_template("task/{feature_name}/{step_id}".to_string());
+                }
+            }
+        }
+
+        if let Some(branch_parent) = template.branch_parent {
+            step = step.with_branch_parent(branch_parent);
+        }
+
+        if let Some(branch_name_template) = template.branch_name_template {
+            step = step.with_branch_name_template(branch_name_template);
         }
 
         Ok(step)
@@ -313,7 +345,10 @@ impl ChainLoader {
             pre_hooks: step.pre_hooks.clone(),
             post_hooks: step.post_hooks.clone(),
             working_directory: step.working_directory.clone(),
-            needs_task_branch: step.needs_task_branch,
+            needs_branch: step.needs_branch,
+            branch_parent: step.branch_parent.clone(),
+            branch_name_template: step.branch_name_template.clone(),
+            needs_task_branch: None, // Never serialize deprecated field
         })
     }
 

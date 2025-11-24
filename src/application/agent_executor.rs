@@ -319,6 +319,39 @@ impl AgentExecutor {
             "Step input prepared for execution"
         );
 
+        // Create branch if step requires it
+        let mut updated_task = task.clone();
+        if step.needs_branch.unwrap_or(false) {
+            info!(
+                task_id = %task.id,
+                step_id = %step.id,
+                "Step requires branch creation"
+            );
+
+            self.create_branch_for_step(&mut updated_task, step, &step_input)
+                .await
+                .map_err(|e| {
+                    ExecutionError::ExecutionFailed(format!(
+                        "Failed to create branch for step {}: {}",
+                        step.id, e
+                    ))
+                })?;
+
+            // Update step_input with new branch information
+            if let Some(ref branch) = updated_task.branch {
+                step_input["branch"] = serde_json::json!(branch);
+            }
+            if let Some(ref worktree_path) = updated_task.worktree_path {
+                step_input["worktree_path"] = serde_json::json!(worktree_path);
+            }
+            if let Some(ref feature_branch) = updated_task.feature_branch {
+                step_input["feature_branch"] = serde_json::json!(feature_branch);
+                if let Some(feature_name) = feature_branch.strip_prefix("feature/") {
+                    step_input["feature_name"] = serde_json::json!(feature_name);
+                }
+            }
+        }
+
         // Execute this single step
         let result = self
             .chain_service
@@ -451,28 +484,11 @@ impl AgentExecutor {
             source: TaskSource::AgentPlanner,
             deadline: current_task.deadline,
             estimated_duration_seconds: None,
-            branch: {
-                // Generate branch and worktree if step needs task branch
-                if next_step.needs_task_branch.unwrap_or(false) && current_task.feature_branch.is_some() {
-                    let feature_name = current_task.feature_branch.as_ref()
-                        .and_then(|fb| fb.strip_prefix("feature/"))
-                        .unwrap_or("unknown");
-                    Some(format!("task/{}/{}", feature_name, next_step.id))
-                } else {
-                    // No task branch - inherit from parent or None
-                    current_task.branch.clone()
-                }
-            },
+            // Branch creation happens when task executes (if needs_branch=true)
+            // Until then, inherit from parent for continuity
+            branch: current_task.branch.clone(),
             feature_branch: current_task.feature_branch.clone(),
-            worktree_path: {
-                // Generate worktree if step needs task branch
-                if next_step.needs_task_branch.unwrap_or(false) && current_task.feature_branch.is_some() {
-                    Some(format!(".abathur/worktrees/task-{}", uuid::Uuid::new_v4()))
-                } else {
-                    // No task branch - use feature branch worktree or inherit from parent
-                    current_task.worktree_path.clone()
-                }
-            },
+            worktree_path: current_task.worktree_path.clone(),
             validation_requirement: crate::domain::models::ValidationRequirement::None,
             validation_task_id: None,
             validating_task_id: None,
@@ -816,6 +832,179 @@ impl AgentExecutor {
             ExecutionError::Timeout { .. } => true,
             _ => false,
         }
+    }
+
+    /// Create a git branch and worktree for a step
+    ///
+    /// Uses the step's branch configuration to:
+    /// 1. Determine the parent branch to branch from
+    /// 2. Substitute variables in the branch name template
+    /// 3. Create the git branch and worktree
+    /// 4. Update the task with branch/worktree information
+    async fn create_branch_for_step(
+        &self,
+        task: &mut Task,
+        step: &crate::domain::models::prompt_chain::PromptStep,
+        variables: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        use tokio::process::Command;
+
+        // Get branch parent (what to branch from)
+        let branch_parent = step.branch_parent.as_deref().unwrap_or("main");
+
+        // Get branch name template
+        let branch_template = step.branch_name_template.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Step requires branch but branch_name_template not specified"))?;
+
+        // Substitute variables in branch name
+        let branch_name = self.substitute_branch_variables(branch_template, task, step, variables)?;
+
+        info!(
+            task_id = %task.id,
+            step_id = %step.id,
+            branch_name = %branch_name,
+            branch_parent = %branch_parent,
+            "Creating git branch and worktree"
+        );
+
+        // Determine the actual parent branch ref
+        let parent_ref = match branch_parent {
+            "main" | "master" => {
+                // Check if main exists, otherwise use master
+                let check_main = Command::new("git")
+                    .args(&["rev-parse", "--verify", "main"])
+                    .output()
+                    .await?;
+
+                if check_main.status.success() {
+                    "main"
+                } else {
+                    "master"
+                }
+            }
+            "feature_branch" => {
+                task.feature_branch.as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("branch_parent is 'feature_branch' but task has no feature_branch set"))?
+            }
+            "parent_branch" => {
+                task.branch.as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("branch_parent is 'parent_branch' but task has no branch set"))?
+            }
+            other => other, // Allow custom branch names
+        };
+
+        // Create worktree directory if needed
+        let worktree_dir = std::path::Path::new(".abathur/worktrees");
+        if !worktree_dir.exists() {
+            tokio::fs::create_dir_all(worktree_dir).await?;
+        }
+
+        // Generate worktree path
+        let worktree_path = format!(".abathur/worktrees/{}", branch_name.replace('/', "-"));
+
+        // Check if branch already exists
+        let check_branch = Command::new("git")
+            .args(&["rev-parse", "--verify", &branch_name])
+            .output()
+            .await?;
+
+        if check_branch.status.success() {
+            info!(
+                branch_name = %branch_name,
+                "Branch already exists, creating worktree"
+            );
+
+            // Branch exists, just create worktree
+            let output = Command::new("git")
+                .args(&["worktree", "add", &worktree_path, &branch_name])
+                .output()
+                .await?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("Failed to create worktree: {}", stderr);
+            }
+        } else {
+            info!(
+                branch_name = %branch_name,
+                parent_ref = %parent_ref,
+                "Creating new branch and worktree"
+            );
+
+            // Create new branch and worktree atomically
+            let output = Command::new("git")
+                .args(&[
+                    "worktree",
+                    "add",
+                    "-b",
+                    &branch_name,
+                    &worktree_path,
+                    parent_ref,
+                ])
+                .output()
+                .await?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("Failed to create branch and worktree: {}", stderr);
+            }
+        }
+
+        // Update task fields
+        task.branch = Some(branch_name.clone());
+        task.worktree_path = Some(worktree_path.clone());
+
+        // If this is a feature branch (starts with "feature/"), also set feature_branch
+        if branch_name.starts_with("feature/") {
+            task.feature_branch = Some(branch_name.clone());
+        }
+
+        // Save updated task to database
+        self.chain_service.update_task(task).await?;
+        info!(
+            task_id = %task.id,
+            branch = %branch_name,
+            worktree = %worktree_path,
+            "Task updated with branch information"
+        );
+
+        Ok(())
+    }
+
+    /// Substitute variables in branch name template
+    fn substitute_branch_variables(
+        &self,
+        template: &str,
+        task: &Task,
+        step: &crate::domain::models::prompt_chain::PromptStep,
+        variables: &serde_json::Value,
+    ) -> anyhow::Result<String> {
+        let mut result = template.to_string();
+
+        // Built-in variables
+        result = result.replace("{task_id}", &task.id.to_string());
+        result = result.replace("{step_id}", &step.id);
+
+        // Extract feature_name from feature_branch if available
+        if let Some(ref feature_branch) = task.feature_branch {
+            if let Some(feature_name) = feature_branch.strip_prefix("feature/") {
+                result = result.replace("{feature_name}", feature_name);
+            }
+        }
+
+        // Variables from step input/output
+        if let Some(vars) = variables.as_object() {
+            for (key, value) in vars {
+                let placeholder = format!("{{{}}}", key);
+                let replacement = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => value.to_string().trim_matches('"').to_string(),
+                };
+                result = result.replace(&placeholder, &replacement);
+            }
+        }
+
+        Ok(result)
     }
 }
 
