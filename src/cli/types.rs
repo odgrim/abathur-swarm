@@ -2,7 +2,8 @@
 //!
 //! This module contains clap command structures that define the CLI interface.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use std::path::PathBuf;
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -52,12 +53,25 @@ pub enum Commands {
     Mcp(McpCommands),
 }
 
+/// Input source for task description (mutually exclusive: description or file)
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+struct TaskInputSource {
+    /// Task description (positional argument)
+    description: Option<String>,
+
+    /// Path to file containing task description
+    #[arg(short = 'f', long)]
+    file: Option<PathBuf>,
+}
+
 #[derive(Subcommand)]
 pub enum TaskCommands {
     /// Submit a new task to the queue
     Submit {
-        /// Task description (positional argument)
-        description: String,
+        /// Input source (description or file)
+        #[command(flatten)]
+        input: TaskInputSource,
 
         /// Agent type to execute the task
         #[arg(short, long, default_value = "requirements-gatherer")]
