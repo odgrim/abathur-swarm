@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
         }
         Commands::Task(task_cmd) => match task_cmd {
             TaskCommands::Submit {
-                description,
+                input,
                 agent_type,
                 summary,
                 priority,
@@ -100,9 +100,21 @@ async fn main() -> Result<()> {
                 feature_branch,
                 needs_worktree,
             } => {
+                // Resolve description from either direct input or file
+                let resolved_description = match (&input.description, &input.file) {
+                    (Some(desc), None) => desc.clone(),
+                    (None, Some(path)) => {
+                        std::fs::read_to_string(path)
+                            .with_context(|| format!("Failed to read task description from file: {}", path.display()))?
+                    }
+                    _ => {
+                        unreachable!("Clap ArgGroup ensures exactly one of description or file is provided")
+                    }
+                };
+
                 task::handle_submit(
                     &task_service,
-                    description,
+                    resolved_description,
                     agent_type,
                     summary,
                     priority,
