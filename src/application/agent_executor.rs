@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::timeout;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// Context for agent task execution
@@ -433,6 +433,40 @@ impl AgentExecutor {
         use crate::domain::models::{DependencyType, TaskSource, TaskStatus};
 
         let next_step = &chain.steps[next_step_index];
+
+        // IDEMPOTENCY CHECK: Prevent duplicate chain step tasks
+        // This is crucial because if the current task fails AFTER enqueueing the next step
+        // (e.g., worker crash, timeout, DB error), it may be retried and would enqueue again.
+        // We check if a task with the same chain_id and step_index already depends on current_task.
+        let dependent_tasks = self
+            .chain_service
+            .get_dependent_tasks(current_task.id)
+            .await
+            .unwrap_or_else(|e| {
+                warn!(
+                    task_id = %current_task.id,
+                    error = ?e,
+                    "Failed to check for existing dependent tasks, proceeding with enqueue"
+                );
+                vec![]
+            });
+
+        // Look for an existing next step task
+        let existing_next_step = dependent_tasks.iter().find(|t| {
+            t.chain_id.as_ref() == current_task.chain_id.as_ref()
+                && t.chain_step_index == next_step_index
+        });
+
+        if let Some(existing) = existing_next_step {
+            info!(
+                existing_task_id = %existing.id,
+                chain_id = ?current_task.chain_id,
+                step_index = next_step_index,
+                current_task_id = %current_task.id,
+                "Next chain step task already exists (idempotency check), skipping enqueue"
+            );
+            return Ok(existing.id);
+        }
 
         // Parse previous output as input_data for next step
         let input_data = match serde_json::from_str(previous_output) {
@@ -904,22 +938,90 @@ impl AgentExecutor {
             tokio::fs::create_dir_all(worktree_dir).await?;
         }
 
-        // Generate worktree path
-        let worktree_path = format!(".abathur/worktrees/{}", branch_name.replace('/', "-"));
-
         // Check if branch already exists
         let check_branch = Command::new("git")
             .args(&["rev-parse", "--verify", &branch_name])
             .output()
             .await?;
 
-        if check_branch.status.success() {
+        let branch_exists = check_branch.status.success();
+
+        // If branch exists, check if it's already in a worktree
+        // Git doesn't allow the same branch to be checked out in multiple worktrees
+        if branch_exists {
+            let worktree_list = Command::new("git")
+                .args(&["worktree", "list", "--porcelain"])
+                .output()
+                .await?;
+
+            if worktree_list.status.success() {
+                let output = String::from_utf8_lossy(&worktree_list.stdout);
+
+                // Parse worktree list to find if this branch is already checked out
+                // Format is: worktree <path>\nHEAD <sha>\nbranch refs/heads/<branch>\n\n
+                let mut current_worktree_path: Option<String> = None;
+                for line in output.lines() {
+                    if let Some(path) = line.strip_prefix("worktree ") {
+                        current_worktree_path = Some(path.to_string());
+                    } else if let Some(branch_ref) = line.strip_prefix("branch refs/heads/") {
+                        if branch_ref == branch_name {
+                            // Found existing worktree for this branch - reuse it
+                            if let Some(ref existing_path) = current_worktree_path {
+                                info!(
+                                    branch_name = %branch_name,
+                                    existing_worktree = %existing_path,
+                                    task_id = %task.id,
+                                    "Branch already checked out in worktree, reusing existing worktree"
+                                );
+
+                                task.branch = Some(branch_name.clone());
+                                task.worktree_path = Some(existing_path.clone());
+                                if branch_name.starts_with("feature/") {
+                                    task.feature_branch = Some(branch_name.clone());
+                                }
+                                self.chain_service.update_task(task).await?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Generate worktree path with task_id suffix for uniqueness
+        // This ensures multiple tasks don't collide on worktree paths
+        let task_id_short = &task.id.to_string()[..8]; // First 8 chars of UUID
+        let worktree_path = format!(
+            ".abathur/worktrees/{}-{}",
+            branch_name.replace('/', "-"),
+            task_id_short
+        );
+
+        // Check if worktree already exists at this exact path (e.g., from a retry)
+        if std::path::Path::new(&worktree_path).exists() {
             info!(
                 branch_name = %branch_name,
-                "Branch already exists, creating worktree"
+                worktree_path = %worktree_path,
+                task_id = %task.id,
+                "Worktree already exists at target path, reusing"
+            );
+            task.branch = Some(branch_name.clone());
+            task.worktree_path = Some(worktree_path.clone());
+            if branch_name.starts_with("feature/") {
+                task.feature_branch = Some(branch_name.clone());
+            }
+            self.chain_service.update_task(task).await?;
+            return Ok(());
+        }
+
+        if branch_exists {
+            info!(
+                branch_name = %branch_name,
+                worktree_path = %worktree_path,
+                "Branch exists but not in worktree, creating worktree from existing branch"
             );
 
-            // Branch exists, just create worktree
+            // Branch exists but isn't in a worktree, create worktree from it
             let output = Command::new("git")
                 .args(&["worktree", "add", &worktree_path, &branch_name])
                 .output()
@@ -933,6 +1035,7 @@ impl AgentExecutor {
             info!(
                 branch_name = %branch_name,
                 parent_ref = %parent_ref,
+                worktree_path = %worktree_path,
                 "Creating new branch and worktree"
             );
 

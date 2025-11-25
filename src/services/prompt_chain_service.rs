@@ -150,6 +150,15 @@ impl PromptChainService {
         task_queue.update_task(task).await
     }
 
+    /// Get tasks that depend on a given task (wrapper for AgentExecutor to use)
+    pub async fn get_dependent_tasks(&self, task_id: uuid::Uuid) -> Result<Vec<Task>> {
+        let Some(ref task_queue) = self.task_queue_service else {
+            anyhow::bail!("Task queue service not configured");
+        };
+
+        task_queue.get_dependent_tasks(task_id).await
+    }
+
     /// Execute a single step of a prompt chain
     ///
     /// This is called by AgentExecutor for each chain step task.
