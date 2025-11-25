@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::timeout;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 /// Context for agent task execution
@@ -304,10 +304,15 @@ impl AgentExecutor {
                 );
             }
         } else {
-            warn!(
+            // Generate feature_name from task summary for steps that need it before feature branch exists
+            let source = if task.summary.is_empty() { &task.description } else { &task.summary };
+            let feature_name = Self::sanitize_branch_name(source);
+            step_input["feature_name"] = serde_json::json!(&feature_name);
+            debug!(
                 task_id = %task.id,
                 step_id = %step.id,
-                "Task has no feature_branch set - cannot extract feature_name for template substitution"
+                generated_feature_name = %feature_name,
+                "Generated feature_name from task summary (no feature_branch set yet)"
             );
         }
 
@@ -985,11 +990,23 @@ impl AgentExecutor {
         result = result.replace("{task_id}", &task.id.to_string());
         result = result.replace("{step_id}", &step.id);
 
-        // Extract feature_name from feature_branch if available
-        if let Some(ref feature_branch) = task.feature_branch {
-            if let Some(feature_name) = feature_branch.strip_prefix("feature/") {
-                result = result.replace("{feature_name}", feature_name);
-            }
+        // Extract feature_name from feature_branch if available, or generate from task summary
+        if result.contains("{feature_name}") {
+            let feature_name = if let Some(ref feature_branch) = task.feature_branch {
+                // Extract from existing feature branch
+                feature_branch.strip_prefix("feature/")
+                    .map(|s| s.to_string())
+            } else {
+                None
+            };
+
+            // If no feature_name from task, generate from summary
+            let feature_name = feature_name.unwrap_or_else(|| {
+                let source = if task.summary.is_empty() { &task.description } else { &task.summary };
+                Self::sanitize_branch_name(source)
+            });
+
+            result = result.replace("{feature_name}", &feature_name);
         }
 
         // Variables from step input/output
@@ -1005,6 +1022,39 @@ impl AgentExecutor {
         }
 
         Ok(result)
+    }
+
+    /// Sanitize a string into a valid git branch name
+    fn sanitize_branch_name(input: &str) -> String {
+        let mut result: String = input
+            .to_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+
+        // Remove leading/trailing hyphens and collapse multiple hyphens
+        while result.contains("--") {
+            result = result.replace("--", "-");
+        }
+        result = result.trim_matches('-').to_string();
+
+        // Limit length to 50 chars for reasonable branch names
+        if result.len() > 50 {
+            result = result[..50].trim_end_matches('-').to_string();
+        }
+
+        // Ensure we have something
+        if result.is_empty() {
+            result = "unnamed-feature".to_string();
+        }
+
+        result
     }
 }
 
