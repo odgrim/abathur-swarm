@@ -259,6 +259,10 @@ impl PromptStep {
     }
 
     /// Build the actual prompt by replacing variables
+    ///
+    /// Automatically appends format instructions based on `expected_output` type.
+    /// For JSON output, appends strict formatting requirements to ensure the agent
+    /// outputs valid JSON that can be parsed by the validation system.
     pub fn build_prompt(&self, variables: &serde_json::Value) -> anyhow::Result<String> {
         let mut prompt = self.prompt_template.clone();
 
@@ -273,7 +277,48 @@ impl PromptStep {
             }
         }
 
+        // Append format instructions based on expected output type
+        let format_instructions = self.get_format_instructions();
+        if !format_instructions.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&format_instructions);
+        }
+
         Ok(prompt)
+    }
+
+    /// Get format instructions based on the expected output type
+    fn get_format_instructions(&self) -> String {
+        match &self.expected_output {
+            OutputFormat::Json { .. } => {
+                r#"
+---
+## OUTPUT FORMAT REQUIREMENT (CRITICAL)
+
+Your response MUST be ONLY valid JSON. The system will parse your output as JSON.
+
+RULES:
+1. Output ONLY the JSON object - no prose, explanations, or summaries
+2. Wrap your JSON in ```json code blocks
+3. Do NOT write anything before or after the JSON block
+4. Do NOT explain what you did or summarize results in text
+
+CORRECT FORMAT:
+```json
+{
+  "your": "data",
+  "goes": "here"
+}
+```
+
+INCORRECT (will cause validation failure):
+- "Here is the result: {...}"
+- "Task complete. The JSON is: {...}"
+- Any text outside the JSON block"#.to_string()
+            }
+            OutputFormat::Markdown => String::new(), // No special instructions needed
+            OutputFormat::Plain => String::new(),    // No special instructions needed
+        }
     }
 }
 
@@ -589,5 +634,49 @@ mod tests {
         execution.complete();
         assert_eq!(execution.status, ChainStatus::Completed);
         assert!(execution.completed_at.is_some());
+    }
+
+    #[test]
+    fn test_build_prompt_appends_json_format_instructions() {
+        let step = PromptStep::new(
+            "step1".to_string(),
+            "Analyze the data: {data}".to_string(),
+            "Analyst".to_string(),
+            OutputFormat::Json { schema: None },
+        );
+
+        let vars = serde_json::json!({
+            "data": "test data"
+        });
+
+        let result = step.build_prompt(&vars).unwrap();
+
+        // Should contain the original prompt with variable replaced
+        assert!(result.contains("Analyze the data: test data"));
+
+        // Should contain JSON format instructions
+        assert!(result.contains("OUTPUT FORMAT REQUIREMENT"));
+        assert!(result.contains("Your response MUST be ONLY valid JSON"));
+        assert!(result.contains("```json"));
+    }
+
+    #[test]
+    fn test_build_prompt_no_format_instructions_for_plain() {
+        let step = PromptStep::new(
+            "step1".to_string(),
+            "Describe the problem".to_string(),
+            "Assistant".to_string(),
+            OutputFormat::Plain,
+        );
+
+        let vars = serde_json::json!({});
+        let result = step.build_prompt(&vars).unwrap();
+
+        // Should contain original prompt
+        assert!(result.contains("Describe the problem"));
+
+        // Should NOT contain JSON format instructions
+        assert!(!result.contains("OUTPUT FORMAT REQUIREMENT"));
+        assert!(!result.contains("MUST be ONLY valid JSON"));
     }
 }
