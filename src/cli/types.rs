@@ -56,13 +56,13 @@ pub enum Commands {
 /// Input source for task description (mutually exclusive: description or file)
 #[derive(Args)]
 #[group(required = true, multiple = false)]
-struct TaskInputSource {
+pub struct TaskInputSource {
     /// Task description (positional argument)
-    description: Option<String>,
+    pub description: Option<String>,
 
     /// Path to file containing task description
     #[arg(short = 'f', long)]
-    file: Option<PathBuf>,
+    pub file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]

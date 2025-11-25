@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
         }
         Commands::Task(task_cmd) => match task_cmd {
             TaskCommands::Submit {
-                description,
+                input,
                 agent_type,
                 summary,
                 priority,
@@ -100,6 +100,17 @@ async fn main() -> Result<()> {
                 feature_branch,
                 needs_worktree,
             } => {
+                // Extract description from input source (either direct or from file)
+                let description = if let Some(desc) = &input.description {
+                    desc.clone()
+                } else if let Some(file_path) = &input.file {
+                    std::fs::read_to_string(file_path).map_err(|e| {
+                        anyhow::anyhow!("Failed to read task description from file: {}", e)
+                    })?
+                } else {
+                    anyhow::bail!("No task description provided")
+                };
+
                 task::handle_submit(
                     &task_service,
                     description,
