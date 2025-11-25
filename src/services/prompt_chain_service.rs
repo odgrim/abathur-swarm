@@ -1010,9 +1010,21 @@ impl PromptChainService {
             return Ok(());
         };
 
+        // Strip markdown code blocks before parsing (agents often wrap JSON in ```json...```)
+        let cleaned_output = OutputValidator::strip_markdown_code_blocks(&result.output);
+
+        debug!(
+            raw_output_len = result.output.len(),
+            cleaned_output_len = cleaned_output.len(),
+            "Stripped markdown code blocks from step output for task parsing"
+        );
+
         // Parse the output as JSON
-        let output_json: serde_json::Value = serde_json::from_str(&result.output)
-            .context("Failed to parse step output as JSON")?;
+        let output_json: serde_json::Value = serde_json::from_str(&cleaned_output)
+            .with_context(|| format!(
+                "Failed to parse step output as JSON. Output starts with: {}",
+                &cleaned_output[..cleaned_output.len().min(200)]
+            ))?;
 
         // Extract the tasks array
         let tasks_array = output_json
