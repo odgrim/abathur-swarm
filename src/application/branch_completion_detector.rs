@@ -243,10 +243,10 @@ impl BranchCompletionDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::TaskStatus;
     use crate::domain::ports::TaskRepository;
     use crate::infrastructure::database::TaskRepositoryImpl;
     use crate::services::{DependencyResolver, PriorityCalculator, TaskQueueService};
-    use tempfile::tempdir;
 
     async fn create_test_coordinator() -> Result<(Arc<TaskCoordinator>, Arc<dyn TaskRepository>)> {
         use sqlx::sqlite::SqlitePoolOptions;

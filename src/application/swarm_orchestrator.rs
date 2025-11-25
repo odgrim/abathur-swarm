@@ -701,7 +701,7 @@ impl SwarmOrchestrator {
 mod tests {
     use super::*;
     use crate::application::resource_monitor::ResourceLimits;
-    use crate::domain::models::{DependencyType, TaskSource, TaskStatus};
+    use crate::domain::models::{DependencyType, TaskSource, TaskStatus, ValidationRequirement};
     use crate::domain::ports::{PriorityCalculator, TaskQueueService};
     use crate::services::DependencyResolver;
     use async_trait::async_trait;
