@@ -100,20 +100,21 @@ async fn main() -> Result<()> {
                 feature_branch,
                 needs_worktree,
             } => {
-                // Extract description from input source (either direct or from file)
-                let description = if let Some(desc) = &input.description {
-                    desc.clone()
-                } else if let Some(file_path) = &input.file {
-                    std::fs::read_to_string(file_path).map_err(|e| {
-                        anyhow::anyhow!("Failed to read task description from file: {}", e)
-                    })?
-                } else {
-                    anyhow::bail!("No task description provided")
+                // Resolve description from either direct input or file
+                let resolved_description = match (&input.description, &input.file) {
+                    (Some(desc), None) => desc.clone(),
+                    (None, Some(path)) => {
+                        std::fs::read_to_string(path)
+                            .with_context(|| format!("Failed to read task description from file: {}", path.display()))?
+                    }
+                    _ => {
+                        unreachable!("Clap ArgGroup ensures exactly one of description or file is provided")
+                    }
                 };
 
                 task::handle_submit(
                     &task_service,
-                    description,
+                    resolved_description,
                     agent_type,
                     summary,
                     priority,
