@@ -55,13 +55,14 @@ pub enum Commands {
 
 /// Input source for task description (mutually exclusive: description or file)
 #[derive(Args)]
-#[group(required = true, multiple = false)]
+#[group(id = "input_source", required = true, multiple = false)]
 pub struct TaskInputSource {
     /// Task description (positional argument)
+    #[arg(group = "input_source")]
     pub description: Option<String>,
 
     /// Path to file containing task description
-    #[arg(short = 'f', long)]
+    #[arg(short = 'f', long, group = "input_source")]
     pub file: Option<PathBuf>,
 }
 
