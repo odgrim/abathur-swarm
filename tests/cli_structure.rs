@@ -94,17 +94,26 @@ fn test_task_submit() {
         Cli::try_parse_from(vec!["abathur", "task", "submit", "Test task description"]).unwrap();
 
     match cli.command {
-        Commands::Task { command } => match command {
+        Commands::Task(task_cmd) => match task_cmd {
             TaskCommands::Submit {
-                description,
+                input,
                 agent_type,
+                summary,
                 priority,
                 dependencies,
+                chain,
+                feature_branch,
+                needs_worktree,
             } => {
-                assert_eq!(description, "Test task description");
-                assert_eq!(agent_type, "general-purpose");
+                assert_eq!(input.description, Some("Test task description".to_string()));
+                assert!(input.file.is_none());
+                assert_eq!(agent_type, "requirements-gatherer");
+                assert!(summary.is_none());
                 assert_eq!(priority, 5);
                 assert!(dependencies.is_empty());
+                assert!(chain.is_none());
+                assert!(feature_branch.is_none());
+                assert!(!needs_worktree);
             }
             _ => panic!("Wrong task command"),
         },
@@ -132,24 +141,140 @@ fn test_task_submit_with_options() {
     .unwrap();
 
     match cli.command {
-        Commands::Task { command } => match command {
+        Commands::Task(task_cmd) => match task_cmd {
             TaskCommands::Submit {
-                description,
+                input,
                 agent_type,
+                summary,
                 priority,
                 dependencies,
+                chain,
+                feature_branch,
+                needs_worktree,
             } => {
-                assert_eq!(description, "Test task");
+                assert_eq!(input.description, Some("Test task".to_string()));
+                assert!(input.file.is_none());
                 assert_eq!(agent_type, "rust-specialist");
+                assert!(summary.is_none());
                 assert_eq!(priority, 8);
                 assert_eq!(dependencies.len(), 2);
-                assert_eq!(dependencies[0], uuid1);
-                assert_eq!(dependencies[1], uuid2);
+                assert_eq!(dependencies[0], uuid1.to_string());
+                assert_eq!(dependencies[1], uuid2.to_string());
+                assert!(chain.is_none());
+                assert!(feature_branch.is_none());
+                assert!(!needs_worktree);
             }
             _ => panic!("Wrong task command"),
         },
         _ => panic!("Wrong top-level command"),
     }
+}
+
+#[test]
+fn test_task_submit_with_file_short_flag() {
+    let cli = Cli::try_parse_from(vec![
+        "abathur",
+        "task",
+        "submit",
+        "-f",
+        "/path/to/task.txt",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Commands::Task(task_cmd) => match task_cmd {
+            TaskCommands::Submit {
+                input,
+                agent_type,
+                summary,
+                priority,
+                dependencies,
+                chain,
+                feature_branch,
+                needs_worktree,
+            } => {
+                assert!(input.description.is_none());
+                assert_eq!(input.file, Some(PathBuf::from("/path/to/task.txt")));
+                assert_eq!(agent_type, "requirements-gatherer");
+                assert!(summary.is_none());
+                assert_eq!(priority, 5);
+                assert!(dependencies.is_empty());
+                assert!(chain.is_none());
+                assert!(feature_branch.is_none());
+                assert!(!needs_worktree);
+            }
+            _ => panic!("Wrong task command"),
+        },
+        _ => panic!("Wrong top-level command"),
+    }
+}
+
+#[test]
+fn test_task_submit_with_file_long_flag() {
+    let cli = Cli::try_parse_from(vec![
+        "abathur",
+        "task",
+        "submit",
+        "--file",
+        "/path/to/task.txt",
+    ])
+    .unwrap();
+
+    match cli.command {
+        Commands::Task(task_cmd) => match task_cmd {
+            TaskCommands::Submit {
+                input,
+                agent_type,
+                summary,
+                priority,
+                dependencies,
+                chain,
+                feature_branch,
+                needs_worktree,
+            } => {
+                assert!(input.description.is_none());
+                assert_eq!(input.file, Some(PathBuf::from("/path/to/task.txt")));
+                assert_eq!(agent_type, "requirements-gatherer");
+                assert!(summary.is_none());
+                assert_eq!(priority, 5);
+                assert!(dependencies.is_empty());
+                assert!(chain.is_none());
+                assert!(feature_branch.is_none());
+                assert!(!needs_worktree);
+            }
+            _ => panic!("Wrong task command"),
+        },
+        _ => panic!("Wrong top-level command"),
+    }
+}
+
+#[test]
+fn test_task_submit_mutual_exclusivity_error() {
+    // Test that providing both description and file produces an error
+    let result = Cli::try_parse_from(vec![
+        "abathur",
+        "task",
+        "submit",
+        "Inline description",
+        "--file",
+        "/path/to/task.txt",
+    ]);
+
+    assert!(result.is_err(), "Should reject when both description and file are provided");
+}
+
+#[test]
+fn test_task_submit_description_required_without_file() {
+    // Test that missing both description and file produces an error
+    let result = Cli::try_parse_from(vec![
+        "abathur",
+        "task",
+        "submit",
+        "--agent-type",
+        "rust-specialist",
+    ]);
+
+    assert!(result.is_err(), "Should reject when neither description nor file is provided");
 }
 
 #[test]
