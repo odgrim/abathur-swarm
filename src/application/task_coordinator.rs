@@ -437,14 +437,63 @@ impl TaskCoordinator {
             task_id
         );
 
-        // 3. Trigger lifecycle coordination for each dependent task
+        // 3. Trigger lifecycle coordination for each dependent task with retry logic
+        // This is critical - if coordination fails, dependent tasks may be stuck forever
+        const MAX_RETRIES: u32 = 3;
+        const INITIAL_BACKOFF_MS: u64 = 100;
+
+        let mut failed_coordinations: Vec<(Uuid, String)> = Vec::new();
+
         for dependent_task in dependent_tasks {
-            if let Err(e) = self.coordinate_task_lifecycle(dependent_task.id).await {
-                warn!(
-                    "Failed to coordinate dependent task {}: {:?}",
-                    dependent_task.id, e
-                );
+            let mut last_error = None;
+            let mut success = false;
+
+            for attempt in 0..MAX_RETRIES {
+                match self.coordinate_task_lifecycle(dependent_task.id).await {
+                    Ok(()) => {
+                        if attempt > 0 {
+                            info!(
+                                "Coordinated dependent task {} after {} retries",
+                                dependent_task.id, attempt
+                            );
+                        }
+                        success = true;
+                        break;
+                    }
+                    Err(e) => {
+                        let backoff_ms = INITIAL_BACKOFF_MS * (1 << attempt); // Exponential backoff
+                        warn!(
+                            "Failed to coordinate dependent task {} (attempt {}/{}): {:?}. Retrying in {}ms",
+                            dependent_task.id, attempt + 1, MAX_RETRIES, e, backoff_ms
+                        );
+                        last_error = Some(e.to_string());
+
+                        if attempt < MAX_RETRIES - 1 {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                        }
+                    }
+                }
             }
+
+            if !success {
+                let error_msg = last_error.unwrap_or_else(|| "Unknown error".to_string());
+                error!(
+                    "Failed to coordinate dependent task {} after {} retries: {}",
+                    dependent_task.id, MAX_RETRIES, error_msg
+                );
+                failed_coordinations.push((dependent_task.id, error_msg));
+            }
+        }
+
+        // Log summary of failed coordinations but don't fail the overall operation
+        // The parent task successfully completed - dependent tasks should be picked up
+        // by the background recovery mechanism
+        if !failed_coordinations.is_empty() {
+            error!(
+                "Failed to coordinate {} dependent task(s) after retries: {:?}. These tasks may require manual intervention or will be recovered by background monitoring.",
+                failed_coordinations.len(),
+                failed_coordinations.iter().map(|(id, _)| id).collect::<Vec<_>>()
+            );
         }
 
         Ok(())
@@ -1063,6 +1112,14 @@ mod tests {
 
         async fn task_exists_by_idempotency_key(&self, _idempotency_key: &str) -> Result<bool> {
             Ok(false) // Mock returns no existing tasks
+        }
+
+        async fn submit_task_idempotent(&self, task: Task) -> Result<crate::domain::ports::task_repository::IdempotentInsertResult> {
+            use crate::domain::ports::task_repository::IdempotentInsertResult;
+            let task_id = task.id;
+            let mut tasks = self.tasks.lock().unwrap();
+            tasks.insert(task_id, task);
+            Ok(IdempotentInsertResult::Inserted(task_id))
         }
     }
 

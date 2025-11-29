@@ -235,14 +235,15 @@ impl PromptChainService {
                 "Step configured to spawn tasks, parsing output"
             );
 
-            if let Err(e) = self.spawn_tasks_from_output(&result, task).await {
-                error!(
-                    step_id = %step.id,
-                    error = ?e,
-                    "Failed to spawn tasks from step output"
-                );
-                // Don't fail the step if task spawning fails, just log it
-            }
+            // Find step index in chain
+            let step_index = chain.steps.iter().position(|s| s.id == step.id).unwrap_or(0);
+
+            // CRITICAL: Task spawning failures are now fatal to prevent hung workflows
+            self.spawn_tasks_from_output(&result, task, &chain.id, &step.id, step_index).await
+                .with_context(|| format!(
+                    "Failed to spawn tasks from step {} output. This is a fatal error to prevent hung workflows.",
+                    step.id
+                ))?;
         }
 
         Ok(result)
@@ -368,15 +369,12 @@ impl PromptChainService {
                     "Step configured to spawn tasks, parsing output"
                 );
 
-                if let Err(e) = self.spawn_tasks_from_output(&result, task).await {
-                    error!(
-                        step_id = %step.id,
-                        error = ?e,
-                        "Failed to spawn tasks from step output"
-                    );
-                    // Don't fail the chain if task spawning fails, just log it
-                    // The monitoring step will detect missing tasks
-                }
+                // CRITICAL: Task spawning failures are now fatal to prevent hung workflows
+                self.spawn_tasks_from_output(&result, task, &chain.id, &step.id, index).await
+                    .with_context(|| format!(
+                        "Failed to spawn tasks from step {} output. This is a fatal error to prevent hung workflows.",
+                        step.id
+                    ))?;
             }
         }
 
@@ -999,11 +997,24 @@ impl PromptChainService {
         ) || step.role == "task-planner"
     }
 
-    /// Generate an idempotency key from parent task ID and output hash
+    /// Generate an idempotency key from chain context, step context, and output hash
     ///
     /// This ensures tasks spawned from the same chain step output are not duplicated
     /// if the step retries or executes multiple times.
-    fn generate_idempotency_key(parent_task_id: Option<uuid::Uuid>, output: &str) -> String {
+    ///
+    /// The key includes:
+    /// - chain_id: Identifies the specific chain being executed
+    /// - step_id: Identifies the specific step within the chain
+    /// - step_index: Position of the step in the chain (for disambiguation)
+    /// - parent_task_id: Links to the parent task context
+    /// - output_hash: Hash of the step output (for uniqueness on different outputs)
+    fn generate_idempotency_key(
+        chain_id: &str,
+        step_id: &str,
+        step_index: usize,
+        parent_task_id: Option<uuid::Uuid>,
+        output: &str,
+    ) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -1012,37 +1023,78 @@ impl PromptChainService {
         let output_hash = hasher.finish();
 
         format!(
-            "chain:{}:{:x}",
+            "chain:{}:step:{}:idx:{}:parent:{}:out:{:x}",
+            chain_id,
+            step_id,
+            step_index,
             parent_task_id.map(|id| id.to_string()).unwrap_or_else(|| "none".to_string()),
             output_hash
         )
     }
 
+    /// Generate a content-based idempotency key for a single task
+    ///
+    /// Uses the task's content (summary, agent_type, description hash) instead of
+    /// array index to ensure deterministic keys even if task order changes.
+    fn generate_task_idempotency_key(
+        parent_key: &str,
+        task_def: &serde_json::Value,
+    ) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let summary = task_def.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+        let agent_type = task_def.get("agent_type").and_then(|v| v.as_str()).unwrap_or("");
+        let description = task_def.get("description").and_then(|v| v.as_str()).unwrap_or("");
+
+        let mut hasher = DefaultHasher::new();
+        summary.hash(&mut hasher);
+        agent_type.hash(&mut hasher);
+        // Include first 200 chars of description for uniqueness without excessive sensitivity
+        description[..description.len().min(200)].hash(&mut hasher);
+        let content_hash = hasher.finish();
+
+        format!("{}:task:{:x}", parent_key, content_hash)
+    }
+
     /// Parse and spawn tasks from step output
+    ///
+    /// This function now:
+    /// - Uses comprehensive idempotency keys including chain_id, step_id, step_index
+    /// - Uses content-based keys for individual tasks (not array indices)
+    /// - Uses atomic insert to prevent race condition duplicates
+    /// - Returns error if task spawning fails (making failures fatal)
     async fn spawn_tasks_from_output(
         &self,
         result: &StepResult,
         parent_task: Option<&Task>,
+        chain_id: &str,
+        step_id: &str,
+        step_index: usize,
     ) -> Result<()> {
+        use crate::domain::ports::task_repository::IdempotentInsertResult;
+
         let Some(ref task_queue) = self.task_queue_service else {
             warn!("Task queue service not configured, cannot spawn tasks");
             return Ok(());
         };
 
-        // Generate idempotency key to prevent duplicate task creation on retries
+        // Generate comprehensive idempotency key with chain and step context
         let idempotency_key = Self::generate_idempotency_key(
+            chain_id,
+            step_id,
+            step_index,
             parent_task.map(|t| t.id),
-            &result.output
+            &result.output,
         );
 
-        // Check if tasks have already been spawned for this output
-        if task_queue.task_exists_by_idempotency_key(&idempotency_key).await? {
-            info!(
-                idempotency_key = %idempotency_key,
-                "Tasks already spawned for this output, skipping duplicate creation"
-            );
-            return Ok(());
-        }
+        info!(
+            idempotency_key = %idempotency_key,
+            chain_id = %chain_id,
+            step_id = %step_id,
+            step_index = step_index,
+            "Generating idempotency key for task spawning"
+        );
 
         // Strip markdown code blocks before parsing (agents often wrap JSON in ```json...```)
         let cleaned_output = OutputValidator::strip_markdown_code_blocks(&result.output);
@@ -1078,29 +1130,52 @@ impl PromptChainService {
         );
 
         let mut spawned_count = 0;
+        let mut skipped_count = 0;
         let mut failed_count = 0;
+        let mut errors: Vec<String> = Vec::new();
 
-        // Parse and enqueue each task
+        // Parse and enqueue each task using content-based idempotency keys
         for (idx, task_def) in tasks_array.iter().enumerate() {
-            // Include index in idempotency key for uniqueness per task
-            let task_idempotency_key = format!("{}:{}", idempotency_key, idx);
+            // Use content-based idempotency key (not array index!)
+            let task_idempotency_key = Self::generate_task_idempotency_key(&idempotency_key, task_def);
 
-            match self.parse_and_enqueue_task(task_def, parent_task, task_queue.as_ref(), &task_idempotency_key).await {
-                Ok(task_id) => {
+            match self.parse_and_enqueue_task_idempotent(
+                task_def,
+                parent_task,
+                task_queue.as_ref(),
+                &task_idempotency_key,
+            ).await {
+                Ok(IdempotentInsertResult::Inserted(task_id)) => {
                     info!(
                         index = idx,
                         task_id = %task_id,
+                        idempotency_key = %task_idempotency_key,
                         "Successfully enqueued task"
                     );
                     spawned_count += 1;
                 }
+                Ok(IdempotentInsertResult::AlreadyExists) => {
+                    info!(
+                        index = idx,
+                        idempotency_key = %task_idempotency_key,
+                        "Task already exists (idempotency check passed), skipping"
+                    );
+                    skipped_count += 1;
+                }
                 Err(e) => {
+                    let error_msg = format!(
+                        "Task {} (summary: {:?}) failed: {}",
+                        idx,
+                        task_def.get("summary").and_then(|v| v.as_str()),
+                        e
+                    );
                     error!(
                         index = idx,
                         error = ?e,
-                        task_def = ?task_def,
+                        idempotency_key = %task_idempotency_key,
                         "Failed to enqueue task"
                     );
+                    errors.push(error_msg);
                     failed_count += 1;
                 }
             }
@@ -1108,30 +1183,53 @@ impl PromptChainService {
 
         info!(
             spawned = spawned_count,
+            skipped = skipped_count,
             failed = failed_count,
             total = tasks_array.len(),
             "Task spawning complete"
         );
 
+        // CRITICAL: Make task spawning failures fatal to prevent hung workflows
+        // This ensures parent tasks don't complete successfully when child tasks fail to spawn
         if failed_count > 0 {
-            warn!(
-                "{} out of {} tasks failed to enqueue",
+            let error_summary = format!(
+                "Failed to spawn {} out of {} tasks. Errors: {}",
                 failed_count,
-                tasks_array.len()
+                tasks_array.len(),
+                errors.join("; ")
             );
+            error!("{}", error_summary);
+            anyhow::bail!("{}", error_summary);
         }
 
         Ok(())
     }
 
-    /// Parse a task definition and enqueue it
-    async fn parse_and_enqueue_task(
+    /// Parse a task definition and enqueue it idempotently using atomic insert
+    ///
+    /// This method uses the atomic `submit_task_idempotent` to prevent race conditions
+    /// when multiple concurrent executions try to spawn the same task.
+    async fn parse_and_enqueue_task_idempotent(
         &self,
         task_def: &serde_json::Value,
         parent_task: Option<&Task>,
         task_queue: &dyn TaskQueueService,
         idempotency_key: &str,
-    ) -> Result<uuid::Uuid> {
+    ) -> Result<crate::domain::ports::task_repository::IdempotentInsertResult> {
+        // Build the task using the common helper
+        let task = self.build_task_from_def(task_def, parent_task, idempotency_key)?;
+
+        // Submit atomically with idempotency check
+        task_queue.submit_task_idempotent(task).await
+    }
+
+    /// Build a Task from a JSON definition (shared by both enqueue methods)
+    fn build_task_from_def(
+        &self,
+        task_def: &serde_json::Value,
+        parent_task: Option<&Task>,
+        idempotency_key: &str,
+    ) -> Result<Task> {
         use crate::domain::models::{DependencyType, TaskSource, TaskStatus};
 
         // Extract required fields
@@ -1176,8 +1274,6 @@ impl PromptChainService {
             .unwrap_or(false);
 
         // Extract or inherit feature_branch
-        // Priority: 1) explicit in task_def, 2) from parent task
-        // ALWAYS inherit from parent in chain workflows for context continuity
         let feature_branch = task_def
             .get("feature_branch")
             .and_then(|v| v.as_str())
@@ -1185,13 +1281,7 @@ impl PromptChainService {
             .or_else(|| parent_task.and_then(|t| t.feature_branch.clone()));
 
         // Determine branch and worktree_path
-        // If needs_worktree is true:
-        //   1. First try to inherit from parent (for implementation tasks under task-planner)
-        //   2. Otherwise generate new task branch (for standalone tasks)
-        // If needs_worktree is false:
-        //   No branch or worktree
         let (branch_value, worktree_path) = if needs_worktree {
-            // Try to inherit from parent task first (implementation tasks inherit planner's branch)
             if let Some(parent) = parent_task {
                 if parent.branch.is_some() && parent.worktree_path.is_some() {
                     info!(
@@ -1201,24 +1291,18 @@ impl PromptChainService {
                     );
                     (parent.branch.clone(), parent.worktree_path.clone())
                 } else if feature_branch.is_some() {
-                    // Parent has no task branch, so this must be creating a new task branch
                     let task_id_slug = task_def
                         .get("id")
                         .and_then(|v| v.as_str())
                         .unwrap_or("task");
 
-                    // Extract feature name from feature_branch
                     let feature_name = feature_branch
                         .as_ref()
                         .and_then(|fb| fb.strip_prefix("feature/"))
                         .unwrap_or("unknown");
 
                     let task_uuid = uuid::Uuid::new_v4();
-
-                    // Generate branch name: task/{feature_name}/{task_id_slug}
                     let branch = format!("task/{}/{}", feature_name, task_id_slug);
-
-                    // Generate worktree path: .abathur/worktrees/task-{uuid}
                     let worktree = format!(".abathur/worktrees/task-{}", task_uuid);
 
                     info!(
@@ -1233,7 +1317,6 @@ impl PromptChainService {
                     (None, None)
                 }
             } else if feature_branch.is_some() {
-                // No parent task, generate new task branch
                 let task_id_slug = task_def
                     .get("id")
                     .and_then(|v| v.as_str())
@@ -1264,11 +1347,10 @@ impl PromptChainService {
         };
 
         let input_data = task_def.get("input_data").cloned();
-
         let now = chrono::Utc::now();
 
         // Create the task
-        let task = Task {
+        Ok(Task {
             id: uuid::Uuid::new_v4(),
             summary,
             description,
@@ -1308,12 +1390,20 @@ impl PromptChainService {
             chain_id: None,
             chain_step_index: 0,
             idempotency_key: Some(idempotency_key.to_string()),
-        };
+        })
+    }
 
-        // Submit to task queue
-        let task_id = task_queue.submit_task(task).await?;
-
-        Ok(task_id)
+    /// Parse a task definition and enqueue it (non-idempotent, for backward compatibility)
+    #[allow(dead_code)]
+    async fn parse_and_enqueue_task(
+        &self,
+        task_def: &serde_json::Value,
+        parent_task: Option<&Task>,
+        task_queue: &dyn TaskQueueService,
+        idempotency_key: &str,
+    ) -> Result<uuid::Uuid> {
+        let task = self.build_task_from_def(task_def, parent_task, idempotency_key)?;
+        task_queue.submit_task(task).await
     }
 }
 

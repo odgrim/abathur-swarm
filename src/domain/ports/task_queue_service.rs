@@ -1,4 +1,5 @@
 use crate::domain::models::task::{Task, TaskStatus};
+use crate::domain::ports::task_repository::IdempotentInsertResult;
 use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -200,4 +201,21 @@ pub trait TaskQueueService: Send + Sync {
     /// * `Ok(false)` - No task with this idempotency key exists
     /// * `Err` - If database error
     async fn task_exists_by_idempotency_key(&self, idempotency_key: &str) -> Result<bool>;
+
+    /// Atomically submit a task if no task with the same idempotency key exists
+    ///
+    /// This method performs an atomic insert operation that prevents race conditions
+    /// where multiple concurrent executions might both check for existence and then
+    /// both attempt to insert. This is critical for prompt chain task spawning.
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - The task to submit
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(IdempotentInsertResult::Inserted(uuid))` - Task was submitted successfully
+    /// * `Ok(IdempotentInsertResult::AlreadyExists)` - Task with same idempotency key exists
+    /// * `Err` - If database error (not including unique violations)
+    async fn submit_task_idempotent(&self, task: Task) -> Result<IdempotentInsertResult>;
 }

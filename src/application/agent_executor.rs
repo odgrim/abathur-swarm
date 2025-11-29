@@ -1235,6 +1235,7 @@ mod tests {
     }
 
     // Mock MCP Client for testing
+    #[allow(dead_code)]
     struct MockMcpClient;
 
     #[async_trait]

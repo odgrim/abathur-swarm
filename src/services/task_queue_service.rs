@@ -785,11 +785,83 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
             .await
             .context("Failed to check if task exists by idempotency key")
     }
+
+    async fn submit_task_idempotent(&self, mut task: Task) -> Result<crate::domain::ports::task_repository::IdempotentInsertResult> {
+        use crate::domain::ports::task_repository::IdempotentInsertResult;
+
+        // 1. Validate task
+        task.validate_summary()
+            .context("Task summary validation failed")?;
+        task.validate_priority()
+            .context("Task priority validation failed")?;
+
+        // 2. Fetch all tasks to validate dependencies
+        let all_tasks = self
+            .repo
+            .list(&TaskFilters::default())
+            .await
+            .context("Failed to fetch existing tasks")?;
+
+        // 3. Validate dependencies exist
+        if task.has_dependencies() {
+            self.dependency_resolver
+                .validate_dependencies(&task, &all_tasks)
+                .context("Dependency validation failed")?;
+
+            // 4. Check for circular dependencies by adding this task to the graph
+            let mut tasks_with_new = all_tasks.clone();
+            tasks_with_new.push(task.clone());
+
+            if let Some(cycle) = self.dependency_resolver.detect_cycle(&tasks_with_new) {
+                warn!("Circular dependency detected: {:?}", cycle);
+                return Err(anyhow::anyhow!("Circular dependency detected: {:?}", cycle));
+            }
+
+            // 5. Calculate dependency depth
+            let depth = self
+                .dependency_resolver
+                .calculate_depth(&task, &all_tasks)
+                .context("Failed to calculate dependency depth")?;
+
+            // 6. Calculate and update priority
+            self.priority_calc.update_task_priority(&mut task, depth);
+        } else {
+            // No dependencies - depth is 0
+            self.priority_calc.update_task_priority(&mut task, 0);
+        }
+
+        // 7. Insert atomically with idempotency check
+        let result = self.repo
+            .insert_task_idempotent(&task)
+            .await
+            .context("Failed to insert task idempotently")?;
+
+        match &result {
+            IdempotentInsertResult::Inserted(task_id) => {
+                info!(
+                    "Task {} submitted idempotently (new task created)",
+                    task_id
+                );
+                // 8. Re-resolve dependencies in case this new task completes dependencies for other tasks
+                self.resolve_dependencies().await
+                    .context("Failed to resolve dependencies after task submission")?;
+            }
+            IdempotentInsertResult::AlreadyExists => {
+                info!(
+                    "Task with idempotency key {:?} already exists, skipping",
+                    task.idempotency_key
+                );
+            }
+        }
+
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ports::task_repository::IdempotentInsertResult;
     use crate::infrastructure::database::DatabaseError;
     use mockall::mock;
     use mockall::predicate::*;
@@ -815,6 +887,7 @@ mod tests {
             async fn claim_next_ready_task(&self) -> Result<Option<Task>, DatabaseError>;
             async fn get_stale_running_tasks(&self, stale_threshold_secs: u64) -> Result<Vec<Task>, DatabaseError>;
             async fn task_exists_by_idempotency_key(&self, idempotency_key: &str) -> Result<bool, DatabaseError>;
+            async fn insert_task_idempotent(&self, task: &Task) -> Result<IdempotentInsertResult, DatabaseError>;
         }
     }
 

@@ -1,9 +1,10 @@
 use crate::domain::models::{Task, TaskStatus};
-use crate::domain::ports::task_repository::{TaskFilters, TaskRepository};
+use crate::domain::ports::task_repository::{IdempotentInsertResult, TaskFilters, TaskRepository};
 use crate::infrastructure::database::{utils::parse_datetime, DatabaseError};
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::SqlitePool;
+use tracing::{debug, info};
 use uuid::Uuid;
 
 /// SQLite implementation of TaskRepository using sqlx
@@ -719,6 +720,136 @@ impl TaskRepository for TaskRepositoryImpl {
         .await?;
 
         Ok(count > 0)
+    }
+
+    async fn insert_task_idempotent(
+        &self,
+        task: &Task,
+    ) -> Result<IdempotentInsertResult, DatabaseError> {
+        // Validate that task has an idempotency key
+        let Some(ref idempotency_key) = task.idempotency_key else {
+            // No idempotency key - fall back to regular insert
+            self.insert(task).await?;
+            return Ok(IdempotentInsertResult::Inserted(task.id));
+        };
+
+        debug!(
+            task_id = %task.id,
+            idempotency_key = %idempotency_key,
+            "Attempting idempotent task insert"
+        );
+
+        // Use INSERT OR IGNORE with the UNIQUE constraint on idempotency_key
+        // This is atomic and prevents race conditions
+        let id = task.id.to_string();
+        let status = task.status.to_string();
+        let dependency_type = task.dependency_type.to_string();
+        let dependencies = task
+            .dependencies
+            .as_ref()
+            .and_then(|d| serde_json::to_string(d).ok());
+        let input_data = task
+            .input_data
+            .as_ref()
+            .and_then(|v| serde_json::to_string(v).ok());
+        let result_data = task
+            .result_data
+            .as_ref()
+            .and_then(|v| serde_json::to_string(v).ok());
+        let submitted_at = task.submitted_at.to_rfc3339();
+        let started_at = task.started_at.as_ref().map(|dt| dt.to_rfc3339());
+        let completed_at = task.completed_at.as_ref().map(|dt| dt.to_rfc3339());
+        let last_updated_at = task.last_updated_at.to_rfc3339();
+        let parent_task_id = task.parent_task_id.as_ref().map(|id| id.to_string());
+        let session_id = task.session_id.as_ref().map(|id| id.to_string());
+        let source = task.source.to_string();
+        let deadline = task.deadline.as_ref().map(|dt| dt.to_rfc3339());
+        let validation_requirement = serde_json::to_string(&task.validation_requirement).ok();
+        let validation_task_id = task.validation_task_id.as_ref().map(|id| id.to_string());
+        let validating_task_id = task.validating_task_id.as_ref().map(|id| id.to_string());
+        let workflow_state = task.workflow_state
+            .as_ref()
+            .and_then(|s| serde_json::to_string(s).ok());
+        let workflow_expectations = task.workflow_expectations
+            .as_ref()
+            .and_then(|e| serde_json::to_string(e).ok());
+        let chain_step_index = task.chain_step_index as i64;
+
+        // Use INSERT OR IGNORE - if idempotency_key already exists, this returns 0 rows affected
+        let result = sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO tasks (
+                id, summary, description, agent_type, priority, calculated_priority,
+                status, dependencies, dependency_type, dependency_depth,
+                input_data, result_data, error_message, retry_count, max_retries,
+                max_execution_timeout_seconds, submitted_at, started_at, completed_at,
+                last_updated_at, created_by, parent_task_id, session_id, source,
+                deadline, estimated_duration_seconds, branch, feature_branch,
+                worktree_path, validation_requirement, validation_task_id,
+                validating_task_id, remediation_count, is_remediation,
+                workflow_state, workflow_expectations, chain_id, chain_step_index,
+                idempotency_key
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&id)
+        .bind(&task.summary)
+        .bind(&task.description)
+        .bind(&task.agent_type)
+        .bind(task.priority)
+        .bind(task.calculated_priority)
+        .bind(&status)
+        .bind(&dependencies)
+        .bind(&dependency_type)
+        .bind(task.dependency_depth)
+        .bind(&input_data)
+        .bind(&result_data)
+        .bind(&task.error_message)
+        .bind(task.retry_count)
+        .bind(task.max_retries)
+        .bind(task.max_execution_timeout_seconds)
+        .bind(&submitted_at)
+        .bind(&started_at)
+        .bind(&completed_at)
+        .bind(&last_updated_at)
+        .bind(&task.created_by)
+        .bind(&parent_task_id)
+        .bind(&session_id)
+        .bind(&source)
+        .bind(&deadline)
+        .bind(task.estimated_duration_seconds)
+        .bind(&task.branch)
+        .bind(&task.feature_branch)
+        .bind(&task.worktree_path)
+        .bind(&validation_requirement)
+        .bind(&validation_task_id)
+        .bind(&validating_task_id)
+        .bind(task.remediation_count)
+        .bind(task.is_remediation)
+        .bind(&workflow_state)
+        .bind(&workflow_expectations)
+        .bind(&task.chain_id)
+        .bind(chain_step_index)
+        .bind(idempotency_key)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            // Row was not inserted because idempotency_key already exists
+            info!(
+                idempotency_key = %idempotency_key,
+                "Task already exists with idempotency key, skipping duplicate"
+            );
+            Ok(IdempotentInsertResult::AlreadyExists)
+        } else {
+            info!(
+                task_id = %task.id,
+                idempotency_key = %idempotency_key,
+                "Task inserted successfully with idempotency key"
+            );
+            Ok(IdempotentInsertResult::Inserted(task.id))
+        }
     }
 }
 

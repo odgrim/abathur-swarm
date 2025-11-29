@@ -113,6 +113,7 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    #[allow(dead_code)]
     fn setup_test_config() {
         let config_yaml = r#"
 agents:

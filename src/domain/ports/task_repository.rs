@@ -302,6 +302,40 @@ pub trait TaskRepository: Send + Sync {
         &self,
         idempotency_key: &str,
     ) -> Result<bool, DatabaseError>;
+
+    /// Atomically insert a task if no task with the same idempotency key exists.
+    ///
+    /// This method performs an atomic insert operation that:
+    /// 1. Attempts to insert the task
+    /// 2. If a UNIQUE constraint violation occurs on idempotency_key, returns `AlreadyExists`
+    /// 3. Otherwise returns `Inserted` with the task ID
+    ///
+    /// This prevents race conditions where multiple concurrent executions might both
+    /// check for existence and then both attempt to insert.
+    ///
+    /// # Arguments
+    /// * `task` - The task to insert
+    ///
+    /// # Returns
+    /// * `Ok(IdempotentInsertResult::Inserted(uuid))` - Task was inserted successfully
+    /// * `Ok(IdempotentInsertResult::AlreadyExists)` - Task with same idempotency key exists
+    /// * `Err(DatabaseError)` on other database errors
+    ///
+    /// # Errors
+    /// - `DatabaseError::QueryFailed`: Database query execution failed (not including unique violations)
+    async fn insert_task_idempotent(
+        &self,
+        task: &Task,
+    ) -> Result<IdempotentInsertResult, DatabaseError>;
+}
+
+/// Result of an idempotent task insertion attempt
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdempotentInsertResult {
+    /// Task was successfully inserted
+    Inserted(Uuid),
+    /// A task with the same idempotency key already exists
+    AlreadyExists,
 }
 
 /// Filter criteria for task queries.

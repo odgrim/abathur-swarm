@@ -928,6 +928,14 @@ mod tests {
         async fn task_exists_by_idempotency_key(&self, _idempotency_key: &str) -> Result<bool> {
             Ok(false) // Mock returns no existing tasks
         }
+
+        async fn submit_task_idempotent(&self, task: Task) -> Result<crate::domain::ports::task_repository::IdempotentInsertResult> {
+            use crate::domain::ports::task_repository::IdempotentInsertResult;
+            let task_id = task.id;
+            let mut tasks = self.tasks.lock().unwrap();
+            tasks.insert(task_id, task);
+            Ok(IdempotentInsertResult::Inserted(task_id))
+        }
     }
 
     struct MockPriorityCalculator;

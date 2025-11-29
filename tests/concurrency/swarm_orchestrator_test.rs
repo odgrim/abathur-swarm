@@ -169,6 +169,22 @@ impl TaskQueueService for MockTaskQueue {
         let tasks = self.tasks.lock().unwrap();
         Ok(tasks.values().any(|t| t.idempotency_key.as_deref() == Some(idempotency_key)))
     }
+
+    async fn submit_task_idempotent(&self, task: Task) -> Result<abathur_cli::domain::ports::task_repository::IdempotentInsertResult> {
+        use abathur_cli::domain::ports::task_repository::IdempotentInsertResult;
+        let task_id = task.id;
+        let mut tasks = self.tasks.lock().unwrap();
+
+        // Check if a task with this idempotency key already exists
+        if let Some(ref key) = task.idempotency_key {
+            if tasks.values().any(|t| t.idempotency_key.as_deref() == Some(key)) {
+                return Ok(IdempotentInsertResult::AlreadyExists);
+            }
+        }
+
+        tasks.insert(task_id, task);
+        Ok(IdempotentInsertResult::Inserted(task_id))
+    }
 }
 
 struct MockPriorityCalculator;
