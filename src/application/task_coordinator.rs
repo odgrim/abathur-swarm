@@ -915,6 +915,78 @@ impl TaskCoordinator {
         ).await
     }
 
+    /// Recover blocked tasks whose dependencies are actually completed
+    ///
+    /// This handles the case where dependency resolution failed (e.g., due to
+    /// transient database errors) and tasks are stuck in Blocked state even
+    /// though their dependencies have completed.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(usize)` - Number of tasks recovered
+    /// * `Err` - If database operations fail
+    #[instrument(skip(self))]
+    pub async fn recover_stuck_blocked_tasks(&self) -> Result<usize> {
+        // Get all blocked tasks
+        let blocked_tasks = self
+            .task_queue
+            .get_tasks_by_status(TaskStatus::Blocked)
+            .await
+            .context("Failed to get blocked tasks")?;
+
+        if blocked_tasks.is_empty() {
+            return Ok(0);
+        }
+
+        debug!("Checking {} blocked tasks for stuck state", blocked_tasks.len());
+
+        let mut recovered_count = 0;
+
+        for task in blocked_tasks {
+            // Check if all dependencies are actually completed
+            match self.check_dependencies_met(&task).await {
+                Ok(true) => {
+                    // Dependencies are met but task is still Blocked - this is stuck
+                    warn!(
+                        task_id = %task.id,
+                        summary = %task.summary,
+                        "Found stuck blocked task with completed dependencies, recovering"
+                    );
+
+                    // Re-coordinate the task lifecycle
+                    if let Err(e) = self.coordinate_task_lifecycle(task.id).await {
+                        error!(
+                            task_id = %task.id,
+                            error = ?e,
+                            "Failed to recover stuck blocked task"
+                        );
+                    } else {
+                        info!(task_id = %task.id, "Successfully recovered stuck blocked task");
+                        recovered_count += 1;
+                    }
+                }
+                Ok(false) => {
+                    // Dependencies not met - this is correctly blocked
+                    debug!(task_id = %task.id, "Blocked task has unmet dependencies (correct state)");
+                }
+                Err(e) => {
+                    // Error checking dependencies - log but continue
+                    warn!(
+                        task_id = %task.id,
+                        error = ?e,
+                        "Error checking dependencies for blocked task"
+                    );
+                }
+            }
+        }
+
+        if recovered_count > 0 {
+            info!("Recovered {} stuck blocked task(s)", recovered_count);
+        }
+
+        Ok(recovered_count)
+    }
+
     // Private helper methods
 
     /// Check if all dependencies for a task are met
@@ -1314,7 +1386,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_task_failure() {
+    async fn test_handle_task_failure_with_retry() {
+        // Test that tasks with retries remaining get re-queued
         let task_queue = Arc::new(MockTaskQueue::new());
         let dependency_resolver = Arc::new(DependencyResolver::new());
         let priority_calc = Arc::new(MockPriorityCalculator);
@@ -1328,6 +1401,7 @@ mod tests {
             TaskStatus::Running,
             None,
         );
+        // Task has max_retries: 3 and retry_count: 0, so retries are available
 
         task_queue.add_task(task);
 
@@ -1337,10 +1411,45 @@ mod tests {
             .await
             .unwrap();
 
-        // Task should be failed with error message
+        // Task should be re-queued (Ready) since retries are available
+        let updated_task = task_queue.get_task(task_id).await.unwrap();
+        assert_eq!(updated_task.status, TaskStatus::Ready);
+        // Error message is set when marking as failed
+        assert!(updated_task.error_message.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_handle_task_failure_max_retries_exceeded() {
+        // Test that tasks with no retries remaining stay failed
+        let task_queue = Arc::new(MockTaskQueue::new());
+        let dependency_resolver = Arc::new(DependencyResolver::new());
+        let priority_calc = Arc::new(MockPriorityCalculator);
+
+        let coordinator =
+            TaskCoordinator::new(task_queue.clone(), dependency_resolver, priority_calc);
+
+        let task_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let mut task = create_test_task(
+            "00000000-0000-0000-0000-000000000002",
+            TaskStatus::Running,
+            None,
+        );
+        // Exhaust retries
+        task.retry_count = 3;
+        task.max_retries = 3;
+
+        task_queue.add_task(task);
+
+        // Mark task as failed
+        coordinator
+            .handle_task_failure(task_id, "Final error".to_string())
+            .await
+            .unwrap();
+
+        // Task should stay failed since max retries exceeded
         let updated_task = task_queue.get_task(task_id).await.unwrap();
         assert_eq!(updated_task.status, TaskStatus::Failed);
-        assert_eq!(updated_task.error_message, Some("Test error".to_string()));
+        assert_eq!(updated_task.error_message, Some("Final error".to_string()));
     }
 
     #[tokio::test]

@@ -166,6 +166,10 @@ impl SwarmOrchestrator {
     /// Should be longer than the longest expected task execution
     const STALE_TASK_THRESHOLD_SECS: u64 = 300; // 5 minutes
 
+    /// How often to check for stuck blocked tasks (in seconds)
+    /// Less frequent than stale check since this is a recovery mechanism
+    const BLOCKED_TASK_CHECK_INTERVAL_SECS: u64 = 120; // 2 minutes
+
     /// Create a new swarm orchestrator
     ///
     /// # Arguments
@@ -408,6 +412,7 @@ impl SwarmOrchestrator {
         let handle = tokio::spawn(async move {
             let mut task_poll_interval = interval(Duration::from_secs(1));
             let mut stale_check_interval = interval(Duration::from_secs(Self::STALE_TASK_CHECK_INTERVAL_SECS));
+            let mut blocked_check_interval = interval(Duration::from_secs(Self::BLOCKED_TASK_CHECK_INTERVAL_SECS));
 
             info!("Task processing loop started");
 
@@ -556,6 +561,13 @@ impl SwarmOrchestrator {
                             Arc::clone(&in_flight_tasks),
                         ).await {
                             error!(error = ?e, "Failed to recover stale tasks");
+                        }
+                    }
+
+                    // Check for stuck blocked tasks periodically
+                    _ = blocked_check_interval.tick() => {
+                        if let Err(e) = task_coordinator.recover_stuck_blocked_tasks().await {
+                            error!(error = ?e, "Failed to recover stuck blocked tasks");
                         }
                     }
 

@@ -726,11 +726,41 @@ impl TaskRepository for TaskRepositoryImpl {
         &self,
         task: &Task,
     ) -> Result<IdempotentInsertResult, DatabaseError> {
-        // Validate that task has an idempotency key
-        let Some(ref idempotency_key) = task.idempotency_key else {
-            // No idempotency key - fall back to regular insert
-            self.insert(task).await?;
-            return Ok(IdempotentInsertResult::Inserted(task.id));
+        // Auto-generate idempotency key if not provided
+        // This ensures ALL tasks go through the idempotent path
+        let idempotency_key = match &task.idempotency_key {
+            Some(key) => key.clone(),
+            None => {
+                // Generate content-based idempotency key
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+
+                let mut hasher = DefaultHasher::new();
+                task.summary.hash(&mut hasher);
+                task.agent_type.hash(&mut hasher);
+                // Include first 200 chars of description for uniqueness
+                task.description[..task.description.len().min(200)].hash(&mut hasher);
+                // Include parent task id for uniqueness within chains
+                if let Some(parent_id) = &task.parent_task_id {
+                    parent_id.to_string().hash(&mut hasher);
+                }
+                let content_hash = hasher.finish();
+
+                let generated_key = format!(
+                    "auto:{}:{}:{:x}",
+                    task.agent_type,
+                    task.parent_task_id.map(|id| id.to_string()).unwrap_or_else(|| "root".to_string()),
+                    content_hash
+                );
+
+                info!(
+                    task_id = %task.id,
+                    generated_key = %generated_key,
+                    "Auto-generated idempotency key for task without explicit key"
+                );
+
+                generated_key
+            }
         };
 
         debug!(
@@ -831,7 +861,7 @@ impl TaskRepository for TaskRepositoryImpl {
         .bind(&workflow_expectations)
         .bind(&task.chain_id)
         .bind(chain_step_index)
-        .bind(idempotency_key)
+        .bind(&idempotency_key)
         .execute(&self.pool)
         .await?;
 

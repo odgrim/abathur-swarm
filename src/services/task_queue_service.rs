@@ -848,10 +848,12 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
     async fn update_task_status(&self, task_id: Uuid, status: TaskStatus) -> Result<()> {
         self.update_status(task_id, status).await?;
 
-        // If task is now completed, use targeted dependency resolution
-        if status == TaskStatus::Completed {
-            self.resolve_dependencies_for_completed_task(task_id).await?;
-        }
+        // NOTE: We intentionally do NOT call resolve_dependencies_for_completed_task() here.
+        // Dependency resolution should ONLY happen through TaskCoordinator::handle_task_completion()
+        // which has proper retry logic, hook execution, and cascade failure handling.
+        // Calling it here would create a dual-path issue with inconsistent behavior.
+        //
+        // The TaskCoordinator is the single source of truth for task lifecycle management.
 
         Ok(())
     }
@@ -1329,26 +1331,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resolve_dependencies_after_task_completion() {
+    async fn test_update_task_status_does_not_resolve_dependencies() {
+        // NOTE: This test verifies that update_task_status does NOT trigger
+        // dependency resolution. Dependency resolution is now ONLY handled
+        // by TaskCoordinator::handle_task_completion() which has proper
+        // retry logic, hook execution, and cascade failure handling.
+
         let mut mock_repo = MockTaskRepo::new();
 
         // Create task1 (dependency)
         let mut task1 = create_test_task("Task 1");
         task1.status = TaskStatus::Running;
         let task1_id = task1.id;
-
-        // Create task2 (depends on task1)
-        let mut task2 = create_test_task("Task 2");
-        task2.dependencies = Some(vec![task1_id]);
-        task2.status = TaskStatus::Blocked;
-        let _task2_id = task2.id;
-
-        // Mock get_dependents to return task2 when task1 completes
-        let task2_clone = task2.clone();
-        mock_repo
-            .expect_get_dependents()
-            .with(eq(task1_id))
-            .returning(move |_| Ok(vec![task2_clone.clone()]));
 
         // Mock get for task1 status update
         let task1_clone = task1.clone();
@@ -1357,28 +1351,15 @@ mod tests {
             .with(eq(task1_id))
             .returning(move |_| Ok(Some(task1_clone.clone())));
 
-        // Mock update for task1 status change to Completed
+        // Mock update for task1 status change to Completed - should only be called once
         mock_repo
             .expect_update()
             .times(1)
             .returning(|_| Ok(()));
 
-        // Mock list to return both tasks for dependency resolution
-        let mut completed_task1 = task1.clone();
-        completed_task1.status = TaskStatus::Completed;
-        let all_tasks = vec![completed_task1.clone(), task2.clone()];
-        mock_repo
-            .expect_list()
-            .returning(move |_| Ok(all_tasks.clone()));
-
-        // Mock update for task2 when it transitions to Ready
-        mock_repo
-            .expect_update()
-            .times(1)
-            .returning(|t| {
-                assert_eq!(t.status, TaskStatus::Ready);
-                Ok(())
-            });
+        // NOTE: We explicitly do NOT expect get_dependents or list to be called.
+        // The TaskQueueService::update_task_status should NOT trigger dependency
+        // resolution. That is now the responsibility of TaskCoordinator.
 
         let service = TaskQueueService::new(
             Arc::new(mock_repo),
@@ -1386,7 +1367,7 @@ mod tests {
             PriorityCalculator::new(),
         );
 
-        // Complete task1 via the trait method
+        // Complete task1 via the trait method - should NOT trigger dependency resolution
         use crate::domain::ports::TaskQueueService as TaskQueueServiceTrait;
         let result = service.update_task_status(task1_id, TaskStatus::Completed).await;
         assert!(result.is_ok());
