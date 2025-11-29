@@ -186,16 +186,26 @@ impl TaskQueueService {
             );
         }
 
-        // 7. Insert into repository
+        // 7. Determine initial status before inserting
+        // This avoids a full table scan after insertion
+        let initial_status = self.resolve_single_task_status(&task, &all_tasks);
+        task.status = initial_status;
+
+        // 8. Insert into repository with correct initial status
         self.repo
             .insert(&task)
             .await
             .context("Failed to insert task into repository")?;
 
-        // 8. Re-resolve dependencies in case this new task completes dependencies for other tasks
-        // This handles the case where tasks were submitted out of order
-        self.resolve_dependencies().await
-            .context("Failed to resolve dependencies after task submission")?;
+        info!(
+            "Task {} submitted with status {:?}",
+            task.id, initial_status
+        );
+
+        // Note: We no longer call resolve_dependencies() after each insert.
+        // The submitted task already has the correct status.
+        // Other tasks' dependencies are resolved when their dependencies complete,
+        // via resolve_dependencies_for_completed_task().
 
         Ok(task.id)
     }
@@ -359,6 +369,121 @@ impl TaskQueueService {
 
         info!("Resolved dependencies: {} tasks updated to Ready", updated_count);
         Ok(updated_count)
+    }
+
+    /// Resolve dependencies for tasks that depend on a specific completed task
+    ///
+    /// This is a targeted resolution that only checks tasks that explicitly depend
+    /// on the completed task, rather than scanning all tasks. This is O(k) where k
+    /// is the number of dependent tasks, vs O(n) for full resolution.
+    ///
+    /// # Arguments
+    /// * `completed_task_id` - The ID of the task that just completed
+    ///
+    /// # Returns
+    /// Number of tasks that were updated to Ready status
+    #[instrument(skip(self), err)]
+    pub async fn resolve_dependencies_for_completed_task(&self, completed_task_id: Uuid) -> Result<usize> {
+        // 1. Fetch only tasks that depend on this specific task
+        let dependent_tasks = self
+            .repo
+            .get_dependents(completed_task_id)
+            .await
+            .context("Failed to fetch dependent tasks")?;
+
+        if dependent_tasks.is_empty() {
+            tracing::debug!("No tasks depend on completed task {}", completed_task_id);
+            return Ok(0);
+        }
+
+        info!(
+            "Checking {} tasks that depend on completed task {}",
+            dependent_tasks.len(),
+            completed_task_id
+        );
+
+        // 2. For each dependent task, check if ALL its dependencies are now met
+        // We need to fetch the status of all dependency tasks
+        let mut updated_count = 0;
+
+        for task in dependent_tasks {
+            // Skip if not pending or blocked
+            if !matches!(task.status, TaskStatus::Pending | TaskStatus::Blocked) {
+                continue;
+            }
+
+            // Check if all dependencies are completed
+            let all_deps_met = if let Some(ref deps) = task.dependencies {
+                let mut all_met = true;
+                for &dep_id in deps {
+                    if dep_id == completed_task_id {
+                        // We know this one is completed
+                        continue;
+                    }
+                    // Check other dependencies
+                    if let Ok(Some(dep_task)) = self.repo.get(dep_id).await {
+                        if dep_task.status != TaskStatus::Completed {
+                            all_met = false;
+                            break;
+                        }
+                    } else {
+                        // Dependency not found - treat as not met
+                        all_met = false;
+                        break;
+                    }
+                }
+                all_met
+            } else {
+                // No dependencies - should be ready
+                true
+            };
+
+            if all_deps_met {
+                let mut updated_task = task.clone();
+                updated_task.status = TaskStatus::Ready;
+                updated_task.last_updated_at = chrono::Utc::now();
+
+                self.repo
+                    .update(&updated_task)
+                    .await
+                    .context(format!("Failed to update task {} to Ready", task.id))?;
+
+                info!(
+                    "Task {} status updated: {:?} -> Ready (dependency {} completed)",
+                    task.id, task.status, completed_task_id
+                );
+                updated_count += 1;
+            }
+        }
+
+        info!(
+            "Targeted dependency resolution: {} tasks updated to Ready after {} completed",
+            updated_count, completed_task_id
+        );
+        Ok(updated_count)
+    }
+
+    /// Resolve dependencies for a newly submitted task only
+    ///
+    /// This is called after a task is inserted to determine its initial status.
+    /// It only updates the submitted task, not all tasks in the system.
+    ///
+    /// # Arguments
+    /// * `task` - The task to resolve
+    /// * `all_tasks` - All existing tasks (for dependency checking)
+    ///
+    /// # Returns
+    /// The updated task status (Ready or Blocked)
+    fn resolve_single_task_status(&self, task: &Task, all_tasks: &[Task]) -> TaskStatus {
+        if !task.has_dependencies() {
+            return TaskStatus::Ready;
+        }
+
+        if self.dependency_resolver.check_dependencies_met(task, all_tasks) {
+            TaskStatus::Ready
+        } else {
+            TaskStatus::Blocked
+        }
     }
 
     /// Get ready tasks ordered by calculated priority
@@ -691,17 +816,9 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
     async fn update_task_status(&self, task_id: Uuid, status: TaskStatus) -> Result<()> {
         self.update_status(task_id, status).await?;
 
-        // If task is now completed, re-resolve dependencies for dependent tasks
+        // If task is now completed, use targeted dependency resolution
         if status == TaskStatus::Completed {
-            let dependent_tasks = self.get_dependent_tasks(task_id).await?;
-            if !dependent_tasks.is_empty() {
-                info!(
-                    "Task {} completed, re-resolving dependencies for {} dependent tasks",
-                    task_id,
-                    dependent_tasks.len()
-                );
-                self.resolve_dependencies().await?;
-            }
+            self.resolve_dependencies_for_completed_task(task_id).await?;
         }
 
         Ok(())
@@ -740,7 +857,9 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
             .await
             .context("Failed to mark task as failed")?;
 
-        // Re-resolve dependencies to ensure dependent tasks remain blocked
+        // Log dependent tasks that will remain blocked
+        // Note: We don't need to call resolve_dependencies here - dependent tasks
+        // were already blocked and will stay blocked since this task failed
         let dependent_tasks = self.get_dependent_tasks(task_id).await?;
         if !dependent_tasks.is_empty() {
             warn!(
@@ -749,7 +868,6 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
                 error_message,
                 dependent_tasks.len()
             );
-            self.resolve_dependencies().await?;
         }
 
         Ok(())
@@ -830,7 +948,12 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
             self.priority_calc.update_task_priority(&mut task, 0);
         }
 
-        // 7. Insert atomically with idempotency check
+        // 7. Determine initial status before inserting
+        // This avoids a full table scan after insertion
+        let initial_status = self.resolve_single_task_status(&task, &all_tasks);
+        task.status = initial_status;
+
+        // 8. Insert atomically with idempotency check
         let result = self.repo
             .insert_task_idempotent(&task)
             .await
@@ -839,12 +962,13 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
         match &result {
             IdempotentInsertResult::Inserted(task_id) => {
                 info!(
-                    "Task {} submitted idempotently (new task created)",
-                    task_id
+                    "Task {} submitted idempotently with status {:?} (new task created)",
+                    task_id, initial_status
                 );
-                // 8. Re-resolve dependencies in case this new task completes dependencies for other tasks
-                self.resolve_dependencies().await
-                    .context("Failed to resolve dependencies after task submission")?;
+                // Note: We no longer call resolve_dependencies() after each insert.
+                // The submitted task already has the correct status.
+                // Other tasks' dependencies are resolved when their dependencies complete,
+                // via resolve_dependencies_for_completed_task().
             }
             IdempotentInsertResult::AlreadyExists => {
                 info!(
@@ -855,6 +979,11 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
         }
 
         Ok(result)
+    }
+
+    async fn resolve_dependencies_for_completed_task(&self, completed_task_id: Uuid) -> Result<usize> {
+        // Delegate to the internal implementation
+        TaskQueueService::resolve_dependencies_for_completed_task(self, completed_task_id).await
     }
 }
 
@@ -899,10 +1028,9 @@ mod tests {
     async fn test_submit_simple_task() {
         let mut mock_repo = MockTaskRepo::new();
 
-        // Expect list to return empty (no existing tasks) - called twice:
-        // 1. During validation
-        // 2. During resolve_dependencies after insert
-        mock_repo.expect_list().times(2).returning(|_| Ok(vec![]));
+        // Expect list to return empty (no existing tasks) - called once during validation
+        // Note: We no longer call resolve_dependencies() after insert for efficiency
+        mock_repo.expect_list().times(1).returning(|_| Ok(vec![]));
 
         // Expect insert to be called once
         mock_repo.expect_insert().times(1).returning(|_| Ok(()));
@@ -928,13 +1056,12 @@ mod tests {
         let mut main_task = create_test_task("Main task");
         main_task.dependencies = Some(vec![dep_task.id]);
 
-        // Expect list to return the dependency task - called twice:
-        // 1. During validation
-        // 2. During resolve_dependencies after insert
+        // Expect list to return the dependency task - called once during validation
+        // Note: We no longer call resolve_dependencies() after insert for efficiency
         let dep_task_clone = dep_task.clone();
         mock_repo
             .expect_list()
-            .times(2)
+            .times(1)
             .returning(move |_| Ok(vec![dep_task_clone.clone()]));
 
         // Expect insert

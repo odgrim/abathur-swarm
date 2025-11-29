@@ -218,4 +218,22 @@ pub trait TaskQueueService: Send + Sync {
     /// * `Ok(IdempotentInsertResult::AlreadyExists)` - Task with same idempotency key exists
     /// * `Err` - If database error (not including unique violations)
     async fn submit_task_idempotent(&self, task: Task) -> Result<IdempotentInsertResult>;
+
+    /// Resolve dependencies for tasks that depend on a specific completed task
+    ///
+    /// This is a targeted resolution that only checks tasks that explicitly depend
+    /// on the completed task, rather than scanning all tasks. This is O(k) where k
+    /// is the number of dependent tasks, vs O(n) for full resolution.
+    ///
+    /// Should be called when a task transitions to Completed status.
+    ///
+    /// # Arguments
+    ///
+    /// * `completed_task_id` - The ID of the task that just completed
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(usize)` - Number of tasks that were updated to Ready status
+    /// * `Err` - If database error
+    async fn resolve_dependencies_for_completed_task(&self, completed_task_id: Uuid) -> Result<usize>;
 }

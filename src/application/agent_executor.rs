@@ -423,6 +423,9 @@ impl AgentExecutor {
     }
 
     /// Enqueue the next step of a chain as a new task
+    ///
+    /// Uses atomic idempotent insertion to prevent duplicate chain steps when
+    /// workers crash/retry. The idempotency key is based on chain_id + step_index + parent_task_id.
     async fn enqueue_next_chain_step(
         &self,
         current_task: &Task,
@@ -431,42 +434,18 @@ impl AgentExecutor {
         previous_output: &str,
     ) -> anyhow::Result<uuid::Uuid> {
         use crate::domain::models::{DependencyType, TaskSource, TaskStatus};
+        use crate::domain::ports::task_repository::IdempotentInsertResult;
 
         let next_step = &chain.steps[next_step_index];
 
-        // IDEMPOTENCY CHECK: Prevent duplicate chain step tasks
-        // This is crucial because if the current task fails AFTER enqueueing the next step
-        // (e.g., worker crash, timeout, DB error), it may be retried and would enqueue again.
-        // We check if a task with the same chain_id and step_index already depends on current_task.
-        let dependent_tasks = self
-            .chain_service
-            .get_dependent_tasks(current_task.id)
-            .await
-            .unwrap_or_else(|e| {
-                warn!(
-                    task_id = %current_task.id,
-                    error = ?e,
-                    "Failed to check for existing dependent tasks, proceeding with enqueue"
-                );
-                vec![]
-            });
-
-        // Look for an existing next step task
-        let existing_next_step = dependent_tasks.iter().find(|t| {
-            t.chain_id.as_ref() == current_task.chain_id.as_ref()
-                && t.chain_step_index == next_step_index
-        });
-
-        if let Some(existing) = existing_next_step {
-            info!(
-                existing_task_id = %existing.id,
-                chain_id = ?current_task.chain_id,
-                step_index = next_step_index,
-                current_task_id = %current_task.id,
-                "Next chain step task already exists (idempotency check), skipping enqueue"
-            );
-            return Ok(existing.id);
-        }
+        // Generate idempotency key based on chain context
+        // This ensures the same chain step is never enqueued twice for the same parent task
+        let idempotency_key = format!(
+            "chain:{}:step:{}:parent:{}",
+            chain.id,
+            next_step_index,
+            current_task.id
+        );
 
         // Parse previous output as input_data for next step
         let input_data = match serde_json::from_str(previous_output) {
@@ -487,7 +466,7 @@ impl AgentExecutor {
         // They inherit both branch and feature_branch from the parent task
         // Implementation tasks spawned later will get new task branch values
 
-        // Create task for next step
+        // Create task for next step with idempotency key
         let next_task = Task {
             id: uuid::Uuid::new_v4(),
             summary: format!(
@@ -537,24 +516,66 @@ impl AgentExecutor {
             workflow_expectations: None,
             chain_id: current_task.chain_id.clone(),
             chain_step_index: next_step_index,
-            idempotency_key: None,
+            idempotency_key: Some(idempotency_key.clone()),
         };
 
-        // Get task queue service from chain service
-        let task_id = self
+        // Use atomic idempotent insert to prevent race conditions
+        // This is database-level deduplication using INSERT OR IGNORE
+        let result = self
             .chain_service
-            .submit_task(next_task)
+            .submit_task_idempotent(next_task)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to submit next step task: {}", e))?;
 
-        info!(
-            next_task_id = %task_id,
-            next_step_id = %next_step.id,
-            next_step_index = next_step_index,
-            "Enqueued next chain step"
-        );
+        match result {
+            IdempotentInsertResult::Inserted(task_id) => {
+                info!(
+                    next_task_id = %task_id,
+                    next_step_id = %next_step.id,
+                    next_step_index = next_step_index,
+                    idempotency_key = %idempotency_key,
+                    "Enqueued next chain step (new task created)"
+                );
+                Ok(task_id)
+            }
+            IdempotentInsertResult::AlreadyExists => {
+                // Task already exists - this is expected during retries
+                // We need to find the existing task to return its ID
+                info!(
+                    chain_id = %chain.id,
+                    step_index = next_step_index,
+                    current_task_id = %current_task.id,
+                    idempotency_key = %idempotency_key,
+                    "Next chain step already exists (idempotent insert detected duplicate)"
+                );
 
-        Ok(task_id)
+                // Query for the existing task by looking at dependents
+                let dependent_tasks = self
+                    .chain_service
+                    .get_dependent_tasks(current_task.id)
+                    .await
+                    .unwrap_or_default();
+
+                let existing = dependent_tasks.iter().find(|t| {
+                    t.chain_id.as_ref() == current_task.chain_id.as_ref()
+                        && t.chain_step_index == next_step_index
+                });
+
+                if let Some(existing_task) = existing {
+                    Ok(existing_task.id)
+                } else {
+                    // Very rare edge case: task exists by idempotency key but we can't find it
+                    // This could happen if the task was cancelled or has a different parent
+                    warn!(
+                        idempotency_key = %idempotency_key,
+                        "Task exists by idempotency key but not found in dependent tasks"
+                    );
+                    Err(anyhow::anyhow!(
+                        "Duplicate task detected but could not retrieve existing task ID"
+                    ))
+                }
+            }
+        }
     }
 
     /// Execute a task with the configured timeout

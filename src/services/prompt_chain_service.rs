@@ -129,6 +129,26 @@ impl PromptChainService {
         task_queue.submit_task(task).await
     }
 
+    /// Submit a task idempotently using atomic INSERT OR IGNORE
+    ///
+    /// This is the preferred method for chain step tasks to prevent duplicates
+    /// when workers crash/retry. The idempotency key should be based on
+    /// chain_id + step_index + parent_task_id to ensure uniqueness.
+    ///
+    /// # Returns
+    /// - `Ok(IdempotentInsertResult::Inserted(uuid))` - Task was inserted
+    /// - `Ok(IdempotentInsertResult::AlreadyExists)` - Task already existed (duplicate)
+    pub async fn submit_task_idempotent(
+        &self,
+        task: Task,
+    ) -> Result<crate::domain::ports::task_repository::IdempotentInsertResult> {
+        let Some(ref task_queue) = self.task_queue_service else {
+            anyhow::bail!("Task queue service not configured");
+        };
+
+        task_queue.submit_task_idempotent(task).await
+    }
+
     /// Get a task from the task queue (wrapper for AgentExecutor to use)
     pub async fn get_task_from_repo(&self, task_id: uuid::Uuid) -> Result<Option<Task>> {
         let Some(ref task_queue) = self.task_queue_service else {

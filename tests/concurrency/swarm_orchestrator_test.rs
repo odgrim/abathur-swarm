@@ -185,6 +185,10 @@ impl TaskQueueService for MockTaskQueue {
         tasks.insert(task_id, task);
         Ok(IdempotentInsertResult::Inserted(task_id))
     }
+
+    async fn resolve_dependencies_for_completed_task(&self, _completed_task_id: Uuid) -> Result<usize> {
+        Ok(0) // Mock returns 0 tasks updated
+    }
 }
 
 struct MockPriorityCalculator;
