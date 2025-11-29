@@ -403,7 +403,6 @@ impl TaskQueueService {
         );
 
         // 2. For each dependent task, check if ALL its dependencies are now met
-        // We need to fetch the status of all dependency tasks
         let mut updated_count = 0;
 
         for task in dependent_tasks {
@@ -412,31 +411,10 @@ impl TaskQueueService {
                 continue;
             }
 
-            // Check if all dependencies are completed
-            let all_deps_met = if let Some(ref deps) = task.dependencies {
-                let mut all_met = true;
-                for &dep_id in deps {
-                    if dep_id == completed_task_id {
-                        // We know this one is completed
-                        continue;
-                    }
-                    // Check other dependencies
-                    if let Ok(Some(dep_task)) = self.repo.get(dep_id).await {
-                        if dep_task.status != TaskStatus::Completed {
-                            all_met = false;
-                            break;
-                        }
-                    } else {
-                        // Dependency not found - treat as not met
-                        all_met = false;
-                        break;
-                    }
-                }
-                all_met
-            } else {
-                // No dependencies - should be ready
-                true
-            };
+            // Check if all dependencies are completed (with known completed task optimization)
+            let all_deps_met = self
+                .check_dependencies_met_async(&task, Some(completed_task_id))
+                .await?;
 
             if all_deps_met {
                 let mut updated_task = task.clone();
@@ -461,6 +439,60 @@ impl TaskQueueService {
             updated_count, completed_task_id
         );
         Ok(updated_count)
+    }
+
+    /// Check if all dependencies of a task are completed (async version)
+    ///
+    /// This method fetches each dependency from the database to check its status.
+    /// Use this when you don't have all tasks loaded in memory.
+    ///
+    /// # Arguments
+    /// * `task` - The task to check dependencies for
+    /// * `known_completed_id` - Optional task ID known to be completed (optimization to skip fetch)
+    ///
+    /// # Returns
+    /// * `Ok(true)` - All dependencies are completed
+    /// * `Ok(false)` - One or more dependencies are not completed
+    /// * `Err` - If a dependency task is not found (indicates data corruption)
+    async fn check_dependencies_met_async(
+        &self,
+        task: &Task,
+        known_completed_id: Option<Uuid>,
+    ) -> Result<bool> {
+        let Some(ref deps) = task.dependencies else {
+            return Ok(true);
+        };
+
+        if deps.is_empty() {
+            return Ok(true);
+        }
+
+        for &dep_id in deps {
+            // Skip if this is the known completed task
+            if known_completed_id == Some(dep_id) {
+                continue;
+            }
+
+            // Fetch dependency and check its status
+            let dep_task = self
+                .repo
+                .get(dep_id)
+                .await
+                .context(format!("Failed to fetch dependency task {}", dep_id))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Dependency task {} not found for task {} - possible data corruption",
+                        dep_id,
+                        task.id
+                    )
+                })?;
+
+            if dep_task.status != TaskStatus::Completed {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 
     /// Resolve dependencies for a newly submitted task only
