@@ -2,17 +2,17 @@
 //!
 //! Tests the async concurrency patterns using tokio primitives.
 
-use abathur::application::resource_monitor::{ResourceLimits, ResourceMonitor};
-use abathur::application::swarm_orchestrator::{SwarmOrchestrator, SwarmState};
-use abathur::application::task_coordinator::TaskCoordinator;
-use abathur::application::AgentExecutor;
-use abathur::domain::models::{Config, DependencyType, Task, TaskSource, TaskStatus};
-use abathur::domain::ports::{
+use abathur_cli::application::resource_monitor::{ResourceLimits, ResourceMonitor};
+use abathur_cli::application::swarm_orchestrator::{SwarmOrchestrator, SwarmState};
+use abathur_cli::application::task_coordinator::TaskCoordinator;
+use abathur_cli::application::AgentExecutor;
+use abathur_cli::domain::models::{Config, DependencyType, Task, TaskSource, TaskStatus};
+use abathur_cli::domain::ports::{
     ClaudeClient, ClaudeError, ClaudeRequest, ClaudeResponse, ContentBlock, McpClient, McpError,
     McpToolRequest, McpToolResponse, MessageRequest, MessageResponse, PriorityCalculator,
     ResourceContent, ResourceInfo, TaskQueueService, ToolInfo, TokenUsage, Usage,
 };
-use abathur::services::DependencyResolver;
+use abathur_cli::services::DependencyResolver;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;

@@ -1,8 +1,8 @@
 mod helpers;
 
-use abathur::domain::models::{Session, SessionEvent};
-use abathur::domain::ports::SessionRepository;
-use abathur::infrastructure::database::SessionRepositoryImpl;
+use abathur_cli::domain::models::{Session, SessionEvent};
+use abathur_cli::domain::ports::SessionRepository;
+use abathur_cli::infrastructure::database::SessionRepositoryImpl;
 use serde_json::json;
 use uuid::Uuid;
 

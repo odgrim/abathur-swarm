@@ -243,7 +243,7 @@ impl BranchCompletionDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::TaskStatus;
+    use crate::domain::models::TaskStatus;
     use crate::domain::ports::TaskRepository;
     use crate::infrastructure::database::TaskRepositoryImpl;
     use crate::services::{DependencyResolver, PriorityCalculator, TaskQueueService};

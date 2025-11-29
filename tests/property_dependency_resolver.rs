@@ -1,5 +1,5 @@
-use abathur::domain::models::task::{DependencyType, Task, TaskSource, TaskStatus};
-use abathur::services::DependencyResolver;
+use abathur_cli::domain::models::task::{DependencyType, Task, TaskSource, TaskStatus};
+use abathur_cli::services::DependencyResolver;
 use chrono::Utc;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;

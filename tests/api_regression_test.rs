@@ -95,6 +95,7 @@ async fn regression_test_embedding_repository_trait_unchanged() {
             .expect("Failed to create embedding service"),
     );
     let vector_store = VectorStore::new(Arc::new(pool), embedding_service.clone())
+        .await
         .expect("Failed to create vector store");
 
     // Test 1: insert method signature and behavior
@@ -403,6 +404,7 @@ async fn regression_test_error_handling_unchanged() {
             .expect("Failed to create embedding service"),
     );
     let vector_store = VectorStore::new(Arc::new(pool), embedding_service.clone())
+        .await
         .expect("Failed to create vector store");
 
     let delete_result = vector_store.delete("non-existent-id").await;
@@ -448,6 +450,7 @@ async fn regression_test_existing_patterns_still_work() {
             .expect("Failed to create embedding service"),
     );
     let vector_store = VectorStore::new(Arc::new(pool), embedding_service.clone())
+        .await
         .expect("Failed to create vector store");
 
     // Pattern 1: Insert and retrieve
@@ -505,6 +508,7 @@ async fn regression_test_citation_api_unchanged() {
             .expect("Failed to create embedding service"),
     );
     let vector_store = VectorStore::new(Arc::new(pool), embedding_service.clone())
+        .await
         .expect("Failed to create vector store");
 
     vector_store
@@ -556,6 +560,7 @@ async fn regression_test_migration_path_validated() {
         Arc::new(pool),
         Arc::new(embedding_service) as Arc<dyn EmbeddingService>,
     )
+    .await
     .unwrap();
 
     // Old pattern 4: Insert and search
@@ -605,6 +610,7 @@ async fn regression_test_trait_object_compatibility() {
     // Must be able to pass trait object to VectorStore::new
     let pool = setup_test_db().await;
     let vector_store = VectorStore::new(Arc::new(pool), embedding_service.clone())
+        .await
         .expect("VectorStore::new must accept Arc<dyn EmbeddingService>");
 
     // Must be able to use VectorStore with trait object
@@ -648,6 +654,7 @@ async fn regression_test_edge_cases_unchanged() {
     let pool = setup_test_db().await;
     let embedding_service = Arc::new(service);
     let vector_store = VectorStore::new(Arc::new(pool), embedding_service.clone())
+        .await
         .expect("Failed to create vector store");
 
     let empty_rowids = vector_store
@@ -672,6 +679,7 @@ async fn regression_test_namespace_filtering_unchanged() {
             .expect("Failed to create embedding service"),
     );
     let vector_store = VectorStore::new(Arc::new(pool), embedding_service.clone())
+        .await
         .expect("Failed to create vector store");
 
     // Insert in different namespaces

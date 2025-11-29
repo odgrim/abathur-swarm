@@ -255,6 +255,9 @@ impl TaskCoordinator {
     /// Retrieves the task with status "ready" that has the highest calculated priority.
     /// This is used by the agent pool to pull the next task to execute.
     ///
+    /// NOTE: This does NOT claim the task. Use `claim_next_ready_task` for
+    /// atomic claim to prevent race conditions in multi-worker scenarios.
+    ///
     /// # Returns
     ///
     /// * `Ok(Some(Task))` - The highest priority ready task
@@ -266,6 +269,29 @@ impl TaskCoordinator {
             .get_next_ready_task()
             .await
             .context("Failed to get next ready task")
+    }
+
+    /// Atomically claim the next ready task for execution
+    ///
+    /// This performs an atomic SELECT + UPDATE operation to:
+    /// 1. Find the highest-priority task with status=Ready
+    /// 2. Immediately mark it as Running
+    /// 3. Return the claimed task
+    ///
+    /// This prevents race conditions where multiple workers pick up the same task.
+    /// The returned task is already marked as Running in the database.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(task))` - The claimed task (already marked as Running)
+    /// * `Ok(None)` - No ready tasks available
+    /// * `Err` - If database error occurs
+    #[instrument(skip(self))]
+    pub async fn claim_next_ready_task(&self) -> Result<Option<Task>> {
+        self.task_queue
+            .claim_next_ready_task()
+            .await
+            .context("Failed to atomically claim next ready task")
     }
 
     /// Mark a task as running
@@ -287,20 +313,9 @@ impl TaskCoordinator {
         let task = self.task_queue.get_task(task_id).await
             .context("Failed to get task for mark_task_running")?;
 
-        // Execute PreStart hooks
-        let hook_registry_guard = self.hook_registry.read().await;
-        if let Some(ref registry) = *hook_registry_guard {
-            let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
-            let hook_result = registry.execute_hooks(HookEvent::PreStart, &task, &context).await
-                .context("Failed to execute PreStart hooks")?;
-
-            if hook_result.should_block() {
-                warn!("PreStart hook blocked task {} from starting", task_id);
-                return Ok(());
-            }
-        }
-        drop(hook_registry_guard);
-
+        // CRITICAL: Update status to Running FIRST, BEFORE hooks execute.
+        // This prevents race conditions where the polling loop picks up the same
+        // task while hooks (like worktree creation) are still executing.
         self.task_queue
             .update_task_status(task_id, TaskStatus::Running)
             .await
@@ -315,6 +330,25 @@ impl TaskCoordinator {
                 new_status: TaskStatus::Running,
             })
             .await;
+
+        // Execute PreStart hooks (after status is already Running)
+        let hook_registry_guard = self.hook_registry.read().await;
+        if let Some(ref registry) = *hook_registry_guard {
+            let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
+            let hook_result = registry.execute_hooks(HookEvent::PreStart, &task, &context).await
+                .context("Failed to execute PreStart hooks")?;
+
+            if hook_result.should_block() {
+                warn!("PreStart hook blocked task {} - reverting to Ready status", task_id);
+                // Revert status to Ready if hook blocks
+                self.task_queue
+                    .update_task_status(task_id, TaskStatus::Ready)
+                    .await
+                    .context("Failed to revert task status to Ready")?;
+                return Ok(());
+            }
+        }
+        drop(hook_registry_guard);
 
         // Execute PostStart hooks
         let hook_registry_guard = self.hook_registry.read().await;
@@ -960,6 +994,28 @@ mod tests {
                         .unwrap()
                 })
                 .cloned())
+        }
+
+        async fn claim_next_ready_task(&self) -> Result<Option<Task>> {
+            let mut tasks = self.tasks.lock().unwrap();
+            let task = tasks
+                .values()
+                .filter(|t| t.status == TaskStatus::Ready)
+                .max_by(|a, b| {
+                    a.calculated_priority
+                        .partial_cmp(&b.calculated_priority)
+                        .unwrap()
+                })
+                .cloned();
+
+            // Atomically mark as running
+            if let Some(ref t) = task {
+                if let Some(task_mut) = tasks.get_mut(&t.id) {
+                    task_mut.status = TaskStatus::Running;
+                }
+            }
+
+            Ok(task)
         }
 
         async fn submit_task(&self, task: Task) -> Result<Uuid> {

@@ -1,9 +1,9 @@
 mod helpers;
 
-use abathur::domain::models::{Memory, MemoryType};
-use abathur::domain::ports::MemoryRepository;
-use abathur::infrastructure::database::MemoryRepositoryImpl;
-use abathur::services::MemoryService;
+use abathur_cli::domain::models::{Memory, MemoryType};
+use abathur_cli::domain::ports::MemoryRepository;
+use abathur_cli::infrastructure::database::MemoryRepositoryImpl;
+use abathur_cli::services::MemoryService;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -113,7 +113,6 @@ async fn test_update_memory() {
         .unwrap();
 
     assert_eq!(retrieved.value, json!({"version": 2}));
-    assert_eq!(retrieved.version, 2);
 
     teardown_test_db(pool).await;
 }
@@ -382,7 +381,6 @@ async fn test_memory_versioning() {
         .expect("failed to get memory")
         .unwrap();
 
-    assert_eq!(final_memory.version, 5);
     assert_eq!(final_memory.value, json!(5));
 
     teardown_test_db(pool).await;

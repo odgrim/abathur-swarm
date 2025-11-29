@@ -2,7 +2,7 @@
 // Note: These tests must be run separately as they initialize global state
 // Run with: cargo test --test logging_integration_test -- --test-threads=1
 
-use abathur::logging::{info, instrument, LogConfig, LogFormat, LoggerImpl, RotationPolicy};
+use abathur_cli::logging::{info, instrument, LogConfig, LogFormat, LoggerImpl, RotationPolicy};
 use std::fs;
 use tempfile::TempDir;
 

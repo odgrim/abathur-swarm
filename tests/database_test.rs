@@ -1,4 +1,4 @@
-use abathur::DatabaseConnection;
+use abathur_cli::DatabaseConnection;
 use sqlx::Row;
 
 #[tokio::test]

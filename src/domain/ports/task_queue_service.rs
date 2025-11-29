@@ -133,6 +133,8 @@ pub trait TaskQueueService: Send + Sync {
     /// Get the next ready task with highest priority
     ///
     /// Returns the task with status "ready" that has the highest calculated priority.
+    /// NOTE: This does NOT mark the task as claimed. Use `claim_next_ready_task` for
+    /// atomic claim to prevent race conditions.
     ///
     /// # Returns
     ///
@@ -140,6 +142,22 @@ pub trait TaskQueueService: Send + Sync {
     /// * `Ok(None)` - No ready tasks available
     /// * `Err` - If database error
     async fn get_next_ready_task(&self) -> Result<Option<Task>>;
+
+    /// Atomically claim the next ready task with highest priority
+    ///
+    /// This performs an atomic SELECT + UPDATE operation to:
+    /// 1. Find the highest-priority task with status=Ready
+    /// 2. Immediately mark it as Running
+    /// 3. Return the claimed task
+    ///
+    /// This prevents race conditions where multiple workers pick up the same task.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(Task))` - The claimed task (already marked as Running)
+    /// * `Ok(None)` - No ready tasks available
+    /// * `Err` - If database error
+    async fn claim_next_ready_task(&self) -> Result<Option<Task>>;
 
     /// Submit a new task to the queue
     ///

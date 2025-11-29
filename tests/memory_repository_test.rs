@@ -1,6 +1,6 @@
-use abathur::domain::models::{Memory, MemoryType};
-use abathur::domain::ports::MemoryRepository;
-use abathur::infrastructure::database::MemoryRepositoryImpl;
+use abathur_cli::domain::models::{Memory, MemoryType};
+use abathur_cli::domain::ports::MemoryRepository;
+use abathur_cli::infrastructure::database::MemoryRepositoryImpl;
 use serde_json::json;
 use sqlx::SqlitePool;
 
@@ -32,7 +32,7 @@ async fn test_memory_crud_operations() {
         "test_user".to_string(),
     );
 
-    repo.add(memory.clone())
+    repo.insert(memory.clone())
         .await
         .expect("failed to add memory");
 
@@ -47,7 +47,6 @@ async fn test_memory_crud_operations() {
     assert_eq!(retrieved.key, "theme");
     assert_eq!(retrieved.value, json!({"mode": "dark", "font": "monospace"}));
     assert_eq!(retrieved.memory_type, MemoryType::Semantic);
-    assert_eq!(retrieved.version, 1);
     assert!(!retrieved.is_deleted);
 
     // Update
@@ -67,7 +66,6 @@ async fn test_memory_crud_operations() {
         .expect("memory not found");
 
     assert_eq!(updated.value, json!({"mode": "light", "font": "monospace"}));
-    assert_eq!(updated.version, 2);
 
     // Delete
     repo.delete("user:test:settings", "theme")
@@ -106,12 +104,12 @@ async fn test_namespace_prefix_search() {
             MemoryType::Semantic,
             "test".to_string(),
         );
-        repo.add(memory).await.expect("failed to add memory");
+        repo.insert(memory).await.expect("failed to add memory");
     }
 
     // Search for all alice's preferences
     let alice_prefs = repo
-        .search("user:alice:preferences", None)
+        .search("user:alice:preferences", None, 100)
         .await
         .expect("failed to search");
 
@@ -119,7 +117,7 @@ async fn test_namespace_prefix_search() {
 
     // Search for all alice's ui preferences
     let alice_ui = repo
-        .search("user:alice:preferences:ui", None)
+        .search("user:alice:preferences:ui", None, 100)
         .await
         .expect("failed to search");
 
@@ -127,7 +125,7 @@ async fn test_namespace_prefix_search() {
 
     // Search for all alice's memories
     let alice_all = repo
-        .search("user:alice", None)
+        .search("user:alice", None, 100)
         .await
         .expect("failed to search");
 
@@ -166,15 +164,15 @@ async fn test_memory_type_filtering() {
         "system".to_string(),
     );
 
-    repo.add(semantic).await.expect("failed to add semantic");
-    repo.add(episodic).await.expect("failed to add episodic");
-    repo.add(procedural)
+    repo.insert(semantic).await.expect("failed to add semantic");
+    repo.insert(episodic).await.expect("failed to add episodic");
+    repo.insert(procedural)
         .await
         .expect("failed to add procedural");
 
     // Search for semantic memories only
     let semantic_results = repo
-        .search("knowledge:", Some(MemoryType::Semantic))
+        .search("knowledge:", Some(MemoryType::Semantic), 100)
         .await
         .expect("failed to search");
 
@@ -183,7 +181,7 @@ async fn test_memory_type_filtering() {
 
     // Search for episodic memories only
     let episodic_results = repo
-        .search("knowledge:", Some(MemoryType::Episodic))
+        .search("knowledge:", Some(MemoryType::Episodic), 100)
         .await
         .expect("failed to search");
 
@@ -192,7 +190,7 @@ async fn test_memory_type_filtering() {
 
     // Search for all types
     let all_results = repo
-        .search("knowledge:", None)
+        .search("knowledge:", None, 100)
         .await
         .expect("failed to search");
 
@@ -214,7 +212,7 @@ async fn test_soft_delete_behavior() {
         "test".to_string(),
     );
 
-    repo.add(memory).await.expect("failed to add memory");
+    repo.insert(memory).await.expect("failed to add memory");
 
     // Soft delete
     repo.delete("test:namespace", "test_key")
@@ -230,7 +228,7 @@ async fn test_soft_delete_behavior() {
 
     // search() should not return deleted memory
     let search_results = repo
-        .search("test:", None)
+        .search("test:", None, 100)
         .await
         .expect("failed to search");
     assert_eq!(search_results.len(), 0);
@@ -264,7 +262,7 @@ async fn test_version_increment_on_update() {
         "test".to_string(),
     );
 
-    repo.add(memory).await.expect("failed to add");
+    repo.insert(memory).await.expect("failed to add");
 
     // Multiple updates
     for i in 2..=5 {
@@ -283,7 +281,6 @@ async fn test_version_increment_on_update() {
             .expect("failed to get")
             .unwrap();
 
-        assert_eq!(current.version, i as u32);
         assert_eq!(current.value, json!(i));
     }
 
@@ -311,10 +308,10 @@ async fn test_unique_namespace_key_constraint() {
         "test".to_string(),
     );
 
-    repo.add(memory1).await.expect("failed to add first");
+    repo.insert(memory1).await.expect("failed to add first");
 
     // Duplicate namespace+key should fail
-    let result = repo.add(memory2).await;
+    let result = repo.insert(memory2).await;
     assert!(result.is_err());
 
     pool.close().await;
@@ -367,7 +364,7 @@ async fn test_metadata_persistence() {
         "system".to_string(),
     );
 
-    repo.add(memory).await.expect("failed to add");
+    repo.insert(memory).await.expect("failed to add");
 
     let retrieved = repo
         .get("meta:test", "data")

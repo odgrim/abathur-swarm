@@ -81,6 +81,7 @@ async fn create_memory_service_with_embeddings() -> MemoryService {
     // Create vector store
     let vector_store = Arc::new(
         VectorStore::new(Arc::new(pool), embedding_service)
+            .await
             .expect("Failed to create vector store")
     );
 

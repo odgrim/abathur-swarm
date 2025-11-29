@@ -8,7 +8,7 @@ use crate::application::resource_monitor::ResourceMonitor;
 use crate::application::task_coordinator::TaskCoordinator;
 use crate::domain::models::{Config, Task};
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, RwLock, Semaphore};
 use tokio::task::JoinHandle;
@@ -138,6 +138,9 @@ pub struct SwarmOrchestrator {
     // Concurrency control
     agent_semaphore: Arc<Semaphore>,
     workers: Arc<RwLock<HashMap<Uuid, WorkerState>>>,
+    /// In-flight task IDs to prevent duplicate spawns during race conditions.
+    /// A task is added here when picked up and removed when spawning completes or fails.
+    in_flight_tasks: Arc<RwLock<HashSet<Uuid>>>,
 
     // Dependencies
     task_coordinator: Arc<TaskCoordinator>,
@@ -182,6 +185,7 @@ impl SwarmOrchestrator {
             tasks_failed: Arc::new(RwLock::new(0)),
             agent_semaphore: Arc::new(Semaphore::new(max_agents)),
             workers: Arc::new(RwLock::new(HashMap::new())),
+            in_flight_tasks: Arc::new(RwLock::new(HashSet::new())),
             task_coordinator,
             agent_executor,
             resource_monitor,
@@ -380,6 +384,7 @@ impl SwarmOrchestrator {
 
         let agent_semaphore = Arc::clone(&self.agent_semaphore);
         let workers = Arc::clone(&self.workers);
+        let in_flight_tasks = Arc::clone(&self.in_flight_tasks);
         let tasks_processed = Arc::clone(&self.tasks_processed);
         let tasks_failed = Arc::clone(&self.tasks_failed);
 
@@ -405,6 +410,26 @@ impl SwarmOrchestrator {
                         // Try to get a ready task
                         match task_coordinator.get_next_ready_task().await {
                             Ok(Some(task)) => {
+                                let task_id = task.id;
+
+                                // Check if this task is already in-flight (prevents race condition duplicates)
+                                {
+                                    let in_flight = in_flight_tasks.read().await;
+                                    if in_flight.contains(&task_id) {
+                                        debug!(
+                                            task_id = %task_id,
+                                            "Task already in-flight, skipping duplicate spawn"
+                                        );
+                                        continue;
+                                    }
+                                }
+
+                                // Mark task as in-flight BEFORE spawning to prevent race conditions
+                                {
+                                    let mut in_flight = in_flight_tasks.write().await;
+                                    in_flight.insert(task_id);
+                                }
+
                                 info!(
                                     task_id = %task.id,
                                     agent_type = %task.agent_type,
@@ -420,10 +445,14 @@ impl SwarmOrchestrator {
                                     Arc::clone(&agent_executor),
                                     Arc::clone(&task_coordinator),
                                     Arc::clone(&workers),
+                                    Arc::clone(&in_flight_tasks),
                                     agent_event_tx.clone(),
                                     config.clone(),
                                 ).await {
                                     error!(error = ?e, "Failed to spawn agent worker");
+                                    // Remove from in-flight on spawn failure
+                                    let mut in_flight = in_flight_tasks.write().await;
+                                    in_flight.remove(&task_id);
                                 }
                             }
                             Ok(None) => {
@@ -459,6 +488,9 @@ impl SwarmOrchestrator {
                                 // Remove worker from tracking
                                 workers.write().await.remove(&agent_id);
 
+                                // Remove from in-flight tasks
+                                in_flight_tasks.write().await.remove(&task_id);
+
                                 // Increment processed counter
                                 *tasks_processed.write().await += 1;
 
@@ -488,6 +520,9 @@ impl SwarmOrchestrator {
                                 // Remove worker from tracking
                                 workers.write().await.remove(&agent_id);
 
+                                // Remove from in-flight tasks
+                                in_flight_tasks.write().await.remove(&task_id);
+
                                 // Increment failed counter
                                 *tasks_failed.write().await += 1;
 
@@ -499,6 +534,9 @@ impl SwarmOrchestrator {
 
                                 // Remove worker from tracking
                                 workers.write().await.remove(&agent_id);
+
+                                // Remove from in-flight tasks
+                                in_flight_tasks.write().await.remove(&task_id);
 
                                 // Task is now AwaitingValidation status (already updated in spawned task)
                                 // Validation task will run via normal task queue
@@ -533,6 +571,7 @@ impl SwarmOrchestrator {
         agent_executor: Arc<AgentExecutor>,
         task_coordinator: Arc<TaskCoordinator>,
         workers: Arc<RwLock<HashMap<Uuid, WorkerState>>>,
+        _in_flight_tasks: Arc<RwLock<HashSet<Uuid>>>,
         agent_event_tx: mpsc::Sender<AgentEvent>,
         _config: Config,
     ) -> Result<()> {
@@ -803,6 +842,28 @@ mod tests {
                         .unwrap()
                 })
                 .cloned())
+        }
+
+        async fn claim_next_ready_task(&self) -> Result<Option<Task>> {
+            let mut tasks = self.tasks.lock().unwrap();
+            let task = tasks
+                .values()
+                .filter(|t| t.status == TaskStatus::Ready)
+                .max_by(|a, b| {
+                    a.calculated_priority
+                        .partial_cmp(&b.calculated_priority)
+                        .unwrap()
+                })
+                .cloned();
+
+            // Atomically mark as running
+            if let Some(ref t) = task {
+                if let Some(task_mut) = tasks.get_mut(&t.id) {
+                    task_mut.status = TaskStatus::Running;
+                }
+            }
+
+            Ok(task)
         }
 
         async fn submit_task(&self, task: Task) -> Result<Uuid> {

@@ -1,4 +1,4 @@
-use abathur::infrastructure::claude::{ClaudeClient, ClaudeClientConfig, MessageRequest};
+use abathur_cli::infrastructure::claude::{ClaudeClient, ClaudeClientConfig, MessageRequest};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 

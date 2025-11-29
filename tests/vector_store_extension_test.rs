@@ -6,6 +6,8 @@
 //! - Graceful fallback to pure-Rust when unavailable
 //! - Implementation tracking
 
+use abathur_cli::domain::models::EmbeddingModel;
+use abathur_cli::domain::ports::EmbeddingRepository;
 use abathur_cli::infrastructure::vector::{LocalEmbeddingService, VectorStore, VectorImplementation};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
@@ -20,7 +22,7 @@ async fn test_vector_store_initialization() {
 
     // Create embedding service (uses deterministic test embeddings)
     let embedding_service = Arc::new(
-        LocalEmbeddingService::new()
+        LocalEmbeddingService::new(EmbeddingModel::LocalMiniLM)
             .expect("Failed to create embedding service")
     );
 
@@ -71,7 +73,7 @@ async fn test_extension_graceful_fallback() {
         .expect("Failed to run migrations");
 
     let embedding_service = Arc::new(
-        LocalEmbeddingService::new()
+        LocalEmbeddingService::new(EmbeddingModel::LocalMiniLM)
             .expect("Failed to create embedding service")
     );
 
@@ -100,7 +102,7 @@ async fn test_create_vector_index_both_implementations() {
     let pool = helpers::database::setup_test_db().await;
 
     let embedding_service = Arc::new(
-        LocalEmbeddingService::new()
+        LocalEmbeddingService::new(EmbeddingModel::LocalMiniLM)
             .expect("Failed to create embedding service")
     );
 
@@ -141,7 +143,7 @@ async fn test_search_similar_both_implementations() {
     let pool = helpers::database::setup_test_db().await;
 
     let embedding_service = Arc::new(
-        LocalEmbeddingService::new()
+        LocalEmbeddingService::new(EmbeddingModel::LocalMiniLM)
             .expect("Failed to create embedding service")
     );
 
@@ -200,7 +202,7 @@ async fn test_implementation_getter() {
     let pool = helpers::database::setup_test_db().await;
 
     let embedding_service = Arc::new(
-        LocalEmbeddingService::new()
+        LocalEmbeddingService::new(EmbeddingModel::LocalMiniLM)
             .expect("Failed to create embedding service")
     );
 
@@ -231,7 +233,7 @@ async fn proptest_both_implementations_produce_valid_results() {
     let pool = helpers::database::setup_test_db().await;
 
     let embedding_service = Arc::new(
-        LocalEmbeddingService::new()
+        LocalEmbeddingService::new(EmbeddingModel::LocalMiniLM)
             .expect("Failed to create embedding service")
     );
 
@@ -325,7 +327,7 @@ async fn benchmark_implementation_performance() {
     let pool = helpers::database::setup_test_db().await;
 
     let embedding_service = Arc::new(
-        LocalEmbeddingService::new()
+        LocalEmbeddingService::new(EmbeddingModel::LocalMiniLM)
             .expect("Failed to create embedding service")
     );
 

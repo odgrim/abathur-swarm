@@ -234,6 +234,42 @@ pub trait TaskRepository: Send + Sync {
     /// - `DatabaseError::QueryFailed`: Database query execution failed
     /// - `DatabaseError::ParseError`: Failed to deserialize task data
     async fn get_by_parent(&self, parent_id: Uuid) -> Result<Vec<Task>, DatabaseError>;
+
+    /// Atomically claim the next ready task for execution.
+    ///
+    /// This method performs an atomic SELECT + UPDATE operation to:
+    /// 1. Find the highest-priority task with status=Ready
+    /// 2. Immediately update its status to Running
+    /// 3. Return the claimed task
+    ///
+    /// This prevents race conditions where multiple workers might pick up
+    /// the same task before its status is updated.
+    ///
+    /// # Returns
+    /// * `Ok(Some(task))` - The claimed task (already marked as Running)
+    /// * `Ok(None)` - No ready tasks available
+    /// * `Err(DatabaseError)` on query failure
+    ///
+    /// # Errors
+    /// - `DatabaseError::QueryFailed`: Database query execution failed
+    /// - `DatabaseError::ParseError`: Failed to deserialize task data
+    ///
+    /// # Note
+    /// Default implementation falls back to non-atomic `get_ready_tasks` + `update_status`.
+    /// Database-specific implementations should override with proper atomic operations
+    /// (e.g., `SELECT ... FOR UPDATE SKIP LOCKED` in PostgreSQL, or transactions with
+    /// immediate locking in SQLite).
+    async fn claim_next_ready_task(&self) -> Result<Option<Task>, DatabaseError> {
+        // Default non-atomic implementation for backwards compatibility
+        let tasks = self.get_ready_tasks(1).await?;
+        if let Some(task) = tasks.into_iter().next() {
+            self.update_status(task.id, TaskStatus::Running).await?;
+            // Re-fetch to get updated task
+            self.get(task.id).await
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 /// Filter criteria for task queries.

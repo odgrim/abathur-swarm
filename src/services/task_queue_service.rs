@@ -760,6 +760,14 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
         Ok(tasks.into_iter().next())
     }
 
+    async fn claim_next_ready_task(&self) -> Result<Option<Task>> {
+        // Use the repository's atomic claim implementation
+        self.repo
+            .claim_next_ready_task()
+            .await
+            .context("Failed to atomically claim next ready task")
+    }
+
     async fn submit_task(&self, task: Task) -> Result<Uuid> {
         self.submit(task).await
     }
@@ -790,6 +798,7 @@ mod tests {
             async fn get_by_session(&self, session_id: Uuid) -> Result<Vec<Task>, DatabaseError>;
             async fn update_status(&self, id: Uuid, status: TaskStatus) -> Result<(), DatabaseError>;
             async fn get_by_parent(&self, parent_id: Uuid) -> Result<Vec<Task>, DatabaseError>;
+            async fn claim_next_ready_task(&self) -> Result<Option<Task>, DatabaseError>;
         }
     }
 

@@ -1,8 +1,8 @@
 mod helpers;
 
-use abathur::domain::models::{DependencyType, Task, TaskSource, TaskStatus};
-use abathur::domain::ports::task_repository::{TaskFilters, TaskRepository};
-use abathur::infrastructure::database::TaskRepositoryImpl;
+use abathur_cli::domain::models::{DependencyType, Task, TaskSource, TaskStatus};
+use abathur_cli::domain::ports::task_repository::{TaskFilters, TaskRepository};
+use abathur_cli::infrastructure::database::TaskRepositoryImpl;
 use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;

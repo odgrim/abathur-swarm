@@ -1,8 +1,8 @@
 mod helpers;
 
-use abathur::domain::models::{Agent, AgentStatus};
-use abathur::domain::ports::AgentRepository;
-use abathur::infrastructure::database::AgentRepositoryImpl;
+use abathur_cli::domain::models::{Agent, AgentStatus};
+use abathur_cli::domain::ports::AgentRepository;
+use abathur_cli::infrastructure::database::AgentRepositoryImpl;
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 

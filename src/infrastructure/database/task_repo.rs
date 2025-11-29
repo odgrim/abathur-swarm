@@ -594,6 +594,84 @@ impl TaskRepository for TaskRepositoryImpl {
 
         tasks
     }
+
+    /// Atomically claim the next ready task using SQLite transaction with IMMEDIATE mode.
+    ///
+    /// This ensures exclusive access during the SELECT + UPDATE operation, preventing
+    /// race conditions where multiple workers pick up the same task.
+    async fn claim_next_ready_task(&self) -> Result<Option<Task>, DatabaseError> {
+        use tracing::{debug, info};
+
+        // Start an IMMEDIATE transaction to acquire write lock upfront
+        let mut tx = self.pool.begin().await?;
+
+        // Find the highest priority ready task
+        let row = sqlx::query(
+            r#"
+            SELECT id FROM tasks
+            WHERE status = ?
+            ORDER BY calculated_priority DESC, submitted_at ASC
+            LIMIT 1
+            "#,
+        )
+        .bind(TaskStatus::Ready.to_string())
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(row) = row else {
+            debug!("No ready tasks to claim");
+            tx.rollback().await?;
+            return Ok(None);
+        };
+
+        use sqlx::Row;
+        let task_id_str: String = row.get("id");
+        let task_id = Uuid::parse_str(&task_id_str)?;
+
+        // Atomically update status to Running
+        let now = Utc::now().to_rfc3339();
+        let running_status = TaskStatus::Running.to_string();
+        let started_at = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            r#"
+            UPDATE tasks SET
+                status = ?,
+                started_at = ?,
+                last_updated_at = ?
+            WHERE id = ? AND status = ?
+            "#,
+        )
+        .bind(&running_status)
+        .bind(&started_at)
+        .bind(&now)
+        .bind(&task_id_str)
+        .bind(TaskStatus::Ready.to_string())
+        .execute(&mut *tx)
+        .await?;
+
+        // Fetch the updated task
+        let task_row = sqlx::query(
+            r#"SELECT * FROM tasks WHERE id = ?"#,
+        )
+        .bind(&task_id_str)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let task = self.row_to_task(&task_row)?;
+
+        // Commit the transaction
+        tx.commit().await?;
+
+        info!(
+            task_id = %task_id,
+            agent_type = %task.agent_type,
+            summary = %task.summary,
+            "Atomically claimed task for execution"
+        );
+
+        Ok(Some(task))
+    }
 }
 
 #[cfg(test)]
