@@ -999,6 +999,25 @@ impl PromptChainService {
         ) || step.role == "task-planner"
     }
 
+    /// Generate an idempotency key from parent task ID and output hash
+    ///
+    /// This ensures tasks spawned from the same chain step output are not duplicated
+    /// if the step retries or executes multiple times.
+    fn generate_idempotency_key(parent_task_id: Option<uuid::Uuid>, output: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        output.hash(&mut hasher);
+        let output_hash = hasher.finish();
+
+        format!(
+            "chain:{}:{:x}",
+            parent_task_id.map(|id| id.to_string()).unwrap_or_else(|| "none".to_string()),
+            output_hash
+        )
+    }
+
     /// Parse and spawn tasks from step output
     async fn spawn_tasks_from_output(
         &self,
@@ -1009,6 +1028,21 @@ impl PromptChainService {
             warn!("Task queue service not configured, cannot spawn tasks");
             return Ok(());
         };
+
+        // Generate idempotency key to prevent duplicate task creation on retries
+        let idempotency_key = Self::generate_idempotency_key(
+            parent_task.map(|t| t.id),
+            &result.output
+        );
+
+        // Check if tasks have already been spawned for this output
+        if task_queue.task_exists_by_idempotency_key(&idempotency_key).await? {
+            info!(
+                idempotency_key = %idempotency_key,
+                "Tasks already spawned for this output, skipping duplicate creation"
+            );
+            return Ok(());
+        }
 
         // Strip markdown code blocks before parsing (agents often wrap JSON in ```json...```)
         let cleaned_output = OutputValidator::strip_markdown_code_blocks(&result.output);
@@ -1048,7 +1082,10 @@ impl PromptChainService {
 
         // Parse and enqueue each task
         for (idx, task_def) in tasks_array.iter().enumerate() {
-            match self.parse_and_enqueue_task(task_def, parent_task, task_queue.as_ref()).await {
+            // Include index in idempotency key for uniqueness per task
+            let task_idempotency_key = format!("{}:{}", idempotency_key, idx);
+
+            match self.parse_and_enqueue_task(task_def, parent_task, task_queue.as_ref(), &task_idempotency_key).await {
                 Ok(task_id) => {
                     info!(
                         index = idx,
@@ -1093,6 +1130,7 @@ impl PromptChainService {
         task_def: &serde_json::Value,
         parent_task: Option<&Task>,
         task_queue: &dyn TaskQueueService,
+        idempotency_key: &str,
     ) -> Result<uuid::Uuid> {
         use crate::domain::models::{DependencyType, TaskSource, TaskStatus};
 
@@ -1269,6 +1307,7 @@ impl PromptChainService {
             workflow_expectations: None,
             chain_id: None,
             chain_step_index: 0,
+            idempotency_key: Some(idempotency_key.to_string()),
         };
 
         // Submit to task queue

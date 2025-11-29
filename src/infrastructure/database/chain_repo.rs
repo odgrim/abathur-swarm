@@ -435,6 +435,7 @@ fn parse_chain_status(status_str: &str) -> Result<ChainStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
     use crate::domain::models::prompt_chain::{OutputFormat, PromptStep};
 
     #[test]

@@ -347,7 +347,7 @@ impl HookRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::{BranchType, HookAction};
+    use crate::domain::models::{BranchCompletionContext, BranchType};
 
     fn create_test_task(agent_type: &str) -> Task {
         let mut task = Task::new("Test task".to_string(), "Test description".to_string());

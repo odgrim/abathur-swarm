@@ -270,6 +270,38 @@ pub trait TaskRepository: Send + Sync {
             Ok(None)
         }
     }
+
+    /// Get tasks that have been in Running status longer than the threshold
+    ///
+    /// Used to detect stale tasks that may have been abandoned due to worker crashes.
+    ///
+    /// # Arguments
+    /// * `stale_threshold_secs` - Tasks running longer than this are considered stale
+    ///
+    /// # Returns
+    /// * `Ok(Vec<Task>)` - List of stale running tasks ordered by started_at ascending
+    /// * `Err(DatabaseError)` - If database error
+    async fn get_stale_running_tasks(&self, stale_threshold_secs: u64) -> Result<Vec<Task>, DatabaseError>;
+
+    /// Check if a task with the given idempotency key already exists.
+    ///
+    /// Used to prevent duplicate task creation when chain steps retry or execute multiple times.
+    /// The idempotency key is typically derived from parent_task_id + step_output_hash.
+    ///
+    /// # Arguments
+    /// * `idempotency_key` - The unique idempotency key to check
+    ///
+    /// # Returns
+    /// * `Ok(true)` - A task with this idempotency key exists
+    /// * `Ok(false)` - No task with this idempotency key exists
+    /// * `Err(DatabaseError)` on query failure
+    ///
+    /// # Errors
+    /// - `DatabaseError::QueryFailed`: Database query execution failed
+    async fn task_exists_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<bool, DatabaseError>;
 }
 
 /// Filter criteria for task queries.

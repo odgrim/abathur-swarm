@@ -771,6 +771,20 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
     async fn submit_task(&self, task: Task) -> Result<Uuid> {
         self.submit(task).await
     }
+
+    async fn get_stale_running_tasks(&self, stale_threshold_secs: u64) -> Result<Vec<Task>> {
+        self.repo
+            .get_stale_running_tasks(stale_threshold_secs)
+            .await
+            .context("Failed to get stale running tasks")
+    }
+
+    async fn task_exists_by_idempotency_key(&self, idempotency_key: &str) -> Result<bool> {
+        self.repo
+            .task_exists_by_idempotency_key(idempotency_key)
+            .await
+            .context("Failed to check if task exists by idempotency key")
+    }
 }
 
 #[cfg(test)]
@@ -799,6 +813,8 @@ mod tests {
             async fn update_status(&self, id: Uuid, status: TaskStatus) -> Result<(), DatabaseError>;
             async fn get_by_parent(&self, parent_id: Uuid) -> Result<Vec<Task>, DatabaseError>;
             async fn claim_next_ready_task(&self) -> Result<Option<Task>, DatabaseError>;
+            async fn get_stale_running_tasks(&self, stale_threshold_secs: u64) -> Result<Vec<Task>, DatabaseError>;
+            async fn task_exists_by_idempotency_key(&self, idempotency_key: &str) -> Result<bool, DatabaseError>;
         }
     }
 

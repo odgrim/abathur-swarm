@@ -537,6 +537,7 @@ impl AgentExecutor {
             workflow_expectations: None,
             chain_id: current_task.chain_id.clone(),
             chain_step_index: next_step_index,
+            idempotency_key: None,
         };
 
         // Get task queue service from chain service

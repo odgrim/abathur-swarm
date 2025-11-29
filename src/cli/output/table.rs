@@ -326,6 +326,7 @@ pub fn format_task_table(tasks: &[crate::cli::models::Task]) -> String {
         workflow_expectations: None,
         chain_id: t.chain_id.clone(),
         chain_step_index: 0,
+        idempotency_key: None,
     }).collect();
 
     formatter.format_tasks(&domain_tasks)
@@ -463,6 +464,7 @@ mod tests {
             workflow_expectations: None,
             chain_id: None,
             chain_step_index: 0,
+            idempotency_key: None,
         };
 
         let formatter = TableFormatter::with_config(false, None);

@@ -114,6 +114,7 @@ impl TaskRepositoryImpl {
             chain_step_index: row
                 .get::<Option<i64>, _>("chain_step_index")
                 .unwrap_or(0) as usize,
+            idempotency_key: row.get("idempotency_key"),
         })
     }
 }
@@ -169,9 +170,10 @@ impl TaskRepository for TaskRepositoryImpl {
                 deadline, estimated_duration_seconds, branch, feature_branch,
                 worktree_path, validation_requirement, validation_task_id,
                 validating_task_id, remediation_count, is_remediation,
-                workflow_state, workflow_expectations, chain_id, chain_step_index
+                workflow_state, workflow_expectations, chain_id, chain_step_index,
+                idempotency_key
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             id,
             task.summary,
@@ -210,7 +212,8 @@ impl TaskRepository for TaskRepositoryImpl {
             workflow_state,
             workflow_expectations,
             task.chain_id,
-            chain_step_index
+            chain_step_index,
+            task.idempotency_key
         )
         .execute(&self.pool)
         .await?;
@@ -307,7 +310,8 @@ impl TaskRepository for TaskRepositoryImpl {
                 is_remediation = ?,
                 workflow_state = ?,
                 workflow_expectations = ?,
-                chain_id = ?
+                chain_id = ?,
+                idempotency_key = ?
             WHERE id = ?
             "#,
             task.summary,
@@ -345,6 +349,7 @@ impl TaskRepository for TaskRepositoryImpl {
             workflow_state,
             workflow_expectations,
             task.chain_id,
+            task.idempotency_key,
             id
         )
         .execute(&self.pool)
@@ -671,6 +676,49 @@ impl TaskRepository for TaskRepositoryImpl {
         );
 
         Ok(Some(task))
+    }
+
+    async fn get_stale_running_tasks(&self, stale_threshold_secs: u64) -> Result<Vec<Task>, DatabaseError> {
+        use chrono::{Duration, Utc};
+
+        let threshold = Utc::now() - Duration::seconds(stale_threshold_secs as i64);
+        let threshold_str = threshold.to_rfc3339();
+        let running_status = TaskStatus::Running.to_string();
+
+        let rows = sqlx::query(
+            r#"
+            SELECT * FROM tasks
+            WHERE status = ?
+            AND started_at IS NOT NULL
+            AND started_at < ?
+            ORDER BY started_at ASC
+            "#,
+        )
+        .bind(&running_status)
+        .bind(&threshold_str)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let tasks: Result<Vec<Task>, DatabaseError> =
+            rows.iter().map(|row| self.row_to_task(row)).collect();
+
+        tasks
+    }
+
+    async fn task_exists_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<bool, DatabaseError> {
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM tasks WHERE idempotency_key = ?
+            "#,
+        )
+        .bind(idempotency_key)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(count > 0)
     }
 }
 

@@ -256,6 +256,12 @@ pub struct Task {
     /// Current step index in the prompt chain (0-based)
     #[serde(default)]
     pub chain_step_index: usize,
+
+    /// Idempotency key for preventing duplicate task creation
+    ///
+    /// Used to ensure tasks spawned from chain outputs are not duplicated
+    /// if a chain step retries or executes multiple times.
+    pub idempotency_key: Option<String>,
 }
 
 impl Task {
@@ -301,6 +307,7 @@ impl Task {
             workflow_expectations: None,
             chain_id: None,
             chain_step_index: 0,
+            idempotency_key: None,
         }
     }
 
@@ -1234,7 +1241,8 @@ mod tests {
             "estimated_duration_seconds": null,
             "feature_branch": null,
             "branch": null,
-            "worktree_path": null
+            "worktree_path": null,
+            "idempotency_key": null
         }"#;
 
         let task: Task = serde_json::from_str(json).unwrap();

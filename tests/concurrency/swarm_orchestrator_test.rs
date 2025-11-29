@@ -133,6 +133,42 @@ impl TaskQueueService for MockTaskQueue {
 
         Ok(None)
     }
+
+    async fn claim_next_ready_task(&self) -> Result<Option<Task>> {
+        let mut tasks = self.tasks.lock().unwrap();
+
+        // Find and atomically claim the first ready task
+        let ready_task_id = tasks
+            .values()
+            .find(|t| t.status == TaskStatus::Ready)
+            .map(|t| t.id);
+
+        if let Some(task_id) = ready_task_id {
+            if let Some(task) = tasks.get_mut(&task_id) {
+                // Mark as running (atomic claim)
+                task.status = TaskStatus::Running;
+                return Ok(Some(task.clone()));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn submit_task(&self, task: Task) -> Result<Uuid> {
+        let task_id = task.id;
+        let mut tasks = self.tasks.lock().unwrap();
+        tasks.insert(task_id, task);
+        Ok(task_id)
+    }
+
+    async fn get_stale_running_tasks(&self, _stale_threshold_secs: u64) -> Result<Vec<Task>> {
+        Ok(vec![]) // Mock returns no stale tasks
+    }
+
+    async fn task_exists_by_idempotency_key(&self, idempotency_key: &str) -> Result<bool> {
+        let tasks = self.tasks.lock().unwrap();
+        Ok(tasks.values().any(|t| t.idempotency_key.as_deref() == Some(idempotency_key)))
+    }
 }
 
 struct MockPriorityCalculator;
@@ -294,6 +330,16 @@ fn create_test_task(status: TaskStatus) -> Task {
         feature_branch: None,
         branch: None,
         worktree_path: None,
+        validation_requirement: abathur_cli::domain::models::ValidationRequirement::None,
+        validation_task_id: None,
+        validating_task_id: None,
+        remediation_count: 0,
+        is_remediation: false,
+        workflow_state: None,
+        workflow_expectations: None,
+        chain_id: None,
+        chain_step_index: 0,
+        idempotency_key: None,
     }
 }
 

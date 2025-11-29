@@ -400,6 +400,7 @@ mod tests {
             workflow_expectations: None,
             chain_id: None,
             chain_step_index: 0,
+            idempotency_key: None,
         }
     }
 

@@ -367,7 +367,7 @@ mod tests {
             TaskStatus::Completed,
         )
         .await;
-        let mut task2 = create_test_task_with_branch(
+        let task2 = create_test_task_with_branch(
             Some("task/test-123".to_string()),
             None,
             TaskStatus::Running,

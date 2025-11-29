@@ -159,6 +159,13 @@ pub struct SwarmOrchestrator {
 }
 
 impl SwarmOrchestrator {
+    /// How often to check for stale tasks (in seconds)
+    const STALE_TASK_CHECK_INTERVAL_SECS: u64 = 60;
+
+    /// Tasks running longer than this are considered stale (in seconds)
+    /// Should be longer than the longest expected task execution
+    const STALE_TASK_THRESHOLD_SECS: u64 = 300; // 5 minutes
+
     /// Create a new swarm orchestrator
     ///
     /// # Arguments
@@ -400,6 +407,7 @@ impl SwarmOrchestrator {
 
         let handle = tokio::spawn(async move {
             let mut task_poll_interval = interval(Duration::from_secs(1));
+            let mut stale_check_interval = interval(Duration::from_secs(Self::STALE_TASK_CHECK_INTERVAL_SECS));
 
             info!("Task processing loop started");
 
@@ -407,15 +415,16 @@ impl SwarmOrchestrator {
                 tokio::select! {
                     // Poll for ready tasks every 1 second
                     _ = task_poll_interval.tick() => {
-                        // Try to get a ready task
-                        match task_coordinator.get_next_ready_task().await {
+                        // Atomically claim and mark task as Running in a single DB transaction
+                        match task_coordinator.claim_next_ready_task().await {
                             Ok(Some(task)) => {
                                 let task_id = task.id;
 
-                                // Check if this task is already in-flight (prevents race condition duplicates)
+                                // Atomic check-and-insert to prevent duplicate spawns
                                 {
-                                    let in_flight = in_flight_tasks.read().await;
-                                    if in_flight.contains(&task_id) {
+                                    let mut in_flight = in_flight_tasks.write().await;
+                                    if !in_flight.insert(task_id) {
+                                        // insert() returns false if already present
                                         debug!(
                                             task_id = %task_id,
                                             "Task already in-flight, skipping duplicate spawn"
@@ -424,18 +433,12 @@ impl SwarmOrchestrator {
                                     }
                                 }
 
-                                // Mark task as in-flight BEFORE spawning to prevent race conditions
-                                {
-                                    let mut in_flight = in_flight_tasks.write().await;
-                                    in_flight.insert(task_id);
-                                }
-
                                 info!(
                                     task_id = %task.id,
                                     agent_type = %task.agent_type,
                                     summary = %task.summary,
                                     priority = task.calculated_priority,
-                                    "Picked up task for execution"
+                                    "Claimed task for execution (atomically marked as Running)"
                                 );
 
                                 // Spawn agent worker for this task
@@ -546,6 +549,16 @@ impl SwarmOrchestrator {
                         }
                     }
 
+                    // Check for stale tasks periodically
+                    _ = stale_check_interval.tick() => {
+                        if let Err(e) = Self::recover_stale_tasks(
+                            Arc::clone(&task_coordinator),
+                            Arc::clone(&in_flight_tasks),
+                        ).await {
+                            error!(error = ?e, "Failed to recover stale tasks");
+                        }
+                    }
+
                     // Shutdown signal
                     _ = shutdown_rx.recv() => {
                         info!("Task processing loop received shutdown signal");
@@ -565,6 +578,9 @@ impl SwarmOrchestrator {
     ///
     /// Uses semaphore for concurrency control and spawns a tokio task
     /// that executes the agent and sends completion events.
+    ///
+    /// NOTE: The task is expected to already be in Running status (claimed atomically).
+    /// This function does NOT call mark_task_running() again.
     async fn spawn_agent_worker(
         task: Task,
         agent_semaphore: Arc<Semaphore>,
@@ -587,11 +603,7 @@ impl SwarmOrchestrator {
             .await
             .context("Failed to acquire agent semaphore permit")?;
 
-        // Mark task as running
-        task_coordinator
-            .mark_task_running(task_id)
-            .await
-            .context("Failed to mark task as running")?;
+        // Task is already marked as Running by claim_next_ready_task() - no need to mark again
 
         // Track worker
         {
@@ -734,6 +746,42 @@ impl SwarmOrchestrator {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
+
+    /// Check for and recover stale running tasks
+    async fn recover_stale_tasks(
+        task_coordinator: Arc<TaskCoordinator>,
+        in_flight_tasks: Arc<RwLock<HashSet<Uuid>>>,
+    ) -> Result<()> {
+        // Get stale tasks from database
+        let stale_tasks = task_coordinator
+            .get_stale_running_tasks(Self::STALE_TASK_THRESHOLD_SECS)
+            .await?;
+
+        if stale_tasks.is_empty() {
+            return Ok(());
+        }
+
+        info!(count = stale_tasks.len(), "Found stale running tasks to recover");
+
+        for task in stale_tasks {
+            // Remove from in-flight set if present (worker is gone anyway)
+            {
+                let mut in_flight = in_flight_tasks.write().await;
+                in_flight.remove(&task.id);
+            }
+
+            // Recover the task (will mark as failed and trigger retry if available)
+            if let Err(e) = task_coordinator.recover_stale_task(task.id).await {
+                error!(
+                    task_id = %task.id,
+                    error = ?e,
+                    "Failed to recover stale task"
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -872,6 +920,14 @@ mod tests {
             tasks.insert(task_id, task);
             Ok(task_id)
         }
+
+        async fn get_stale_running_tasks(&self, _stale_threshold_secs: u64) -> Result<Vec<Task>> {
+            Ok(vec![]) // Mock returns no stale tasks
+        }
+
+        async fn task_exists_by_idempotency_key(&self, _idempotency_key: &str) -> Result<bool> {
+            Ok(false) // Mock returns no existing tasks
+        }
     }
 
     struct MockPriorityCalculator;
@@ -931,6 +987,7 @@ mod tests {
             workflow_expectations: None,
             chain_id: None,
             chain_step_index: 0,
+            idempotency_key: None,
         }
     }
 

@@ -834,6 +834,38 @@ impl TaskCoordinator {
             .context("Failed to update task priority")
     }
 
+    /// Get tasks that have been running longer than the threshold
+    pub async fn get_stale_running_tasks(&self, threshold_secs: u64) -> Result<Vec<Task>> {
+        self.task_queue
+            .get_stale_running_tasks(threshold_secs)
+            .await
+            .context("Failed to get stale running tasks")
+    }
+
+    /// Recover a stale task by marking it as failed
+    ///
+    /// This is called when a task has been in Running status too long,
+    /// indicating the worker may have crashed.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - UUID of the stale task
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Task recovered (marked as failed for retry)
+    #[instrument(skip(self), fields(task_id = %task_id))]
+    pub async fn recover_stale_task(&self, task_id: Uuid) -> Result<()> {
+        warn!(task_id = %task_id, "Recovering stale task - worker may have crashed");
+
+        // Mark as failed with a recoverable error message
+        // The existing retry logic will handle re-queuing if retries remain
+        self.handle_task_failure(
+            task_id,
+            "Task stalled - worker may have crashed or timed out. Recovered by stale task monitor.".to_string()
+        ).await
+    }
+
     // Private helper methods
 
     /// Check if all dependencies for a task are met
@@ -1024,6 +1056,14 @@ mod tests {
             tasks.insert(task_id, task);
             Ok(task_id)
         }
+
+        async fn get_stale_running_tasks(&self, _stale_threshold_secs: u64) -> Result<Vec<Task>> {
+            Ok(vec![]) // Mock returns no stale tasks
+        }
+
+        async fn task_exists_by_idempotency_key(&self, _idempotency_key: &str) -> Result<bool> {
+            Ok(false) // Mock returns no existing tasks
+        }
     }
 
     // Mock PriorityCalculator for testing
@@ -1087,6 +1127,7 @@ mod tests {
             workflow_expectations: None,
             chain_id: None,
             chain_step_index: 0,
+            idempotency_key: None,
         }
     }
 
