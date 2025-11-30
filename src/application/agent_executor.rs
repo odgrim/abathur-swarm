@@ -521,29 +521,63 @@ impl AgentExecutor {
                     ))
                 })?;
 
+            // CRITICAL: Re-read task to get fresh version after update.
+            // Without this, the next update will fail with OptimisticLockConflict
+            // because updated_task.version is stale (the DB incremented it).
+            updated_task = self
+                .chain_service
+                .get_task_from_repo(task.id)
+                .await
+                .map_err(|e| {
+                    ExecutionError::ExecutionFailed(format!(
+                        "Failed to refresh task after handoff state update: {}",
+                        e
+                    ))
+                })?
+                .ok_or_else(|| {
+                    ExecutionError::ExecutionFailed(format!(
+                        "Task {} not found after handoff state update",
+                        task.id
+                    ))
+                })?;
+
             // Attempt to enqueue the next step
             match self.enqueue_next_chain_step(&updated_task, &chain, next_step_index, &result.output)
                 .await
             {
                 Ok(_) => {
                     // SUCCESS: Clear the handoff state
+                    // We have the fresh version from the re-read above
                     updated_task.chain_handoff_state = None;
                     if let Err(e) = self.chain_service.update_task(&updated_task).await {
-                        // Non-fatal: handoff succeeded, just couldn't clear state
-                        // Recovery will skip this task since next step exists
+                        // This should rarely happen now, but log if it does
                         warn!(
                             task_id = %task.id,
                             error = ?e,
-                            "Failed to clear chain handoff state after successful enqueue (non-fatal)"
+                            "Failed to clear chain handoff state after successful enqueue"
                         );
+                        // Try one more time with a fresh read
+                        if let Ok(Some(mut fresh_task)) = self.chain_service.get_task_from_repo(task.id).await {
+                            fresh_task.chain_handoff_state = None;
+                            if let Err(e2) = self.chain_service.update_task(&fresh_task).await {
+                                warn!(
+                                    task_id = %task.id,
+                                    error = ?e2,
+                                    "Retry also failed to clear handoff state (will be recovered)"
+                                );
+                            }
+                        }
                     }
                 }
                 Err(e) => {
                     // FAILED: Update handoff state with error, then propagate failure
-                    if let Some(ref mut state) = updated_task.chain_handoff_state {
-                        state.last_error = Some(e.to_string());
+                    // Re-read to get fresh version before updating
+                    if let Ok(Some(mut fresh_task)) = self.chain_service.get_task_from_repo(task.id).await {
+                        if let Some(ref mut state) = fresh_task.chain_handoff_state {
+                            state.last_error = Some(e.to_string());
+                        }
+                        let _ = self.chain_service.update_task(&fresh_task).await;
                     }
-                    let _ = self.chain_service.update_task(&updated_task).await;
 
                     return Err(ExecutionError::ExecutionFailed(format!(
                         "Failed to enqueue next step: {}. Handoff state preserved for recovery.",

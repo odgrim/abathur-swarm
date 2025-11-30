@@ -1017,6 +1017,101 @@ impl TaskCoordinator {
             .context("Failed to update task")
     }
 
+    /// Update a task with automatic retry on optimistic lock conflict
+    ///
+    /// This method handles the common pattern of:
+    /// 1. Apply modifications to a task
+    /// 2. If update fails due to version conflict, re-read and retry
+    ///
+    /// This is essential for reliable updates when multiple processes may
+    /// be modifying the same task concurrently.
+    ///
+    /// # Arguments
+    ///
+    /// * `task_id` - UUID of the task to update
+    /// * `update_fn` - Closure that modifies the task. Will be called again on retry.
+    /// * `max_retries` - Maximum number of retry attempts (default: 3)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Task)` - The updated task with fresh version
+    /// * `Err` - If all retries exhausted or non-retryable error
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// coordinator.update_task_with_retry(task_id, |task| {
+    ///     task.chain_handoff_state = None;
+    /// }, 3).await?;
+    /// ```
+    pub async fn update_task_with_retry<F>(
+        &self,
+        task_id: Uuid,
+        update_fn: F,
+        max_retries: u32,
+    ) -> Result<Task>
+    where
+        F: Fn(&mut Task),
+    {
+        let mut last_error = None;
+
+        for attempt in 0..=max_retries {
+            // Get fresh task from database
+            let mut task = self
+                .task_queue
+                .get_task(task_id)
+                .await
+                .context("Failed to get task for retry update")?;
+
+            // Apply the update function
+            update_fn(&mut task);
+
+            // Attempt to save
+            match self.task_queue.update_task(&task).await {
+                Ok(()) => {
+                    if attempt > 0 {
+                        debug!(
+                            task_id = %task_id,
+                            attempts = attempt + 1,
+                            "Task update succeeded after optimistic lock retry"
+                        );
+                    }
+                    // Return task with updated version
+                    // Note: The version in memory is still old, re-read if caller needs fresh version
+                    return self.task_queue.get_task(task_id).await
+                        .context("Failed to get task after successful update");
+                }
+                Err(e) => {
+                    let error_str = e.to_string();
+                    // Check if this is an optimistic lock conflict
+                    if error_str.contains("OptimisticLockConflict") || error_str.contains("version") {
+                        if attempt < max_retries {
+                            debug!(
+                                task_id = %task_id,
+                                attempt = attempt + 1,
+                                max_retries = max_retries,
+                                "Optimistic lock conflict, retrying with fresh task"
+                            );
+                            // Small backoff to reduce contention
+                            tokio::time::sleep(tokio::time::Duration::from_millis(10 * (attempt as u64 + 1))).await;
+                            last_error = Some(e);
+                            continue;
+                        }
+                    }
+                    // Non-retryable error or max retries exceeded
+                    return Err(e).context("Failed to update task");
+                }
+            }
+        }
+
+        Err(last_error
+            .map(|e| e.context(format!(
+                "Task update failed after {} retries due to optimistic lock conflicts",
+                max_retries
+            )))
+            .unwrap_or_else(|| anyhow::anyhow!("Task update failed with unknown error")))
+    }
+
     /// Get tasks that have been running longer than the threshold
     pub async fn get_stale_running_tasks(&self, threshold_secs: u64) -> Result<Vec<Task>> {
         self.task_queue

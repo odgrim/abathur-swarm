@@ -65,6 +65,68 @@ enum AgentEvent {
     ValidationRequested { agent_id: Uuid, task_id: Uuid },
 }
 
+/// RAII guard for tracking in-flight tasks
+///
+/// This guard ensures a task is removed from the in-flight set even if the
+/// spawned task panics. Without this, a panic would leave the task in the
+/// in-flight set forever, blocking future attempts to process it.
+///
+/// The guard removes the task from the set when dropped, which happens:
+/// - On normal completion (when guard goes out of scope)
+/// - On panic (Rust's drop guarantee)
+/// - On task cancellation
+struct InFlightGuard {
+    task_id: Uuid,
+    in_flight_tasks: Arc<RwLock<HashSet<Uuid>>>,
+    /// Whether removal has already been done explicitly
+    removed: bool,
+}
+
+impl InFlightGuard {
+    fn new(task_id: Uuid, in_flight_tasks: Arc<RwLock<HashSet<Uuid>>>) -> Self {
+        Self {
+            task_id,
+            in_flight_tasks,
+            removed: false,
+        }
+    }
+
+    /// Explicitly remove from in-flight set (avoids async drop issue)
+    async fn remove(&mut self) {
+        if !self.removed {
+            self.in_flight_tasks.write().await.remove(&self.task_id);
+            self.removed = true;
+        }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if !self.removed {
+            // We can't do async operations in Drop, so we use try_write
+            // to avoid blocking. If we can't get the lock, spawn a cleanup task.
+            let task_id = self.task_id;
+            let in_flight_tasks = Arc::clone(&self.in_flight_tasks);
+
+            // Use try_write to avoid blocking - if we can't get the lock,
+            // the stale task recovery will eventually clean it up
+            if let Ok(mut set) = in_flight_tasks.try_write() {
+                set.remove(&task_id);
+            } else {
+                // Couldn't get lock synchronously - spawn a task to clean up
+                // This handles the panic case where we need async cleanup
+                tokio::spawn(async move {
+                    in_flight_tasks.write().await.remove(&task_id);
+                    warn!(
+                        task_id = %task_id,
+                        "InFlightGuard removed task via spawned cleanup (panic recovery)"
+                    );
+                });
+            }
+        }
+    }
+}
+
 /// Swarm orchestrator with concurrent task processing
 ///
 /// Orchestrates concurrent agent workers using tokio primitives:
@@ -502,7 +564,9 @@ impl SwarmOrchestrator {
                                 // Remove worker from tracking
                                 workers.write().await.remove(&agent_id);
 
-                                // Remove from in-flight tasks
+                                // Note: in-flight removal is handled by InFlightGuard in the spawned task.
+                                // This redundant removal is kept as a safety belt in case the guard
+                                // failed to remove (e.g., lock contention during panic recovery).
                                 in_flight_tasks.write().await.remove(&task_id);
 
                                 // Increment processed counter
@@ -534,7 +598,8 @@ impl SwarmOrchestrator {
                                 // Remove worker from tracking
                                 workers.write().await.remove(&agent_id);
 
-                                // Remove from in-flight tasks
+                                // Note: in-flight removal is handled by InFlightGuard in the spawned task.
+                                // This redundant removal is kept as a safety belt.
                                 in_flight_tasks.write().await.remove(&task_id);
 
                                 // Increment failed counter
@@ -549,7 +614,8 @@ impl SwarmOrchestrator {
                                 // Remove worker from tracking
                                 workers.write().await.remove(&agent_id);
 
-                                // Remove from in-flight tasks
+                                // Note: in-flight removal is handled by InFlightGuard in the spawned task.
+                                // This redundant removal is kept as a safety belt.
                                 in_flight_tasks.write().await.remove(&task_id);
 
                                 // Task is now AwaitingValidation status (already updated in spawned task)
@@ -619,7 +685,7 @@ impl SwarmOrchestrator {
         agent_executor: Arc<AgentExecutor>,
         task_coordinator: Arc<TaskCoordinator>,
         workers: Arc<RwLock<HashMap<Uuid, WorkerState>>>,
-        _in_flight_tasks: Arc<RwLock<HashSet<Uuid>>>,
+        in_flight_tasks: Arc<RwLock<HashSet<Uuid>>>,
         agent_event_tx: mpsc::Sender<AgentEvent>,
         _config: Config,
     ) -> Result<()> {
@@ -654,6 +720,10 @@ impl SwarmOrchestrator {
 
         // Spawn agent execution task
         tokio::spawn(async move {
+            // Create RAII guard for panic-safe in-flight tracking
+            // This ensures the task is removed from in_flight_tasks even if we panic
+            let mut in_flight_guard = InFlightGuard::new(task_id, Arc::clone(&in_flight_tasks));
+
             // Execute task (automatically detects and executes prompt chains if chain_id is present)
             let result = agent_executor.execute_task(&task).await;
 
@@ -822,11 +892,16 @@ impl SwarmOrchestrator {
                 }
             };
 
+            // Explicitly remove from in-flight set before sending event
+            // This ensures the cleanup happens even if event sending fails
+            in_flight_guard.remove().await;
+
             // Send event for monitoring/stats (best-effort, don't fail if receiver dropped during shutdown)
             let _ = agent_event_tx.send(event).await;
 
             // Release semaphore permit (automatically dropped)
             drop(permit);
+            // in_flight_guard also dropped here, but remove() already called so it's a no-op
         });
 
         Ok(())
@@ -968,35 +1043,45 @@ impl SwarmOrchestrator {
             "Found stuck chain handoffs to recover"
         );
 
-        for mut task in stuck_handoffs {
+        for task in stuck_handoffs {
             let handoff_state = task.chain_handoff_state.clone().expect("checked above");
 
             // Check if we've exceeded max attempts
             if handoff_state.enqueue_attempts >= max_attempts {
+                let task_id = task.id;
+                let step_index = handoff_state.pending_next_step_index;
+                let attempts = handoff_state.enqueue_attempts;
+                let last_error = handoff_state.last_error.clone();
+
                 error!(
-                    task_id = %task.id,
+                    task_id = %task_id,
                     chain_id = %handoff_state.chain_id,
-                    step_index = handoff_state.pending_next_step_index,
-                    attempts = handoff_state.enqueue_attempts,
+                    step_index = step_index,
+                    attempts = attempts,
                     max_attempts = max_attempts,
-                    last_error = ?handoff_state.last_error,
+                    last_error = ?last_error,
                     "Chain handoff exceeded max recovery attempts, marking as unrecoverable"
                 );
 
-                // Clear the handoff state and log the failure
+                // Clear the handoff state and log the failure using retry helper
                 // The chain is now permanently stuck at this step, but the task is marked
                 // complete so dependent tasks can still be analyzed
-                task.chain_handoff_state = None;
-                task.error_message = Some(format!(
+                let error_message = format!(
                     "Chain handoff to step {} failed after {} attempts. Last error: {}",
-                    handoff_state.pending_next_step_index,
-                    handoff_state.enqueue_attempts,
-                    handoff_state.last_error.as_deref().unwrap_or("unknown")
-                ));
+                    step_index,
+                    attempts,
+                    last_error.as_deref().unwrap_or("unknown")
+                );
 
-                if let Err(e) = task_coordinator.update_task(&task).await {
+                if let Err(e) = task_coordinator
+                    .update_task_with_retry(task_id, move |t| {
+                        t.chain_handoff_state = None;
+                        t.error_message = Some(error_message.clone());
+                    }, 3)
+                    .await
+                {
                     warn!(
-                        task_id = %task.id,
+                        task_id = %task_id,
                         error = ?e,
                         "Failed to mark chain handoff as unrecoverable"
                     );
@@ -1005,30 +1090,36 @@ impl SwarmOrchestrator {
             }
 
             // Attempt to retry the handoff
+            let task_id = task.id;
             match agent_executor
                 .retry_chain_handoff(&task, &handoff_state)
                 .await
             {
                 Ok(_) => {
                     info!(
-                        task_id = %task.id,
+                        task_id = %task_id,
                         chain_id = %handoff_state.chain_id,
                         step_index = handoff_state.pending_next_step_index,
                         "Successfully recovered stuck chain handoff"
                     );
-                    // Clear the handoff state
-                    task.chain_handoff_state = None;
-                    if let Err(e) = task_coordinator.update_task(&task).await {
+                    // Clear the handoff state using retry helper to handle version conflicts
+                    // The task object we have is stale (wrong version), so we must re-read
+                    if let Err(e) = task_coordinator
+                        .update_task_with_retry(task_id, |t| {
+                            t.chain_handoff_state = None;
+                        }, 3)
+                        .await
+                    {
                         warn!(
-                            task_id = %task.id,
+                            task_id = %task_id,
                             error = ?e,
-                            "Failed to clear handoff state after successful recovery"
+                            "Failed to clear handoff state after successful recovery (will retry next cycle)"
                         );
                     }
                 }
                 Err(e) => {
                     warn!(
-                        task_id = %task.id,
+                        task_id = %task_id,
                         chain_id = %handoff_state.chain_id,
                         step_index = handoff_state.pending_next_step_index,
                         error = ?e,
@@ -1036,12 +1127,16 @@ impl SwarmOrchestrator {
                         max_attempts = max_attempts,
                         "Failed to recover stuck chain handoff, will retry later"
                     );
-                    // Update the handoff state with the error and increment attempts
-                    if let Some(ref mut state) = task.chain_handoff_state {
-                        state.enqueue_attempts += 1;
-                        state.last_error = Some(e.to_string());
-                    }
-                    let _ = task_coordinator.update_task(&task).await;
+                    // Update the handoff state with error using retry helper
+                    let error_msg = e.to_string();
+                    let _ = task_coordinator
+                        .update_task_with_retry(task_id, move |t| {
+                            if let Some(ref mut state) = t.chain_handoff_state {
+                                state.enqueue_attempts += 1;
+                                state.last_error = Some(error_msg.clone());
+                            }
+                        }, 3)
+                        .await;
                 }
             }
         }

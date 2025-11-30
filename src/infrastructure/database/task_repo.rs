@@ -634,14 +634,21 @@ impl TaskRepository for TaskRepositoryImpl {
         tasks
     }
 
-    /// Atomically claim the next ready task using SQLite transaction with IMMEDIATE mode.
+    /// Atomically claim the next ready task using SQLite transaction.
     ///
     /// This ensures exclusive access during the SELECT + UPDATE operation, preventing
     /// race conditions where multiple workers pick up the same task.
+    ///
+    /// IMPORTANT: We verify that the UPDATE actually affected a row. If another worker
+    /// already claimed the task between our SELECT and UPDATE, the UPDATE will affect
+    /// 0 rows (because status is no longer 'Ready'), and we return None instead of
+    /// returning a task we didn't actually claim.
     async fn claim_next_ready_task(&self) -> Result<Option<Task>, DatabaseError> {
-        use tracing::{debug, info};
+        use tracing::{debug, info, warn};
 
-        // Start an IMMEDIATE transaction to acquire write lock upfront
+        // Start a transaction for atomic SELECT + UPDATE
+        // The key protection is the rows_affected check below, which ensures
+        // we only return a task if we actually claimed it
         let mut tx = self.pool.begin().await?;
 
         // Find the highest priority ready task
@@ -672,7 +679,7 @@ impl TaskRepository for TaskRepositoryImpl {
         let running_status = TaskStatus::Running.to_string();
         let started_at = Utc::now().to_rfc3339();
 
-        sqlx::query(
+        let update_result = sqlx::query(
             r#"
             UPDATE tasks SET
                 status = ?,
@@ -688,6 +695,20 @@ impl TaskRepository for TaskRepositoryImpl {
         .bind(TaskStatus::Ready.to_string())
         .execute(&mut *tx)
         .await?;
+
+        // CRITICAL: Check if we actually claimed the task
+        // If another worker already claimed it, rows_affected will be 0
+        // because the WHERE clause (status = 'Ready') won't match
+        if update_result.rows_affected() == 0 {
+            warn!(
+                task_id = %task_id,
+                "Task was claimed by another worker between SELECT and UPDATE, retrying"
+            );
+            tx.rollback().await?;
+            // Return None to let the caller retry on next poll cycle
+            // This is safe because the task is already being processed
+            return Ok(None);
+        }
 
         // Fetch the updated task
         let task_row = sqlx::query(

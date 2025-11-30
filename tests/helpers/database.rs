@@ -1,6 +1,7 @@
 use sqlx::SqlitePool;
 
 /// Create an in-memory `SQLite` database for testing
+#[allow(dead_code)]
 pub async fn setup_test_db() -> SqlitePool {
     let pool = SqlitePool::connect("sqlite::memory:")
         .await
