@@ -327,6 +327,49 @@ pub trait TaskRepository: Send + Sync {
         &self,
         task: &Task,
     ) -> Result<IdempotentInsertResult, DatabaseError>;
+
+    /// Atomically insert multiple tasks in a single transaction.
+    ///
+    /// This method performs a transactional batch insert that:
+    /// 1. Opens a database transaction
+    /// 2. Attempts to insert all tasks (using idempotent insert for each)
+    /// 3. If any non-duplicate insert fails, rolls back the entire transaction
+    /// 4. Returns the result indicating which tasks were inserted vs already existed
+    ///
+    /// This is critical for chain step task spawning where all spawned tasks
+    /// must be inserted atomically to prevent partial state on retry.
+    ///
+    /// # Arguments
+    /// * `tasks` - The tasks to insert
+    ///
+    /// # Returns
+    /// * `Ok(BatchInsertResult)` - All tasks processed successfully (inserted or already existed)
+    /// * `Err(DatabaseError)` - Transaction failed and was rolled back
+    ///
+    /// # Errors
+    /// - `DatabaseError::QueryFailed`: Database query execution failed (transaction rolled back)
+    ///
+    /// # Default Implementation
+    /// Falls back to non-transactional sequential inserts for backwards compatibility.
+    /// Database-specific implementations should override with proper transactional support.
+    async fn insert_tasks_transactional(
+        &self,
+        tasks: &[Task],
+    ) -> Result<BatchInsertResult, DatabaseError> {
+        // Default non-transactional implementation for backwards compatibility
+        let mut result = BatchInsertResult::new();
+        for task in tasks {
+            match self.insert_task_idempotent(task).await? {
+                IdempotentInsertResult::Inserted(id) => result.inserted.push(id),
+                IdempotentInsertResult::AlreadyExists => {
+                    if let Some(ref key) = task.idempotency_key {
+                        result.already_existed.push(key.clone());
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
 }
 
 /// Result of an idempotent task insertion attempt
@@ -336,6 +379,30 @@ pub enum IdempotentInsertResult {
     Inserted(Uuid),
     /// A task with the same idempotency key already exists
     AlreadyExists,
+}
+
+/// Result of a batch task insertion attempt
+#[derive(Debug, Clone)]
+pub struct BatchInsertResult {
+    /// Tasks that were successfully inserted
+    pub inserted: Vec<Uuid>,
+    /// Tasks that already existed (by idempotency key)
+    pub already_existed: Vec<String>, // idempotency keys
+}
+
+impl BatchInsertResult {
+    /// Create a new empty batch insert result
+    pub fn new() -> Self {
+        Self {
+            inserted: Vec::new(),
+            already_existed: Vec::new(),
+        }
+    }
+
+    /// Total number of tasks processed
+    pub fn total(&self) -> usize {
+        self.inserted.len() + self.already_existed.len()
+    }
 }
 
 /// Filter criteria for task queries.

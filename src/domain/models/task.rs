@@ -262,6 +262,17 @@ pub struct Task {
     /// Used to ensure tasks spawned from chain outputs are not duplicated
     /// if a chain step retries or executes multiple times.
     pub idempotency_key: Option<String>,
+
+    /// Version number for optimistic locking.
+    ///
+    /// Incremented on each update. Used to detect concurrent modifications
+    /// and prevent lost updates when multiple processes modify the same task.
+    #[serde(default = "default_version")]
+    pub version: u32,
+}
+
+fn default_version() -> u32 {
+    1
 }
 
 impl Task {
@@ -308,6 +319,7 @@ impl Task {
             chain_id: None,
             chain_step_index: 0,
             idempotency_key: None,
+            version: 1,
         }
     }
 

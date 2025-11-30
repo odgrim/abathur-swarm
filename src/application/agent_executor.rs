@@ -214,6 +214,8 @@ impl AgentExecutor {
     /// Execute a single step of a prompt chain
     ///
     /// Loads the chain, executes the current step, and enqueues the next step if needed.
+    /// If the task already has result_data, it means the step already executed - we skip
+    /// re-execution and just try to enqueue the next step (idempotent).
     ///
     /// # Arguments
     /// * `task` - The task to execute (contains chain_id and chain_step_index)
@@ -252,6 +254,48 @@ impl AgentExecutor {
         }
 
         let step = &chain.steps[step_index];
+
+        // IDEMPOTENCY CHECK: If task already has result_data, the step already executed.
+        // This can happen if the step completed but enqueueing the next step failed.
+        // Skip re-execution and just try to enqueue the next step (idempotent).
+        if let Some(ref existing_result) = task.result_data {
+            info!(
+                task_id = %task.id,
+                step_id = %step.id,
+                step_index = step_index,
+                "Step already has result_data, skipping re-execution (idempotent retry)"
+            );
+
+            // Try to enqueue the next step
+            let next_step_index = step_index + 1;
+            if next_step_index < chain.steps.len() {
+                // Extract previous output from result_data
+                let previous_output = existing_result
+                    .get("output")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                info!(
+                    task_id = %task.id,
+                    next_step_index = next_step_index,
+                    "Re-attempting to enqueue next chain step after idempotent retry"
+                );
+
+                self.enqueue_next_chain_step(task, &chain, next_step_index, previous_output)
+                    .await
+                    .map_err(|e| {
+                        ExecutionError::ExecutionFailed(format!(
+                            "Failed to enqueue next step on retry: {}",
+                            e
+                        ))
+                    })?;
+            }
+
+            // Return the existing result
+            return serde_json::to_string_pretty(existing_result).map_err(|e| {
+                ExecutionError::ExecutionFailed(format!("Failed to serialize existing result: {}", e))
+            });
+        }
 
         // TODO: TEMPORARY DEBUG - Remove this logging once timeout issue is resolved
         info!(
@@ -379,7 +423,7 @@ impl AgentExecutor {
 
         // Reload task from database to get any updates from post-hooks
         // (e.g., feature_branch, worktree_path set by create_feature_branch.sh)
-        let updated_task = self
+        let mut updated_task = self
             .chain_service
             .get_task_from_repo(task.id)
             .await
@@ -389,6 +433,63 @@ impl AgentExecutor {
             .ok_or_else(|| {
                 ExecutionError::ExecutionFailed(format!("Task {} not found after step execution", task.id))
             })?;
+
+        // CRITICAL: Save result_data BEFORE enqueueing next step for idempotency.
+        // If enqueueing fails and the task retries, we'll detect existing result_data
+        // and skip re-execution of this step.
+        let result_json = serde_json::json!({
+            "output": result.output,
+            "step_id": step.id,
+            "step_index": step_index,
+            "completed_at": chrono::Utc::now().to_rfc3339(),
+        });
+        updated_task.result_data = Some(result_json.clone());
+        self.chain_service
+            .update_task(&updated_task)
+            .await
+            .map_err(|e| {
+                ExecutionError::ExecutionFailed(format!(
+                    "Failed to save step result for idempotency: {}",
+                    e
+                ))
+            })?;
+        info!(
+            task_id = %task.id,
+            step_id = %step.id,
+            "Saved step result_data for idempotency"
+        );
+
+        // Record step completion in chain execution tracking
+        // This is non-critical - failures here don't affect task execution
+        if let Ok(execution) = self.chain_service
+            .get_or_create_execution(chain_id, &task.id.to_string())
+            .await
+        {
+            let step_result_record = crate::domain::models::prompt_chain::StepResult::new(
+                step.id.clone(),
+                result.output.clone(),
+                result.validated,
+                result.duration,
+            );
+
+            match self.chain_service.record_step_completion(execution, step_result_record).await {
+                Ok(_) => {
+                    debug!(
+                        task_id = %task.id,
+                        step_id = %step.id,
+                        "Recorded step completion in chain execution tracking"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        task_id = %task.id,
+                        step_id = %step.id,
+                        error = ?e,
+                        "Failed to record step completion in chain execution tracking (non-critical)"
+                    );
+                }
+            }
+        }
 
         // Enqueue the next step if there is one
         let next_step_index = step_index + 1;
@@ -414,10 +515,25 @@ impl AgentExecutor {
                 chain_id = %chain_id,
                 "Chain execution complete (all steps finished)"
             );
+
+            // Mark chain execution as completed
+            if let Ok(execution) = self.chain_service
+                .get_or_create_execution(chain_id, &task.id.to_string())
+                .await
+            {
+                if let Err(e) = self.chain_service.complete_execution(execution).await {
+                    warn!(
+                        task_id = %task.id,
+                        chain_id = %chain_id,
+                        error = ?e,
+                        "Failed to mark chain execution as completed (non-critical)"
+                    );
+                }
+            }
         }
 
         // Return step result as JSON
-        serde_json::to_string_pretty(&result).map_err(|e| {
+        serde_json::to_string_pretty(&result_json).map_err(|e| {
             ExecutionError::ExecutionFailed(format!("Failed to serialize step result: {}", e))
         })
     }
@@ -517,6 +633,7 @@ impl AgentExecutor {
             chain_id: current_task.chain_id.clone(),
             chain_step_index: next_step_index,
             idempotency_key: Some(idempotency_key.clone()),
+            version: 1,
         };
 
         // Use atomic idempotent insert to prevent race conditions

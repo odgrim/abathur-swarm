@@ -18,6 +18,40 @@ pub struct TaskStatusUpdate {
     pub new_status: TaskStatus,
 }
 
+/// Result of task completion operation
+///
+/// Distinguishes between primary success/failure (marking task completed)
+/// and secondary issues (dependency coordination failures).
+#[derive(Debug)]
+pub enum TaskCompletionResult {
+    /// Task completed successfully and all dependencies were coordinated
+    Success,
+    /// Task completed, but some dependency coordination failed.
+    /// These will be recovered by background monitoring (30s interval).
+    /// Contains the list of failed dependent task IDs.
+    CompletedWithDependencyFailures(Vec<Uuid>),
+}
+
+/// Error type for task completion failures
+#[derive(Debug, thiserror::Error)]
+pub enum TaskCompletionError {
+    /// Failed to mark the task as completed in the database
+    #[error("Failed to mark task as completed: {0}")]
+    MarkCompletedFailed(String),
+
+    /// Pre-complete hook blocked the completion
+    #[error("Pre-complete hook blocked task completion")]
+    HookBlocked,
+
+    /// Task not found
+    #[error("Task not found: {0}")]
+    TaskNotFound(Uuid),
+
+    /// Other error
+    #[error("{0}")]
+    Other(#[from] anyhow::Error),
+}
+
 /// Coordinates task lifecycle, dependency resolution, and priority scheduling
 ///
 /// The `TaskCoordinator` is the central orchestration component that:
@@ -376,35 +410,39 @@ impl TaskCoordinator {
     ///
     /// # Returns
     ///
-    /// * `Ok(())` - Task marked complete and dependents triggered
-    /// * `Err` - If task not found or database error
+    /// * `Ok(TaskCompletionResult::Success)` - Task marked complete and all dependents triggered
+    /// * `Ok(TaskCompletionResult::CompletedWithDependencyFailures)` - Task marked complete but
+    ///   some dependency coordination failed. These will be recovered by background monitoring.
+    /// * `Err(TaskCompletionError::MarkCompletedFailed)` - Failed to mark task as completed (serious)
+    /// * `Err(TaskCompletionError::HookBlocked)` - Pre-complete hook blocked the completion
     #[instrument(skip(self), fields(task_id = %task_id))]
-    pub async fn handle_task_completion(&self, task_id: Uuid) -> Result<()> {
+    pub async fn handle_task_completion(&self, task_id: Uuid) -> std::result::Result<TaskCompletionResult, TaskCompletionError> {
         info!("Handling task completion for task {}", task_id);
 
         // Get the task for hook execution
         let task = self.task_queue.get_task(task_id).await
-            .context("Failed to get task for handle_task_completion")?;
+            .map_err(|e| TaskCompletionError::Other(e.context("Failed to get task for handle_task_completion")))?;
 
         // Execute PreComplete hooks
         let hook_registry_guard = self.hook_registry.read().await;
         if let Some(ref registry) = *hook_registry_guard {
             let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
             let hook_result = registry.execute_hooks(HookEvent::PreComplete, &task, &context).await
-                .context("Failed to execute PreComplete hooks")?;
+                .map_err(|e| TaskCompletionError::Other(e.context("Failed to execute PreComplete hooks")))?;
 
             if hook_result.should_block() {
                 warn!("PreComplete hook blocked task {} from completing", task_id);
-                return Ok(());
+                return Err(TaskCompletionError::HookBlocked);
             }
         }
         drop(hook_registry_guard);
 
-        // 1. Mark task as completed
+        // 1. Mark task as completed - THIS IS THE CRITICAL OPERATION
+        // If this fails, the task status is inconsistent
         self.task_queue
             .update_task_status(task_id, TaskStatus::Completed)
             .await
-            .context("Failed to mark task as completed")?;
+            .map_err(|e| TaskCompletionError::MarkCompletedFailed(e.to_string()))?;
 
         // Notify status change
         let _ = self
@@ -429,7 +467,7 @@ impl TaskCoordinator {
             .task_queue
             .get_dependent_tasks(task_id)
             .await
-            .context("Failed to get dependent tasks")?;
+            .map_err(|e| TaskCompletionError::Other(e.context("Failed to get dependent tasks")))?;
 
         info!(
             "Found {} dependent tasks for task {}",
@@ -442,7 +480,7 @@ impl TaskCoordinator {
         const MAX_RETRIES: u32 = 3;
         const INITIAL_BACKOFF_MS: u64 = 100;
 
-        let mut failed_coordinations: Vec<(Uuid, String)> = Vec::new();
+        let mut failed_coordinations: Vec<Uuid> = Vec::new();
 
         for dependent_task in dependent_tasks {
             let mut last_error = None;
@@ -481,22 +519,23 @@ impl TaskCoordinator {
                     "Failed to coordinate dependent task {} after {} retries: {}",
                     dependent_task.id, MAX_RETRIES, error_msg
                 );
-                failed_coordinations.push((dependent_task.id, error_msg));
+                failed_coordinations.push(dependent_task.id);
             }
         }
 
-        // Log summary of failed coordinations but don't fail the overall operation
-        // The parent task successfully completed - dependent tasks should be picked up
-        // by the background recovery mechanism
-        if !failed_coordinations.is_empty() {
+        // Return result indicating whether all dependencies were coordinated
+        // NOTE: The parent task IS completed at this point. Failed coordinations will be
+        // recovered by the background blocked task recovery (runs every 30 seconds).
+        if failed_coordinations.is_empty() {
+            Ok(TaskCompletionResult::Success)
+        } else {
             error!(
-                "Failed to coordinate {} dependent task(s) after retries: {:?}. These tasks may require manual intervention or will be recovered by background monitoring.",
+                "Failed to coordinate {} dependent task(s) after retries: {:?}. Will be recovered by background monitoring (30s interval).",
                 failed_coordinations.len(),
-                failed_coordinations.iter().map(|(id, _)| id).collect::<Vec<_>>()
+                failed_coordinations
             );
+            Ok(TaskCompletionResult::CompletedWithDependencyFailures(failed_coordinations))
         }
-
-        Ok(())
     }
 
     /// Handle task failure with optional retry logic
@@ -1194,6 +1233,18 @@ mod tests {
             Ok(IdempotentInsertResult::Inserted(task_id))
         }
 
+        async fn submit_tasks_transactional(&self, tasks_to_insert: Vec<Task>) -> Result<crate::domain::ports::task_repository::BatchInsertResult> {
+            use crate::domain::ports::task_repository::BatchInsertResult;
+            let mut result = BatchInsertResult::new();
+            let mut tasks = self.tasks.lock().unwrap();
+            for task in tasks_to_insert {
+                let task_id = task.id;
+                tasks.insert(task_id, task);
+                result.inserted.push(task_id);
+            }
+            Ok(result)
+        }
+
         async fn resolve_dependencies_for_completed_task(&self, _completed_task_id: Uuid) -> Result<usize> {
             Ok(0) // Mock returns 0 tasks updated
         }
@@ -1261,6 +1312,7 @@ mod tests {
             chain_id: None,
             chain_step_index: 0,
             idempotency_key: None,
+            version: 1,
         }
     }
 

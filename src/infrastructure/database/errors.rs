@@ -31,4 +31,12 @@ pub enum DatabaseError {
 
     #[error("Anyhow error: {0}")]
     AnyhowError(#[from] anyhow::Error),
+
+    /// Optimistic lock conflict - task was modified by another process.
+    /// The caller should re-read the task and retry the operation.
+    #[error("Optimistic lock conflict for task {task_id}: expected version {expected_version}, but task was modified")]
+    OptimisticLockConflict {
+        task_id: uuid::Uuid,
+        expected_version: u32,
+    },
 }

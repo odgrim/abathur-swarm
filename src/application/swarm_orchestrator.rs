@@ -162,13 +162,13 @@ impl SwarmOrchestrator {
     /// How often to check for stale tasks (in seconds)
     const STALE_TASK_CHECK_INTERVAL_SECS: u64 = 60;
 
-    /// Tasks running longer than this are considered stale (in seconds)
-    /// Should be longer than the longest expected task execution
-    const STALE_TASK_THRESHOLD_SECS: u64 = 300; // 5 minutes
+    /// Buffer time added to task's max_execution_timeout_seconds before considering stale.
+    /// This prevents false positives for tasks that are completing normally.
+    const STALE_TASK_BUFFER_SECS: u64 = 120; // 2 minute buffer
 
     /// How often to check for stuck blocked tasks (in seconds)
-    /// Less frequent than stale check since this is a recovery mechanism
-    const BLOCKED_TASK_CHECK_INTERVAL_SECS: u64 = 120; // 2 minutes
+    /// Reduced from 2 minutes to 30 seconds for faster recovery
+    const BLOCKED_TASK_CHECK_INTERVAL_SECS: u64 = 30;
 
     /// Create a new swarm orchestrator
     ///
@@ -640,6 +640,78 @@ impl SwarmOrchestrator {
             // CRITICAL: Update task status IMMEDIATELY after subprocess exits,
             // BEFORE sending event to ensure database reflects reality
             // even if event loop is not running or channel is full.
+            use crate::application::task_coordinator::{TaskCompletionResult, TaskCompletionError};
+
+            /// Helper to handle task completion result and map to appropriate event
+            async fn handle_completion_result(
+                task_coordinator: &TaskCoordinator,
+                task_id: Uuid,
+                agent_id: Uuid,
+            ) -> AgentEvent {
+                match task_coordinator.handle_task_completion(task_id).await {
+                    Ok(TaskCompletionResult::Success) => {
+                        info!(%task_id, "Task completed successfully, all dependencies coordinated");
+                        AgentEvent::TaskCompleted { agent_id, task_id }
+                    }
+                    Ok(TaskCompletionResult::CompletedWithDependencyFailures(failed_deps)) => {
+                        // Task is completed but some dependencies couldn't be coordinated.
+                        // This is OK - they will be recovered by background monitoring (30s).
+                        // Still report as completed since the parent task's work IS done.
+                        warn!(
+                            %task_id,
+                            failed_deps = ?failed_deps,
+                            "Task completed but {} dependencies failed to coordinate (will recover in 30s)",
+                            failed_deps.len()
+                        );
+                        AgentEvent::TaskCompleted { agent_id, task_id }
+                    }
+                    Err(TaskCompletionError::MarkCompletedFailed(e)) => {
+                        // CRITICAL: Failed to mark task as completed - this is a serious error
+                        // The task needs to be retried because the DB doesn't reflect completion
+                        error!(%task_id, error = %e, "CRITICAL: Failed to mark task as completed in database");
+                        let error_msg = format!("Failed to mark task completed: {}", e);
+                        if let Err(err) = task_coordinator.handle_task_failure(task_id, error_msg.clone()).await {
+                            error!(%task_id, error = ?err, "Also failed to mark task as failed");
+                        }
+                        AgentEvent::TaskFailed {
+                            agent_id,
+                            task_id,
+                            error: error_msg,
+                        }
+                    }
+                    Err(TaskCompletionError::HookBlocked) => {
+                        // Hook blocked completion - this is intentional, not an error
+                        // Don't mark as failed, just report that it didn't complete
+                        warn!(%task_id, "Task completion blocked by pre-complete hook");
+                        AgentEvent::TaskFailed {
+                            agent_id,
+                            task_id,
+                            error: "Task completion blocked by pre-complete hook".to_string(),
+                        }
+                    }
+                    Err(TaskCompletionError::TaskNotFound(id)) => {
+                        error!(%task_id, "Task {} not found during completion", id);
+                        AgentEvent::TaskFailed {
+                            agent_id,
+                            task_id,
+                            error: format!("Task not found: {}", id),
+                        }
+                    }
+                    Err(TaskCompletionError::Other(e)) => {
+                        error!(%task_id, error = ?e, "Error during task completion");
+                        let error_msg = format!("Task completion error: {}", e);
+                        if let Err(err) = task_coordinator.handle_task_failure(task_id, error_msg.clone()).await {
+                            error!(%task_id, error = ?err, "Also failed to mark task as failed");
+                        }
+                        AgentEvent::TaskFailed {
+                            agent_id,
+                            task_id,
+                            error: error_msg,
+                        }
+                    }
+                }
+            }
+
             let event = match &result {
                 Ok(_output) => {
                     // Check if this agent type requires validation
@@ -652,10 +724,7 @@ impl SwarmOrchestrator {
                         crate::domain::models::ValidationRequirement::None => {
                             // No validation required - mark as completed IMMEDIATELY
                             info!(%task_id, agent_type = %task.agent_type, "No validation required, marking as completed");
-                            if let Err(e) = task_coordinator.handle_task_completion(task_id).await {
-                                error!(%task_id, error = ?e, "Failed to mark task as completed");
-                            }
-                            AgentEvent::TaskCompleted { agent_id, task_id }
+                            handle_completion_result(&task_coordinator, task_id, agent_id).await
                         }
 
                         crate::domain::models::ValidationRequirement::Contract { .. } => {
@@ -664,10 +733,7 @@ impl SwarmOrchestrator {
                             match validate_task_completion(task_id, &task, &task_coordinator).await {
                                 Ok(ValidationResult::Passed) => {
                                     info!(%task_id, "Contract validation passed, marking as completed");
-                                    if let Err(e) = task_coordinator.handle_task_completion(task_id).await {
-                                        error!(%task_id, error = ?e, "Failed to mark task as completed");
-                                    }
-                                    AgentEvent::TaskCompleted { agent_id, task_id }
+                                    handle_completion_result(&task_coordinator, task_id, agent_id).await
                                 }
                                 Ok(ValidationResult::Failed { reason }) => {
                                     error!(%task_id, reason = %reason, "Contract validation failed, marking as failed");
@@ -760,14 +826,47 @@ impl SwarmOrchestrator {
     }
 
     /// Check for and recover stale running tasks
+    ///
+    /// A task is considered stale if it has been running longer than its
+    /// max_execution_timeout_seconds + STALE_TASK_BUFFER_SECS.
+    /// This per-task timeout approach prevents false positives where legitimate
+    /// long-running tasks were being marked stale with the old fixed threshold.
     async fn recover_stale_tasks(
         task_coordinator: Arc<TaskCoordinator>,
         in_flight_tasks: Arc<RwLock<HashSet<Uuid>>>,
     ) -> Result<()> {
-        // Get stale tasks from database
-        let stale_tasks = task_coordinator
-            .get_stale_running_tasks(Self::STALE_TASK_THRESHOLD_SECS)
+        // Get ALL running tasks and filter by their individual timeouts
+        // This is more correct than using a global threshold
+        let running_tasks = task_coordinator
+            .get_tasks_by_status(crate::domain::models::TaskStatus::Running)
             .await?;
+
+        if running_tasks.is_empty() {
+            return Ok(());
+        }
+
+        let now = chrono::Utc::now();
+        let mut stale_tasks = Vec::new();
+
+        for task in running_tasks {
+            if let Some(started_at) = task.started_at {
+                // Calculate per-task stale threshold: timeout + buffer
+                let task_threshold_secs = task.max_execution_timeout_seconds as i64
+                    + Self::STALE_TASK_BUFFER_SECS as i64;
+                let elapsed_secs = now.signed_duration_since(started_at).num_seconds();
+
+                if elapsed_secs > task_threshold_secs {
+                    info!(
+                        task_id = %task.id,
+                        elapsed_secs = elapsed_secs,
+                        task_timeout = task.max_execution_timeout_seconds,
+                        threshold = task_threshold_secs,
+                        "Task exceeded its individual timeout threshold"
+                    );
+                    stale_tasks.push(task);
+                }
+            }
+        }
 
         if stale_tasks.is_empty() {
             return Ok(());
@@ -949,6 +1048,18 @@ mod tests {
             Ok(IdempotentInsertResult::Inserted(task_id))
         }
 
+        async fn submit_tasks_transactional(&self, tasks_to_insert: Vec<Task>) -> Result<crate::domain::ports::task_repository::BatchInsertResult> {
+            use crate::domain::ports::task_repository::BatchInsertResult;
+            let mut result = BatchInsertResult::new();
+            let mut tasks = self.tasks.lock().unwrap();
+            for task in tasks_to_insert {
+                let task_id = task.id;
+                tasks.insert(task_id, task);
+                result.inserted.push(task_id);
+            }
+            Ok(result)
+        }
+
         async fn resolve_dependencies_for_completed_task(&self, _completed_task_id: Uuid) -> Result<usize> {
             Ok(0) // Mock returns 0 tasks updated
         }
@@ -1012,6 +1123,7 @@ mod tests {
             chain_id: None,
             chain_step_index: 0,
             idempotency_key: None,
+            version: 1,
         }
     }
 

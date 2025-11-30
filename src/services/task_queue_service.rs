@@ -1019,6 +1019,74 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
         // Delegate to the internal implementation
         TaskQueueService::resolve_dependencies_for_completed_task(self, completed_task_id).await
     }
+
+    async fn submit_tasks_transactional(&self, mut tasks: Vec<Task>) -> Result<crate::domain::ports::task_repository::BatchInsertResult> {
+        use crate::domain::ports::task_repository::BatchInsertResult;
+
+        if tasks.is_empty() {
+            return Ok(BatchInsertResult::new());
+        }
+
+        // 1. Fetch all existing tasks once for dependency validation
+        let all_tasks = self
+            .repo
+            .list(&TaskFilters::default())
+            .await
+            .context("Failed to fetch existing tasks for batch insert")?;
+
+        // 2. Validate and prepare all tasks
+        for task in tasks.iter_mut() {
+            // Validate task
+            task.validate_summary()
+                .context("Task summary validation failed")?;
+            task.validate_priority()
+                .context("Task priority validation failed")?;
+
+            // Validate dependencies exist
+            if task.has_dependencies() {
+                self.dependency_resolver
+                    .validate_dependencies(task, &all_tasks)
+                    .context("Dependency validation failed")?;
+
+                // Check for circular dependencies
+                let mut tasks_with_new = all_tasks.clone();
+                tasks_with_new.push(task.clone());
+
+                if let Some(cycle) = self.dependency_resolver.detect_cycle(&tasks_with_new) {
+                    warn!("Circular dependency detected: {:?}", cycle);
+                    return Err(anyhow::anyhow!("Circular dependency detected: {:?}", cycle));
+                }
+
+                // Calculate dependency depth and priority
+                let depth = self
+                    .dependency_resolver
+                    .calculate_depth(task, &all_tasks)
+                    .context("Failed to calculate dependency depth")?;
+                self.priority_calc.update_task_priority(task, depth);
+            } else {
+                // No dependencies - depth is 0
+                self.priority_calc.update_task_priority(task, 0);
+            }
+
+            // Determine initial status
+            let initial_status = self.resolve_single_task_status(task, &all_tasks);
+            task.status = initial_status;
+        }
+
+        // 3. Insert all tasks transactionally
+        let result = self.repo
+            .insert_tasks_transactional(&tasks)
+            .await
+            .context("Failed to insert tasks transactionally")?;
+
+        info!(
+            "Batch insert completed: {} inserted, {} already existed",
+            result.inserted.len(),
+            result.already_existed.len()
+        );
+
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -1051,6 +1119,7 @@ mod tests {
             async fn get_stale_running_tasks(&self, stale_threshold_secs: u64) -> Result<Vec<Task>, DatabaseError>;
             async fn task_exists_by_idempotency_key(&self, idempotency_key: &str) -> Result<bool, DatabaseError>;
             async fn insert_task_idempotent(&self, task: &Task) -> Result<IdempotentInsertResult, DatabaseError>;
+            async fn insert_tasks_transactional(&self, tasks: &[Task]) -> Result<crate::domain::ports::task_repository::BatchInsertResult, DatabaseError>;
         }
     }
 

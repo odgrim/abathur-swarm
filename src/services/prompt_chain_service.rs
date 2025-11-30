@@ -4,11 +4,11 @@
 //! and error handling between steps.
 
 use crate::domain::models::prompt_chain::{
-    ChainExecution, OutputFormat, PromptChain, PromptStep, StepResult, ValidationRule,
+    ChainExecution, ChainStatus, OutputFormat, PromptChain, PromptStep, StepResult, ValidationRule,
     ValidationType,
 };
 use crate::domain::models::{AgentMetadata, AgentMetadataRegistry, HookContext, Task};
-use crate::domain::ports::{ExecutionParameters, SubstrateRequest, TaskQueueService};
+use crate::domain::ports::{ChainRepository, ExecutionParameters, SubstrateRequest, TaskQueueService};
 use crate::infrastructure::substrates::SubstrateRegistry;
 use crate::infrastructure::validators::OutputValidator;
 use crate::services::HookExecutor;
@@ -53,6 +53,7 @@ pub struct PromptChainService {
     substrate_registry: Option<Arc<SubstrateRegistry>>,
     agent_metadata_registry: Option<Arc<Mutex<AgentMetadataRegistry>>>,
     task_queue_service: Option<Arc<dyn TaskQueueService>>,
+    chain_repository: Option<Arc<dyn ChainRepository>>,
     max_retries: u32,
     default_timeout: Duration,
 }
@@ -66,6 +67,7 @@ impl PromptChainService {
             substrate_registry: None,
             agent_metadata_registry: None,
             task_queue_service: None,
+            chain_repository: None,
             max_retries: 3,
             default_timeout: Duration::from_secs(300), // 5 minutes
         }
@@ -79,9 +81,16 @@ impl PromptChainService {
             substrate_registry: None,
             agent_metadata_registry: None,
             task_queue_service: None,
+            chain_repository: None,
             max_retries: 3,
             default_timeout: Duration::from_secs(300),
         }
+    }
+
+    /// Set the chain repository for tracking chain executions
+    pub fn with_chain_repository(mut self, chain_repository: Arc<dyn ChainRepository>) -> Self {
+        self.chain_repository = Some(chain_repository);
+        self
     }
 
     /// Create a service with hook executor
@@ -178,6 +187,190 @@ impl PromptChainService {
 
         task_queue.get_dependent_tasks(task_id).await
     }
+
+    // ==================== Chain Execution Tracking ====================
+
+    /// Get or create a chain execution for a task
+    ///
+    /// If an execution already exists for this task, returns it.
+    /// Otherwise, creates a new execution and persists it.
+    ///
+    /// # Arguments
+    /// * `chain_id` - The chain being executed
+    /// * `task_id` - The task ID (used as execution identifier)
+    ///
+    /// # Returns
+    /// * `Ok(ChainExecution)` - Existing or new execution
+    /// * `Err(_)` - If repository is not configured or operation fails
+    pub async fn get_or_create_execution(
+        &self,
+        chain_id: &str,
+        task_id: &str,
+    ) -> Result<ChainExecution> {
+        let Some(ref repo) = self.chain_repository else {
+            // If no repository, create a transient execution (not persisted)
+            debug!("Chain repository not configured, creating transient execution");
+            return Ok(ChainExecution::new(chain_id.to_string(), task_id.to_string()));
+        };
+
+        // Try to find existing execution for this task
+        let existing_executions = repo.list_executions_for_task(task_id).await
+            .context("Failed to list executions for task")?;
+
+        // Find execution for this specific chain
+        if let Some(execution) = existing_executions.into_iter().find(|e| e.chain_id == chain_id) {
+            info!(
+                execution_id = %execution.id,
+                task_id = %task_id,
+                chain_id = %chain_id,
+                current_step = execution.current_step,
+                completed_steps = execution.step_results.len(),
+                "Found existing chain execution"
+            );
+            return Ok(execution);
+        }
+
+        // Create new execution
+        let execution = ChainExecution::new(chain_id.to_string(), task_id.to_string());
+        repo.insert_execution(&execution).await
+            .context("Failed to insert new chain execution")?;
+
+        info!(
+            execution_id = %execution.id,
+            task_id = %task_id,
+            chain_id = %chain_id,
+            "Created new chain execution"
+        );
+
+        Ok(execution)
+    }
+
+    /// Record completion of a chain step
+    ///
+    /// Updates the execution record with the step result.
+    /// This should be called AFTER saving task.result_data for idempotency.
+    ///
+    /// # Arguments
+    /// * `execution` - The chain execution to update
+    /// * `step_result` - Result of the completed step
+    ///
+    /// # Returns
+    /// * `Ok(ChainExecution)` - Updated execution
+    /// * `Err(_)` - If update fails
+    pub async fn record_step_completion(
+        &self,
+        mut execution: ChainExecution,
+        step_result: StepResult,
+    ) -> Result<ChainExecution> {
+        execution.add_result(step_result);
+
+        let Some(ref repo) = self.chain_repository else {
+            // If no repository, just return updated execution (not persisted)
+            return Ok(execution);
+        };
+
+        repo.update_execution(&execution).await
+            .context("Failed to update chain execution with step result")?;
+
+        info!(
+            execution_id = %execution.id,
+            current_step = execution.current_step,
+            total_results = execution.step_results.len(),
+            "Recorded step completion in chain execution"
+        );
+
+        Ok(execution)
+    }
+
+    /// Mark chain execution as completed
+    ///
+    /// # Arguments
+    /// * `execution` - The chain execution to complete
+    ///
+    /// # Returns
+    /// * `Ok(())` - If update succeeds
+    /// * `Err(_)` - If update fails
+    pub async fn complete_execution(&self, mut execution: ChainExecution) -> Result<()> {
+        execution.complete();
+
+        let Some(ref repo) = self.chain_repository else {
+            return Ok(());
+        };
+
+        repo.update_execution(&execution).await
+            .context("Failed to mark chain execution as completed")?;
+
+        info!(
+            execution_id = %execution.id,
+            total_steps = execution.step_results.len(),
+            "Chain execution completed"
+        );
+
+        Ok(())
+    }
+
+    /// Mark chain execution as failed
+    ///
+    /// # Arguments
+    /// * `execution` - The chain execution to mark failed
+    /// * `error` - Error message
+    ///
+    /// # Returns
+    /// * `Ok(())` - If update succeeds
+    /// * `Err(_)` - If update fails
+    pub async fn fail_execution(&self, mut execution: ChainExecution, error: String) -> Result<()> {
+        execution.fail(error.clone());
+
+        let Some(ref repo) = self.chain_repository else {
+            return Ok(());
+        };
+
+        repo.update_execution(&execution).await
+            .context("Failed to mark chain execution as failed")?;
+
+        warn!(
+            execution_id = %execution.id,
+            error = %error,
+            "Chain execution failed"
+        );
+
+        Ok(())
+    }
+
+    /// Get the last completed step index from an execution
+    ///
+    /// Used to resume chains from the last successful step on retry.
+    ///
+    /// # Arguments
+    /// * `execution` - The chain execution to check
+    ///
+    /// # Returns
+    /// * Index of the last completed step, or 0 if none completed
+    pub fn get_last_completed_step_index(&self, execution: &ChainExecution) -> usize {
+        execution.step_results.len()
+    }
+
+    /// Check if a chain execution can be resumed
+    ///
+    /// Returns true if the execution has completed steps but is not finished.
+    ///
+    /// # Arguments
+    /// * `execution` - The chain execution to check
+    /// * `total_steps` - Total number of steps in the chain
+    pub fn can_resume_execution(&self, execution: &ChainExecution, total_steps: usize) -> bool {
+        !execution.step_results.is_empty()
+            && execution.step_results.len() < total_steps
+            && matches!(execution.status, ChainStatus::Running)
+    }
+
+    /// Get the last step output for resumption
+    ///
+    /// Returns the output from the last completed step, or None if no steps completed.
+    pub fn get_last_step_output<'a>(&self, execution: &'a ChainExecution) -> Option<&'a str> {
+        execution.step_results.last().map(|r| r.output.as_str())
+    }
+
+    // ==================== End Chain Execution Tracking ====================
 
     /// Execute a single step of a prompt chain
     ///
@@ -1079,8 +1272,11 @@ impl PromptChainService {
     /// This function now:
     /// - Uses comprehensive idempotency keys including chain_id, step_id, step_index
     /// - Uses content-based keys for individual tasks (not array indices)
-    /// - Uses atomic insert to prevent race condition duplicates
+    /// - Uses TRANSACTIONAL batch insert to ensure atomicity
     /// - Returns error if task spawning fails (making failures fatal)
+    ///
+    /// IMPORTANT: All tasks are inserted in a single transaction to prevent partial
+    /// state if the process crashes midway. Either all tasks are inserted, or none.
     async fn spawn_tasks_from_output(
         &self,
         result: &StepResult,
@@ -1089,8 +1285,6 @@ impl PromptChainService {
         step_id: &str,
         step_index: usize,
     ) -> Result<()> {
-        use crate::domain::ports::task_repository::IdempotentInsertResult;
-
         let Some(ref task_queue) = self.task_queue_service else {
             warn!("Task queue service not configured, cannot spawn tasks");
             return Ok(());
@@ -1142,82 +1336,63 @@ impl PromptChainService {
 
         info!(
             task_count = tasks_array.len(),
-            "Parsing {} tasks from step output",
+            "Parsing {} tasks from step output for transactional insert",
             tasks_array.len()
         );
 
-        let mut spawned_count = 0;
-        let mut skipped_count = 0;
-        let mut failed_count = 0;
-        let mut errors: Vec<String> = Vec::new();
+        // PHASE 1: Build all Task objects with content-based idempotency keys
+        let mut tasks_to_insert = Vec::with_capacity(tasks_array.len());
 
-        // Parse and enqueue each task using content-based idempotency keys
         for (idx, task_def) in tasks_array.iter().enumerate() {
             // Use content-based idempotency key (not array index!)
             let task_idempotency_key = Self::generate_task_idempotency_key(&idempotency_key, task_def);
 
-            match self.parse_and_enqueue_task_idempotent(
-                task_def,
-                parent_task,
-                task_queue.as_ref(),
-                &task_idempotency_key,
-            ).await {
-                Ok(IdempotentInsertResult::Inserted(task_id)) => {
-                    info!(
+            match self.build_task_from_def(task_def, parent_task, &task_idempotency_key) {
+                Ok(task) => {
+                    debug!(
                         index = idx,
-                        task_id = %task_id,
+                        task_id = %task.id,
                         idempotency_key = %task_idempotency_key,
-                        "Successfully enqueued task"
+                        "Built task for batch insert"
                     );
-                    spawned_count += 1;
-                }
-                Ok(IdempotentInsertResult::AlreadyExists) => {
-                    info!(
-                        index = idx,
-                        idempotency_key = %task_idempotency_key,
-                        "Task already exists (idempotency check passed), skipping"
-                    );
-                    skipped_count += 1;
+                    tasks_to_insert.push(task);
                 }
                 Err(e) => {
+                    // Fail fast on build errors - these are validation issues
                     let error_msg = format!(
-                        "Task {} (summary: {:?}) failed: {}",
+                        "Failed to build task {} (summary: {:?}): {}",
                         idx,
                         task_def.get("summary").and_then(|v| v.as_str()),
                         e
                     );
-                    error!(
-                        index = idx,
-                        error = ?e,
-                        idempotency_key = %task_idempotency_key,
-                        "Failed to enqueue task"
-                    );
-                    errors.push(error_msg);
-                    failed_count += 1;
+                    error!("{}", error_msg);
+                    anyhow::bail!("{}", error_msg);
                 }
             }
         }
 
+        // PHASE 2: Insert all tasks transactionally
         info!(
-            spawned = spawned_count,
-            skipped = skipped_count,
-            failed = failed_count,
-            total = tasks_array.len(),
-            "Task spawning complete"
+            task_count = tasks_to_insert.len(),
+            "Inserting {} tasks transactionally",
+            tasks_to_insert.len()
         );
 
-        // CRITICAL: Make task spawning failures fatal to prevent hung workflows
-        // This ensures parent tasks don't complete successfully when child tasks fail to spawn
-        if failed_count > 0 {
-            let error_summary = format!(
-                "Failed to spawn {} out of {} tasks. Errors: {}",
-                failed_count,
+        let result = task_queue
+            .submit_tasks_transactional(tasks_to_insert)
+            .await
+            .with_context(|| format!(
+                "Transactional batch insert failed for {} tasks from step {}",
                 tasks_array.len(),
-                errors.join("; ")
-            );
-            error!("{}", error_summary);
-            anyhow::bail!("{}", error_summary);
-        }
+                step_id
+            ))?;
+
+        info!(
+            inserted = result.inserted.len(),
+            already_existed = result.already_existed.len(),
+            total = result.total(),
+            "Transactional task spawning complete"
+        );
 
         Ok(())
     }
@@ -1226,6 +1401,10 @@ impl PromptChainService {
     ///
     /// This method uses the atomic `submit_task_idempotent` to prevent race conditions
     /// when multiple concurrent executions try to spawn the same task.
+    ///
+    /// NOTE: This method is currently unused since spawn_tasks_from_output now uses
+    /// transactional batch insert. Kept for potential future single-task insert needs.
+    #[allow(dead_code)]
     async fn parse_and_enqueue_task_idempotent(
         &self,
         task_def: &serde_json::Value,
@@ -1407,6 +1586,7 @@ impl PromptChainService {
             chain_id: None,
             chain_step_index: 0,
             idempotency_key: Some(idempotency_key.to_string()),
+            version: 1,
         })
     }
 

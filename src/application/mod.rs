@@ -25,6 +25,6 @@ pub use branch_completion_detector::BranchCompletionDetector;
 pub use loop_executor::{ConvergenceStrategy, LoopExecutor, LoopState};
 pub use resource_monitor::{ResourceEvent, ResourceLimits, ResourceMonitor, ResourceStatus};
 pub use swarm_orchestrator::{SwarmOrchestrator, SwarmState, SwarmStats};
-pub use task_coordinator::{TaskCoordinator, TaskStatusUpdate};
+pub use task_coordinator::{TaskCoordinator, TaskCompletionError, TaskCompletionResult, TaskStatusUpdate};
 pub use validation::{validate_contract, validate_task_completion, ValidationResult};
 pub use workflow_verifier::{remediate_orphaned_workflow, WorkflowHealthMonitor};

@@ -116,6 +116,9 @@ impl TaskRepositoryImpl {
                 .get::<Option<i64>, _>("chain_step_index")
                 .unwrap_or(0) as usize,
             idempotency_key: row.get("idempotency_key"),
+            version: row
+                .get::<Option<i64>, _>("version")
+                .unwrap_or(1) as u32,
         })
     }
 }
@@ -172,9 +175,9 @@ impl TaskRepository for TaskRepositoryImpl {
                 worktree_path, validation_requirement, validation_task_id,
                 validating_task_id, remediation_count, is_remediation,
                 workflow_state, workflow_expectations, chain_id, chain_step_index,
-                idempotency_key
+                idempotency_key, version
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             id,
             task.summary,
@@ -214,7 +217,8 @@ impl TaskRepository for TaskRepositoryImpl {
             workflow_expectations,
             task.chain_id,
             chain_step_index,
-            task.idempotency_key
+            task.idempotency_key,
+            task.version
         )
         .execute(&self.pool)
         .await?;
@@ -257,7 +261,7 @@ impl TaskRepository for TaskRepositoryImpl {
             .and_then(|v| serde_json::to_string(v).ok());
         let started_at = task.started_at.as_ref().map(|dt| dt.to_rfc3339());
         let completed_at = task.completed_at.as_ref().map(|dt| dt.to_rfc3339());
-        let last_updated_at = task.last_updated_at.to_rfc3339();
+        let last_updated_at = Utc::now().to_rfc3339(); // Always update timestamp
         let parent_task_id = task.parent_task_id.as_ref().map(|id| id.to_string());
         let session_id = task.session_id.as_ref().map(|id| id.to_string());
         let source = task.source.to_string();
@@ -274,7 +278,12 @@ impl TaskRepository for TaskRepositoryImpl {
             .as_ref()
             .and_then(|e| serde_json::to_string(e).ok());
 
-        sqlx::query!(
+        // New version is current version + 1
+        let new_version = task.version + 1;
+
+        // Optimistic locking: only update if version matches
+        // This prevents lost updates when multiple processes modify the same task
+        let result = sqlx::query!(
             r#"
             UPDATE tasks SET
                 summary = ?,
@@ -312,8 +321,9 @@ impl TaskRepository for TaskRepositoryImpl {
                 workflow_state = ?,
                 workflow_expectations = ?,
                 chain_id = ?,
-                idempotency_key = ?
-            WHERE id = ?
+                idempotency_key = ?,
+                version = ?
+            WHERE id = ? AND version = ?
             "#,
             task.summary,
             task.description,
@@ -351,10 +361,20 @@ impl TaskRepository for TaskRepositoryImpl {
             workflow_expectations,
             task.chain_id,
             task.idempotency_key,
-            id
+            new_version,
+            id,
+            task.version
         )
         .execute(&self.pool)
         .await?;
+
+        // Check if any row was updated
+        if result.rows_affected() == 0 {
+            return Err(DatabaseError::OptimisticLockConflict {
+                task_id: task.id,
+                expected_version: task.version,
+            });
+        }
 
         Ok(())
     }
@@ -880,6 +900,164 @@ impl TaskRepository for TaskRepositoryImpl {
             );
             Ok(IdempotentInsertResult::Inserted(task.id))
         }
+    }
+
+    /// Transactional batch insert of multiple tasks.
+    ///
+    /// Uses SQLite transaction to ensure all tasks are inserted atomically.
+    /// If any insert fails (not due to idempotency), the entire transaction
+    /// is rolled back.
+    async fn insert_tasks_transactional(
+        &self,
+        tasks: &[Task],
+    ) -> Result<crate::domain::ports::task_repository::BatchInsertResult, DatabaseError> {
+        use crate::domain::ports::task_repository::BatchInsertResult;
+
+        if tasks.is_empty() {
+            return Ok(BatchInsertResult::new());
+        }
+
+        info!(
+            task_count = tasks.len(),
+            "Starting transactional batch insert of tasks"
+        );
+
+        // Start transaction
+        let mut tx = self.pool.begin().await?;
+        let mut result = BatchInsertResult::new();
+
+        for task in tasks {
+            // Prepare all the fields for this task
+            let id = task.id.to_string();
+            let status = task.status.to_string();
+            let dependency_type = task.dependency_type.to_string();
+            let dependencies = task
+                .dependencies
+                .as_ref()
+                .and_then(|d| serde_json::to_string(d).ok());
+            let input_data = task
+                .input_data
+                .as_ref()
+                .and_then(|v| serde_json::to_string(v).ok());
+            let result_data = task
+                .result_data
+                .as_ref()
+                .and_then(|v| serde_json::to_string(v).ok());
+            let submitted_at = task.submitted_at.to_rfc3339();
+            let started_at = task.started_at.as_ref().map(|dt| dt.to_rfc3339());
+            let completed_at = task.completed_at.as_ref().map(|dt| dt.to_rfc3339());
+            let last_updated_at = task.last_updated_at.to_rfc3339();
+            let parent_task_id = task.parent_task_id.as_ref().map(|id| id.to_string());
+            let session_id = task.session_id.as_ref().map(|id| id.to_string());
+            let source = task.source.to_string();
+            let deadline = task.deadline.as_ref().map(|dt| dt.to_rfc3339());
+            let validation_requirement = serde_json::to_string(&task.validation_requirement).ok();
+            let validation_task_id = task.validation_task_id.as_ref().map(|id| id.to_string());
+            let validating_task_id = task.validating_task_id.as_ref().map(|id| id.to_string());
+            let workflow_state = task.workflow_state
+                .as_ref()
+                .and_then(|s| serde_json::to_string(s).ok());
+            let workflow_expectations = task.workflow_expectations
+                .as_ref()
+                .and_then(|e| serde_json::to_string(e).ok());
+            let chain_step_index = task.chain_step_index as i64;
+            let idempotency_key = task.idempotency_key.clone().unwrap_or_else(|| {
+                format!(
+                    "auto:{}:{}:{}",
+                    task.summary,
+                    task.agent_type,
+                    task.parent_task_id.map(|id| id.to_string()).unwrap_or_default()
+                )
+            });
+
+            // Use INSERT OR IGNORE for idempotency within the transaction
+            let insert_result = sqlx::query(
+                r#"
+                INSERT OR IGNORE INTO tasks (
+                    id, summary, description, agent_type, priority, calculated_priority,
+                    status, dependencies, dependency_type, dependency_depth,
+                    input_data, result_data, error_message, retry_count, max_retries,
+                    max_execution_timeout_seconds, submitted_at, started_at, completed_at,
+                    last_updated_at, created_by, parent_task_id, session_id, source,
+                    deadline, estimated_duration_seconds, branch, feature_branch,
+                    worktree_path, validation_requirement, validation_task_id,
+                    validating_task_id, remediation_count, is_remediation,
+                    workflow_state, workflow_expectations, chain_id, chain_step_index,
+                    idempotency_key, version
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(&id)
+            .bind(&task.summary)
+            .bind(&task.description)
+            .bind(&task.agent_type)
+            .bind(task.priority)
+            .bind(task.calculated_priority)
+            .bind(&status)
+            .bind(&dependencies)
+            .bind(&dependency_type)
+            .bind(task.dependency_depth)
+            .bind(&input_data)
+            .bind(&result_data)
+            .bind(&task.error_message)
+            .bind(task.retry_count)
+            .bind(task.max_retries)
+            .bind(task.max_execution_timeout_seconds)
+            .bind(&submitted_at)
+            .bind(&started_at)
+            .bind(&completed_at)
+            .bind(&last_updated_at)
+            .bind(&task.created_by)
+            .bind(&parent_task_id)
+            .bind(&session_id)
+            .bind(&source)
+            .bind(&deadline)
+            .bind(task.estimated_duration_seconds)
+            .bind(&task.branch)
+            .bind(&task.feature_branch)
+            .bind(&task.worktree_path)
+            .bind(&validation_requirement)
+            .bind(&validation_task_id)
+            .bind(&validating_task_id)
+            .bind(task.remediation_count)
+            .bind(task.is_remediation)
+            .bind(&workflow_state)
+            .bind(&workflow_expectations)
+            .bind(&task.chain_id)
+            .bind(chain_step_index)
+            .bind(&idempotency_key)
+            .bind(task.version)
+            .execute(&mut *tx)
+            .await?;
+
+            if insert_result.rows_affected() == 0 {
+                // Task already exists
+                debug!(
+                    idempotency_key = %idempotency_key,
+                    "Task already exists in transaction, skipping"
+                );
+                result.already_existed.push(idempotency_key);
+            } else {
+                debug!(
+                    task_id = %task.id,
+                    idempotency_key = %idempotency_key,
+                    "Task inserted in transaction"
+                );
+                result.inserted.push(task.id);
+            }
+        }
+
+        // Commit the transaction
+        tx.commit().await?;
+
+        info!(
+            inserted = result.inserted.len(),
+            already_existed = result.already_existed.len(),
+            "Transactional batch insert completed successfully"
+        );
+
+        Ok(result)
     }
 }
 

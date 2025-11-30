@@ -1,5 +1,5 @@
 use crate::domain::models::task::{Task, TaskStatus};
-use crate::domain::ports::task_repository::IdempotentInsertResult;
+use crate::domain::ports::task_repository::{BatchInsertResult, IdempotentInsertResult};
 use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -218,6 +218,27 @@ pub trait TaskQueueService: Send + Sync {
     /// * `Ok(IdempotentInsertResult::AlreadyExists)` - Task with same idempotency key exists
     /// * `Err` - If database error (not including unique violations)
     async fn submit_task_idempotent(&self, task: Task) -> Result<IdempotentInsertResult>;
+
+    /// Atomically submit multiple tasks in a single transaction
+    ///
+    /// This method performs a transactional batch insert that:
+    /// 1. Opens a database transaction
+    /// 2. Attempts to insert all tasks (using idempotent insert for each)
+    /// 3. If any non-duplicate insert fails, rolls back the entire transaction
+    /// 4. Returns results indicating which tasks were inserted vs already existed
+    ///
+    /// This is critical for chain step task spawning where all spawned tasks
+    /// must be inserted atomically to prevent partial state on crash/retry.
+    ///
+    /// # Arguments
+    ///
+    /// * `tasks` - The tasks to submit
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(BatchInsertResult)` - All tasks processed successfully (inserted or already existed)
+    /// * `Err` - Transaction failed and was rolled back
+    async fn submit_tasks_transactional(&self, tasks: Vec<Task>) -> Result<BatchInsertResult>;
 
     /// Resolve dependencies for tasks that depend on a specific completed task
     ///
