@@ -580,10 +580,12 @@ impl SwarmOrchestrator {
                     // Check for stuck chain handoffs periodically
                     _ = chain_handoff_check_interval.tick() => {
                         let handoff_timeout_secs = config.recovery.chain_handoff_timeout_secs;
+                        let handoff_max_attempts = config.recovery.chain_handoff_max_attempts;
                         if let Err(e) = Self::recover_stuck_chain_handoffs(
                             Arc::clone(&task_coordinator),
                             Arc::clone(&agent_executor),
                             handoff_timeout_secs,
+                            handoff_max_attempts,
                         ).await {
                             error!(error = ?e, "Failed to recover stuck chain handoffs");
                         }
@@ -921,10 +923,14 @@ impl SwarmOrchestrator {
     /// This prevents chains from hanging silently when:
     /// - The next step enqueue failed due to transient errors
     /// - The process crashed after saving handoff state but before enqueue
+    ///
+    /// After `max_attempts` failures, the handoff is marked as unrecoverable and
+    /// cleared to prevent infinite retry loops.
     async fn recover_stuck_chain_handoffs(
         task_coordinator: Arc<TaskCoordinator>,
         agent_executor: Arc<AgentExecutor>,
         timeout_secs: u64,
+        max_attempts: u32,
     ) -> Result<()> {
         // Get completed tasks that have chain_handoff_state set
         // These are tasks where the step completed but next step wasn't enqueued
@@ -965,6 +971,39 @@ impl SwarmOrchestrator {
         for mut task in stuck_handoffs {
             let handoff_state = task.chain_handoff_state.clone().expect("checked above");
 
+            // Check if we've exceeded max attempts
+            if handoff_state.enqueue_attempts >= max_attempts {
+                error!(
+                    task_id = %task.id,
+                    chain_id = %handoff_state.chain_id,
+                    step_index = handoff_state.pending_next_step_index,
+                    attempts = handoff_state.enqueue_attempts,
+                    max_attempts = max_attempts,
+                    last_error = ?handoff_state.last_error,
+                    "Chain handoff exceeded max recovery attempts, marking as unrecoverable"
+                );
+
+                // Clear the handoff state and log the failure
+                // The chain is now permanently stuck at this step, but the task is marked
+                // complete so dependent tasks can still be analyzed
+                task.chain_handoff_state = None;
+                task.error_message = Some(format!(
+                    "Chain handoff to step {} failed after {} attempts. Last error: {}",
+                    handoff_state.pending_next_step_index,
+                    handoff_state.enqueue_attempts,
+                    handoff_state.last_error.as_deref().unwrap_or("unknown")
+                ));
+
+                if let Err(e) = task_coordinator.update_task(&task).await {
+                    warn!(
+                        task_id = %task.id,
+                        error = ?e,
+                        "Failed to mark chain handoff as unrecoverable"
+                    );
+                }
+                continue;
+            }
+
             // Attempt to retry the handoff
             match agent_executor
                 .retry_chain_handoff(&task, &handoff_state)
@@ -994,6 +1033,7 @@ impl SwarmOrchestrator {
                         step_index = handoff_state.pending_next_step_index,
                         error = ?e,
                         attempt = handoff_state.enqueue_attempts + 1,
+                        max_attempts = max_attempts,
                         "Failed to recover stuck chain handoff, will retry later"
                     );
                     // Update the handoff state with the error and increment attempts
@@ -1155,6 +1195,10 @@ mod tests {
             Ok(false) // Mock returns no existing tasks
         }
 
+        async fn get_task_by_idempotency_key(&self, _idempotency_key: &str) -> Result<Option<Task>> {
+            Ok(None) // Mock returns no existing tasks
+        }
+
         async fn submit_task_idempotent(&self, task: Task) -> Result<crate::domain::ports::task_repository::IdempotentInsertResult> {
             use crate::domain::ports::task_repository::IdempotentInsertResult;
             let task_id = task.id;
@@ -1237,6 +1281,7 @@ mod tests {
             workflow_expectations: None,
             chain_id: None,
             chain_step_index: 0,
+            chain_handoff_state: None,
             idempotency_key: None,
             version: 1,
         }

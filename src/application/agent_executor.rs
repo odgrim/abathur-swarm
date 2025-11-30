@@ -700,7 +700,7 @@ impl AgentExecutor {
             }
             IdempotentInsertResult::AlreadyExists => {
                 // Task already exists - this is expected during retries
-                // We need to find the existing task to return its ID
+                // Use direct idempotency key lookup instead of scanning dependent tasks
                 info!(
                     chain_id = %chain.id,
                     step_index = next_step_index,
@@ -709,30 +709,39 @@ impl AgentExecutor {
                     "Next chain step already exists (idempotent insert detected duplicate)"
                 );
 
-                // Query for the existing task by looking at dependents
-                let dependent_tasks = self
-                    .chain_service
-                    .get_dependent_tasks(current_task.id)
-                    .await
-                    .unwrap_or_default();
-
-                let existing = dependent_tasks.iter().find(|t| {
-                    t.chain_id.as_ref() == current_task.chain_id.as_ref()
-                        && t.chain_step_index == next_step_index
-                });
-
-                if let Some(existing_task) = existing {
-                    Ok(existing_task.id)
-                } else {
-                    // Very rare edge case: task exists by idempotency key but we can't find it
-                    // This could happen if the task was cancelled or has a different parent
-                    warn!(
-                        idempotency_key = %idempotency_key,
-                        "Task exists by idempotency key but not found in dependent tasks"
-                    );
-                    Err(anyhow::anyhow!(
-                        "Duplicate task detected but could not retrieve existing task ID"
-                    ))
+                // Query for the existing task directly by idempotency key
+                // This is O(1) vs O(n) for scanning dependents, and more reliable
+                match self.chain_service.get_task_by_idempotency_key(&idempotency_key).await {
+                    Ok(Some(existing_task)) => {
+                        info!(
+                            existing_task_id = %existing_task.id,
+                            idempotency_key = %idempotency_key,
+                            "Found existing task by idempotency key"
+                        );
+                        Ok(existing_task.id)
+                    }
+                    Ok(None) => {
+                        // Very rare edge case: task exists by database constraint but query returned None
+                        // This could happen due to concurrent deletion or replication lag
+                        warn!(
+                            idempotency_key = %idempotency_key,
+                            "Task exists by idempotency key constraint but not found in query"
+                        );
+                        Err(anyhow::anyhow!(
+                            "Duplicate task detected but could not retrieve existing task ID"
+                        ))
+                    }
+                    Err(e) => {
+                        // Database error during lookup - propagate for proper error handling
+                        warn!(
+                            idempotency_key = %idempotency_key,
+                            error = ?e,
+                            "Failed to look up existing task by idempotency key"
+                        );
+                        Err(anyhow::anyhow!(
+                            "Failed to retrieve existing task: {}", e
+                        ))
+                    }
                 }
             }
         }
@@ -1386,10 +1395,14 @@ impl AgentExecutor {
         }
 
         // Get the step output from the handoff state or from the task's result_data
+        // Note: result_data is stored as JSON with structure {"output": "...", "step_id": "...", ...}
+        // We need to extract just the "output" field, not the whole serialized JSON
         let previous_output = handoff_state.step_output.clone().unwrap_or_else(|| {
             task.result_data
                 .as_ref()
-                .map(|v| v.to_string())
+                .and_then(|v| v.get("output"))
+                .and_then(|o| o.as_str())
+                .map(|s| s.to_string())
                 .unwrap_or_else(|| "{}".to_string())
         });
 

@@ -188,6 +188,18 @@ impl PromptChainService {
         task_queue.get_dependent_tasks(task_id).await
     }
 
+    /// Get a task by its idempotency key (wrapper for AgentExecutor to use)
+    ///
+    /// This provides a direct O(1) lookup for finding existing tasks by their
+    /// idempotency key, which is more reliable than scanning dependent tasks.
+    pub async fn get_task_by_idempotency_key(&self, idempotency_key: &str) -> Result<Option<Task>> {
+        let Some(ref task_queue) = self.task_queue_service else {
+            anyhow::bail!("Task queue service not configured");
+        };
+
+        task_queue.get_task_by_idempotency_key(idempotency_key).await
+    }
+
     // ==================== Chain Execution Tracking ====================
 
     /// Get or create a chain execution for a task

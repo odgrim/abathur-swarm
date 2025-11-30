@@ -755,36 +755,37 @@ impl TaskRepository for TaskRepositoryImpl {
         Ok(count > 0)
     }
 
+    async fn get_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<Task>, DatabaseError> {
+        let row = sqlx::query(
+            r#"
+            SELECT * FROM tasks WHERE idempotency_key = ?
+            "#,
+        )
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(r) => Ok(Some(self.row_to_task(&r)?)),
+            None => Ok(None),
+        }
+    }
+
     async fn insert_task_idempotent(
         &self,
         task: &Task,
     ) -> Result<IdempotentInsertResult, DatabaseError> {
-        // Auto-generate idempotency key if not provided
-        // This ensures ALL tasks go through the idempotent path
+        use crate::domain::ports::task_repository::generate_auto_idempotency_key;
+
+        // Auto-generate idempotency key if not provided using the unified function
+        // This ensures ALL tasks go through the idempotent path with consistent keys
         let idempotency_key = match &task.idempotency_key {
             Some(key) => key.clone(),
             None => {
-                // Generate content-based idempotency key
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-
-                let mut hasher = DefaultHasher::new();
-                task.summary.hash(&mut hasher);
-                task.agent_type.hash(&mut hasher);
-                // Include first 200 chars of description for uniqueness
-                task.description[..task.description.len().min(200)].hash(&mut hasher);
-                // Include parent task id for uniqueness within chains
-                if let Some(parent_id) = &task.parent_task_id {
-                    parent_id.to_string().hash(&mut hasher);
-                }
-                let content_hash = hasher.finish();
-
-                let generated_key = format!(
-                    "auto:{}:{}:{:x}",
-                    task.agent_type,
-                    task.parent_task_id.map(|id| id.to_string()).unwrap_or_else(|| "root".to_string()),
-                    content_hash
-                );
+                let generated_key = generate_auto_idempotency_key(task);
 
                 info!(
                     task_id = %task.id,
@@ -928,7 +929,7 @@ impl TaskRepository for TaskRepositoryImpl {
         &self,
         tasks: &[Task],
     ) -> Result<crate::domain::ports::task_repository::BatchInsertResult, DatabaseError> {
-        use crate::domain::ports::task_repository::BatchInsertResult;
+        use crate::domain::ports::task_repository::{BatchInsertResult, generate_auto_idempotency_key};
 
         if tasks.is_empty() {
             return Ok(BatchInsertResult::new());
@@ -981,13 +982,9 @@ impl TaskRepository for TaskRepositoryImpl {
             let chain_handoff_state = task.chain_handoff_state
                 .as_ref()
                 .and_then(|s| serde_json::to_string(s).ok());
+            // Use the unified idempotency key generation function
             let idempotency_key = task.idempotency_key.clone().unwrap_or_else(|| {
-                format!(
-                    "auto:{}:{}:{}",
-                    task.summary,
-                    task.agent_type,
-                    task.parent_task_id.map(|id| id.to_string()).unwrap_or_default()
-                )
+                generate_auto_idempotency_key(task)
             });
 
             // Use INSERT OR IGNORE for idempotency within the transaction

@@ -1320,6 +1320,10 @@ mod tests {
             Ok(false) // Mock returns no existing tasks
         }
 
+        async fn get_task_by_idempotency_key(&self, _idempotency_key: &str) -> Result<Option<Task>> {
+            Ok(None) // Mock returns no existing tasks
+        }
+
         async fn submit_task_idempotent(&self, task: Task) -> Result<crate::domain::ports::task_repository::IdempotentInsertResult> {
             use crate::domain::ports::task_repository::IdempotentInsertResult;
             let task_id = task.id;
@@ -1406,6 +1410,7 @@ mod tests {
             workflow_expectations: None,
             chain_id: None,
             chain_step_index: 0,
+            chain_handoff_state: None,
             idempotency_key: None,
             version: 1,
         }

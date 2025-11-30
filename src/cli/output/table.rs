@@ -466,6 +466,7 @@ mod tests {
             workflow_expectations: None,
             chain_id: None,
             chain_step_index: 0,
+            chain_handoff_state: None,
             idempotency_key: None,
             version: 1,
         };

@@ -480,18 +480,18 @@ mod tests {
             .expect("failed to get memory");
         assert!(result.is_none());
 
-        // Verify row still exists in database
-        let row = sqlx::query!(
+        // Verify row still exists in database (using runtime query to avoid sqlx cache issues)
+        let row: Option<(i32,)> = sqlx::query_as(
             "SELECT is_deleted FROM memories WHERE namespace = ? AND key = ?",
-            "test:ns",
-            "key"
         )
+        .bind("test:ns")
+        .bind("key")
         .fetch_optional(&pool)
         .await
         .expect("failed to query");
 
         assert!(row.is_some());
-        assert_eq!(row.unwrap().is_deleted, 1);
+        assert_eq!(row.unwrap().0, 1);
 
         pool.close().await;
     }

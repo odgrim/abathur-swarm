@@ -233,6 +233,7 @@ logging:
             mcp_servers: vec![],
             substrates: SubstratesConfig::default(),
             rag: RagConfig::default(),
+            recovery: crate::domain::models::config::RecoveryConfig::default(),
         };
         assert!(ConfigLoader::validate(&config).is_ok());
     }

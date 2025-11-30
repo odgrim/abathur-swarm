@@ -113,6 +113,83 @@ impl TaskQueueService {
         Ok(count)
     }
 
+    /// Update a task with automatic retry on optimistic lock conflicts.
+    ///
+    /// This method handles the common case where a task may be modified by concurrent
+    /// processes. On lock conflict, it re-reads the task, applies the update function
+    /// to get fresh changes, and retries.
+    ///
+    /// # Arguments
+    /// * `task_id` - The task ID to update
+    /// * `update_fn` - A function that takes a mutable task reference and applies changes
+    /// * `max_retries` - Maximum number of retry attempts (default: 3)
+    ///
+    /// # Returns
+    /// * `Ok(Task)` - The successfully updated task
+    /// * `Err(_)` - If update fails after all retries or for non-retryable errors
+    ///
+    /// # Example
+    /// ```ignore
+    /// service.update_task_with_retry(
+    ///     task_id,
+    ///     |task| {
+    ///         task.status = TaskStatus::Running;
+    ///         task.started_at = Some(Utc::now());
+    ///     },
+    ///     3,
+    /// ).await?;
+    /// ```
+    pub async fn update_task_with_retry<F>(
+        &self,
+        task_id: Uuid,
+        update_fn: F,
+        max_retries: u32,
+    ) -> Result<Task>
+    where
+        F: Fn(&mut Task) + Send + Sync,
+    {
+        use crate::infrastructure::database::DatabaseError;
+
+        let mut attempts = 0;
+        loop {
+            // Fetch the latest version of the task
+            let mut task = self.repo.get(task_id).await?
+                .ok_or_else(|| anyhow::anyhow!("Task {} not found", task_id))?;
+
+            // Apply the update function
+            update_fn(&mut task);
+
+            // Try to update
+            match self.repo.update(&task).await {
+                Ok(()) => return Ok(task),
+                Err(DatabaseError::OptimisticLockConflict { task_id, expected_version }) => {
+                    attempts += 1;
+                    if attempts >= max_retries {
+                        return Err(anyhow::anyhow!(
+                            "Failed to update task {} after {} retries due to concurrent modifications (expected version {})",
+                            task_id,
+                            max_retries,
+                            expected_version
+                        ));
+                    }
+                    warn!(
+                        task_id = %task_id,
+                        attempt = attempts,
+                        max_retries = max_retries,
+                        expected_version = expected_version,
+                        "Optimistic lock conflict, retrying update"
+                    );
+                    // Small delay before retry to reduce contention
+                    tokio::time::sleep(std::time::Duration::from_millis(10 * attempts as u64)).await;
+                }
+                Err(e) => {
+                    // Non-retryable error
+                    return Err(e.into());
+                }
+            }
+        }
+    }
+
     /// Submit a new task to the queue
     ///
     /// # Steps:
@@ -938,6 +1015,13 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
             .context("Failed to check if task exists by idempotency key")
     }
 
+    async fn get_task_by_idempotency_key(&self, idempotency_key: &str) -> Result<Option<Task>> {
+        self.repo
+            .get_by_idempotency_key(idempotency_key)
+            .await
+            .context("Failed to get task by idempotency key")
+    }
+
     async fn submit_task_idempotent(&self, mut task: Task) -> Result<crate::domain::ports::task_repository::IdempotentInsertResult> {
         use crate::domain::ports::task_repository::IdempotentInsertResult;
 
@@ -1118,6 +1202,7 @@ mod tests {
             async fn claim_next_ready_task(&self) -> Result<Option<Task>, DatabaseError>;
             async fn get_stale_running_tasks(&self, stale_threshold_secs: u64) -> Result<Vec<Task>, DatabaseError>;
             async fn task_exists_by_idempotency_key(&self, idempotency_key: &str) -> Result<bool, DatabaseError>;
+            async fn get_by_idempotency_key(&self, idempotency_key: &str) -> Result<Option<Task>, DatabaseError>;
             async fn insert_task_idempotent(&self, task: &Task) -> Result<IdempotentInsertResult, DatabaseError>;
             async fn insert_tasks_transactional(&self, tasks: &[Task]) -> Result<crate::domain::ports::task_repository::BatchInsertResult, DatabaseError>;
         }

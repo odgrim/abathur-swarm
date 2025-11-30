@@ -202,6 +202,22 @@ pub trait TaskQueueService: Send + Sync {
     /// * `Err` - If database error
     async fn task_exists_by_idempotency_key(&self, idempotency_key: &str) -> Result<bool>;
 
+    /// Get a task by its idempotency key
+    ///
+    /// Used to retrieve an existing task when a duplicate insert is detected.
+    /// This is more efficient than scanning dependent tasks to find duplicates.
+    ///
+    /// # Arguments
+    ///
+    /// * `idempotency_key` - The unique idempotency key to look up
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(Task))` - The task with this idempotency key
+    /// * `Ok(None)` - No task with this idempotency key exists
+    /// * `Err` - If database error
+    async fn get_task_by_idempotency_key(&self, idempotency_key: &str) -> Result<Option<Task>>;
+
     /// Atomically submit a task if no task with the same idempotency key exists
     ///
     /// This method performs an atomic insert operation that prevents race conditions

@@ -61,6 +61,11 @@ pub struct RecoveryConfig {
     /// Time in seconds after which a pending chain handoff is considered stuck (default: 60)
     #[serde(default = "default_chain_handoff_timeout")]
     pub chain_handoff_timeout_secs: u64,
+
+    /// Maximum number of attempts to recover a stuck chain handoff (default: 10)
+    /// After this many attempts, the handoff is marked as unrecoverable and the chain fails
+    #[serde(default = "default_chain_handoff_max_attempts")]
+    pub chain_handoff_max_attempts: u32,
 }
 
 const fn default_blocked_task_interval() -> u64 {
@@ -79,6 +84,10 @@ const fn default_chain_handoff_timeout() -> u64 {
     60
 }
 
+const fn default_chain_handoff_max_attempts() -> u32 {
+    10
+}
+
 impl Default for RecoveryConfig {
     fn default() -> Self {
         Self {
@@ -86,6 +95,7 @@ impl Default for RecoveryConfig {
             stale_task_check_interval_secs: default_stale_task_interval(),
             chain_handoff_check_interval_secs: default_chain_handoff_interval(),
             chain_handoff_timeout_secs: default_chain_handoff_timeout(),
+            chain_handoff_max_attempts: default_chain_handoff_max_attempts(),
         }
     }
 }
