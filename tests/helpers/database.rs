@@ -1,19 +1,20 @@
+use abathur_cli::infrastructure::database::DatabaseConnection;
 use sqlx::SqlitePool;
 
-/// Create an in-memory `SQLite` database for testing
+/// Create an in-memory `SQLite` database for testing with vec0 extension loaded
 #[allow(dead_code)]
 pub async fn setup_test_db() -> SqlitePool {
-    let pool = SqlitePool::connect("sqlite::memory:")
+    let db_conn = DatabaseConnection::new("sqlite::memory:")
         .await
         .expect("failed to create test database");
 
     // Run migrations
-    sqlx::migrate!("./migrations")
-        .run(&pool)
+    db_conn
+        .migrate()
         .await
         .expect("failed to run migrations");
 
-    pool
+    db_conn.pool().clone()
 }
 
 /// Teardown test database

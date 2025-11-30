@@ -10,6 +10,7 @@ steps:
 
       Output the requirements analysis in JSON format:
       {
+        "feature_name": "Short kebab-case name for this feature (e.g., user-authentication, payment-integration, api-rate-limiting)",
         "problem_statement": "Clear description of the problem to solve",
         "functional_requirements": [
           {"id": "FR-1", "description": "...", "priority": "must|should|could"}
@@ -29,6 +30,9 @@ steps:
       schema:
         type: object
         properties:
+          feature_name:
+            type: string
+            description: "Short kebab-case name for the feature (used for branch naming)"
           problem_statement:
             type: string
           functional_requirements:
@@ -59,6 +63,7 @@ steps:
           dependencies:
             type: array
         required:
+          - feature_name
           - problem_statement
           - functional_requirements
           - success_criteria

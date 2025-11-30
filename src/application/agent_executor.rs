@@ -323,8 +323,20 @@ impl AgentExecutor {
                 "task_id": task.id.to_string(),
                 "task_description": task.description,
                 "task_summary": task.summary,
+                // Store original task context for the entire chain
+                // These are used for branch naming and task summaries
+                "original_task_summary": task.summary,
+                "original_task_description": task.description,
             })
         });
+
+        // Ensure original task context is preserved (in case it wasn't in initial input)
+        if step_input.get("original_task_summary").is_none() {
+            step_input["original_task_summary"] = serde_json::json!(&task.summary);
+        }
+        if step_input.get("original_task_description").is_none() {
+            step_input["original_task_description"] = serde_json::json!(&task.description);
+        }
 
         // Ensure worktree information is included in step input
         if let Some(ref worktree_path) = task.worktree_path {
@@ -640,7 +652,7 @@ impl AgentExecutor {
         );
 
         // Parse previous output as input_data for next step
-        let input_data = match serde_json::from_str(previous_output) {
+        let mut input_data: serde_json::Value = match serde_json::from_str(previous_output) {
             Ok(value) => value,
             Err(_) => {
                 // If not JSON, wrap it
@@ -651,6 +663,42 @@ impl AgentExecutor {
             }
         };
 
+        // Preserve original task context through the chain
+        // This allows downstream steps to use meaningful names instead of chain step IDs
+        let original_summary = current_task
+            .input_data
+            .as_ref()
+            .and_then(|d| d.get("original_task_summary"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| current_task.summary.clone());
+
+        let original_description = current_task
+            .input_data
+            .as_ref()
+            .and_then(|d| d.get("original_task_description"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| current_task.description.clone());
+
+        // Extract feature_name from previous output if available (e.g., from technical-architect)
+        let feature_name_from_output = input_data
+            .get("feature_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Store original context in input_data for subsequent steps
+        if let Some(obj) = input_data.as_object_mut() {
+            obj.insert(
+                "original_task_summary".to_string(),
+                serde_json::Value::String(original_summary.clone()),
+            );
+            obj.insert(
+                "original_task_description".to_string(),
+                serde_json::Value::String(original_description.clone()),
+            );
+        }
+
         let now = chrono::Utc::now();
 
         // Chain orchestration steps (technical-architect, technical-requirements-specialist, task-planner)
@@ -658,18 +706,30 @@ impl AgentExecutor {
         // They inherit both branch and feature_branch from the parent task
         // Implementation tasks spawned later will get new task branch values
 
-        // Create task for next step with idempotency key
-        let next_task = Task {
-            id: uuid::Uuid::new_v4(),
-            summary: format!(
+        // Generate a meaningful summary for the task
+        // Priority: feature_name from output > original task summary > generic chain step
+        let task_summary = if let Some(ref feature_name) = feature_name_from_output {
+            format!("{} [{}]", feature_name, next_step.id)
+        } else if !original_summary.starts_with("Chain:") {
+            // Use original summary if it's not a generic chain summary
+            format!("{} [{}]", Self::truncate_summary(&original_summary, 60), next_step.id)
+        } else {
+            // Fallback to generic chain step (shouldn't happen often now)
+            format!(
                 "Chain: {} - Step {}/{}",
                 chain.name,
                 next_step_index + 1,
                 chain.steps.len()
-            ),
+            )
+        };
+
+        // Create task for next step with idempotency key
+        let next_task = Task {
+            id: uuid::Uuid::new_v4(),
+            summary: task_summary,
             description: format!(
-                "Execute step '{}' of chain '{}'",
-                next_step.id, chain.id
+                "Execute step '{}' of chain '{}'\n\nOriginal request: {}",
+                next_step.id, chain.id, Self::truncate_summary(&original_description, 200)
             ),
             agent_type: next_step.role.clone(),
             priority: current_task.priority,
@@ -1305,6 +1365,12 @@ impl AgentExecutor {
     }
 
     /// Substitute variables in branch name template
+    ///
+    /// Priority for `{feature_name}`:
+    /// 1. From step input variables (e.g., previous step's output with feature_name)
+    /// 2. From existing feature_branch on task
+    /// 3. From original_task_summary in input_data (preserves original request)
+    /// 4. Fallback: sanitize current task summary
     fn substitute_branch_variables(
         &self,
         template: &str,
@@ -1318,28 +1384,58 @@ impl AgentExecutor {
         result = result.replace("{task_id}", &task.id.to_string());
         result = result.replace("{step_id}", &step.id);
 
-        // Extract feature_name from feature_branch if available, or generate from task summary
+        // Handle {feature_name} with proper priority
         if result.contains("{feature_name}") {
-            let feature_name = if let Some(ref feature_branch) = task.feature_branch {
-                // Extract from existing feature branch
-                feature_branch.strip_prefix("feature/")
-                    .map(|s| s.to_string())
-            } else {
-                None
-            };
+            // Priority 1: Check step input variables (from previous step's output)
+            let feature_name = variables
+                .get("feature_name")
+                .and_then(|v| v.as_str())
+                .map(Self::sanitize_branch_name);
 
-            // If no feature_name from task, generate from summary
+            // Priority 2: Check existing feature_branch on task
+            let feature_name = feature_name.or_else(|| {
+                task.feature_branch
+                    .as_ref()
+                    .and_then(|fb| fb.strip_prefix("feature/"))
+                    .map(|s| s.to_string())
+            });
+
+            // Priority 3: Check original_task_summary in input_data
+            let feature_name = feature_name.or_else(|| {
+                variables
+                    .get("original_task_summary")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.starts_with("Chain:")) // Skip generic chain summaries
+                    .map(Self::sanitize_branch_name)
+            });
+
+            // Priority 4: Fallback to current task summary
             let feature_name = feature_name.unwrap_or_else(|| {
-                let source = if task.summary.is_empty() { &task.description } else { &task.summary };
+                let source = if task.summary.is_empty() || task.summary.starts_with("Chain:") {
+                    &task.description
+                } else {
+                    &task.summary
+                };
                 Self::sanitize_branch_name(source)
             });
 
             result = result.replace("{feature_name}", &feature_name);
+
+            debug!(
+                task_id = %task.id,
+                step_id = %step.id,
+                resolved_feature_name = %feature_name,
+                "Resolved feature_name for branch template"
+            );
         }
 
-        // Variables from step input/output
+        // Variables from step input/output (for other placeholders)
         if let Some(vars) = variables.as_object() {
             for (key, value) in vars {
+                // Skip feature_name as we already handled it with proper priority
+                if key == "feature_name" {
+                    continue;
+                }
                 let placeholder = format!("{{{}}}", key);
                 let replacement = match value {
                     serde_json::Value::String(s) => s.clone(),
@@ -1383,6 +1479,20 @@ impl AgentExecutor {
         }
 
         result
+    }
+
+    /// Truncate a summary string to a maximum length, adding ellipsis if needed
+    fn truncate_summary(input: &str, max_len: usize) -> String {
+        let trimmed = input.trim();
+        if trimmed.len() <= max_len {
+            trimmed.to_string()
+        } else {
+            // Find a good break point (space) near the limit
+            let break_point = trimmed[..max_len - 3]
+                .rfind(' ')
+                .unwrap_or(max_len - 3);
+            format!("{}...", &trimmed[..break_point])
+        }
     }
 
     /// Retry a stuck chain handoff
