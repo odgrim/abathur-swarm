@@ -170,6 +170,34 @@ pub struct WorkflowState {
     pub last_updated: Option<DateTime<Utc>>,
 }
 
+/// State tracking for chain step handoffs to prevent silent hangs
+///
+/// When a chain step completes and needs to enqueue the next step,
+/// this state is set BEFORE the enqueue attempt. If the enqueue fails
+/// and the task completes without clearing this state, a recovery
+/// mechanism can detect and retry the handoff.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ChainHandoffState {
+    /// The index of the next step that needs to be enqueued
+    pub pending_next_step_index: usize,
+
+    /// The chain ID being executed
+    pub chain_id: String,
+
+    /// Timestamp when the handoff was initiated
+    pub pending_since: DateTime<Utc>,
+
+    /// Number of enqueue attempts so far
+    #[serde(default)]
+    pub enqueue_attempts: u32,
+
+    /// Last error message if enqueue failed
+    pub last_error: Option<String>,
+
+    /// Output from the completed step (needed for next step input)
+    pub step_output: Option<String>,
+}
+
 /// Workflow expectations for tasks that must spawn children
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowExpectations {
@@ -257,6 +285,12 @@ pub struct Task {
     #[serde(default)]
     pub chain_step_index: usize,
 
+    /// Chain handoff state for tracking pending next step enqueueing
+    ///
+    /// Set BEFORE attempting to enqueue the next chain step, cleared on success.
+    /// If this is set on a completed task, recovery can retry the handoff.
+    pub chain_handoff_state: Option<ChainHandoffState>,
+
     /// Idempotency key for preventing duplicate task creation
     ///
     /// Used to ensure tasks spawned from chain outputs are not duplicated
@@ -318,6 +352,7 @@ impl Task {
             workflow_expectations: None,
             chain_id: None,
             chain_step_index: 0,
+            chain_handoff_state: None,
             idempotency_key: None,
             version: 1,
         }

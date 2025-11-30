@@ -35,6 +35,59 @@ pub struct Config {
     /// RAG (Retrieval-Augmented Generation) configuration
     #[serde(default)]
     pub rag: RagConfig,
+
+    /// Recovery configuration for stuck tasks and chain handoffs
+    #[serde(default)]
+    pub recovery: RecoveryConfig,
+}
+
+/// Configuration for task and chain recovery mechanisms
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RecoveryConfig {
+    /// Interval in seconds for checking stuck blocked tasks (default: 10)
+    /// Lower values provide faster recovery but increase CPU usage
+    #[serde(default = "default_blocked_task_interval")]
+    pub blocked_task_check_interval_secs: u64,
+
+    /// Interval in seconds for checking stale running tasks (default: 60)
+    #[serde(default = "default_stale_task_interval")]
+    pub stale_task_check_interval_secs: u64,
+
+    /// Interval in seconds for checking stuck chain handoffs (default: 30)
+    #[serde(default = "default_chain_handoff_interval")]
+    pub chain_handoff_check_interval_secs: u64,
+
+    /// Time in seconds after which a pending chain handoff is considered stuck (default: 60)
+    #[serde(default = "default_chain_handoff_timeout")]
+    pub chain_handoff_timeout_secs: u64,
+}
+
+const fn default_blocked_task_interval() -> u64 {
+    10 // Reduced from 30 for faster recovery
+}
+
+const fn default_stale_task_interval() -> u64 {
+    60
+}
+
+const fn default_chain_handoff_interval() -> u64 {
+    30
+}
+
+const fn default_chain_handoff_timeout() -> u64 {
+    60
+}
+
+impl Default for RecoveryConfig {
+    fn default() -> Self {
+        Self {
+            blocked_task_check_interval_secs: default_blocked_task_interval(),
+            stale_task_check_interval_secs: default_stale_task_interval(),
+            chain_handoff_check_interval_secs: default_chain_handoff_interval(),
+            chain_handoff_timeout_secs: default_chain_handoff_timeout(),
+        }
+    }
 }
 
 const fn default_max_agents() -> usize {
@@ -52,6 +105,7 @@ impl Default for Config {
             mcp_servers: vec![],
             substrates: SubstratesConfig::default(),
             rag: RagConfig::default(),
+            recovery: RecoveryConfig::default(),
         }
     }
 }

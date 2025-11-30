@@ -115,6 +115,10 @@ impl TaskRepositoryImpl {
             chain_step_index: row
                 .get::<Option<i64>, _>("chain_step_index")
                 .unwrap_or(0) as usize,
+            chain_handoff_state: row
+                .get::<Option<String>, _>("chain_handoff_state")
+                .as_ref()
+                .and_then(|s| serde_json::from_str(s).ok()),
             idempotency_key: row.get("idempotency_key"),
             version: row
                 .get::<Option<i64>, _>("version")
@@ -162,6 +166,9 @@ impl TaskRepository for TaskRepositoryImpl {
             .as_ref()
             .and_then(|e| serde_json::to_string(e).ok());
         let chain_step_index = task.chain_step_index as i64;
+        let chain_handoff_state = task.chain_handoff_state
+            .as_ref()
+            .and_then(|s| serde_json::to_string(s).ok());
 
         sqlx::query!(
             r#"
@@ -175,9 +182,9 @@ impl TaskRepository for TaskRepositoryImpl {
                 worktree_path, validation_requirement, validation_task_id,
                 validating_task_id, remediation_count, is_remediation,
                 workflow_state, workflow_expectations, chain_id, chain_step_index,
-                idempotency_key, version
+                chain_handoff_state, idempotency_key, version
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             id,
             task.summary,
@@ -217,6 +224,7 @@ impl TaskRepository for TaskRepositoryImpl {
             workflow_expectations,
             task.chain_id,
             chain_step_index,
+            chain_handoff_state,
             task.idempotency_key,
             task.version
         )
@@ -277,6 +285,9 @@ impl TaskRepository for TaskRepositoryImpl {
         let workflow_expectations = task.workflow_expectations
             .as_ref()
             .and_then(|e| serde_json::to_string(e).ok());
+        let chain_handoff_state = task.chain_handoff_state
+            .as_ref()
+            .and_then(|s| serde_json::to_string(s).ok());
 
         // New version is current version + 1
         let new_version = task.version + 1;
@@ -321,6 +332,7 @@ impl TaskRepository for TaskRepositoryImpl {
                 workflow_state = ?,
                 workflow_expectations = ?,
                 chain_id = ?,
+                chain_handoff_state = ?,
                 idempotency_key = ?,
                 version = ?
             WHERE id = ? AND version = ?
@@ -360,6 +372,7 @@ impl TaskRepository for TaskRepositoryImpl {
             workflow_state,
             workflow_expectations,
             task.chain_id,
+            chain_handoff_state,
             task.idempotency_key,
             new_version,
             id,
@@ -824,6 +837,9 @@ impl TaskRepository for TaskRepositoryImpl {
             .as_ref()
             .and_then(|e| serde_json::to_string(e).ok());
         let chain_step_index = task.chain_step_index as i64;
+        let chain_handoff_state = task.chain_handoff_state
+            .as_ref()
+            .and_then(|s| serde_json::to_string(s).ok());
 
         // Use INSERT OR IGNORE - if idempotency_key already exists, this returns 0 rows affected
         let result = sqlx::query(
@@ -838,9 +854,9 @@ impl TaskRepository for TaskRepositoryImpl {
                 worktree_path, validation_requirement, validation_task_id,
                 validating_task_id, remediation_count, is_remediation,
                 workflow_state, workflow_expectations, chain_id, chain_step_index,
-                idempotency_key
+                chain_handoff_state, idempotency_key
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&id)
@@ -881,6 +897,7 @@ impl TaskRepository for TaskRepositoryImpl {
         .bind(&workflow_expectations)
         .bind(&task.chain_id)
         .bind(chain_step_index)
+        .bind(&chain_handoff_state)
         .bind(&idempotency_key)
         .execute(&self.pool)
         .await?;
@@ -961,6 +978,9 @@ impl TaskRepository for TaskRepositoryImpl {
                 .as_ref()
                 .and_then(|e| serde_json::to_string(e).ok());
             let chain_step_index = task.chain_step_index as i64;
+            let chain_handoff_state = task.chain_handoff_state
+                .as_ref()
+                .and_then(|s| serde_json::to_string(s).ok());
             let idempotency_key = task.idempotency_key.clone().unwrap_or_else(|| {
                 format!(
                     "auto:{}:{}:{}",
@@ -983,9 +1003,9 @@ impl TaskRepository for TaskRepositoryImpl {
                     worktree_path, validation_requirement, validation_task_id,
                     validating_task_id, remediation_count, is_remediation,
                     workflow_state, workflow_expectations, chain_id, chain_step_index,
-                    idempotency_key, version
+                    chain_handoff_state, idempotency_key, version
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&id)
@@ -1026,6 +1046,7 @@ impl TaskRepository for TaskRepositoryImpl {
             .bind(&workflow_expectations)
             .bind(&task.chain_id)
             .bind(chain_step_index)
+            .bind(&chain_handoff_state)
             .bind(&idempotency_key)
             .bind(task.version)
             .execute(&mut *tx)

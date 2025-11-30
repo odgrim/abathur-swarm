@@ -27,8 +27,8 @@ pub use chunking::{
 };
 pub use config::{
     ChunkingConfigSettings, Config, DatabaseConfig, EmbeddingConfig, LoggingConfig,
-    McpServerConfig, OpenAIEmbeddingConfig, RagConfig, RateLimitConfig, RetryConfig,
-    VectorSearchConfig,
+    McpServerConfig, OpenAIEmbeddingConfig, RagConfig, RateLimitConfig, RecoveryConfig,
+    RetryConfig, VectorSearchConfig,
 };
 pub use embedding::{
     Citation, EmbeddingModel, SearchResult, VectorMemory,
@@ -46,6 +46,6 @@ pub use prune::{BlockedTask, PruneResult};
 pub use queue::{Queue, QueueError};
 pub use session::{Session, SessionEvent};
 pub use task::{
-    DependencyType, Task, TaskSource, TaskStatus, ValidationRequirement, WorkflowExpectations,
-    WorkflowState,
+    ChainHandoffState, DependencyType, Task, TaskSource, TaskStatus, ValidationRequirement,
+    WorkflowExpectations, WorkflowState,
 };

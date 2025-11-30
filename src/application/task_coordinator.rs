@@ -1,14 +1,19 @@
 use crate::domain::models::task::{Task, TaskStatus};
-use crate::domain::models::{HookContext, HookEvent};
+use crate::domain::models::{HookContext, HookEvent, HookResult};
 use crate::domain::ports::{PriorityCalculator, TaskQueueService};
 use crate::services::hook_executor::HookExecutor;
 use crate::services::hook_registry::HookRegistry;
 use crate::services::DependencyResolver;
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
+
+/// Default timeout for hook execution (60 seconds)
+/// Hooks that take longer than this will be cancelled to prevent indefinite hangs
+const HOOK_TIMEOUT_SECS: u64 = 60;
 
 /// Status update message for task lifecycle events
 #[derive(Debug, Clone)]
@@ -163,6 +168,43 @@ impl TaskCoordinator {
         self.status_rx.take()
     }
 
+    /// Execute hooks with a timeout to prevent indefinite hangs
+    ///
+    /// Wraps hook execution in a tokio timeout to ensure hooks cannot block
+    /// the task coordinator indefinitely. If a hook times out, it returns
+    /// an error that can be handled appropriately.
+    ///
+    /// # Arguments
+    /// * `registry` - The hook registry to execute hooks from
+    /// * `event` - The hook event type (PreReady, PostReady, etc.)
+    /// * `task` - The task being processed
+    /// * `context` - The hook context with variables
+    ///
+    /// # Returns
+    /// * `Ok(HookResult)` - If hooks complete within the timeout
+    /// * `Err` - If hooks time out or fail
+    async fn execute_hooks_with_timeout(
+        registry: &HookRegistry,
+        event: HookEvent,
+        task: &Task,
+        context: &HookContext,
+    ) -> Result<HookResult> {
+        tokio::time::timeout(
+            Duration::from_secs(HOOK_TIMEOUT_SECS),
+            registry.execute_hooks(event.clone(), task, context),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Hook execution timed out after {}s for event {:?} on task {}",
+                HOOK_TIMEOUT_SECS,
+                event,
+                task.id
+            )
+        })?
+        .context(format!("Failed to execute {:?} hooks", event))
+    }
+
     /// Coordinate the complete lifecycle of a task
     ///
     /// Orchestrates:
@@ -222,12 +264,11 @@ impl TaskCoordinator {
         };
 
         if task.status != new_status && new_status == TaskStatus::Ready {
-            // Execute PreReady hooks
+            // Execute PreReady hooks with timeout
             let hook_registry_guard = self.hook_registry.read().await;
             if let Some(ref registry) = *hook_registry_guard {
                 let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
-                let hook_result = registry.execute_hooks(HookEvent::PreReady, &task, &context).await
-                    .context("Failed to execute PreReady hooks")?;
+                let hook_result = Self::execute_hooks_with_timeout(registry, HookEvent::PreReady, &task, &context).await?;
 
                 if hook_result.should_block() {
                     warn!("PreReady hook blocked task {} from becoming ready", task_id);
@@ -254,11 +295,13 @@ impl TaskCoordinator {
 
             info!("Task {} transitioned to {:?}", task_id, new_status);
 
-            // Execute PostReady hooks
+            // Execute PostReady hooks with timeout (non-blocking, log errors)
             let hook_registry_guard = self.hook_registry.read().await;
             if let Some(ref registry) = *hook_registry_guard {
                 let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
-                let _ = registry.execute_hooks(HookEvent::PostReady, &task, &context).await;
+                if let Err(e) = Self::execute_hooks_with_timeout(registry, HookEvent::PostReady, &task, &context).await {
+                    warn!(task_id = %task_id, error = ?e, "PostReady hook execution failed or timed out");
+                }
             }
             drop(hook_registry_guard);
         } else if task.status != new_status {
@@ -365,12 +408,11 @@ impl TaskCoordinator {
             })
             .await;
 
-        // Execute PreStart hooks (after status is already Running)
+        // Execute PreStart hooks with timeout (after status is already Running)
         let hook_registry_guard = self.hook_registry.read().await;
         if let Some(ref registry) = *hook_registry_guard {
             let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
-            let hook_result = registry.execute_hooks(HookEvent::PreStart, &task, &context).await
-                .context("Failed to execute PreStart hooks")?;
+            let hook_result = Self::execute_hooks_with_timeout(registry, HookEvent::PreStart, &task, &context).await?;
 
             if hook_result.should_block() {
                 warn!("PreStart hook blocked task {} - reverting to Ready status", task_id);
@@ -384,11 +426,13 @@ impl TaskCoordinator {
         }
         drop(hook_registry_guard);
 
-        // Execute PostStart hooks
+        // Execute PostStart hooks with timeout (non-blocking, log errors)
         let hook_registry_guard = self.hook_registry.read().await;
         if let Some(ref registry) = *hook_registry_guard {
             let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
-            let _ = registry.execute_hooks(HookEvent::PostStart, &task, &context).await;
+            if let Err(e) = Self::execute_hooks_with_timeout(registry, HookEvent::PostStart, &task, &context).await {
+                warn!(task_id = %task_id, error = ?e, "PostStart hook execution failed or timed out");
+            }
         }
         drop(hook_registry_guard);
 
@@ -423,12 +467,12 @@ impl TaskCoordinator {
         let task = self.task_queue.get_task(task_id).await
             .map_err(|e| TaskCompletionError::Other(e.context("Failed to get task for handle_task_completion")))?;
 
-        // Execute PreComplete hooks
+        // Execute PreComplete hooks with timeout
         let hook_registry_guard = self.hook_registry.read().await;
         if let Some(ref registry) = *hook_registry_guard {
             let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
-            let hook_result = registry.execute_hooks(HookEvent::PreComplete, &task, &context).await
-                .map_err(|e| TaskCompletionError::Other(e.context("Failed to execute PreComplete hooks")))?;
+            let hook_result = Self::execute_hooks_with_timeout(registry, HookEvent::PreComplete, &task, &context).await
+                .map_err(|e| TaskCompletionError::Other(e.context("PreComplete hooks failed or timed out")))?;
 
             if hook_result.should_block() {
                 warn!("PreComplete hook blocked task {} from completing", task_id);
@@ -454,11 +498,13 @@ impl TaskCoordinator {
             })
             .await;
 
-        // Execute PostComplete hooks
+        // Execute PostComplete hooks with timeout (non-blocking, log errors)
         let hook_registry_guard = self.hook_registry.read().await;
         if let Some(ref registry) = *hook_registry_guard {
             let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
-            let _ = registry.execute_hooks(HookEvent::PostComplete, &task, &context).await;
+            if let Err(e) = Self::execute_hooks_with_timeout(registry, HookEvent::PostComplete, &task, &context).await {
+                warn!(task_id = %task_id, error = ?e, "PostComplete hook execution failed or timed out");
+            }
         }
         drop(hook_registry_guard);
 
@@ -477,8 +523,9 @@ impl TaskCoordinator {
 
         // 3. Trigger lifecycle coordination for each dependent task with retry logic
         // This is critical - if coordination fails, dependent tasks may be stuck forever
-        const MAX_RETRIES: u32 = 3;
-        const INITIAL_BACKOFF_MS: u64 = 100;
+        // Use aggressive retries: 5 attempts with faster initial backoff (50ms)
+        const MAX_RETRIES: u32 = 5;
+        const INITIAL_BACKOFF_MS: u64 = 50;
 
         let mut failed_coordinations: Vec<Uuid> = Vec::new();
 
@@ -499,7 +546,7 @@ impl TaskCoordinator {
                         break;
                     }
                     Err(e) => {
-                        let backoff_ms = INITIAL_BACKOFF_MS * (1 << attempt); // Exponential backoff
+                        let backoff_ms = INITIAL_BACKOFF_MS * (1 << attempt); // Exponential backoff: 50, 100, 200, 400, 800ms
                         warn!(
                             "Failed to coordinate dependent task {} (attempt {}/{}): {:?}. Retrying in {}ms",
                             dependent_task.id, attempt + 1, MAX_RETRIES, e, backoff_ms
@@ -523,14 +570,43 @@ impl TaskCoordinator {
             }
         }
 
+        // If coordinations failed, attempt immediate dependency resolution as fallback
+        // This directly resolves dependencies without going through full lifecycle coordination
+        if !failed_coordinations.is_empty() {
+            info!(
+                "Attempting immediate dependency resolution for {} failed coordination(s)",
+                failed_coordinations.len()
+            );
+
+            // Try resolving through the task queue service directly
+            match self.task_queue.resolve_dependencies_for_completed_task(task_id).await {
+                Ok(resolved_count) => {
+                    if resolved_count > 0 {
+                        info!(
+                            "Immediate resolution succeeded: {} tasks became ready after {} completion",
+                            resolved_count, task_id
+                        );
+                        // Clear failed coordinations if we resolved them
+                        failed_coordinations.clear();
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Immediate dependency resolution also failed: {:?}. Falling back to background monitor.",
+                        e
+                    );
+                }
+            }
+        }
+
         // Return result indicating whether all dependencies were coordinated
         // NOTE: The parent task IS completed at this point. Failed coordinations will be
-        // recovered by the background blocked task recovery (runs every 30 seconds).
+        // recovered by the background blocked task recovery (configurable interval).
         if failed_coordinations.is_empty() {
             Ok(TaskCompletionResult::Success)
         } else {
             error!(
-                "Failed to coordinate {} dependent task(s) after retries: {:?}. Will be recovered by background monitoring (30s interval).",
+                "Failed to coordinate {} dependent task(s) after retries and fallback: {:?}. Will be recovered by background monitoring.",
                 failed_coordinations.len(),
                 failed_coordinations
             );
@@ -920,6 +996,25 @@ impl TaskCoordinator {
             .update_task_priority(task_id, priority)
             .await
             .context("Failed to update task priority")
+    }
+
+    /// Update a task with all its fields
+    ///
+    /// Used for updating task state like `chain_handoff_state` during recovery.
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - The task with updated fields
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Task updated successfully
+    /// * `Err` - If task not found or database error
+    pub async fn update_task(&self, task: &Task) -> Result<()> {
+        self.task_queue
+            .update_task(task)
+            .await
+            .context("Failed to update task")
     }
 
     /// Get tasks that have been running longer than the threshold

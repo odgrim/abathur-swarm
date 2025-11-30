@@ -159,16 +159,9 @@ pub struct SwarmOrchestrator {
 }
 
 impl SwarmOrchestrator {
-    /// How often to check for stale tasks (in seconds)
-    const STALE_TASK_CHECK_INTERVAL_SECS: u64 = 60;
-
     /// Buffer time added to task's max_execution_timeout_seconds before considering stale.
     /// This prevents false positives for tasks that are completing normally.
     const STALE_TASK_BUFFER_SECS: u64 = 120; // 2 minute buffer
-
-    /// How often to check for stuck blocked tasks (in seconds)
-    /// Reduced from 2 minutes to 30 seconds for faster recovery
-    const BLOCKED_TASK_CHECK_INTERVAL_SECS: u64 = 30;
 
     /// Create a new swarm orchestrator
     ///
@@ -411,8 +404,21 @@ impl SwarmOrchestrator {
 
         let handle = tokio::spawn(async move {
             let mut task_poll_interval = interval(Duration::from_secs(1));
-            let mut stale_check_interval = interval(Duration::from_secs(Self::STALE_TASK_CHECK_INTERVAL_SECS));
-            let mut blocked_check_interval = interval(Duration::from_secs(Self::BLOCKED_TASK_CHECK_INTERVAL_SECS));
+            // Use configurable recovery intervals
+            let stale_interval_secs = config.recovery.stale_task_check_interval_secs;
+            let blocked_interval_secs = config.recovery.blocked_task_check_interval_secs;
+            let chain_handoff_interval_secs = config.recovery.chain_handoff_check_interval_secs;
+
+            info!(
+                stale_check_interval_secs = stale_interval_secs,
+                blocked_check_interval_secs = blocked_interval_secs,
+                chain_handoff_check_interval_secs = chain_handoff_interval_secs,
+                "Starting task processing with configurable recovery intervals"
+            );
+
+            let mut stale_check_interval = interval(Duration::from_secs(stale_interval_secs));
+            let mut blocked_check_interval = interval(Duration::from_secs(blocked_interval_secs));
+            let mut chain_handoff_check_interval = interval(Duration::from_secs(chain_handoff_interval_secs));
 
             info!("Task processing loop started");
 
@@ -568,6 +574,18 @@ impl SwarmOrchestrator {
                     _ = blocked_check_interval.tick() => {
                         if let Err(e) = task_coordinator.recover_stuck_blocked_tasks().await {
                             error!(error = ?e, "Failed to recover stuck blocked tasks");
+                        }
+                    }
+
+                    // Check for stuck chain handoffs periodically
+                    _ = chain_handoff_check_interval.tick() => {
+                        let handoff_timeout_secs = config.recovery.chain_handoff_timeout_secs;
+                        if let Err(e) = Self::recover_stuck_chain_handoffs(
+                            Arc::clone(&task_coordinator),
+                            Arc::clone(&agent_executor),
+                            handoff_timeout_secs,
+                        ).await {
+                            error!(error = ?e, "Failed to recover stuck chain handoffs");
                         }
                     }
 
@@ -888,6 +906,103 @@ impl SwarmOrchestrator {
                     error = ?e,
                     "Failed to recover stale task"
                 );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Recover stuck chain handoffs
+    ///
+    /// Finds tasks that have `chain_handoff_state` set (indicating a pending handoff)
+    /// that have been pending for longer than the configured timeout. For each stuck
+    /// handoff, attempts to re-enqueue the next chain step.
+    ///
+    /// This prevents chains from hanging silently when:
+    /// - The next step enqueue failed due to transient errors
+    /// - The process crashed after saving handoff state but before enqueue
+    async fn recover_stuck_chain_handoffs(
+        task_coordinator: Arc<TaskCoordinator>,
+        agent_executor: Arc<AgentExecutor>,
+        timeout_secs: u64,
+    ) -> Result<()> {
+        // Get completed tasks that have chain_handoff_state set
+        // These are tasks where the step completed but next step wasn't enqueued
+        let completed_tasks = task_coordinator
+            .get_tasks_by_status(crate::domain::models::TaskStatus::Completed)
+            .await?;
+
+        let now = chrono::Utc::now();
+        let mut stuck_handoffs = Vec::new();
+
+        for task in completed_tasks {
+            if let Some(ref handoff_state) = task.chain_handoff_state {
+                let elapsed_secs = now.signed_duration_since(handoff_state.pending_since).num_seconds();
+                if elapsed_secs > timeout_secs as i64 {
+                    info!(
+                        task_id = %task.id,
+                        chain_id = %handoff_state.chain_id,
+                        pending_step_index = handoff_state.pending_next_step_index,
+                        elapsed_secs = elapsed_secs,
+                        enqueue_attempts = handoff_state.enqueue_attempts,
+                        last_error = ?handoff_state.last_error,
+                        "Found stuck chain handoff"
+                    );
+                    stuck_handoffs.push(task);
+                }
+            }
+        }
+
+        if stuck_handoffs.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            count = stuck_handoffs.len(),
+            "Found stuck chain handoffs to recover"
+        );
+
+        for mut task in stuck_handoffs {
+            let handoff_state = task.chain_handoff_state.clone().expect("checked above");
+
+            // Attempt to retry the handoff
+            match agent_executor
+                .retry_chain_handoff(&task, &handoff_state)
+                .await
+            {
+                Ok(_) => {
+                    info!(
+                        task_id = %task.id,
+                        chain_id = %handoff_state.chain_id,
+                        step_index = handoff_state.pending_next_step_index,
+                        "Successfully recovered stuck chain handoff"
+                    );
+                    // Clear the handoff state
+                    task.chain_handoff_state = None;
+                    if let Err(e) = task_coordinator.update_task(&task).await {
+                        warn!(
+                            task_id = %task.id,
+                            error = ?e,
+                            "Failed to clear handoff state after successful recovery"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        task_id = %task.id,
+                        chain_id = %handoff_state.chain_id,
+                        step_index = handoff_state.pending_next_step_index,
+                        error = ?e,
+                        attempt = handoff_state.enqueue_attempts + 1,
+                        "Failed to recover stuck chain handoff, will retry later"
+                    );
+                    // Update the handoff state with the error and increment attempts
+                    if let Some(ref mut state) = task.chain_handoff_state {
+                        state.enqueue_attempts += 1;
+                        state.last_error = Some(e.to_string());
+                    }
+                    let _ = task_coordinator.update_task(&task).await;
+                }
             }
         }
 

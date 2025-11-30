@@ -601,7 +601,11 @@ impl PromptChainService {
         Ok(execution)
     }
 
-    /// Execute a single step with retry logic
+    /// Execute a single step with retry logic and validation feedback
+    ///
+    /// When a step fails validation, the retry includes the validation error feedback
+    /// in the prompt to help the LLM correct its output. This significantly improves
+    /// success rates for format-sensitive outputs like JSON.
     #[instrument(skip(self, step, prompt), fields(step_id = %step.id))]
     async fn execute_step_with_retry(
         &self,
@@ -611,17 +615,23 @@ impl PromptChainService {
     ) -> Result<StepResult> {
         let mut retry_count = 0;
         let mut last_error = None;
+        let mut current_prompt = prompt.to_string();
 
         while retry_count <= self.max_retries {
-            match self.execute_step(step, prompt, working_directory).await {
+            match self.execute_step(step, &current_prompt, working_directory).await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
+                    let error_str = e.to_string();
+                    let is_validation_error = error_str.contains("Validation failed") ||
+                                              error_str.contains("validation failed");
+
                     warn!(
-                        "Step {} execution failed (attempt {}/{}): {}",
+                        "Step {} execution failed (attempt {}/{}): {}{}",
                         step.id,
                         retry_count + 1,
                         self.max_retries + 1,
-                        e
+                        e,
+                        if is_validation_error { " [Will include validation feedback in retry]" } else { "" }
                     );
                     last_error = Some(e);
                     retry_count += 1;
@@ -630,6 +640,20 @@ impl PromptChainService {
                         // Exponential backoff
                         let delay = Duration::from_secs(2_u64.pow(retry_count));
                         tokio::time::sleep(delay).await;
+
+                        // If this was a validation error, add feedback to the prompt
+                        if is_validation_error {
+                            current_prompt = format!(
+                                "{}\n\n---\nIMPORTANT: Your previous response failed validation with the following error:\n{}\n\nPlease correct your response to address this validation error. Ensure your output matches the expected format exactly.",
+                                prompt,
+                                error_str
+                            );
+                            info!(
+                                step_id = %step.id,
+                                retry_attempt = retry_count,
+                                "Adding validation feedback to retry prompt"
+                            );
+                        }
                     }
                 }
             }
@@ -1246,6 +1270,12 @@ impl PromptChainService {
     ///
     /// Uses the task's content (summary, agent_type, description hash) instead of
     /// array index to ensure deterministic keys even if task order changes.
+    ///
+    /// Key design considerations:
+    /// - Include full description hash for accurate uniqueness (not truncated)
+    /// - Normalize whitespace to prevent formatting-sensitive duplicates
+    /// - Include dependencies and priority for completeness
+    /// - Parent key provides chain/step context
     fn generate_task_idempotency_key(
         parent_key: &str,
         task_def: &serde_json::Value,
@@ -1257,11 +1287,25 @@ impl PromptChainService {
         let agent_type = task_def.get("agent_type").and_then(|v| v.as_str()).unwrap_or("");
         let description = task_def.get("description").and_then(|v| v.as_str()).unwrap_or("");
 
+        // Normalize whitespace to prevent duplicates due to formatting differences
+        let normalized_summary: String = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized_desc: String = description.split_whitespace().collect::<Vec<_>>().join(" ");
+
         let mut hasher = DefaultHasher::new();
-        summary.hash(&mut hasher);
+
+        // Hash normalized content
+        normalized_summary.hash(&mut hasher);
         agent_type.hash(&mut hasher);
-        // Include first 200 chars of description for uniqueness without excessive sensitivity
-        description[..description.len().min(200)].hash(&mut hasher);
+        normalized_desc.hash(&mut hasher); // Full description, not truncated
+
+        // Include additional fields if present for more precise uniqueness
+        if let Some(deps) = task_def.get("dependencies") {
+            deps.to_string().hash(&mut hasher);
+        }
+        if let Some(priority) = task_def.get("priority") {
+            priority.to_string().hash(&mut hasher);
+        }
+
         let content_hash = hasher.finish();
 
         format!("{}:task:{:x}", parent_key, content_hash)
@@ -1585,6 +1629,7 @@ impl PromptChainService {
             workflow_expectations: None,
             chain_id: None,
             chain_step_index: 0,
+            chain_handoff_state: None,
             idempotency_key: Some(idempotency_key.to_string()),
             version: 1,
         })

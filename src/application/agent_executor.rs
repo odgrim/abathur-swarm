@@ -1,4 +1,4 @@
-use crate::domain::models::{AgentMetadataRegistry, Config, Task};
+use crate::domain::models::{AgentMetadataRegistry, ChainHandoffState, Config, Task};
 use crate::domain::ports::{
     ExecutionParameters,
     SubstrateError, SubstrateRequest,
@@ -501,14 +501,56 @@ impl AgentExecutor {
                 "Enqueueing next chain step"
             );
 
-            self.enqueue_next_chain_step(&updated_task, &chain, next_step_index, &result.output)
+            // CRITICAL: Set handoff state BEFORE attempting to enqueue.
+            // This allows recovery if the enqueue fails and the task completes.
+            updated_task.chain_handoff_state = Some(ChainHandoffState {
+                pending_next_step_index: next_step_index,
+                chain_id: chain_id.to_string(),
+                pending_since: chrono::Utc::now(),
+                enqueue_attempts: 1,
+                last_error: None,
+                step_output: Some(result.output.clone()),
+            });
+            self.chain_service
+                .update_task(&updated_task)
                 .await
                 .map_err(|e| {
                     ExecutionError::ExecutionFailed(format!(
-                        "Failed to enqueue next step: {}",
+                        "Failed to set chain handoff state: {}",
                         e
                     ))
                 })?;
+
+            // Attempt to enqueue the next step
+            match self.enqueue_next_chain_step(&updated_task, &chain, next_step_index, &result.output)
+                .await
+            {
+                Ok(_) => {
+                    // SUCCESS: Clear the handoff state
+                    updated_task.chain_handoff_state = None;
+                    if let Err(e) = self.chain_service.update_task(&updated_task).await {
+                        // Non-fatal: handoff succeeded, just couldn't clear state
+                        // Recovery will skip this task since next step exists
+                        warn!(
+                            task_id = %task.id,
+                            error = ?e,
+                            "Failed to clear chain handoff state after successful enqueue (non-fatal)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    // FAILED: Update handoff state with error, then propagate failure
+                    if let Some(ref mut state) = updated_task.chain_handoff_state {
+                        state.last_error = Some(e.to_string());
+                    }
+                    let _ = self.chain_service.update_task(&updated_task).await;
+
+                    return Err(ExecutionError::ExecutionFailed(format!(
+                        "Failed to enqueue next step: {}. Handoff state preserved for recovery.",
+                        e
+                    )));
+                }
+            }
         } else {
             info!(
                 task_id = %task.id,
@@ -632,6 +674,7 @@ impl AgentExecutor {
             workflow_expectations: None,
             chain_id: current_task.chain_id.clone(),
             chain_step_index: next_step_index,
+            chain_handoff_state: None,
             idempotency_key: Some(idempotency_key.clone()),
             version: 1,
         };
@@ -1297,6 +1340,67 @@ impl AgentExecutor {
         }
 
         result
+    }
+
+    /// Retry a stuck chain handoff
+    ///
+    /// Called by the recovery mechanism when a task has completed but its
+    /// `chain_handoff_state` indicates the next step was never enqueued.
+    ///
+    /// # Arguments
+    /// * `task` - The completed task with stuck handoff state
+    /// * `handoff_state` - The handoff state containing step index and chain ID
+    ///
+    /// # Returns
+    /// * `Ok(Uuid)` - The ID of the enqueued next step task
+    /// * `Err` - If the handoff could not be retried
+    pub async fn retry_chain_handoff(
+        &self,
+        task: &Task,
+        handoff_state: &ChainHandoffState,
+    ) -> anyhow::Result<uuid::Uuid> {
+        info!(
+            task_id = %task.id,
+            chain_id = %handoff_state.chain_id,
+            step_index = handoff_state.pending_next_step_index,
+            attempt = handoff_state.enqueue_attempts + 1,
+            "Retrying stuck chain handoff"
+        );
+
+        // Load the chain definition
+        // The chain_id is typically the filename without extension
+        let chain_file = format!("{}.yaml", handoff_state.chain_id);
+        let chain = self
+            .chain_loader
+            .load_from_file(&chain_file)
+            .map_err(|e| anyhow::anyhow!("Failed to load chain '{}': {}", handoff_state.chain_id, e))?;
+
+        // Validate step index
+        if handoff_state.pending_next_step_index >= chain.steps.len() {
+            return Err(anyhow::anyhow!(
+                "Invalid step index {} for chain {} with {} steps",
+                handoff_state.pending_next_step_index,
+                handoff_state.chain_id,
+                chain.steps.len()
+            ));
+        }
+
+        // Get the step output from the handoff state or from the task's result_data
+        let previous_output = handoff_state.step_output.clone().unwrap_or_else(|| {
+            task.result_data
+                .as_ref()
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "{}".to_string())
+        });
+
+        // Attempt to enqueue the next step
+        self.enqueue_next_chain_step(
+            task,
+            &chain,
+            handoff_state.pending_next_step_index,
+            &previous_output,
+        )
+        .await
     }
 }
 

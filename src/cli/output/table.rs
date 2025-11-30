@@ -326,6 +326,7 @@ pub fn format_task_table(tasks: &[crate::cli::models::Task]) -> String {
         workflow_expectations: None,
         chain_id: t.chain_id.clone(),
         chain_step_index: 0,
+        chain_handoff_state: None,
         idempotency_key: None,
         version: 1,
     }).collect();
