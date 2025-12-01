@@ -360,16 +360,33 @@ impl AgentExecutor {
                 );
             }
         } else {
-            // Generate feature_name from task summary for steps that need it before feature branch exists
-            let source = if task.summary.is_empty() { &task.description } else { &task.summary };
-            let feature_name = Self::sanitize_branch_name(source);
-            step_input["feature_name"] = serde_json::json!(&feature_name);
-            debug!(
-                task_id = %task.id,
-                step_id = %step.id,
-                generated_feature_name = %feature_name,
-                "Generated feature_name from task summary (no feature_branch set yet)"
-            );
+            // Only generate feature_name if not already set from previous step output
+            // This preserves the feature_name from requirements-gatherer through the chain
+            let has_valid_feature_name = step_input
+                .get("feature_name")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty() && !s.starts_with("chain-"))
+                .unwrap_or(false);
+
+            if !has_valid_feature_name {
+                // Generate feature_name from task summary for steps that need it before feature branch exists
+                let source = if task.summary.is_empty() { &task.description } else { &task.summary };
+                let feature_name = Self::sanitize_branch_name(source);
+                step_input["feature_name"] = serde_json::json!(&feature_name);
+                debug!(
+                    task_id = %task.id,
+                    step_id = %step.id,
+                    generated_feature_name = %feature_name,
+                    "Generated feature_name from task summary (no feature_branch set yet)"
+                );
+            } else {
+                debug!(
+                    task_id = %task.id,
+                    step_id = %step.id,
+                    existing_feature_name = ?step_input.get("feature_name"),
+                    "Preserving feature_name from previous step output"
+                );
+            }
         }
 
         // Log the complete step_input for debugging
