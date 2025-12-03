@@ -1088,10 +1088,10 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
                 // Other tasks' dependencies are resolved when their dependencies complete,
                 // via resolve_dependencies_for_completed_task().
             }
-            IdempotentInsertResult::AlreadyExists => {
+            IdempotentInsertResult::AlreadyExists(existing_id) => {
                 info!(
-                    "Task with idempotency key {:?} already exists, skipping",
-                    task.idempotency_key
+                    "Task with idempotency key {:?} already exists (existing task: {}), skipping",
+                    task.idempotency_key, existing_id
                 );
             }
         }

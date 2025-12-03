@@ -1379,6 +1379,8 @@ mod tests {
             chain_handoff_state: None,
             idempotency_key: None,
             version: 1,
+            awaiting_children: None,
+            spawned_by_task_id: None,
         }
     }
 

@@ -382,7 +382,7 @@ pub trait TaskRepository: Send + Sync {
         for task in tasks {
             match self.insert_task_idempotent(task).await? {
                 IdempotentInsertResult::Inserted(id) => result.inserted.push(id),
-                IdempotentInsertResult::AlreadyExists => {
+                IdempotentInsertResult::AlreadyExists(_existing_id) => {
                     if let Some(ref key) = task.idempotency_key {
                         result.already_existed.push(key.clone());
                     }
@@ -398,8 +398,8 @@ pub trait TaskRepository: Send + Sync {
 pub enum IdempotentInsertResult {
     /// Task was successfully inserted
     Inserted(Uuid),
-    /// A task with the same idempotency key already exists
-    AlreadyExists,
+    /// A task with the same idempotency key already exists (returns existing task's ID)
+    AlreadyExists(Uuid),
 }
 
 /// Result of a batch task insertion attempt

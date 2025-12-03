@@ -4,7 +4,7 @@ use crate::infrastructure::database::{utils::parse_datetime, DatabaseError};
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::SqlitePool;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// SQLite implementation of TaskRepository using sqlx
@@ -115,6 +115,14 @@ impl TaskRepositoryImpl {
             chain_step_index: row
                 .get::<Option<i64>, _>("chain_step_index")
                 .unwrap_or(0) as usize,
+            awaiting_children: row
+                .get::<Option<String>, _>("awaiting_children")
+                .as_ref()
+                .and_then(|s| serde_json::from_str(s).ok()),
+            spawned_by_task_id: row
+                .get::<Option<String>, _>("spawned_by_task_id")
+                .as_ref()
+                .and_then(|s| Uuid::parse_str(s).ok()),
             chain_handoff_state: row
                 .get::<Option<String>, _>("chain_handoff_state")
                 .as_ref()
@@ -166,6 +174,10 @@ impl TaskRepository for TaskRepositoryImpl {
             .as_ref()
             .and_then(|e| serde_json::to_string(e).ok());
         let chain_step_index = task.chain_step_index as i64;
+        let awaiting_children = task.awaiting_children
+            .as_ref()
+            .and_then(|c| serde_json::to_string(c).ok());
+        let spawned_by_task_id = task.spawned_by_task_id.as_ref().map(|id| id.to_string());
         let chain_handoff_state = task.chain_handoff_state
             .as_ref()
             .and_then(|s| serde_json::to_string(s).ok());
@@ -182,9 +194,9 @@ impl TaskRepository for TaskRepositoryImpl {
                 worktree_path, validation_requirement, validation_task_id,
                 validating_task_id, remediation_count, is_remediation,
                 workflow_state, workflow_expectations, chain_id, chain_step_index,
-                chain_handoff_state, idempotency_key, version
+                awaiting_children, spawned_by_task_id, chain_handoff_state, idempotency_key, version
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             id,
             task.summary,
@@ -224,6 +236,8 @@ impl TaskRepository for TaskRepositoryImpl {
             workflow_expectations,
             task.chain_id,
             chain_step_index,
+            awaiting_children,
+            spawned_by_task_id,
             chain_handoff_state,
             task.idempotency_key,
             task.version
@@ -285,6 +299,10 @@ impl TaskRepository for TaskRepositoryImpl {
         let workflow_expectations = task.workflow_expectations
             .as_ref()
             .and_then(|e| serde_json::to_string(e).ok());
+        let awaiting_children = task.awaiting_children
+            .as_ref()
+            .and_then(|c| serde_json::to_string(c).ok());
+        let spawned_by_task_id = task.spawned_by_task_id.as_ref().map(|id| id.to_string());
         let chain_handoff_state = task.chain_handoff_state
             .as_ref()
             .and_then(|s| serde_json::to_string(s).ok());
@@ -332,6 +350,8 @@ impl TaskRepository for TaskRepositoryImpl {
                 workflow_state = ?,
                 workflow_expectations = ?,
                 chain_id = ?,
+                awaiting_children = ?,
+                spawned_by_task_id = ?,
                 chain_handoff_state = ?,
                 idempotency_key = ?,
                 version = ?
@@ -372,6 +392,8 @@ impl TaskRepository for TaskRepositoryImpl {
             workflow_state,
             workflow_expectations,
             task.chain_id,
+            awaiting_children,
+            spawned_by_task_id,
             chain_handoff_state,
             task.idempotency_key,
             new_version,
@@ -926,11 +948,30 @@ impl TaskRepository for TaskRepositoryImpl {
 
         if result.rows_affected() == 0 {
             // Row was not inserted because idempotency_key already exists
+            // Query to get the existing task's ID
+            let existing_id: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM tasks WHERE idempotency_key = ?"
+            )
+            .bind(&idempotency_key)
+            .fetch_optional(&self.pool)
+            .await?;
+
+            let existing_uuid = existing_id
+                .and_then(|id| Uuid::parse_str(&id).ok())
+                .unwrap_or_else(|| {
+                    warn!(
+                        idempotency_key = %idempotency_key,
+                        "Could not find existing task with idempotency key, using submitted task ID"
+                    );
+                    task.id
+                });
+
             info!(
                 idempotency_key = %idempotency_key,
+                existing_task_id = %existing_uuid,
                 "Task already exists with idempotency key, skipping duplicate"
             );
-            Ok(IdempotentInsertResult::AlreadyExists)
+            Ok(IdempotentInsertResult::AlreadyExists(existing_uuid))
         } else {
             info!(
                 task_id = %task.id,

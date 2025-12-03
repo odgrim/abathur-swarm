@@ -79,9 +79,33 @@ steps:
 
   - id: design_architecture
     role: technical-architect
-    needs_branch: true
-    branch_parent: "main"
-    branch_name_template: "feature/{feature_name}"
+    # Branch creation and task spawning handled by first-class decomposition config
+    needs_branch: false
+    # Decomposition config: fan-out pattern for subprojects
+    decomposition:
+      # Extract subprojects from output JSON - handles both single and multiple strategies
+      # For single strategy, this will be a single-item array
+      items_path: "$.decomposition.subprojects"
+      per_item:
+        branch:
+          template: "feature/{feature_name}-{item}"
+          parent: main
+        task:
+          agent_type: "technical-requirements-specialist"
+          summary: "Create technical specs for {feature_name}/{item}"
+          description: |
+            Continue feature development workflow for subproject: {item}
+
+            Architecture context from parent task:
+            {previous_output}
+
+            This is a decomposition child task - implement technical specifications
+            for the {item} subproject following the architecture design.
+          priority: 5
+          continue_chain: true
+          continue_at_step: create_technical_specs
+      on_complete:
+        wait_for_children: true
     prompt: |
       Requirements from previous step:
       {previous_output}

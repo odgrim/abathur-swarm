@@ -15,6 +15,7 @@ pub enum TaskStatus {
     Blocked,            // Waiting for dependencies
     Ready,              // Dependencies met, ready for execution
     Running,            // Currently executing
+    AwaitingChildren,   // Waiting for spawned child tasks to complete (fan-out pattern)
     AwaitingValidation, // Execution complete, validation task spawned
     ValidationRunning,  // Validation task is executing
     ValidationFailed,   // Validation found issues (triggers remediation)
@@ -30,6 +31,7 @@ impl fmt::Display for TaskStatus {
             Self::Blocked => write!(f, "blocked"),
             Self::Ready => write!(f, "ready"),
             Self::Running => write!(f, "running"),
+            Self::AwaitingChildren => write!(f, "awaiting_children"),
             Self::AwaitingValidation => write!(f, "awaiting_validation"),
             Self::ValidationRunning => write!(f, "validation_running"),
             Self::ValidationFailed => write!(f, "validation_failed"),
@@ -49,6 +51,7 @@ impl FromStr for TaskStatus {
             "blocked" => Ok(Self::Blocked),
             "ready" => Ok(Self::Ready),
             "running" => Ok(Self::Running),
+            "awaiting_children" | "awaitingchildren" => Ok(Self::AwaitingChildren),
             "awaiting_validation" | "awaitingvalidation" => Ok(Self::AwaitingValidation),
             "validation_running" | "validationrunning" => Ok(Self::ValidationRunning),
             "validation_failed" | "validationfailed" => Ok(Self::ValidationFailed),
@@ -285,6 +288,17 @@ pub struct Task {
     #[serde(default)]
     pub chain_step_index: usize,
 
+    /// IDs of child tasks this task is waiting for (fan-out pattern)
+    /// When set and all children complete, task transitions from AwaitingChildren to Ready
+    #[schemars(with = "Option<Vec<String>>")]
+    pub awaiting_children: Option<Vec<Uuid>>,
+
+    /// Task ID that spawned this task via chain decomposition
+    /// Different from parent_task_id (which is for user-facing hierarchy)
+    /// This creates a direct link for fan-in tracking
+    #[schemars(with = "Option<String>")]
+    pub spawned_by_task_id: Option<Uuid>,
+
     /// Chain handoff state for tracking pending next step enqueueing
     ///
     /// Set BEFORE attempting to enqueue the next chain step, cleared on success.
@@ -352,6 +366,8 @@ impl Task {
             workflow_expectations: None,
             chain_id: None,
             chain_step_index: 0,
+            awaiting_children: None,
+            spawned_by_task_id: None,
             chain_handoff_state: None,
             idempotency_key: None,
             version: 1,

@@ -2,7 +2,8 @@
 
 use crate::domain::models::hook::HookAction;
 use crate::domain::models::prompt_chain::{
-    OutputFormat, PromptChain, PromptStep, ValidationRule, ValidationType,
+    BranchConfig, DecompositionConfig, OnDecompositionComplete, OutputFormat, PerItemConfig,
+    PromptChain, PromptStep, TaskSpawnConfig, ValidationRule, ValidationType,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,80 @@ pub struct StepTemplate {
     // DEPRECATED: For backwards compatibility with old configs
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_task_branch: Option<bool>,
+    /// Decomposition configuration for fan-out pattern
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decomposition: Option<DecompositionConfigTemplate>,
+}
+
+/// Template for decomposition configuration (fan-out pattern)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecompositionConfigTemplate {
+    /// JSON path to items array in step output
+    pub items_path: String,
+    /// Configuration for each item
+    pub per_item: PerItemConfigTemplate,
+    /// Behavior after spawning
+    #[serde(default)]
+    pub on_complete: OnDecompositionCompleteTemplate,
+}
+
+/// Template for per-item configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerItemConfigTemplate {
+    /// Branch configuration
+    pub branch: BranchConfigTemplate,
+    /// Task to spawn
+    pub task: TaskSpawnConfigTemplate,
+}
+
+/// Template for branch configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchConfigTemplate {
+    /// Branch name template
+    pub template: String,
+    /// Parent branch
+    #[serde(default = "default_branch_parent_template")]
+    pub parent: String,
+}
+
+fn default_branch_parent_template() -> String {
+    "main".to_string()
+}
+
+/// Template for task spawn configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSpawnConfigTemplate {
+    /// Agent type
+    pub agent_type: String,
+    /// Summary template
+    pub summary: String,
+    /// Description template
+    pub description: String,
+    /// Priority
+    #[serde(default = "default_priority_template")]
+    pub priority: u8,
+    /// Continue chain in spawned task
+    #[serde(default)]
+    pub continue_chain: bool,
+    /// Step to continue at
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continue_at_step: Option<String>,
+}
+
+fn default_priority_template() -> u8 {
+    5
+}
+
+/// Template for on_complete configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OnDecompositionCompleteTemplate {
+    /// Wait for children to complete
+    #[serde(default = "default_wait_for_children_template")]
+    pub wait_for_children: bool,
+}
+
+fn default_wait_for_children_template() -> bool {
+    true
 }
 
 /// Template for output format specification
@@ -232,6 +307,36 @@ impl ChainLoader {
             step = step.with_branch_name_template(branch_name_template);
         }
 
+        // Handle decomposition configuration (fan-out pattern)
+        if let Some(decomp_template) = template.decomposition {
+            let decomposition = DecompositionConfig {
+                items_path: decomp_template.items_path,
+                per_item: PerItemConfig {
+                    branch: BranchConfig {
+                        template: decomp_template.per_item.branch.template,
+                        parent: decomp_template.per_item.branch.parent,
+                    },
+                    task: TaskSpawnConfig {
+                        agent_type: decomp_template.per_item.task.agent_type,
+                        summary: decomp_template.per_item.task.summary,
+                        description: decomp_template.per_item.task.description,
+                        priority: decomp_template.per_item.task.priority,
+                        continue_chain: decomp_template.per_item.task.continue_chain,
+                        continue_at_step: decomp_template.per_item.task.continue_at_step,
+                    },
+                },
+                on_complete: OnDecompositionComplete {
+                    wait_for_children: decomp_template.on_complete.wait_for_children,
+                },
+            };
+            step = step.with_decomposition(decomposition);
+            info!(
+                step_id = %template.id,
+                items_path = %step.decomposition.as_ref().unwrap().items_path,
+                "ChainLoader: Step configured with decomposition (fan-out pattern)"
+            );
+        }
+
         Ok(step)
     }
 
@@ -349,6 +454,26 @@ impl ChainLoader {
             branch_parent: step.branch_parent.clone(),
             branch_name_template: step.branch_name_template.clone(),
             needs_task_branch: None, // Never serialize deprecated field
+            decomposition: step.decomposition.as_ref().map(|d| DecompositionConfigTemplate {
+                items_path: d.items_path.clone(),
+                per_item: PerItemConfigTemplate {
+                    branch: BranchConfigTemplate {
+                        template: d.per_item.branch.template.clone(),
+                        parent: d.per_item.branch.parent.clone(),
+                    },
+                    task: TaskSpawnConfigTemplate {
+                        agent_type: d.per_item.task.agent_type.clone(),
+                        summary: d.per_item.task.summary.clone(),
+                        description: d.per_item.task.description.clone(),
+                        priority: d.per_item.task.priority,
+                        continue_chain: d.per_item.task.continue_chain,
+                        continue_at_step: d.per_item.task.continue_at_step.clone(),
+                    },
+                },
+                on_complete: OnDecompositionCompleteTemplate {
+                    wait_for_children: d.on_complete.wait_for_children,
+                },
+            }),
         })
     }
 

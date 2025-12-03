@@ -221,6 +221,7 @@ fn status_color(status: &TaskStatus) -> Color {
     match status {
         TaskStatus::Completed => Color::Green,
         TaskStatus::Running => Color::Cyan,
+        TaskStatus::AwaitingChildren => Color::Blue,
         TaskStatus::AwaitingValidation => Color::Yellow,
         TaskStatus::ValidationRunning => Color::Cyan,
         TaskStatus::ValidationFailed => Color::Red,
@@ -237,6 +238,7 @@ fn status_icon(status: &TaskStatus) -> &'static str {
     match status {
         TaskStatus::Completed => "✓",
         TaskStatus::Running => "⟳",
+        TaskStatus::AwaitingChildren => "⫸", // Waiting for children (fork icon)
         TaskStatus::AwaitingValidation => "⧗",
         TaskStatus::ValidationRunning => "⟳",
         TaskStatus::ValidationFailed => "✗",
@@ -326,6 +328,8 @@ pub fn format_task_table(tasks: &[crate::cli::models::Task]) -> String {
         workflow_expectations: None,
         chain_id: t.chain_id.clone(),
         chain_step_index: 0,
+        awaiting_children: None,
+        spawned_by_task_id: None,
         chain_handoff_state: None,
         idempotency_key: None,
         version: 1,
@@ -469,6 +473,8 @@ mod tests {
             chain_handoff_state: None,
             idempotency_key: None,
             version: 1,
+            awaiting_children: None,
+            spawned_by_task_id: None,
         };
 
         let formatter = TableFormatter::with_config(false, None);

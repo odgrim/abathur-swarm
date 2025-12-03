@@ -1,4 +1,7 @@
-use crate::domain::models::{AgentMetadataRegistry, ChainHandoffState, Config, Task};
+use crate::domain::models::{
+    AgentMetadataRegistry, ChainHandoffState, Config, Task, TaskStatus,
+    task::{DependencyType, TaskSource},
+};
 use crate::domain::ports::{
     ExecutionParameters,
     SubstrateError, SubstrateRequest,
@@ -520,6 +523,68 @@ impl AgentExecutor {
             }
         }
 
+        // Handle decomposition if configured (fan-out pattern)
+        if let Some(ref decomposition) = step.decomposition {
+            info!(
+                task_id = %task.id,
+                step_id = %step.id,
+                items_path = %decomposition.items_path,
+                "Step has decomposition config, processing fan-out"
+            );
+
+            // Process decomposition and spawn child tasks
+            match self.handle_decomposition(&result.output, step, &mut updated_task, &chain).await {
+                Ok(child_ids) => {
+                    if !child_ids.is_empty() && decomposition.on_complete.wait_for_children {
+                        // Set task to AwaitingChildren status - it will resume when all children complete
+                        updated_task.awaiting_children = Some(child_ids.clone());
+                        updated_task.status = TaskStatus::AwaitingChildren;
+
+                        // Save the handoff state so we know which step to continue at
+                        let next_step_index = step_index + 1;
+                        if next_step_index < chain.steps.len() {
+                            updated_task.chain_handoff_state = Some(ChainHandoffState {
+                                pending_next_step_index: next_step_index,
+                                chain_id: chain_id.to_string(),
+                                pending_since: chrono::Utc::now(),
+                                enqueue_attempts: 0,
+                                last_error: None,
+                                step_output: Some(result.output.clone()),
+                            });
+                        }
+
+                        self.chain_service
+                            .update_task(&updated_task)
+                            .await
+                            .map_err(|e| {
+                                ExecutionError::ExecutionFailed(format!(
+                                    "Failed to save AwaitingChildren state: {}", e
+                                ))
+                            })?;
+
+                        info!(
+                            task_id = %task.id,
+                            child_count = child_ids.len(),
+                            "Task now waiting for {} children to complete",
+                            child_ids.len()
+                        );
+
+                        // Don't enqueue next step - will be done when children complete
+                        // Return the step result (children will continue from here)
+                        return Ok(result.output.clone());
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        task_id = %task.id,
+                        error = ?e,
+                        "Decomposition failed, continuing with normal flow"
+                    );
+                    // Fall through to normal next step enqueueing
+                }
+            }
+        }
+
         // Enqueue the next step if there is one
         let next_step_index = step_index + 1;
         if next_step_index < chain.steps.len() {
@@ -785,6 +850,8 @@ impl AgentExecutor {
             workflow_expectations: None,
             chain_id: current_task.chain_id.clone(),
             chain_step_index: next_step_index,
+            awaiting_children: None,
+            spawned_by_task_id: None,
             chain_handoff_state: None,
             idempotency_key: Some(idempotency_key.clone()),
             version: 1,
@@ -809,51 +876,18 @@ impl AgentExecutor {
                 );
                 Ok(task_id)
             }
-            IdempotentInsertResult::AlreadyExists => {
+            IdempotentInsertResult::AlreadyExists(existing_task_id) => {
                 // Task already exists - this is expected during retries
-                // Use direct idempotency key lookup instead of scanning dependent tasks
+                // The existing task ID is returned directly from the insert operation
                 info!(
                     chain_id = %chain.id,
                     step_index = next_step_index,
                     current_task_id = %current_task.id,
+                    existing_task_id = %existing_task_id,
                     idempotency_key = %idempotency_key,
                     "Next chain step already exists (idempotent insert detected duplicate)"
                 );
-
-                // Query for the existing task directly by idempotency key
-                // This is O(1) vs O(n) for scanning dependents, and more reliable
-                match self.chain_service.get_task_by_idempotency_key(&idempotency_key).await {
-                    Ok(Some(existing_task)) => {
-                        info!(
-                            existing_task_id = %existing_task.id,
-                            idempotency_key = %idempotency_key,
-                            "Found existing task by idempotency key"
-                        );
-                        Ok(existing_task.id)
-                    }
-                    Ok(None) => {
-                        // Very rare edge case: task exists by database constraint but query returned None
-                        // This could happen due to concurrent deletion or replication lag
-                        warn!(
-                            idempotency_key = %idempotency_key,
-                            "Task exists by idempotency key constraint but not found in query"
-                        );
-                        Err(anyhow::anyhow!(
-                            "Duplicate task detected but could not retrieve existing task ID"
-                        ))
-                    }
-                    Err(e) => {
-                        // Database error during lookup - propagate for proper error handling
-                        warn!(
-                            idempotency_key = %idempotency_key,
-                            error = ?e,
-                            "Failed to look up existing task by idempotency key"
-                        );
-                        Err(anyhow::anyhow!(
-                            "Failed to retrieve existing task: {}", e
-                        ))
-                    }
-                }
+                Ok(existing_task_id)
             }
         }
     }
@@ -1456,6 +1490,225 @@ impl AgentExecutor {
                 let placeholder = format!("{{{}}}", key);
                 let replacement = match value {
                     serde_json::Value::String(s) => s.clone(),
+                    _ => value.to_string().trim_matches('"').to_string(),
+                };
+                result = result.replace(&placeholder, &replacement);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Handle decomposition fan-out pattern
+    ///
+    /// Parses step output, extracts items from items_path, and spawns a child task
+    /// for each item with its own branch.
+    ///
+    /// Returns the IDs of spawned child tasks.
+    async fn handle_decomposition(
+        &self,
+        output: &str,
+        step: &crate::domain::models::prompt_chain::PromptStep,
+        parent_task: &mut Task,
+        chain: &crate::domain::models::prompt_chain::PromptChain,
+    ) -> Result<Vec<Uuid>> {
+        use crate::infrastructure::validators::output_validator::OutputValidator;
+        use crate::domain::ports::task_repository::IdempotentInsertResult;
+
+        let decomposition = step.decomposition.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No decomposition config"))?;
+
+        // Parse output as JSON
+        let cleaned_output = OutputValidator::strip_markdown_code_blocks(output);
+        let output_json: serde_json::Value = serde_json::from_str(&cleaned_output)
+            .map_err(|e| anyhow::anyhow!("Failed to parse step output as JSON: {}", e))?;
+
+        // Navigate to items_path (e.g., "decomposition.subprojects")
+        let items = self.get_json_path(&output_json, &decomposition.items_path)
+            .ok_or_else(|| anyhow::anyhow!(
+                "Items path '{}' not found in output",
+                decomposition.items_path
+            ))?;
+
+        let items_array = items.as_array()
+            .ok_or_else(|| anyhow::anyhow!(
+                "Items at path '{}' is not an array",
+                decomposition.items_path
+            ))?;
+
+        if items_array.is_empty() {
+            info!(
+                task_id = %parent_task.id,
+                "No items found at '{}', skipping decomposition",
+                decomposition.items_path
+            );
+            return Ok(vec![]);
+        }
+
+        info!(
+            task_id = %parent_task.id,
+            item_count = items_array.len(),
+            "Found {} items for decomposition",
+            items_array.len()
+        );
+
+        let mut child_ids = Vec::with_capacity(items_array.len());
+        let now = chrono::Utc::now();
+
+        for (idx, item) in items_array.iter().enumerate() {
+            // Build substitution variables from item
+            let mut variables = serde_json::Map::new();
+            if let Some(obj) = item.as_object() {
+                for (key, value) in obj {
+                    variables.insert(format!("item.{}", key), value.clone());
+                }
+            }
+            variables.insert("parent_task_id".to_string(), serde_json::json!(parent_task.id.to_string()));
+            let vars_value = serde_json::Value::Object(variables);
+
+            // Substitute branch template
+            let branch_template = &decomposition.per_item.branch.template;
+            let branch_name = self.substitute_template(branch_template, &vars_value)?;
+            let sanitized_branch = Self::sanitize_branch_name(&branch_name);
+
+            // Substitute task templates
+            let task_config = &decomposition.per_item.task;
+            let summary = self.substitute_template(&task_config.summary, &vars_value)?;
+            let description = self.substitute_template(&task_config.description, &vars_value)?;
+            let agent_type = self.substitute_template(&task_config.agent_type, &vars_value)?;
+
+            info!(
+                task_id = %parent_task.id,
+                item_index = idx,
+                branch = %sanitized_branch,
+                agent_type = %agent_type,
+                "Creating child task for decomposition item"
+            );
+
+            // Determine chain continuation
+            let (chain_id, chain_step_index) = if task_config.continue_chain {
+                if let Some(ref continue_at) = task_config.continue_at_step {
+                    // Find the step index for continue_at_step
+                    let step_idx = chain.steps.iter()
+                        .position(|s| &s.id == continue_at)
+                        .unwrap_or(0);
+                    (parent_task.chain_id.clone(), step_idx)
+                } else {
+                    (parent_task.chain_id.clone(), 0)
+                }
+            } else {
+                (None, 0)
+            };
+
+            // Create the child task
+            let child_task = Task {
+                id: Uuid::new_v4(),
+                summary: Self::truncate_summary(&summary, 140),
+                description,
+                agent_type,
+                priority: task_config.priority,
+                calculated_priority: f64::from(task_config.priority),
+                status: TaskStatus::Pending,
+                dependencies: None, // Children run in parallel
+                dependency_type: DependencyType::Sequential,
+                dependency_depth: parent_task.dependency_depth + 1,
+                input_data: Some(item.clone()), // Pass item data as input
+                result_data: None,
+                error_message: None,
+                retry_count: 0,
+                max_retries: 3,
+                max_execution_timeout_seconds: 3600,
+                submitted_at: now,
+                started_at: None,
+                completed_at: None,
+                last_updated_at: now,
+                created_by: Some("decomposition-fanout".to_string()),
+                parent_task_id: Some(parent_task.id),
+                session_id: parent_task.session_id,
+                source: TaskSource::AgentPlanner,
+                deadline: parent_task.deadline,
+                estimated_duration_seconds: None,
+                branch: None, // Branch will be created when task starts
+                feature_branch: Some(sanitized_branch.clone()),
+                worktree_path: None,
+                validation_requirement: crate::domain::models::ValidationRequirement::None,
+                validation_task_id: None,
+                validating_task_id: None,
+                remediation_count: 0,
+                is_remediation: false,
+                workflow_state: None,
+                workflow_expectations: None,
+                chain_id,
+                chain_step_index,
+                awaiting_children: None,
+                spawned_by_task_id: Some(parent_task.id),
+                chain_handoff_state: None,
+                idempotency_key: Some(format!(
+                    "decomp:{}:{}:{}",
+                    parent_task.id,
+                    step.id,
+                    idx
+                )),
+                version: 1,
+            };
+
+            // Submit the child task
+            match self.chain_service.submit_task_idempotent(child_task).await {
+                Ok(insert_result) => {
+                    let task_id = match insert_result {
+                        IdempotentInsertResult::Inserted(id) => {
+                            info!(
+                                child_task_id = %id,
+                                branch = %sanitized_branch,
+                                "Spawned new child task"
+                            );
+                            id
+                        }
+                        IdempotentInsertResult::AlreadyExists(id) => {
+                            info!(
+                                child_task_id = %id,
+                                branch = %sanitized_branch,
+                                "Child task already exists (idempotent)"
+                            );
+                            id
+                        }
+                    };
+                    child_ids.push(task_id);
+                }
+                Err(e) => {
+                    warn!(
+                        task_id = %parent_task.id,
+                        error = ?e,
+                        item_index = idx,
+                        "Failed to spawn child task"
+                    );
+                    // Continue with other items even if one fails
+                }
+            }
+        }
+
+        Ok(child_ids)
+    }
+
+    /// Navigate a JSON value using a dot-separated path (e.g., "decomposition.subprojects")
+    fn get_json_path<'a>(&self, value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+        let mut current = value;
+        for key in path.split('.') {
+            current = current.get(key)?;
+        }
+        Some(current)
+    }
+
+    /// Substitute {key} placeholders in a template with values from variables
+    fn substitute_template(&self, template: &str, variables: &serde_json::Value) -> Result<String> {
+        let mut result = template.to_string();
+
+        if let Some(vars) = variables.as_object() {
+            for (key, value) in vars {
+                let placeholder = format!("{{{}}}", key);
+                let replacement = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Null => String::new(),
                     _ => value.to_string().trim_matches('"').to_string(),
                 };
                 result = result.replace(&placeholder, &replacement);

@@ -172,6 +172,107 @@ pub struct PromptStep {
     /// Variables available: feature_name, step_id, task_id, and any from step output
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch_name_template: Option<String>,
+    /// Decomposition configuration for spawning child tasks from step output
+    /// This enables fan-out patterns where a step can create multiple branches
+    /// and spawn tasks that continue the chain in parallel
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decomposition: Option<DecompositionConfig>,
+}
+
+/// Configuration for spawning tasks from step output (fan-out pattern)
+///
+/// Enables a step to dynamically create branches and spawn child tasks based
+/// on its output. The parent task waits for all children before proceeding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecompositionConfig {
+    /// JSON path to extract items array from step output
+    /// Example: "decomposition.subprojects" extracts from output.decomposition.subprojects
+    pub items_path: String,
+
+    /// Configuration applied to each item in the array
+    pub per_item: PerItemConfig,
+
+    /// Behavior after spawning all child tasks
+    #[serde(default)]
+    pub on_complete: OnDecompositionComplete,
+}
+
+/// Configuration for each item in the decomposition array
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerItemConfig {
+    /// Branch configuration (required - each item gets its own branch)
+    pub branch: BranchConfig,
+
+    /// Task to spawn for this item
+    pub task: TaskSpawnConfig,
+}
+
+/// Configuration for branch creation during decomposition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchConfig {
+    /// Template for branch name
+    /// Supports {item.*} substitution for item properties
+    /// Example: "feature/{item.name}" with item {"name": "auth"} -> "feature/auth"
+    pub template: String,
+
+    /// Parent branch to create from
+    /// - "main": Branch from main/master
+    /// - "current": Branch from current task's branch
+    /// - explicit name: Branch from specified branch
+    #[serde(default = "default_branch_parent")]
+    pub parent: String,
+}
+
+fn default_branch_parent() -> String {
+    "main".to_string()
+}
+
+/// Configuration for task spawning during decomposition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSpawnConfig {
+    /// Agent type for the spawned task
+    /// Can be templated: "{item.agent_type}" or hardcoded: "technical-requirements-specialist"
+    pub agent_type: String,
+
+    /// Summary template for the spawned task
+    /// Supports {item.*} and {parent_task_id} substitution
+    pub summary: String,
+
+    /// Description template for the spawned task
+    /// Supports {item.*} and {parent_task_id} substitution
+    pub description: String,
+
+    /// Priority for spawned tasks (default 5)
+    #[serde(default = "default_priority")]
+    pub priority: u8,
+
+    /// Whether spawned tasks continue the chain execution
+    /// If true, the child task continues at `continue_at_step`
+    #[serde(default)]
+    pub continue_chain: bool,
+
+    /// Step ID to continue at in spawned tasks
+    /// Required if continue_chain is true
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continue_at_step: Option<String>,
+}
+
+fn default_priority() -> u8 {
+    5
+}
+
+/// Behavior after decomposition completes
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OnDecompositionComplete {
+    /// Wait for all spawned children before proceeding to next step
+    /// If true, parent enters AwaitingChildren status until all complete
+    /// If false, parent continues immediately (fire-and-forget pattern)
+    #[serde(default = "default_wait_for_children")]
+    pub wait_for_children: bool,
+}
+
+fn default_wait_for_children() -> bool {
+    true
 }
 
 impl PromptStep {
@@ -195,6 +296,7 @@ impl PromptStep {
             needs_branch: None,
             branch_parent: None,
             branch_name_template: None,
+            decomposition: None,
         }
     }
 
@@ -255,6 +357,12 @@ impl PromptStep {
     /// Set the branch name template
     pub fn with_branch_name_template(mut self, branch_name_template: String) -> Self {
         self.branch_name_template = Some(branch_name_template);
+        self
+    }
+
+    /// Set the decomposition configuration for fan-out pattern
+    pub fn with_decomposition(mut self, decomposition: DecompositionConfig) -> Self {
+        self.decomposition = Some(decomposition);
         self
     }
 

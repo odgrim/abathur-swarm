@@ -508,6 +508,17 @@ impl TaskCoordinator {
         }
         drop(hook_registry_guard);
 
+        // Check if this is a decomposition child task and handle parent completion
+        // This implements fan-in for fan-out/fan-in decomposition pattern
+        if let Err(e) = self.check_parent_child_completion(task_id).await {
+            warn!(
+                task_id = %task_id,
+                error = ?e,
+                "Failed to check parent child completion, parent may be stuck in AwaitingChildren"
+            );
+            // Don't fail the overall completion - parent can be recovered by background process
+        }
+
         // 2. Get all dependent tasks
         let dependent_tasks = self
             .task_queue
@@ -1258,6 +1269,176 @@ impl TaskCoordinator {
 
         Ok(true)
     }
+
+    /// Check if a completed task is a child task, and if so, check if all siblings are complete.
+    /// If all children of a parent task are complete, transition the parent from AwaitingChildren
+    /// to Ready so it can continue its chain workflow.
+    ///
+    /// This implements the fan-out/fan-in pattern for decomposition tasks.
+    #[instrument(skip(self), fields(task_id = %completed_task_id))]
+    pub async fn check_parent_child_completion(&self, completed_task_id: Uuid) -> Result<()> {
+        // 1. Get the completed task to check if it has a parent
+        let completed_task = self.task_queue.get_task(completed_task_id).await?;
+
+        // 2. Check if this task was spawned by a parent (decomposition child)
+        let parent_task_id = match completed_task.spawned_by_task_id {
+            Some(parent_id) => parent_id,
+            None => {
+                debug!(
+                    task_id = %completed_task_id,
+                    "Task has no spawned_by_task_id, not a decomposition child"
+                );
+                return Ok(());
+            }
+        };
+
+        info!(
+            task_id = %completed_task_id,
+            parent_task_id = %parent_task_id,
+            "Checking if parent task's children are all complete"
+        );
+
+        // 3. Get the parent task
+        let parent_task = self.task_queue.get_task(parent_task_id).await?;
+
+        // 4. Check if parent is in AwaitingChildren status
+        if parent_task.status != TaskStatus::AwaitingChildren {
+            debug!(
+                parent_task_id = %parent_task_id,
+                parent_status = ?parent_task.status,
+                "Parent task is not in AwaitingChildren status, skipping"
+            );
+            return Ok(());
+        }
+
+        // 5. Get the list of children the parent is waiting for
+        let awaiting_children = match &parent_task.awaiting_children {
+            Some(children) if !children.is_empty() => children.clone(),
+            _ => {
+                warn!(
+                    parent_task_id = %parent_task_id,
+                    "Parent in AwaitingChildren status but has no awaiting_children list"
+                );
+                return Ok(());
+            }
+        };
+
+        // 6. Check if all children are in terminal state
+        let mut all_complete = true;
+        let mut any_failed = false;
+
+        for child_id in &awaiting_children {
+            match self.task_queue.get_task(*child_id).await {
+                Ok(child) => {
+                    match child.status {
+                        TaskStatus::Completed => {
+                            // Child completed successfully
+                        }
+                        TaskStatus::Failed | TaskStatus::Cancelled => {
+                            any_failed = true;
+                            // Still consider as terminal
+                        }
+                        _ => {
+                            // Child still in progress
+                            all_complete = false;
+                            debug!(
+                                child_id = %child_id,
+                                child_status = ?child.status,
+                                "Child task not yet complete"
+                            );
+                            break; // Early exit, not all complete
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        child_id = %child_id,
+                        error = ?e,
+                        "Failed to get child task, assuming not complete"
+                    );
+                    all_complete = false;
+                    break;
+                }
+            }
+        }
+
+        if !all_complete {
+            info!(
+                parent_task_id = %parent_task_id,
+                "Not all children complete yet, parent remains in AwaitingChildren"
+            );
+            return Ok(());
+        }
+
+        // 7. All children are in terminal state - transition parent
+        if any_failed {
+            // If any child failed, we need to decide: fail the parent or let it handle?
+            // For now, we'll still transition to Ready and let the chain decide
+            warn!(
+                parent_task_id = %parent_task_id,
+                "All children complete but some failed, transitioning parent to Ready anyway"
+            );
+        }
+
+        // 8. Prepare parent task for chain continuation
+        // We need to update:
+        // - chain_step_index to the next step from chain_handoff_state
+        // - clear awaiting_children
+        // - set status to Ready
+        let mut updated_parent = parent_task.clone();
+
+        // Update chain_step_index from handoff state
+        if let Some(ref handoff_state) = parent_task.chain_handoff_state {
+            let next_step = handoff_state.pending_next_step_index;
+            info!(
+                parent_task_id = %parent_task_id,
+                current_step = parent_task.chain_step_index,
+                next_step = next_step,
+                "Advancing parent chain step index from handoff state"
+            );
+            updated_parent.chain_step_index = next_step;
+        }
+
+        // Clear awaiting_children - they're all done
+        updated_parent.awaiting_children = None;
+
+        // Set status to Ready
+        updated_parent.status = TaskStatus::Ready;
+
+        // Update timestamp
+        updated_parent.last_updated_at = chrono::Utc::now();
+
+        info!(
+            parent_task_id = %parent_task_id,
+            child_count = awaiting_children.len(),
+            new_step_index = updated_parent.chain_step_index,
+            "All children complete! Transitioning parent from AwaitingChildren to Ready"
+        );
+
+        // Save all updates atomically
+        self.task_queue
+            .update_task(&updated_parent)
+            .await
+            .context("Failed to update parent task for chain continuation")?;
+
+        // Notify status change
+        let _ = self
+            .status_tx
+            .send(TaskStatusUpdate {
+                task_id: parent_task_id,
+                old_status: TaskStatus::AwaitingChildren,
+                new_status: TaskStatus::Ready,
+            })
+            .await;
+
+        info!(
+            parent_task_id = %parent_task_id,
+            "Parent task transitioned to Ready, will continue chain workflow at step {}",
+            updated_parent.chain_step_index
+        );
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1508,6 +1689,8 @@ mod tests {
             chain_handoff_state: None,
             idempotency_key: None,
             version: 1,
+            awaiting_children: None,
+            spawned_by_task_id: None,
         }
     }
 

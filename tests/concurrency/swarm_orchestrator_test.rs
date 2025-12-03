@@ -177,8 +177,8 @@ impl TaskQueueService for MockTaskQueue {
 
         // Check if a task with this idempotency key already exists
         if let Some(ref key) = task.idempotency_key {
-            if tasks.values().any(|t| t.idempotency_key.as_deref() == Some(key)) {
-                return Ok(IdempotentInsertResult::AlreadyExists);
+            if let Some(existing) = tasks.values().find(|t| t.idempotency_key.as_deref() == Some(key)) {
+                return Ok(IdempotentInsertResult::AlreadyExists(existing.id));
             }
         }
 
