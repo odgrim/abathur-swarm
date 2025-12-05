@@ -434,9 +434,11 @@ impl AgentExecutor {
         }
 
         // Execute this single step
+        // IMPORTANT: Pass updated_task (which has branch info from create_branch_for_step)
+        // instead of task, so spawn_tasks_from_output can inherit feature_branch
         let result = self
             .chain_service
-            .execute_single_step(&chain, step, &step_input, Some(task))
+            .execute_single_step(&chain, step, &step_input, Some(&updated_task))
             .await
             .map_err(|e| {
                 ExecutionError::ExecutionFailed(format!(
