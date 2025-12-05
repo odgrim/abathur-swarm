@@ -63,11 +63,18 @@ echo "[INFO]   Task ID: $TASK_ID"
 echo "[INFO]   Branch: $FEATURE_BRANCH"
 echo "[INFO]   Path: $WORKTREE_PATH"
 
-# Check if worktree already exists
+# Check if worktree already exists AND is a valid git worktree
 if [[ -d "$WORKTREE_PATH" ]]; then
-    echo "[WARN] Worktree already exists at $WORKTREE_PATH"
-    echo "[INFO] Reusing existing worktree"
-    exit 0
+    # Verify it's actually a git worktree (has .git file pointing to main repo)
+    if [[ -f "$WORKTREE_PATH/.git" ]] && git -C "$WORKTREE_PATH" rev-parse --git-dir >/dev/null 2>&1; then
+        echo "[INFO] Valid git worktree already exists at $WORKTREE_PATH"
+        echo "[INFO] Reusing existing worktree"
+        exit 0
+    else
+        echo "[WARN] Directory exists at $WORKTREE_PATH but is NOT a valid git worktree"
+        echo "[INFO] Removing invalid directory and creating proper worktree"
+        rm -rf "$WORKTREE_PATH"
+    fi
 fi
 
 # Check if branch already exists
