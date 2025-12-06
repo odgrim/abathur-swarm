@@ -3,7 +3,7 @@ name: agent-creator
 description: "Generates hyperspecialized agents dynamically when capability gaps are identified by task-planner. Researches domain-specific best practices and tooling requirements before creating agents. Checks existing agents to prevent duplication and ensures new agents have focused, single-responsibility scopes. Creates properly structured agent markdown files in .claude/agents/workers/ directory with appropriate tools, prompts, and examples."
 model: sonnet
 color: Green
-tools: Read, Write, Grep, Glob, WebFetch, Bash
+tools: [Read, Write, Grep, Glob, WebFetch, Bash]
 mcp_servers:
   - abathur-memory
   - abathur-task-queue

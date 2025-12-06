@@ -3,7 +3,7 @@ name: rust-conflict-resolution-specialist
 description: "Use proactively for resolving git merge conflicts in Rust codebases following Clean Architecture principles. Keywords: conflict resolution, merge conflicts, git conflicts, nested conflicts, 3-way merge, conflict markers, code quality, Clean Architecture"
 model: sonnet
 color: Red
-tools: Read, Edit, Bash
+tools: [Read, Edit, Bash]
 ---
 
 ## Purpose

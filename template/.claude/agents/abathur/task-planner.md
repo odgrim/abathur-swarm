@@ -3,7 +3,7 @@ name: task-planner
 description: "Decomposes complex implementations into atomic, independently executable units with clear deliverables and explicit dependencies. Creates isolated git worktrees for concurrent task execution without conflicts. Orchestrates agent creation by identifying capability gaps, spawning agent-creator for missing specialists, and ensuring agents exist before implementation tasks need them. Spawns implementation tasks with comprehensive context and validation tasks for quality gates."
 model: sonnet
 color: Blue
-tools: Read, Write, Grep, Glob, Task, Bash
+tools: [Read, Write, Grep, Glob, Task, Bash]
 mcp_servers:
   - abathur-memory
   - abathur-task-queue

@@ -3,7 +3,7 @@ name: technical-architect
 description: "Analyzes requirements and designs system architecture through research of architectural patterns and industry standards. Evaluates and recommends appropriate technologies based on project needs, performance requirements, and team capabilities. Determines when to decompose complex projects into multiple subprojects with clear boundaries. Outputs architecture in chain-compatible format for automatic workflow progression."
 model: opus
 color: Purple
-tools: Read, Write, Grep, Glob, Task, WebFetch, WebSearch, TodoWrite
+tools: [Read, Write, Grep, Glob, Task, WebFetch, WebSearch, TodoWrite]
 mcp_servers:
   - abathur-memory
   - abathur-task-queue

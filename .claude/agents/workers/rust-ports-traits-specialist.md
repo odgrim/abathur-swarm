@@ -3,7 +3,7 @@ name: rust-ports-traits-specialist
 description: "Use proactively for defining async trait interfaces in Rust following hexagonal architecture (ports pattern). Keywords: async trait, port definition, trait bounds, hexagonal architecture, dependency injection, async_trait macro"
 model: sonnet
 color: Orange
-tools: Read, Write, Edit, Bash
+tools: [Read, Write, Edit, Bash]
 ---
 
 ## Purpose

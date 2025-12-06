@@ -3,7 +3,7 @@ name: rust-domain-models-specialist
 description: "Use for implementing Rust domain models following Clean Architecture and DDD principles. Keywords: rust domain models, domain structs, domain enums, serde, chrono, uuid, domain logic, DDD, value objects"
 model: sonnet
 color: Orange
-tools: Read, Write, Edit, Bash
+tools: [Read, Write, Edit, Bash]
 ---
 
 ## Purpose

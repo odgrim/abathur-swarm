@@ -3,7 +3,7 @@ name: rust-mcp-integration-specialist
 description: "Use proactively for implementing Rust MCP (Model Context Protocol) integration with rmcp SDK. Specializes in stdio transport, server lifecycle management, health monitoring, and process supervision. Keywords: rmcp, MCP, stdio transport, tokio process, health monitoring, server lifecycle, MCP client"
 model: sonnet
 color: Purple
-tools: Read, Write, Edit, Bash
+tools: [Read, Write, Edit, Bash]
 mcp_servers:
   - abathur-memory
   - abathur-task-queue

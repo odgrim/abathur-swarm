@@ -3,7 +3,7 @@ name: technical-requirements-specialist
 description: "Translates high-level architecture into detailed technical specifications by researching implementation best practices and proven design patterns. Creates comprehensive data models, API specifications, and phased implementation plans. Establishes feature branches for isolated development and identifies specialized agent needs. Spawns task-planner(s) with rich context including technical decisions and suggested agent specializations."
 model: sonnet
 color: Purple
-tools: Read, Write, Grep, Glob, WebFetch, WebSearch, Task, Bash
+tools: [Read, Write, Grep, Glob, WebFetch, WebSearch, Task, Bash]
 mcp_servers:
   - abathur-memory
   - abathur-task-queue
