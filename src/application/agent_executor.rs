@@ -1987,6 +1987,90 @@ impl AgentExecutor {
             "Successfully created branch for decomposition"
         );
 
+        // If this is a feature branch, create a worktree for it
+        // Feature branches need worktrees for merge conflict resolution
+        if branch_name.starts_with("feature/") || branch_name.starts_with("features/") {
+            if let Err(e) = self.ensure_feature_branch_worktree(branch_name).await {
+                warn!(
+                    branch_name = %branch_name,
+                    error = ?e,
+                    "Failed to create worktree for feature branch (continuing anyway)"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Ensure a feature branch has a worktree for merge conflict resolution
+    ///
+    /// Feature branches need their own worktrees so that task branches can be
+    /// merged into them without affecting the main working directory.
+    async fn ensure_feature_branch_worktree(&self, feature_branch: &str) -> Result<()> {
+        use tokio::process::Command;
+        use std::process::Stdio;
+
+        // Generate worktree path from feature branch name
+        // e.g., "feature/my-feature" -> ".abathur/worktrees/feature-my-feature"
+        let sanitized_name = feature_branch
+            .trim_start_matches("feature/")
+            .trim_start_matches("features/")
+            .replace('/', "-");
+        let worktree_path = format!(".abathur/worktrees/feature-{}", sanitized_name);
+
+        // Check if worktree already exists
+        let path = std::path::Path::new(&worktree_path);
+        if path.exists() {
+            let git_file = path.join(".git");
+            if git_file.exists() && git_file.is_file() {
+                debug!(
+                    feature_branch = %feature_branch,
+                    worktree_path = %worktree_path,
+                    "Feature branch worktree already exists"
+                );
+                return Ok(());
+            }
+            // Invalid directory, remove it
+            tokio::fs::remove_dir_all(path).await?;
+        }
+
+        // Ensure parent directory exists
+        let parent = path.parent();
+        if let Some(p) = parent {
+            if !p.exists() {
+                tokio::fs::create_dir_all(p).await?;
+            }
+        }
+
+        // Create the worktree
+        info!(
+            feature_branch = %feature_branch,
+            worktree_path = %worktree_path,
+            "Creating worktree for feature branch"
+        );
+
+        let output = Command::new("git")
+            .args(["worktree", "add", &worktree_path, feature_branch])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "Failed to create worktree for feature branch '{}': {}",
+                feature_branch,
+                stderr
+            ));
+        }
+
+        info!(
+            feature_branch = %feature_branch,
+            worktree_path = %worktree_path,
+            "Feature branch worktree created successfully"
+        );
+
         Ok(())
     }
 

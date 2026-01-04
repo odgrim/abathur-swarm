@@ -398,6 +398,81 @@ impl WorktreeService {
 
         Ok(())
     }
+
+    /// Set up a worktree for a feature branch.
+    ///
+    /// Feature branches need their own worktrees to serve as merge targets
+    /// for task branches. This enables conflict resolution without affecting
+    /// the main working directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `feature_branch` - The feature branch name (e.g., "feature/my-feature")
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(worktree_path)` - The path to the created worktree
+    /// * `Err` - If worktree creation fails
+    #[instrument(skip(self), fields(feature_branch = %feature_branch))]
+    pub async fn setup_feature_branch_worktree(&self, feature_branch: &str) -> Result<String> {
+        // Generate worktree path from feature branch name
+        // e.g., "feature/my-feature" -> ".abathur/worktrees/feature-my-feature"
+        let sanitized_name = feature_branch
+            .trim_start_matches("feature/")
+            .trim_start_matches("features/")
+            .replace('/', "-");
+        let worktree_path = format!(".abathur/worktrees/feature-{}", sanitized_name);
+
+        // Check if worktree already exists and is valid
+        if self.is_valid_worktree(&worktree_path).await? {
+            info!(
+                feature_branch = %feature_branch,
+                worktree_path = %worktree_path,
+                "Feature branch worktree already exists"
+            );
+            return Ok(worktree_path);
+        }
+
+        // Verify the feature branch exists
+        self.verify_feature_branch_exists(feature_branch).await?;
+
+        // Ensure parent directory exists
+        self.ensure_worktree_parent_exists(&worktree_path).await?;
+
+        // Create the worktree (branch already exists, so just attach it)
+        info!(
+            feature_branch = %feature_branch,
+            worktree_path = %worktree_path,
+            "Creating worktree for feature branch"
+        );
+
+        let output = Command::new("git")
+            .args(["worktree", "add", &worktree_path, feature_branch])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context("Failed to create feature branch worktree")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            error!(
+                feature_branch = %feature_branch,
+                worktree_path = %worktree_path,
+                stderr = %stderr,
+                "Failed to create feature branch worktree"
+            );
+            return Err(anyhow::anyhow!("Git worktree creation failed: {}", stderr));
+        }
+
+        info!(
+            feature_branch = %feature_branch,
+            worktree_path = %worktree_path,
+            "Feature branch worktree created successfully"
+        );
+
+        Ok(worktree_path)
+    }
 }
 
 #[cfg(test)]
