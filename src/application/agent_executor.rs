@@ -1636,6 +1636,14 @@ impl AgentExecutor {
             let branch_name = self.substitute_template(branch_template, &vars_value)?;
             let sanitized_branch = Self::sanitize_branch_name(&branch_name);
 
+            // CRITICAL: Create the git branch from parent before spawning child task
+            // The worktree service expects feature_branch to exist when the child task starts
+            let branch_parent = &decomposition.per_item.branch.parent;
+            let parent_ref = self.resolve_branch_parent(branch_parent, parent_task).await?;
+
+            // Create the branch if it doesn't exist
+            self.ensure_branch_exists(&sanitized_branch, &parent_ref).await?;
+
             // Substitute task templates
             let task_config = &decomposition.per_item.task;
             let summary = self.substitute_template(&task_config.summary, &vars_value)?;
@@ -1817,6 +1825,110 @@ impl AgentExecutor {
         }
 
         result
+    }
+
+    /// Resolve a branch parent reference to an actual branch name
+    ///
+    /// Handles:
+    /// - "main" / "master": Checks which exists and returns it
+    /// - "current": Returns the parent task's branch
+    /// - Any other value: Returns as-is (explicit branch name)
+    async fn resolve_branch_parent(&self, branch_parent: &str, task: &Task) -> Result<String> {
+        use tokio::process::Command;
+
+        match branch_parent {
+            "main" | "master" => {
+                // Check if main exists, otherwise use master
+                let check_main = Command::new("git")
+                    .args(["rev-parse", "--verify", "main"])
+                    .output()
+                    .await?;
+
+                if check_main.status.success() {
+                    Ok("main".to_string())
+                } else {
+                    Ok("master".to_string())
+                }
+            }
+            "current" => {
+                // Use parent task's branch
+                task.branch.clone()
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "branch_parent is 'current' but task has no branch set"
+                    ))
+            }
+            other => {
+                // Explicit branch name - return as-is
+                Ok(other.to_string())
+            }
+        }
+    }
+
+    /// Ensure a git branch exists, creating it from parent if necessary
+    ///
+    /// This is used during decomposition to create feature branches
+    /// before spawning child tasks. The worktree service expects the
+    /// feature_branch to already exist when the child task starts.
+    async fn ensure_branch_exists(&self, branch_name: &str, parent_ref: &str) -> Result<()> {
+        use tokio::process::Command;
+
+        // Check if branch already exists
+        let check_branch = Command::new("git")
+            .args(["rev-parse", "--verify", &format!("refs/heads/{}", branch_name)])
+            .output()
+            .await?;
+
+        if check_branch.status.success() {
+            debug!(
+                branch_name = %branch_name,
+                "Branch already exists, skipping creation"
+            );
+            return Ok(());
+        }
+
+        // Verify parent ref exists
+        let check_parent = Command::new("git")
+            .args(["rev-parse", "--verify", parent_ref])
+            .output()
+            .await?;
+
+        if !check_parent.status.success() {
+            return Err(anyhow::anyhow!(
+                "Cannot create branch '{}': parent ref '{}' does not exist",
+                branch_name,
+                parent_ref
+            ));
+        }
+
+        // Create the branch
+        info!(
+            branch_name = %branch_name,
+            parent_ref = %parent_ref,
+            "Creating git branch for decomposition"
+        );
+
+        let create_branch = Command::new("git")
+            .args(["branch", branch_name, parent_ref])
+            .output()
+            .await?;
+
+        if !create_branch.status.success() {
+            let stderr = String::from_utf8_lossy(&create_branch.stderr);
+            return Err(anyhow::anyhow!(
+                "Failed to create branch '{}' from '{}': {}",
+                branch_name,
+                parent_ref,
+                stderr
+            ));
+        }
+
+        info!(
+            branch_name = %branch_name,
+            parent_ref = %parent_ref,
+            "Successfully created branch for decomposition"
+        );
+
+        Ok(())
     }
 
     /// Truncate a summary string to a maximum length, adding ellipsis if needed
