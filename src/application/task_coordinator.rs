@@ -377,10 +377,72 @@ impl TaskCoordinator {
     /// * `Err` - If database error occurs
     #[instrument(skip(self))]
     pub async fn claim_next_ready_task(&self) -> Result<Option<Task>> {
-        self.task_queue
+        // Atomically claim the task (marks as Running in DB)
+        let task = self.task_queue
             .claim_next_ready_task()
             .await
-            .context("Failed to atomically claim next ready task")
+            .context("Failed to atomically claim next ready task")?;
+
+        // If we claimed a task, set up worktree and run hooks
+        if let Some(mut task) = task {
+            let task_id = task.id;
+
+            // Set up worktree if the task needs one (has feature_branch)
+            // This updates both the in-memory task and the database
+            let worktree_service_guard = self.worktree_service.read().await;
+            if let Some(ref worktree_service) = *worktree_service_guard {
+                match worktree_service.setup_task_worktree(&mut task).await {
+                    Ok(true) => {
+                        info!(task_id = %task_id, "Task worktree created successfully");
+                    }
+                    Ok(false) => {
+                        debug!(task_id = %task_id, "Task does not need worktree (no feature_branch)");
+                    }
+                    Err(e) => {
+                        // Worktree creation failed - revert to Ready and return error
+                        error!(task_id = %task_id, error = ?e, "Failed to create task worktree");
+                        self.task_queue
+                            .update_task_status(task_id, TaskStatus::Ready)
+                            .await
+                            .context("Failed to revert task status to Ready after worktree failure")?;
+                        return Err(e.context("Failed to set up task worktree"));
+                    }
+                }
+            }
+            drop(worktree_service_guard);
+
+            // Execute PreStart hooks with timeout
+            let hook_registry_guard = self.hook_registry.read().await;
+            if let Some(ref registry) = *hook_registry_guard {
+                let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
+                let hook_result = Self::execute_hooks_with_timeout(registry, HookEvent::PreStart, &task, &context).await?;
+
+                if hook_result.should_block() {
+                    warn!("PreStart hook blocked task {} - reverting to Ready status", task_id);
+                    // Revert status to Ready if hook blocks
+                    self.task_queue
+                        .update_task_status(task_id, TaskStatus::Ready)
+                        .await
+                        .context("Failed to revert task status to Ready")?;
+                    return Ok(None);
+                }
+            }
+            drop(hook_registry_guard);
+
+            // Execute PostStart hooks with timeout (non-blocking, log errors)
+            let hook_registry_guard = self.hook_registry.read().await;
+            if let Some(ref registry) = *hook_registry_guard {
+                let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
+                if let Err(e) = Self::execute_hooks_with_timeout(registry, HookEvent::PostStart, &task, &context).await {
+                    warn!(task_id = %task_id, error = ?e, "PostStart hook execution failed or timed out");
+                }
+            }
+            drop(hook_registry_guard);
+
+            Ok(Some(task))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Mark a task as running
