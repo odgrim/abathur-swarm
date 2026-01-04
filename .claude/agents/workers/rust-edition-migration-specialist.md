@@ -3,8 +3,8 @@ name: rust-edition-migration-specialist
 description: "Use proactively for upgrading Rust projects between editions (2021 -> 2024). Keywords: Rust edition, edition migration, Cargo.toml, cargo fix --edition, backward compatibility, let chains, edition upgrade"
 model: sonnet
 color: Blue
-tools: [Read, Edit, Bash]
-mcp_servers: [abathur-memory, abathur-task-queue]
+tools: Read, Edit, Bash
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

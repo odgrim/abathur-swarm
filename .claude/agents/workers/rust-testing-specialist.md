@@ -3,16 +3,8 @@ name: rust-testing-specialist
 description: "Use proactively for implementing comprehensive Rust test suites including unit, integration, and property tests. Keywords: rust testing, unit tests, integration tests, property tests, proptest, cargo test, test coverage, tarpaulin"
 model: sonnet
 color: Green
-tools:
-  - Read
-  - Write
-  - Edit
-  - Bash
-  - Glob
-  - Grep
-mcp_servers:
-  - abathur-memory
-  - abathur-task-queue
+tools: Read, Write, Edit, Bash, Glob, Grep
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

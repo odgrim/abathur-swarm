@@ -3,15 +3,8 @@ name: documentation-testing-specialist
 description: "Use proactively for testing documentation quality, accessibility, and performance including link validation, WCAG compliance, mobile responsiveness, and build validation. Keywords: documentation testing, link validation, accessibility testing, WCAG, mobile responsive, performance audit, search testing, MkDocs validation"
 model: sonnet
 color: Cyan
-tools:
-  - Read
-  - Bash
-  - WebFetch
-  - Glob
-  - Grep
-mcp_servers:
-  - abathur-memory
-  - abathur-task-queue
+tools: Read, Bash, WebFetch, Glob, Grep
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

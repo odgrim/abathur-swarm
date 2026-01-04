@@ -3,7 +3,8 @@ name: mkdocs-configuration-specialist
 description: "Use proactively for configuring MkDocs static site generator with Material theme. Keywords: mkdocs.yml, Material theme, navigation, markdown extensions, Pymdown, documentation configuration, site setup"
 model: sonnet
 color: Blue
-tools: [Read, Write, Edit, Bash]
+tools: Read, Write, Edit, Bash
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

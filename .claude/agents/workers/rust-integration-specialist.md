@@ -3,16 +3,8 @@ name: rust-integration-specialist
 description: "Use proactively for wiring up Rust services with dependency injection and writing comprehensive end-to-end integration tests. Keywords: rust, integration tests, service wiring, dependency injection, Arc dyn trait, end-to-end testing, regression tests, NFR validation"
 model: sonnet
 color: Cyan
-tools:
-  - Read
-  - Write
-  - Edit
-  - Bash
-  - Glob
-  - Grep
-mcp_servers:
-  - abathur-memory
-  - abathur-task-queue
+tools: Read, Write, Edit, Bash, Glob, Grep
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 # Rust Integration Specialist

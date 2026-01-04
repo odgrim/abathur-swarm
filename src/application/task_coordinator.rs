@@ -779,14 +779,16 @@ impl TaskCoordinator {
             );
 
             // Use the domain model's retry method to handle state transition
+            // This increments retry_count and sets status to Pending
             task.retry()
                 .context("Failed to transition task to retry state")?;
 
-            // Update the task in the database
+            // Update the FULL task in the database to persist the incremented retry_count
+            // Previously this only updated status, losing the retry_count increment
             self.task_queue
-                .update_task_status(task_id, TaskStatus::Pending)
+                .update_task(&task)
                 .await
-                .context("Failed to update task status for retry")?;
+                .context("Failed to update task for retry")?;
 
             // Re-coordinate the task lifecycle to check dependencies and set priority
             self.coordinate_task_lifecycle(task_id)
@@ -1942,8 +1944,10 @@ mod tests {
         // Task should be re-queued (Ready) since retries are available
         let updated_task = task_queue.get_task(task_id).await.unwrap();
         assert_eq!(updated_task.status, TaskStatus::Ready);
-        // Error message is set when marking as failed
-        assert!(updated_task.error_message.is_some());
+        // Error message is cleared when retrying (task gets a fresh start)
+        assert!(updated_task.error_message.is_none());
+        // Retry count should be incremented
+        assert_eq!(updated_task.retry_count, 1);
     }
 
     #[tokio::test]

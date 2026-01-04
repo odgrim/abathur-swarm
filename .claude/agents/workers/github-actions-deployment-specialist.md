@@ -3,7 +3,8 @@ name: github-actions-deployment-specialist
 description: "Use proactively for implementing GitHub Actions CI/CD workflows and GitHub Pages deployment automation. Keywords: GitHub Actions, workflow, CI/CD, GitHub Pages, deployment, automation, mkdocs gh-deploy, caching"
 model: sonnet
 color: Green
-tools: [Read, Write, Edit, Bash]
+tools: Read, Write, Edit, Bash
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

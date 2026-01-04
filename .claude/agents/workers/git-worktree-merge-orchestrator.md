@@ -3,7 +3,8 @@ name: git-worktree-merge-orchestrator
 description: "Manages complete lifecycle of merging validated task branches into feature branches with safety-first approach ensuring no code is lost. Handles conflict resolution, runs comprehensive tests after merge to verify integration, and performs mandatory cleanup of merged branches and worktrees. Prevents repository clutter by ensuring all temporary branches and worktrees are removed after successful merges. Keywords: git merge, worktree merge, merge orchestration, conflict resolution, test validation, branch cleanup, feature integration"
 model: sonnet
 color: Purple
-tools: [Bash, Read, Write, Grep, Glob, Edit, TodoWrite, mcp__abathur-task-queue__task_get, mcp__abathur-task-queue__task_list, mcp__abathur-task-queue__task_enqueue, mcp__abathur-memory__memory_add, mcp__abathur-memory__memory_get, mcp__abathur-memory__memory_update]
+tools: Bash, Read, Write, Grep, Glob, Edit, TodoWrite
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

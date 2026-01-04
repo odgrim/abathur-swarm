@@ -3,14 +3,8 @@ name: rust-clap-cli-specialist
 description: "Use proactively for implementing Rust CLI commands with clap 4.x derive macros. Specializes in command structure, argument parsing, handler implementation, and CLI testing. Keywords: clap, CLI commands, derive macros, argument parsing, subcommands, command handlers, CLI testing"
 model: sonnet
 color: Yellow
-tools:
-  - Read
-  - Write
-  - Edit
-  - Bash
-mcp_servers:
-  - abathur-memory
-  - abathur-task-queue
+tools: Read, Write, Edit, Bash
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

@@ -3,7 +3,8 @@ name: rust-terminal-output-specialist
 description: "Use proactively for implementing Rust terminal output with tables, trees, and progress bars. Keywords: comfy-table, indicatif, ratatui, terminal output, table formatting, tree visualization, progress bars, TUI widgets, Unicode box-drawing"
 model: sonnet
 color: Yellow
-tools: [Read, Write, Edit, Bash]
+tools: Read, Write, Edit, Bash
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

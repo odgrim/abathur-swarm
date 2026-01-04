@@ -3,14 +3,8 @@ name: rust-config-management-specialist
 description: "Use proactively for implementing hierarchical configuration management in Rust with figment and YAML. Keywords: figment, YAML config, hierarchical configuration, config validation, environment variables, config merging, serde YAML, configuration loading"
 model: sonnet
 color: Yellow
-tools:
-  - Read
-  - Write
-  - Edit
-  - Bash
-mcp_servers:
-  - abathur-memory
-  - abathur-task-queue
+tools: Read, Write, Edit, Bash
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

@@ -3,16 +3,8 @@ name: rust-infrastructure-specialist
 description: "Use proactively for implementing infrastructure layer components in Rust with clean architecture patterns. Keywords: rust, infrastructure, async I/O, tokio, file downloads, hf-hub, exponential backoff, retry logic, path validation, caching, clean architecture"
 model: sonnet
 color: Purple
-tools:
-  - Read
-  - Write
-  - Edit
-  - Bash
-  - Glob
-  - Grep
-mcp_servers:
-  - abathur-memory
-  - abathur-task-queue
+tools: Read, Write, Edit, Bash, Glob, Grep
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 # Rust Infrastructure Specialist

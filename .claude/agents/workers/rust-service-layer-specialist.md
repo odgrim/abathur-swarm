@@ -3,16 +3,8 @@ name: rust-service-layer-specialist
 description: "Use proactively for implementing Rust service layer business logic coordinating domain models with infrastructure. Keywords: service implementation, business logic, Arc dyn trait, dependency injection, async coordination, tokio"
 model: sonnet
 color: Blue
-tools:
-  - Read
-  - Write
-  - Edit
-  - Bash
-  - Glob
-  - Grep
-mcp_servers:
-  - abathur-task-queue
-  - abathur-memory
+tools: Read, Write, Edit, Bash, Glob, Grep
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

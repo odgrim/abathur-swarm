@@ -3,10 +3,8 @@ name: rust-ml-specialist
 description: "Use proactively for implementing machine learning inference with candle-transformers in Rust. Specializes in BERT embeddings, tokenization with tokenizers crate, tensor operations, mean pooling, L2 normalization, and batched forward passes. Keywords: rust, candle, transformers, BERT, embeddings, tokenization, tensor operations, mean pooling, L2 normalization, ML inference"
 model: sonnet
 color: Purple
-tools: [Read, Write, Edit, Bash]
-mcp_servers:
-  - abathur-memory
-  - abathur-task-queue
+tools: Read, Write, Edit, Bash
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

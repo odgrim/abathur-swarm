@@ -3,14 +3,8 @@ name: documentation-content-writer
 description: "Use proactively for writing technical documentation following Diátaxis framework. Specializes in tutorials, how-to guides, reference docs, and explanations with code examples. Keywords: documentation, Diátaxis, technical writing, tutorials, how-to guides, reference, explanation, markdown, MkDocs"
 model: sonnet
 color: Cyan
-tools:
-  - Read
-  - Write
-  - Edit
-  - Bash
-mcp_servers:
-  - abathur-memory
-  - abathur-task-queue
+tools: Read, Write, Edit, Bash
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

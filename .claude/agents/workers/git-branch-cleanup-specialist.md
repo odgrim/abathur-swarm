@@ -3,7 +3,8 @@ name: git-branch-cleanup-specialist
 description: "Use proactively for safe deletion of merged git branches and worktree cleanup. Keywords: git branch cleanup, merged branches, worktree cleanup, safe deletion, branch verification, git branch -d"
 model: sonnet
 color: Green
-tools: [Bash]
+tools: Bash
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

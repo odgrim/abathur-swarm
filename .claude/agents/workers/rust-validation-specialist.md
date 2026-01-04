@@ -3,14 +3,8 @@ name: rust-validation-specialist
 description: "Use proactively for comprehensive Rust code quality validation including compilation checks, linting, formatting, and test execution. Keywords: rust, validation, cargo check, clippy, fmt, cargo test, build verification, code quality"
 model: sonnet
 color: Blue
-tools:
-  - Bash
-  - Read
-  - Grep
-  - Glob
-mcp_servers:
-  - abathur-memory
-  - abathur-task-queue
+tools: Bash, Read, Grep, Glob
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 # Rust Validation Specialist

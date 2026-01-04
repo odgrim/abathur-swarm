@@ -3,7 +3,8 @@ name: diagram-visualization-specialist
 description: "Use proactively for creating Mermaid diagrams for technical documentation. Keywords: mermaid diagrams, architecture diagrams, sequence diagrams, flowcharts, state diagrams, visualization, documentation diagrams, MkDocs Material"
 model: sonnet
 color: Cyan
-tools: [Read, Write, Edit]
+tools: Read, Write, Edit
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

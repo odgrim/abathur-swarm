@@ -3,14 +3,8 @@ name: rust-error-types-specialist
 description: "Use proactively for implementing Rust error handling with thiserror and anyhow following Clean Architecture. Keywords: error types, thiserror, anyhow, error context, error conversion, Result patterns, custom errors"
 model: sonnet
 color: Red
-tools:
-  - Read
-  - Write
-  - Edit
-  - Bash
-mcp_servers:
-  - abathur-memory
-  - abathur-task-queue
+tools: Read, Write, Edit, Bash
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

@@ -3,14 +3,8 @@ name: rust-criterion-benchmark-specialist
 description: "Use proactively for implementing Rust performance benchmarks with criterion. Specializes in measuring latency metrics (p50, p95, p99), verifying NFR requirements, and optimizing hot paths. Keywords: criterion, benchmarking, performance testing, NFR verification, latency measurement, optimization, p95, p99, throughput"
 model: sonnet
 color: Yellow
-tools:
-  - Read
-  - Write
-  - Edit
-  - Bash
-mcp_servers:
-  - abathur-memory
-  - abathur-task-queue
+tools: Read, Write, Edit, Bash
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

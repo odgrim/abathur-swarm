@@ -3,14 +3,8 @@ name: rust-tracing-logging-specialist
 description: "Use proactively for implementing Rust structured logging with tracing and tracing-subscriber. Keywords: tracing, tracing-subscriber, structured logging, log rotation, secret scrubbing, #[instrument], audit trail, JSON logging"
 model: sonnet
 color: Yellow
-tools:
-  - Read
-  - Write
-  - Edit
-  - Bash
-mcp_servers:
-  - abathur-memory
-  - abathur-task-queue
+tools: Read, Write, Edit, Bash
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

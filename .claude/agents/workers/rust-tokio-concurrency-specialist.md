@@ -3,10 +3,8 @@ name: rust-tokio-concurrency-specialist
 description: "Use proactively for implementing async concurrency patterns in Rust using tokio runtime. Specializes in task spawning, channel communication, semaphore-based concurrency control, graceful shutdown, and concurrent orchestration. Keywords: tokio, async, concurrency, spawn, channels, semaphore, mutex, shutdown, orchestration"
 model: sonnet
 color: Cyan
-tools: [Read, Write, Edit, Bash]
-mcp_servers:
-  - abathur-memory
-  - abathur-task-queue
+tools: Read, Write, Edit, Bash
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

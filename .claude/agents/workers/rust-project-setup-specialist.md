@@ -3,8 +3,8 @@ name: rust-project-setup-specialist
 description: "Use proactively for initializing Rust projects with cargo, configuring tooling, and setting up CI/CD pipelines. Keywords: cargo init, Cargo.toml, rustfmt, clippy, GitHub Actions, project structure, dependencies"
 model: sonnet
 color: Blue
-tools: [Read, Write, Edit, Bash]
-mcp_servers: [abathur-memory, abathur-task-queue]
+tools: Read, Write, Edit, Bash
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose

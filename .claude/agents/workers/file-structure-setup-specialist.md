@@ -3,8 +3,8 @@ name: file-structure-setup-specialist
 description: "Use proactively for creating MkDocs documentation directory structures following Diátaxis framework. Keywords: mkdocs, directory setup, file structure, placeholder files, index pages, documentation organization, Diátaxis"
 model: sonnet
 color: Green
-tools: [Bash, Write]
-mcp_servers: [abathur-memory, abathur-task-queue]
+tools: Bash, Write
+mcp_servers: abathur-memory, abathur-task-queue
 ---
 
 ## Purpose
