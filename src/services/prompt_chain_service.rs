@@ -871,9 +871,12 @@ impl PromptChainService {
         let Some(ref registry) = self.substrate_registry else {
             warn!("No substrate registry configured, returning mock response");
             // Fallback to mock response if no substrate available (for tests)
+            // Note: We return a simple mock JSON that won't trigger false positives
+            // in the markdown code block stripper (which looks for ``` in output)
             return Ok(serde_json::json!({
                 "role": role,
-                "response": format!("Mock response (no substrate): {}", full_prompt),
+                "response": "Mock response generated without substrate",
+                "status": "success",
                 "timestamp": chrono::Utc::now().to_rfc3339()
             })
             .to_string());

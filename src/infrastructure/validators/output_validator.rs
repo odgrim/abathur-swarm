@@ -92,13 +92,26 @@ impl OutputValidator {
     pub fn validate(&self, output: &str, format: &OutputFormat) -> Result<bool> {
         match format {
             OutputFormat::Json { schema } => {
-                // Strip markdown code blocks before validating JSON
-                let cleaned = Self::strip_markdown_code_blocks(output);
+                // First, try to parse the output as-is. This handles:
+                // 1. Clean JSON output
+                // 2. JSON that contains code blocks inside string values (shouldn't be stripped)
+                let trimmed = output.trim();
 
                 if let Some(schema_value) = schema {
+                    // Try parsing as-is first
+                    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+                        return self.validate_json(trimmed, schema_value);
+                    }
+                    // If that fails, try stripping markdown code blocks
+                    let cleaned = Self::strip_markdown_code_blocks(output);
                     self.validate_json(&cleaned, schema_value)
                 } else {
-                    // Just verify it's valid JSON
+                    // Just verify it's valid JSON - try as-is first
+                    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+                        return Ok(true);
+                    }
+                    // If that fails, try stripping markdown code blocks
+                    let cleaned = Self::strip_markdown_code_blocks(output);
                     serde_json::from_str::<serde_json::Value>(&cleaned)
                         .context("Invalid JSON output")?;
                     Ok(true)
@@ -351,5 +364,24 @@ mod tests {
 
         // This should pass because validate_json now strips markdown
         assert!(validator.validate_json(output_with_markdown, &schema).is_ok());
+    }
+
+    #[test]
+    fn test_json_with_embedded_code_blocks_not_stripped() {
+        let validator = OutputValidator::new();
+
+        // This simulates a response where the LLM includes code examples in its output
+        // The code block is INSIDE a JSON string value, not wrapping the JSON
+        let json_with_embedded_code = r#"{"explanation": "Use this code:\n```python\nprint('hello')\n```", "result": "success"}"#;
+
+        // This should parse as valid JSON
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(json_with_embedded_code);
+        assert!(parsed.is_ok(), "Original JSON should be valid");
+
+        // The validator should accept this as valid JSON (not strip the embedded code block)
+        let format = OutputFormat::Json { schema: None };
+        let result = validator.validate(json_with_embedded_code, &format);
+
+        assert!(result.is_ok(), "JSON with embedded code blocks should be valid: {:?}", result.err());
     }
 }
