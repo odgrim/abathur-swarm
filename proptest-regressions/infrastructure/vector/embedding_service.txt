@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c096d2711aff48f5ff06c04b10fc7895fae4ba66c3c63854777b3e6119c0e282 # shrinks to text = ":3:'5N,'\"H?;sf?.35m'''?3z?tvFX.7xCN FdA'U 2-W'.0G-- '.g!.Q0L!HAH.?hP1oxw,.!?R'L.'\"'l86t?b14-1'f6?850-t?9R-1.-?X'!?h4TC,\"21?.?!?Db'5v\"!y?z,'8,qF':w,zT?F?CV'.f'?V\" L7,c6-'2-O'4'G'H??'1N,..''k?n .I'W6,h\"7''L?y!K9-a?zX'.e?G'TvTY.u.:;\"ZcMazZU:U' y'0ZM.9?iV,J?a3.G4oT\"X'-xV'X'?E3!\"Z0c:Y :!m ?9R,o',Au1.'WL: P'02w'S.c6nG!?. :6we'Fd'?4U\"W.!q??,U.SP 'y0VT'\"'5W'.,yy.1Q!'.?b'd4Oil',?onS6?GH??\"167S4-Sb'u ?:v67XN2-.,V! Aqj?G-1?l\"-LeSRyos--'TlvF-'?CE.", model_idx = 1

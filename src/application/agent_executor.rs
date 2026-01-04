@@ -15,7 +15,7 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::timeout;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 /// Context for agent task execution
@@ -577,12 +577,27 @@ impl AgentExecutor {
                     }
                 }
                 Err(e) => {
-                    warn!(
-                        task_id = %task.id,
-                        error = ?e,
-                        "Decomposition failed, continuing with normal flow"
-                    );
-                    // Fall through to normal next step enqueueing
+                    // If wait_for_children is true, decomposition is critical - fail the task
+                    if decomposition.on_complete.wait_for_children {
+                        error!(
+                            task_id = %task.id,
+                            step_id = %step.id,
+                            items_path = %decomposition.items_path,
+                            error = ?e,
+                            "Decomposition failed and wait_for_children=true - this is a fatal error"
+                        );
+                        return Err(ExecutionError::ExecutionFailed(format!(
+                            "Decomposition failed for step {}: {}. Check that items_path '{}' exists in the output JSON.",
+                            step.id, e, decomposition.items_path
+                        )));
+                    } else {
+                        warn!(
+                            task_id = %task.id,
+                            error = ?e,
+                            "Decomposition failed (wait_for_children=false), continuing with normal flow"
+                        );
+                        // Fall through to normal next step enqueueing
+                    }
                 }
             }
         }
@@ -841,7 +856,10 @@ impl AgentExecutor {
             // Branch creation happens when task executes (if needs_branch=true)
             // Until then, inherit from parent for continuity
             branch: current_task.branch.clone(),
-            feature_branch: current_task.feature_branch.clone(),
+            // If parent has feature_branch, inherit it. Otherwise, create from feature_name.
+            feature_branch: current_task.feature_branch.clone().or_else(|| {
+                feature_name_from_output.as_ref().map(|name| format!("feature/{}", name))
+            }),
             worktree_path: current_task.worktree_path.clone(),
             validation_requirement: crate::domain::models::ValidationRequirement::None,
             validation_task_id: None,
@@ -1560,12 +1578,32 @@ impl AgentExecutor {
         for (idx, item) in items_array.iter().enumerate() {
             // Build substitution variables from item
             let mut variables = serde_json::Map::new();
-            if let Some(obj) = item.as_object() {
-                for (key, value) in obj {
-                    variables.insert(format!("item.{}", key), value.clone());
+
+            // Add {item} variable - works for both string and object items
+            match item {
+                serde_json::Value::String(s) => {
+                    variables.insert("item".to_string(), serde_json::json!(s));
+                }
+                serde_json::Value::Object(obj) => {
+                    // For objects, add both {item} (as JSON) and {item.key} for each key
+                    variables.insert("item".to_string(), item.clone());
+                    for (key, value) in obj {
+                        variables.insert(format!("item.{}", key), value.clone());
+                    }
+                }
+                other => {
+                    // For other types (number, bool, etc.), convert to string
+                    variables.insert("item".to_string(), serde_json::json!(other.to_string()));
                 }
             }
+
+            // Extract feature_name from output JSON if available
+            if let Some(feature_name) = output_json.get("feature_name").and_then(|v| v.as_str()) {
+                variables.insert("feature_name".to_string(), serde_json::json!(feature_name));
+            }
+
             variables.insert("parent_task_id".to_string(), serde_json::json!(parent_task.id.to_string()));
+            variables.insert("index".to_string(), serde_json::json!(idx));
             let vars_value = serde_json::Value::Object(variables);
 
             // Substitute branch template

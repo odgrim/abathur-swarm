@@ -4,6 +4,7 @@
 //! multiple integration test files.
 
 use std::path::PathBuf;
+use std::process::Command;
 use tempfile::TempDir;
 
 /// Create a temporary directory for test isolation
@@ -65,6 +66,84 @@ where
     }
 
     false
+}
+
+/// Setup a git repository in a temp directory for testing
+///
+/// Creates an initialized git repo with an initial empty commit.
+/// Returns the TempDir (for lifetime management) and the path to the repo.
+///
+/// # Example
+///
+/// ```
+/// let (_dir, repo_path) = setup_test_git_repo();
+/// // repo_path now contains an initialized git repository
+/// // _dir must be kept alive to prevent cleanup
+/// ```
+#[allow(dead_code)]
+pub fn setup_test_git_repo() -> (TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("Failed to create temp dir for git repo");
+    let path = dir.path().to_path_buf();
+
+    // Initialize git repo
+    let init_output = Command::new("git")
+        .args(["init"])
+        .current_dir(&path)
+        .output()
+        .expect("Failed to run git init");
+    assert!(init_output.status.success(), "git init failed");
+
+    // Configure git user for commits
+    Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(&path)
+        .output()
+        .expect("Failed to set git user.email");
+
+    Command::new("git")
+        .args(["config", "user.name", "Test User"])
+        .current_dir(&path)
+        .output()
+        .expect("Failed to set git user.name");
+
+    // Create initial commit so we have a valid branch
+    let commit_output = Command::new("git")
+        .args(["commit", "--allow-empty", "-m", "initial commit"])
+        .current_dir(&path)
+        .output()
+        .expect("Failed to create initial commit");
+    assert!(commit_output.status.success(), "git commit failed");
+
+    (dir, path)
+}
+
+/// Setup a git repository with a specific branch name
+///
+/// Creates an initialized git repo with main branch (or specified name).
+#[allow(dead_code)]
+pub fn setup_test_git_repo_with_branch(branch_name: &str) -> (TempDir, PathBuf) {
+    let (dir, path) = setup_test_git_repo();
+
+    // Rename branch if not 'main' or 'master'
+    let current_branch = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(&path)
+        .output()
+        .expect("Failed to get current branch");
+
+    let current = String::from_utf8_lossy(&current_branch.stdout)
+        .trim()
+        .to_string();
+
+    if current != branch_name {
+        Command::new("git")
+            .args(["branch", "-m", &current, branch_name])
+            .current_dir(&path)
+            .output()
+            .expect("Failed to rename branch");
+    }
+
+    (dir, path)
 }
 
 /// Mock data generators
