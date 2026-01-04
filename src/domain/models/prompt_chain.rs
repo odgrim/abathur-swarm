@@ -177,6 +177,38 @@ pub struct PromptStep {
     /// and spawn tasks that continue the chain in parallel
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decomposition: Option<DecompositionConfig>,
+    /// Memory storage configuration for step output
+    /// When set, step output is stored to the memory system after successful execution
+    /// This is a core feature - no shell hooks required
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_in_memory: Option<StepMemoryConfig>,
+}
+
+/// Configuration for storing step output in memory
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepMemoryConfig {
+    /// Memory key to store the output under
+    /// Stored in namespace "step:{task_id}:{step_id}" with this key
+    /// If not provided, defaults to "output"
+    #[serde(default = "default_memory_key")]
+    pub key: String,
+    /// Memory type (semantic, episodic, procedural)
+    /// Defaults to "semantic"
+    #[serde(default = "default_memory_type")]
+    pub memory_type: String,
+    /// Optional custom namespace template
+    /// Supports variables: {task_id}, {step_id}, {feature_name}
+    /// Defaults to "step:{task_id}:{step_id}"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace_template: Option<String>,
+}
+
+fn default_memory_key() -> String {
+    "output".to_string()
+}
+
+fn default_memory_type() -> String {
+    "semantic".to_string()
 }
 
 /// Configuration for spawning tasks from step output (fan-out pattern)
@@ -297,6 +329,7 @@ impl PromptStep {
             branch_parent: None,
             branch_name_template: None,
             decomposition: None,
+            store_in_memory: None,
         }
     }
 
@@ -786,5 +819,70 @@ mod tests {
         // Should NOT contain JSON format instructions
         assert!(!result.contains("OUTPUT FORMAT REQUIREMENT"));
         assert!(!result.contains("MUST be ONLY valid JSON"));
+    }
+
+    #[test]
+    fn test_step_memory_config_defaults() {
+        // Test YAML parsing with minimal config
+        let yaml = r#"
+            key: "requirements"
+        "#;
+        let config: StepMemoryConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(config.key, "requirements");
+        assert_eq!(config.memory_type, "semantic"); // default
+        assert!(config.namespace_template.is_none());
+    }
+
+    #[test]
+    fn test_step_memory_config_full() {
+        let yaml = r#"
+            key: "architecture"
+            memory_type: "episodic"
+            namespace_template: "task:{task_id}:arch"
+        "#;
+        let config: StepMemoryConfig = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(config.key, "architecture");
+        assert_eq!(config.memory_type, "episodic");
+        assert_eq!(config.namespace_template, Some("task:{task_id}:arch".to_string()));
+    }
+
+    #[test]
+    fn test_prompt_step_with_store_in_memory() {
+        // Create step programmatically with store_in_memory
+        let mut step = PromptStep::new(
+            "gather_requirements".to_string(),
+            "Gather requirements for {task}".to_string(),
+            "requirements-gatherer".to_string(),
+            OutputFormat::Json { schema: None },
+        );
+        step.store_in_memory = Some(StepMemoryConfig {
+            key: "requirements".to_string(),
+            memory_type: "semantic".to_string(),
+            namespace_template: Some("task:{task_id}:requirements".to_string()),
+        });
+
+        assert_eq!(step.id, "gather_requirements");
+        assert!(step.store_in_memory.is_some());
+
+        let config = step.store_in_memory.unwrap();
+        assert_eq!(config.key, "requirements");
+        assert_eq!(config.memory_type, "semantic");
+        assert_eq!(config.namespace_template, Some("task:{task_id}:requirements".to_string()));
+    }
+
+    #[test]
+    fn test_prompt_step_without_store_in_memory() {
+        // Create step programmatically without store_in_memory
+        let step = PromptStep::new(
+            "simple_step".to_string(),
+            "Do something".to_string(),
+            "worker".to_string(),
+            OutputFormat::Plain,
+        );
+
+        assert_eq!(step.id, "simple_step");
+        assert!(step.store_in_memory.is_none());
     }
 }

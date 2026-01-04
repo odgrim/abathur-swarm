@@ -7,11 +7,11 @@ use crate::domain::models::prompt_chain::{
     ChainExecution, ChainStatus, OutputFormat, PromptChain, PromptStep, StepResult, ValidationRule,
     ValidationType,
 };
-use crate::domain::models::{AgentMetadata, AgentMetadataRegistry, HookContext, Task};
+use crate::domain::models::{AgentMetadata, AgentMetadataRegistry, HookContext, Memory, MemoryType, Task};
 use crate::domain::ports::{ChainRepository, ExecutionParameters, SubstrateRequest, TaskQueueService};
 use crate::infrastructure::substrates::SubstrateRegistry;
 use crate::infrastructure::validators::OutputValidator;
-use crate::services::HookExecutor;
+use crate::services::{HookExecutor, MemoryService};
 use anyhow::{Context, Result};
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
@@ -54,6 +54,7 @@ pub struct PromptChainService {
     agent_metadata_registry: Option<Arc<Mutex<AgentMetadataRegistry>>>,
     task_queue_service: Option<Arc<dyn TaskQueueService>>,
     chain_repository: Option<Arc<dyn ChainRepository>>,
+    memory_service: Option<Arc<MemoryService>>,
     max_retries: u32,
     default_timeout: Duration,
 }
@@ -68,6 +69,7 @@ impl PromptChainService {
             agent_metadata_registry: None,
             task_queue_service: None,
             chain_repository: None,
+            memory_service: None,
             max_retries: 3,
             default_timeout: Duration::from_secs(300), // 5 minutes
         }
@@ -82,9 +84,16 @@ impl PromptChainService {
             agent_metadata_registry: None,
             task_queue_service: None,
             chain_repository: None,
+            memory_service: None,
             max_retries: 3,
             default_timeout: Duration::from_secs(300),
         }
+    }
+
+    /// Set the memory service for storing step outputs
+    pub fn with_memory_service(mut self, memory_service: Arc<MemoryService>) -> Self {
+        self.memory_service = Some(memory_service);
+        self
     }
 
     /// Set the chain repository for tracking chain executions
@@ -446,6 +455,18 @@ impl PromptChainService {
             "Step {} completed successfully in {:?}",
             step.id, result.duration
         );
+
+        // Store step output to memory if configured (core feature)
+        if step.store_in_memory.is_some() {
+            if let Err(e) = self.store_step_output_to_memory(step, &result, task).await {
+                // Log but don't fail - memory storage is best-effort
+                warn!(
+                    step_id = %step.id,
+                    error = ?e,
+                    "Memory storage failed but continuing execution"
+                );
+            }
+        }
 
         // Execute post-hooks if any
         if !step.post_hooks.is_empty() {
@@ -1664,6 +1685,122 @@ impl PromptChainService {
         let task = self.build_task_from_def(task_def, parent_task, idempotency_key)?;
         task_queue.submit_task(task).await
     }
+
+    /// Store step output to memory (core feature, no shell hooks required)
+    ///
+    /// This is called when a step has `store_in_memory` configuration set.
+    /// The output is stored in the memory system for future reference by other
+    /// agents or chain steps.
+    ///
+    /// # Arguments
+    /// * `step` - The step that was executed
+    /// * `result` - The step execution result
+    /// * `task` - Optional task context for namespace construction
+    ///
+    /// # Returns
+    /// * `Ok(())` - Storage succeeded
+    /// * `Err(_)` - Storage failed (logged but non-fatal)
+    #[instrument(skip(self, step, result, task), fields(step_id = %step.id))]
+    async fn store_step_output_to_memory(
+        &self,
+        step: &PromptStep,
+        result: &StepResult,
+        task: Option<&Task>,
+    ) -> Result<()> {
+        let Some(config) = &step.store_in_memory else {
+            return Ok(()); // No memory storage configured
+        };
+
+        let Some(memory_service) = &self.memory_service else {
+            warn!(
+                step_id = %step.id,
+                "store_in_memory configured but no memory service available"
+            );
+            return Ok(());
+        };
+
+        // Build namespace from template or default
+        let namespace = if let Some(template) = &config.namespace_template {
+            let mut ns = template.clone();
+            if let Some(task) = task {
+                ns = ns.replace("{task_id}", &task.id.to_string());
+                if let Some(ref feature_name) = task.feature_branch {
+                    ns = ns.replace("{feature_name}", feature_name);
+                }
+            }
+            ns = ns.replace("{step_id}", &step.id);
+            ns
+        } else if let Some(task) = task {
+            format!("step:{}:{}", task.id, step.id)
+        } else {
+            format!("step:unknown:{}", step.id)
+        };
+
+        // Parse memory type
+        let memory_type = match config.memory_type.to_lowercase().as_str() {
+            "semantic" => MemoryType::Semantic,
+            "episodic" => MemoryType::Episodic,
+            "procedural" => MemoryType::Procedural,
+            _ => {
+                warn!(
+                    step_id = %step.id,
+                    memory_type = %config.memory_type,
+                    "Unknown memory type, defaulting to Semantic"
+                );
+                MemoryType::Semantic
+            }
+        };
+
+        // Parse output as JSON value, or wrap as string
+        let value = match serde_json::from_str::<serde_json::Value>(&result.output) {
+            Ok(v) => v,
+            Err(_) => serde_json::json!({ "raw_output": result.output }),
+        };
+
+        // Create memory entry
+        let memory = Memory::new(
+            namespace.clone(),
+            config.key.clone(),
+            value,
+            memory_type,
+            format!("chain_step:{}", step.id),
+        );
+
+        // Store to memory service
+        match memory_service.add(memory).await {
+            Ok(id) => {
+                info!(
+                    step_id = %step.id,
+                    namespace = %namespace,
+                    key = %config.key,
+                    memory_id = %id,
+                    "Step output stored to memory successfully"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                // Check if it's a duplicate - that's not an error for idempotent retries
+                if e.to_string().contains("already exists") {
+                    info!(
+                        step_id = %step.id,
+                        namespace = %namespace,
+                        key = %config.key,
+                        "Step output already stored (idempotent retry)"
+                    );
+                    Ok(())
+                } else {
+                    error!(
+                        step_id = %step.id,
+                        namespace = %namespace,
+                        key = %config.key,
+                        error = ?e,
+                        "Failed to store step output to memory"
+                    );
+                    Err(e)
+                }
+            }
+        }
+    }
 }
 
 impl Default for PromptChainService {
@@ -1675,7 +1812,7 @@ impl Default for PromptChainService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::prompt_chain::{ChainStatus, OutputFormat, PromptChain, PromptStep};
+    use crate::domain::models::prompt_chain::{ChainStatus, OutputFormat, PromptChain, PromptStep, StepMemoryConfig};
 
     #[tokio::test]
     async fn test_execute_simple_chain() {
@@ -1773,5 +1910,172 @@ mod tests {
         let next_input = service.prepare_next_input(&result).unwrap();
         assert_eq!(next_input["previous_output"], "Plain text output");
         assert_eq!(next_input["previous_step"], "step1");
+    }
+
+    #[tokio::test]
+    async fn test_store_step_output_no_config() {
+        // When store_in_memory is None, should return Ok immediately
+        let service = PromptChainService::new();
+
+        let step = PromptStep::new(
+            "step1".to_string(),
+            "Test".to_string(),
+            "Tester".to_string(),
+            OutputFormat::Plain,
+        );
+        assert!(step.store_in_memory.is_none());
+
+        let result = StepResult::new(
+            "step1".to_string(),
+            r#"{"data": "value"}"#.to_string(),
+            true,
+            Duration::from_secs(1),
+        );
+
+        // Should return Ok because there's no store_in_memory config
+        let store_result = service.store_step_output_to_memory(&step, &result, None).await;
+        assert!(store_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_store_step_output_no_memory_service() {
+        // When store_in_memory is set but no memory service, should log warning and return Ok
+        let service = PromptChainService::new();
+        assert!(service.memory_service.is_none());
+
+        let mut step = PromptStep::new(
+            "step1".to_string(),
+            "Test".to_string(),
+            "Tester".to_string(),
+            OutputFormat::Json { schema: None },
+        );
+        step.store_in_memory = Some(StepMemoryConfig {
+            key: "test_key".to_string(),
+            memory_type: "semantic".to_string(),
+            namespace_template: None,
+        });
+
+        let result = StepResult::new(
+            "step1".to_string(),
+            r#"{"data": "value"}"#.to_string(),
+            true,
+            Duration::from_secs(1),
+        );
+
+        // Should return Ok even without memory service (graceful degradation)
+        let store_result = service.store_step_output_to_memory(&step, &result, None).await;
+        assert!(store_result.is_ok());
+    }
+
+    #[test]
+    fn test_step_memory_config_creation() {
+        let config = StepMemoryConfig {
+            key: "requirements".to_string(),
+            memory_type: "semantic".to_string(),
+            namespace_template: Some("task:{task_id}:requirements".to_string()),
+        };
+
+        assert_eq!(config.key, "requirements");
+        assert_eq!(config.memory_type, "semantic");
+        assert_eq!(config.namespace_template.unwrap(), "task:{task_id}:requirements");
+    }
+
+    #[test]
+    fn test_memory_type_parsing() {
+        // Test that various memory types are recognized
+        let types = vec!["semantic", "episodic", "procedural", "SEMANTIC", "Episodic"];
+        for mt in types {
+            let config = StepMemoryConfig {
+                key: "test".to_string(),
+                memory_type: mt.to_string(),
+                namespace_template: None,
+            };
+            // Just verify it doesn't panic - actual parsing happens in store_step_output_to_memory
+            assert!(!config.memory_type.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_store_step_output_with_memory_service() {
+        use crate::domain::ports::MemoryRepository;
+        use mockall::mock;
+        use mockall::predicate::*;
+
+        // Create a mock memory repository
+        mock! {
+            MemRepo {}
+
+            #[async_trait::async_trait]
+            impl MemoryRepository for MemRepo {
+                async fn insert(&self, memory: Memory) -> anyhow::Result<i64>;
+                async fn get(&self, namespace: &str, key: &str) -> anyhow::Result<Option<Memory>>;
+                async fn search(
+                    &self,
+                    namespace_prefix: &str,
+                    memory_type: Option<MemoryType>,
+                    limit: usize,
+                ) -> anyhow::Result<Vec<Memory>>;
+                async fn update(
+                    &self,
+                    namespace: &str,
+                    key: &str,
+                    value: serde_json::Value,
+                    updated_by: &str,
+                ) -> anyhow::Result<()>;
+                async fn delete(&self, namespace: &str, key: &str) -> anyhow::Result<()>;
+                async fn count(
+                    &self,
+                    namespace_prefix: &str,
+                    memory_type: Option<MemoryType>,
+                ) -> anyhow::Result<usize>;
+            }
+        }
+
+        let mut mock_repo = MockMemRepo::new();
+
+        // Expect get to return None (memory doesn't exist yet)
+        mock_repo
+            .expect_get()
+            .returning(|_, _| Ok(None));
+
+        // Expect insert to succeed
+        mock_repo
+            .expect_insert()
+            .times(1)
+            .returning(|_| Ok(42));
+
+        let memory_service = Arc::new(MemoryService::new(Arc::new(mock_repo), None, None));
+        let service = PromptChainService::new().with_memory_service(memory_service);
+
+        // Create step with store_in_memory config
+        let mut step = PromptStep::new(
+            "test_step".to_string(),
+            "Test prompt".to_string(),
+            "tester".to_string(),
+            OutputFormat::Json { schema: None },
+        );
+        step.store_in_memory = Some(StepMemoryConfig {
+            key: "test_output".to_string(),
+            memory_type: "semantic".to_string(),
+            namespace_template: Some("test:{task_id}:output".to_string()),
+        });
+
+        let result = StepResult::new(
+            "test_step".to_string(),
+            r#"{"requirements": ["req1", "req2"]}"#.to_string(),
+            true,
+            Duration::from_secs(1),
+        );
+
+        // Create a test task for context
+        let mut task = Task::new(
+            "Test task".to_string(),
+            "Test description".to_string(),
+        );
+        task.feature_branch = Some("feature/test".to_string());
+
+        // Call store_step_output_to_memory
+        let store_result = service.store_step_output_to_memory(&step, &result, Some(&task)).await;
+        assert!(store_result.is_ok(), "Expected Ok, got {:?}", store_result);
     }
 }

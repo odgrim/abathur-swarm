@@ -67,13 +67,11 @@ steps:
           - problem_statement
           - functional_requirements
           - success_criteria
-    post_hooks:
-      # Store requirements in memory for future reference
-      - type: run_script
-        script_path: .abathur/scripts/store_requirements.sh
-        args:
-          - "${task_id}"
-          - "requirements"
+    # Store requirements in memory (core feature - no shell hooks required)
+    store_in_memory:
+      key: "requirements"
+      memory_type: "semantic"
+      namespace_template: "task:{task_id}:requirements"
     next: design_architecture
     timeout_secs: 600
 
@@ -85,7 +83,7 @@ steps:
     decomposition:
       # Extract subprojects from output JSON - handles both single and multiple strategies
       # For single strategy, this will be a single-item array
-      items_path: "$.decomposition.subprojects"
+      items_path: "decomposition.subprojects"
       per_item:
         branch:
           template: "feature/{feature_name}-{item}"
@@ -161,23 +159,24 @@ steps:
                 enum:
                   - single
                   - multiple
+              subprojects:
+                type: array
+                items:
+                  type: string
+                minItems: 1
             required:
               - strategy
+              - subprojects
         required:
           - feature_name
           - architecture_overview
           - components
           - decomposition
-    post_hooks:
-      # Store architecture in memory
-      - type: run_script
-        script_path: .abathur/scripts/store_architecture.sh
-        args:
-          - "${task_id}"
-          - "architecture"
-      - type: log_message
-        level: info
-        message: "Architecture designed for task ${task_id}"
+    # Store architecture in memory (core feature - no shell hooks required)
+    store_in_memory:
+      key: "architecture"
+      memory_type: "semantic"
+      namespace_template: "task:{task_id}:architecture"
     next: create_technical_specs
     timeout_secs: 600
 
@@ -260,16 +259,11 @@ steps:
           - components
           - implementation_phases
           - required_agents
-    post_hooks:
-      # Store technical specs in memory
-      - type: run_script
-        script_path: .abathur/scripts/store_technical_specs.sh
-        args:
-          - "${task_id}"
-          - "technical_specs"
-      - type: log_message
-        level: info
-        message: "Technical specifications created for task ${task_id}"
+    # Store technical specs in memory (core feature - no shell hooks required)
+    store_in_memory:
+      key: "technical_specs"
+      memory_type: "semantic"
+      namespace_template: "task:{task_id}:technical_specs"
     next: create_task_plan
     timeout_secs: 600
 

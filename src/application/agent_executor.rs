@@ -1751,7 +1751,10 @@ impl AgentExecutor {
     }
 
     /// Navigate a JSON value using a dot-separated path (e.g., "decomposition.subprojects")
+    /// Supports optional JSONPath `$.` prefix for compatibility (e.g., "$.decomposition.subprojects")
     fn get_json_path<'a>(&self, value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+        // Strip JSONPath root prefix if present
+        let path = path.strip_prefix("$.").unwrap_or(path);
         let mut current = value;
         for key in path.split('.') {
             current = current.get(key)?;

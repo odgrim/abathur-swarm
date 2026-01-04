@@ -9,7 +9,7 @@ use crate::application::{
 use crate::cli::service::{SwarmService, TaskQueueServiceAdapter};
 use crate::infrastructure::config::ConfigLoader;
 use crate::infrastructure::database::{AgentRepositoryImpl, MemoryRepositoryImpl, TaskRepositoryImpl};
-use crate::services::{DependencyResolver, PriorityCalculator, TaskQueueService as TaskQueueServiceImpl};
+use crate::services::{DependencyResolver, MemoryService, PriorityCalculator, TaskQueueService as TaskQueueServiceImpl};
 use crate::services::hook_executor::HookExecutor;
 use crate::services::hook_registry::HookRegistry;
 use anyhow::{Context, Result};
@@ -293,8 +293,12 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
 
     // Initialize repositories
     let task_repo = Arc::new(TaskRepositoryImpl::new(pool.clone()));
-    let _memory_repo = Arc::new(MemoryRepositoryImpl::new(pool.clone()));
+    let memory_repo = Arc::new(MemoryRepositoryImpl::new(pool.clone()));
     let _agent_repo = Arc::new(AgentRepositoryImpl::new(pool.clone()));
+
+    // Initialize memory service for core step output storage
+    let memory_service = Arc::new(MemoryService::new(memory_repo, None, None));
+    eprintln!("Memory service initialized for core step output storage");
 
     // Initialize dependency resolver and priority calculator early
     let dependency_resolver = DependencyResolver::new();
@@ -417,8 +421,9 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
             .with_substrate_registry(substrate_registry.clone())
             .with_agent_metadata_registry(agent_metadata_registry.clone())
             .with_task_queue_service(task_queue_service.clone())
+            .with_memory_service(memory_service)
     );
-    eprintln!("Prompt chain system initialized (agent definitions + task spawning enabled)");
+    eprintln!("Prompt chain system initialized (agent definitions + task spawning + core memory storage enabled)");
 
     // Create AgentExecutor with substrate registry, agent metadata, and chain support
     let agent_executor = Arc::new(AgentExecutor::new(
