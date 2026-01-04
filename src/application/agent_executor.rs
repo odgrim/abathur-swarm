@@ -758,6 +758,7 @@ impl AgentExecutor {
     ) -> anyhow::Result<uuid::Uuid> {
         use crate::domain::models::{DependencyType, TaskSource, TaskStatus};
         use crate::domain::ports::task_repository::IdempotentInsertResult;
+        use crate::infrastructure::validators::output_validator::OutputValidator;
 
         let next_step = &chain.steps[next_step_index];
 
@@ -770,8 +771,12 @@ impl AgentExecutor {
             current_task.id
         );
 
+        // Strip markdown code blocks before parsing (agents often wrap JSON in ```json...```)
+        // This is critical for extracting feature_name and other fields from structured output
+        let cleaned_output = OutputValidator::strip_markdown_code_blocks(previous_output);
+
         // Parse previous output as input_data for next step
-        let mut input_data: serde_json::Value = match serde_json::from_str(previous_output) {
+        let mut input_data: serde_json::Value = match serde_json::from_str(&cleaned_output) {
             Ok(value) => value,
             Err(_) => {
                 // If not JSON, wrap it
