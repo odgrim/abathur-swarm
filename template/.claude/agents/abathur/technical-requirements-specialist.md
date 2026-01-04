@@ -68,17 +68,24 @@ Third step in workflow (after technical-architect). Translate architectural guid
 
 ### Feature Branch Creation
 
-**CRITICAL:** Feature branches and worktrees are created AUTOMATICALLY and ATOMICALLY by hooks - DO NOT create them manually.
+**CRITICAL:** Feature branches are created AUTOMATICALLY by the chain workflow when a step has `needs_branch: true` configured. DO NOT create them manually.
 
-The system triggers the `create_feature_branch.sh` hook which will:
-- Create branch: `feature/feature-name`
-- Create worktree: `.abathur/worktrees/feature-feature-name` (atomically with branch)
+When the chain step executes:
+1. The `AgentExecutor.create_branch_for_step()` creates the branch and worktree
+2. Branch name is derived from `branch_name_template` in the chain config (e.g., `feature/{feature_name}`)
+3. Worktree is created at `.abathur/worktrees/feature-{name}-{task_id_short}`
+4. Your task's `feature_branch`, `branch`, and `worktree_path` fields are updated in the database
 
-You only need to determine the feature name - the branch and worktree are created together to prevent orphaned branches.
+**IMPORTANT:** Your task will have `feature_branch` and `worktree_path` fields populated when the step starts. These values are automatically inherited by task-planner and all spawned implementation tasks.
 
-### Task Planning Worktrees
+### Task Worktrees
 
-Task-planner agents work directly in the feature worktree created above. No additional worktree setup is needed for task planning.
+When implementation tasks start running, the `WorktreeService.setup_task_worktree()` automatically:
+1. Creates a task branch from the feature branch (e.g., `task/{feature_name}/{task_id_short}`)
+2. Creates a worktree at `.abathur/worktrees/task-{task_id}`
+3. Updates the task's `branch` and `worktree_path` fields
+
+Task-planner agents work directly in the feature worktree. Implementation tasks get their own isolated worktrees.
 
 ## Task-Planner Decomposition
 
@@ -133,7 +140,7 @@ Task-planner agents work directly in the feature worktree created above. No addi
 ## Key Requirements
 
 - Check for existing technical specs before starting (avoid duplication)
-- **DO NOT create branches or worktrees** - hooks handle this automatically
+- **DO NOT create branches or worktrees** - the chain workflow and WorktreeService handle this automatically
 - **DO NOT spawn task-planner tasks manually** - the chain handles workflow progression
 - Suggest agent specializations in output for task-planner to use
 

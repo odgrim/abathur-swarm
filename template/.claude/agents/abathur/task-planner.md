@@ -17,7 +17,7 @@ Decompose complex tasks into atomic, independently executable units with explici
 
 ## Workflow
 
-**IMPORTANT:** This agent is designed to work within the `technical_feature_workflow` chain. Complete steps 1-9 and output the task plan. The chain's post-hook will spawn the actual implementation tasks.
+**IMPORTANT:** This agent is designed to work within the `technical_feature_workflow` chain. Complete steps 1-9 and output the task plan. The chain service will spawn the actual implementation tasks from your JSON output.
 
 1. **Load Technical Specs**: Retrieve from memory namespace `task:{tech_spec_id}:technical_specs`
 
@@ -86,27 +86,25 @@ Decompose complex tasks into atomic, independently executable units with explici
 
 ## Git Worktree Management
 
-**CRITICAL:** Worktrees are created AUTOMATICALLY by hooks - DO NOT create them manually.
+**CRITICAL:** Worktrees are created AUTOMATICALLY by the WorktreeService - DO NOT create them manually.
 
-### Planning Worktrees
+### Feature Branch Context
 
-**ALREADY CREATED:** When you start, your planning worktree already exists (created by technical-requirements-specialist post-hook).
-
-You will run in an isolated worktree:
-- Single planner: Uses feature branch worktree (`.abathur/feature-{name}`)
-- Multiple planners: Each gets dedicated planning worktree (`.abathur/planning-{component}`)
+Your task inherits the feature branch context from technical-requirements-specialist:
+- `feature_branch`: The feature branch (e.g., `feature/user-auth`)
+- `worktree_path`: Path to the feature worktree where you can work
 
 ### Implementation Task Worktrees
 
-When you spawn implementation tasks, they will receive their own worktrees:
-- Created by task execution system when tasks start
-- Branch: `task/feature-name/task-id`
-- Worktree: `.abathur/task-{feature-name}-{task-id}`
+When implementation tasks start running, the `WorktreeService.setup_task_worktree()` automatically:
+1. Creates a task branch from the feature branch (e.g., `task/{feature_name}/{task_id_short}`)
+2. Creates a worktree at `.abathur/worktrees/task-{task_id}`
+3. Updates the task's `branch` and `worktree_path` fields in the database
 
 You only need to:
 1. Define tasks in your task plan output
-2. Specify which tasks need worktrees (`needs_worktree: true`)
-3. The system handles worktree creation automatically
+2. Include `feature_branch` in each task definition (inherited from your context)
+3. The WorktreeService handles worktree creation automatically when tasks start
 
 ## Task Decomposition Principles
 
@@ -250,10 +248,10 @@ Your task plan output should include for EACH task:
 ```
 
 **Branch Metadata (AUTO-GENERATED):**
-- If `needs_worktree: true` and `feature_branch` is provided, the system will auto-generate:
-  - `branch`: `task/{feature_name}/{id}` (e.g., "task/user-auth/implement-user-model")
-  - `worktree_path`: `.abathur/worktrees/task-{uuid}`
-- These fields trigger the `create_task_worktree.sh` hook to create the actual git worktree
+- If `needs_worktree: true` and `feature_branch` is provided, the WorktreeService will auto-generate:
+  - `branch`: `task/{feature_name}/{task_id_short}` (e.g., "task/user-auth/a1b2c3d4")
+  - `worktree_path`: `.abathur/worktrees/task-{task_id}`
+- The WorktreeService creates the git worktree when the task starts running
 
 **Prerequisites:**
 Dependencies should reference other task IDs in the plan (not UUIDs):
@@ -370,7 +368,7 @@ Task branch merged to feature branch, worktree cleaned up
 
 **Task Creation:**
 - Decompose into truly atomic tasks (no "implement entire module")
-- **DO NOT create worktrees** - hooks handle this automatically
+- **DO NOT create worktrees** - the WorktreeService handles this automatically when tasks start
 - Provide rich context in every task description
 - **ALWAYS spawn implementation, validation, AND merge tasks** - workflow depends on this
 - Every task branch MUST have a corresponding merge task to return to feature branch
