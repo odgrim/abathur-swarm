@@ -811,6 +811,38 @@ impl AgentExecutor {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // Derive feature_branch: inherit from parent OR create from feature_name
+        // CRITICAL: If creating from feature_name, we must create the actual git branch
+        let derived_feature_branch = if current_task.feature_branch.is_some() {
+            // Inherit from parent - branch should already exist
+            current_task.feature_branch.clone()
+        } else if let Some(ref feature_name) = feature_name_from_output {
+            // Create feature branch from feature_name
+            let branch_name = format!("feature/{}", Self::sanitize_branch_name(feature_name));
+
+            // Ensure the git branch exists before setting feature_branch
+            // This prevents worktree_service from failing when the task starts
+            let parent_ref = self.resolve_branch_parent("main", current_task).await?;
+            if let Err(e) = self.ensure_branch_exists(&branch_name, &parent_ref).await {
+                warn!(
+                    feature_name = %feature_name,
+                    branch_name = %branch_name,
+                    error = ?e,
+                    "Failed to create feature branch, task will not have feature_branch set"
+                );
+                None
+            } else {
+                info!(
+                    feature_name = %feature_name,
+                    branch_name = %branch_name,
+                    "Created feature branch from step output feature_name"
+                );
+                Some(branch_name)
+            }
+        } else {
+            None
+        };
+
         // Store original context in input_data for subsequent steps
         if let Some(obj) = input_data.as_object_mut() {
             obj.insert(
@@ -881,10 +913,8 @@ impl AgentExecutor {
             // Branch creation happens when task executes (if needs_branch=true)
             // Until then, inherit from parent for continuity
             branch: current_task.branch.clone(),
-            // If parent has feature_branch, inherit it. Otherwise, create from feature_name.
-            feature_branch: current_task.feature_branch.clone().or_else(|| {
-                feature_name_from_output.as_ref().map(|name| format!("feature/{}", name))
-            }),
+            // feature_branch is set below after ensuring it exists
+            feature_branch: derived_feature_branch.clone(),
             worktree_path: current_task.worktree_path.clone(),
             validation_requirement: crate::domain::models::ValidationRequirement::None,
             validation_task_id: None,
