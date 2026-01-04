@@ -493,6 +493,26 @@ impl AgentExecutor {
             "Saved step result_data for idempotency"
         );
 
+        // CRITICAL: Re-read task to get fresh version after saving result_data.
+        // The update above incremented the DB version; we need the fresh version
+        // for any subsequent updates (chain_handoff_state, decomposition, etc.)
+        updated_task = self
+            .chain_service
+            .get_task_from_repo(task.id)
+            .await
+            .map_err(|e| {
+                ExecutionError::ExecutionFailed(format!(
+                    "Failed to refresh task after saving result_data: {}",
+                    e
+                ))
+            })?
+            .ok_or_else(|| {
+                ExecutionError::ExecutionFailed(format!(
+                    "Task {} not found after saving result_data",
+                    task.id
+                ))
+            })?;
+
         // Record step completion in chain execution tracking
         // This is non-critical - failures here don't affect task execution
         if let Ok(execution) = self.chain_service
