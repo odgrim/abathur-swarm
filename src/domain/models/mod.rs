@@ -9,6 +9,7 @@ pub mod agent_contract;
 pub mod agent_metadata;
 pub mod chunking;
 pub mod config;
+pub mod dag;
 pub mod embedding;
 pub mod hook;
 pub mod memory;
@@ -30,6 +31,7 @@ pub use config::{
     McpServerConfig, OpenAIEmbeddingConfig, RagConfig, RateLimitConfig, RecoveryConfig,
     RetryConfig, VectorSearchConfig,
 };
+pub use dag::{DAGEdge, DAGNode};
 pub use embedding::{
     Citation, EmbeddingModel, SearchResult, VectorMemory,
 };
