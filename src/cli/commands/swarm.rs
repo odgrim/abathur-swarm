@@ -370,6 +370,14 @@ pub async fn handle_daemon(max_agents: usize) -> Result<()> {
         priority_calc_arc,
     ));
 
+    // Initialize worktree service for task isolation
+    eprintln!("Initializing worktree service...");
+    let worktree_service = Arc::new(crate::services::WorktreeService::new(
+        task_queue_service.clone(),
+    ));
+    task_coordinator.set_worktree_service(worktree_service).await;
+    eprintln!("Worktree service initialized");
+
     // Initialize hook system
     eprintln!("Initializing hook system...");
     let hook_executor = Arc::new(HookExecutor::new(

@@ -3,6 +3,7 @@ use crate::domain::models::{HookContext, HookEvent, HookResult};
 use crate::domain::ports::{PriorityCalculator, TaskQueueService};
 use crate::services::hook_executor::HookExecutor;
 use crate::services::hook_registry::HookRegistry;
+use crate::services::worktree_service::WorktreeService;
 use crate::services::DependencyResolver;
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -111,6 +112,7 @@ pub struct TaskCoordinator {
     status_tx: mpsc::Sender<TaskStatusUpdate>,
     status_rx: Option<mpsc::Receiver<TaskStatusUpdate>>,
     hook_registry: Arc<RwLock<Option<Arc<HookRegistry>>>>,
+    worktree_service: Arc<RwLock<Option<Arc<WorktreeService>>>>,
 }
 
 impl TaskCoordinator {
@@ -139,7 +141,17 @@ impl TaskCoordinator {
             status_tx,
             status_rx: Some(status_rx),
             hook_registry: Arc::new(RwLock::new(None)),
+            worktree_service: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set the worktree service for this coordinator
+    ///
+    /// This must be called after construction to enable automatic worktree
+    /// creation when tasks start running.
+    pub async fn set_worktree_service(&self, worktree_service: Arc<WorktreeService>) {
+        let mut service = self.worktree_service.write().await;
+        *service = Some(worktree_service);
     }
 
     /// Set the hook registry for this coordinator
@@ -386,13 +398,13 @@ impl TaskCoordinator {
     /// * `Err` - If task not found or database error
     #[instrument(skip(self), fields(task_id = %task_id))]
     pub async fn mark_task_running(&self, task_id: Uuid) -> Result<()> {
-        // Get the task for hook execution
-        let task = self.task_queue.get_task(task_id).await
+        // Get the task for hook execution and worktree setup
+        let mut task = self.task_queue.get_task(task_id).await
             .context("Failed to get task for mark_task_running")?;
 
-        // CRITICAL: Update status to Running FIRST, BEFORE hooks execute.
+        // CRITICAL: Update status to Running FIRST, BEFORE worktree/hooks execute.
         // This prevents race conditions where the polling loop picks up the same
-        // task while hooks (like worktree creation) are still executing.
+        // task while worktree creation or hooks are still executing.
         self.task_queue
             .update_task_status(task_id, TaskStatus::Running)
             .await
@@ -408,7 +420,31 @@ impl TaskCoordinator {
             })
             .await;
 
-        // Execute PreStart hooks with timeout (after status is already Running)
+        // Set up worktree if the task needs one (has feature_branch)
+        // This updates both the in-memory task and the database
+        let worktree_service_guard = self.worktree_service.read().await;
+        if let Some(ref worktree_service) = *worktree_service_guard {
+            match worktree_service.setup_task_worktree(&mut task).await {
+                Ok(true) => {
+                    info!(task_id = %task_id, "Task worktree created successfully");
+                }
+                Ok(false) => {
+                    debug!(task_id = %task_id, "Task does not need worktree (no feature_branch)");
+                }
+                Err(e) => {
+                    // Worktree creation failed - revert to Ready and return error
+                    error!(task_id = %task_id, error = ?e, "Failed to create task worktree");
+                    self.task_queue
+                        .update_task_status(task_id, TaskStatus::Ready)
+                        .await
+                        .context("Failed to revert task status to Ready after worktree failure")?;
+                    return Err(e.context("Failed to set up task worktree"));
+                }
+            }
+        }
+        drop(worktree_service_guard);
+
+        // Execute PreStart hooks with timeout (after status is already Running and worktree is ready)
         let hook_registry_guard = self.hook_registry.read().await;
         if let Some(ref registry) = *hook_registry_guard {
             let context = HookContext::from_task(task_id, HookExecutor::build_variables(&task, &HookContext::from_task(task_id, std::collections::HashMap::new())));
@@ -2056,5 +2092,71 @@ mod tests {
         // Task should still be ready (blocked from starting)
         let updated_task = task_queue.get_task(task_id).await.unwrap();
         assert_eq!(updated_task.status, TaskStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn test_mark_task_running_without_worktree_service() {
+        // Test that mark_task_running works without a worktree service configured
+        let task_queue = Arc::new(MockTaskQueue::new());
+        let dependency_resolver = Arc::new(DependencyResolver::new());
+        let priority_calc = Arc::new(MockPriorityCalculator);
+
+        let coordinator =
+            TaskCoordinator::new(task_queue.clone(), dependency_resolver, priority_calc);
+
+        let task_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let mut task = create_test_task(
+            "00000000-0000-0000-0000-000000000001",
+            TaskStatus::Ready,
+            None,
+        );
+        task.feature_branch = Some("feature/test".to_string());
+
+        task_queue.add_task(task);
+
+        // Mark task as running - should work without worktree service
+        coordinator.mark_task_running(task_id).await.unwrap();
+
+        // Task should be running
+        let updated_task = task_queue.get_task(task_id).await.unwrap();
+        assert_eq!(updated_task.status, TaskStatus::Running);
+        // Worktree fields should still be None (no worktree service configured)
+        assert!(updated_task.branch.is_none());
+        assert!(updated_task.worktree_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mark_task_running_without_feature_branch() {
+        // Test that tasks without feature_branch are marked running without worktree setup
+        let task_queue = Arc::new(MockTaskQueue::new());
+        let dependency_resolver = Arc::new(DependencyResolver::new());
+        let priority_calc = Arc::new(MockPriorityCalculator);
+
+        let coordinator =
+            TaskCoordinator::new(task_queue.clone(), dependency_resolver, priority_calc);
+
+        // Create worktree service and set it
+        let worktree_service = Arc::new(crate::services::WorktreeService::new(task_queue.clone()));
+        coordinator.set_worktree_service(worktree_service).await;
+
+        let task_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let task = create_test_task(
+            "00000000-0000-0000-0000-000000000001",
+            TaskStatus::Ready,
+            None,
+        );
+        // No feature_branch set
+
+        task_queue.add_task(task);
+
+        // Mark task as running
+        coordinator.mark_task_running(task_id).await.unwrap();
+
+        // Task should be running
+        let updated_task = task_queue.get_task(task_id).await.unwrap();
+        assert_eq!(updated_task.status, TaskStatus::Running);
+        // Worktree fields should still be None (no feature_branch)
+        assert!(updated_task.branch.is_none());
+        assert!(updated_task.worktree_path.is_none());
     }
 }
