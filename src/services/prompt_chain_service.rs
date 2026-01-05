@@ -511,36 +511,8 @@ impl PromptChainService {
                 ))?;
         }
 
-        // Check if this step has decomposition configuration (fan-out pattern)
-        if self.has_decomposition(step) {
-            if let Some(parent_task) = task {
-                info!(
-                    step_id = %step.id,
-                    "Step has decomposition config, processing fan-out"
-                );
-
-                // CRITICAL: Decomposition failures are fatal to prevent hung workflows
-                let child_count = self.process_decomposition(step, &result, parent_task, &chain.name).await
-                    .with_context(|| format!(
-                        "Failed to process decomposition for step {}. This is a fatal error to prevent hung workflows.",
-                        step.id
-                    ))?;
-
-                if child_count > 0 {
-                    info!(
-                        step_id = %step.id,
-                        child_count = child_count,
-                        "Decomposition spawned {} child tasks",
-                        child_count
-                    );
-                }
-            } else {
-                warn!(
-                    step_id = %step.id,
-                    "Step has decomposition config but no parent task provided"
-                );
-            }
-        }
+        // Decomposition is handled by the caller (execute_with_chain or execute_chain_with_task),
+        // not here. Processing it here would cause duplicate children.
 
         Ok(result)
     }

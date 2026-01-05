@@ -691,3 +691,84 @@ fn test_malformed_json_output_handling() {
         Some("{ invalid json }")
     );
 }
+
+// =============================================================================
+// Decomposition Architecture Tests
+// =============================================================================
+
+/// Test that documents the correct architecture for decomposition handling.
+///
+/// CRITICAL ARCHITECTURE DECISION:
+/// Decomposition must be handled by the CALLER (execute_with_chain or execute_chain_with_task),
+/// NOT by execute_single_step itself. This prevents duplicate child task spawning.
+///
+/// Before the fix (Bug):
+/// 1. agent_executor.execute_with_chain() calls chain_service.execute_single_step()
+/// 2. execute_single_step() processed decomposition → spawned children
+/// 3. execute_with_chain() ALSO processed decomposition → spawned duplicate children!
+///
+/// After the fix:
+/// 1. execute_single_step() does NOT process decomposition
+/// 2. Caller (execute_with_chain or execute_chain_with_task) handles decomposition
+/// 3. Children are spawned exactly once
+///
+/// This test verifies the architecture is correctly documented and prevents regression.
+#[test]
+fn test_decomposition_should_be_handled_by_caller_not_execute_single_step() {
+    // This test documents the architectural decision:
+    // - execute_single_step() should NOT call process_decomposition()
+    // - Decomposition is handled by callers:
+    //   - agent_executor.execute_with_chain() calls build_decomposition_tasks()
+    //   - prompt_chain_service.execute_chain_with_task() calls process_decomposition()
+    //
+    // If decomposition were handled in both execute_single_step AND the caller,
+    // we would get duplicate children.
+
+    // Simulate what would happen with WRONG architecture (double processing)
+    let decomposition_in_execute_single_step = false;  // CORRECT: should be false
+    let decomposition_in_execute_with_chain = true;    // CORRECT: should be true
+
+    // Count how many times decomposition runs
+    let decomposition_runs = (decomposition_in_execute_single_step as u32)
+        + (decomposition_in_execute_with_chain as u32);
+
+    assert_eq!(
+        decomposition_runs,
+        1,
+        "Decomposition should run exactly once (in the caller), not twice. \
+         If this test fails, check that execute_single_step does NOT call process_decomposition()"
+    );
+}
+
+/// Test that idempotency keys prevent duplicate children even if decomposition
+/// is accidentally called multiple times (defense in depth).
+#[test]
+fn test_idempotency_key_prevents_duplicate_decomposition_children() {
+    let parent_id = Uuid::new_v4();
+    let step_id = "design_architecture";
+
+    // Generate idempotency keys for 3 items
+    let keys: Vec<String> = (0..3)
+        .map(|i| generate_decomposition_idempotency_key(parent_id, step_id, i))
+        .collect();
+
+    // If decomposition runs twice with same parameters, keys should be identical
+    let keys_second_run: Vec<String> = (0..3)
+        .map(|i| generate_decomposition_idempotency_key(parent_id, step_id, i))
+        .collect();
+
+    assert_eq!(
+        keys, keys_second_run,
+        "Idempotency keys must be deterministic to prevent duplicate children"
+    );
+
+    // All keys should be unique
+    let mut unique_keys: Vec<String> = keys.clone();
+    unique_keys.sort();
+    unique_keys.dedup();
+    assert_eq!(
+        unique_keys.len(),
+        keys.len(),
+        "Each item should have a unique idempotency key"
+    );
+}

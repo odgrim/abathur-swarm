@@ -114,46 +114,30 @@ hooks:
   # ============================================================================
   # ORCHESTRATION CHAIN HOOKS
   # ============================================================================
-  # These hooks define the workflow pipeline: requirements → architect → tech-spec → planner
+  # These hooks are for non-chain orchestration. When using prompt chains
+  # (technical_feature_workflow.yaml), the chain executor handles step transitions.
+  # Enabling these with chains causes duplicate agents.
 
+  # Chain executor handles requirements→architect transition automatically.
+  # Only enable for non-chain workflows.
   - id: spawn-architect-after-requirements
-    description: "Automatically spawn technical-architect after requirements gathering completes"
+    description: "Spawn technical-architect after requirements gathering (non-chain workflows only)"
     event:
       type: post_complete
     conditions:
       - agent_type: requirements-gatherer
         task_status: completed
     actions:
-      - type: spawn_task
-        agent_type: technical-architect
-        summary: "Technical architecture for: ${task_summary}"
-        description: |
-          Requirements stored in memory namespace: task:${task_id}:requirements
-
-          Your mission:
-          1. Load requirements from memory
-          2. Research architectural patterns and best practices
-          3. Design system architecture and select technology stack
-          4. Store architecture decisions in memory
-          5. Workflow will automatically spawn technical-requirements-specialist when you complete
-
-          Expected Deliverables:
-          - Technical architecture
-          - Component breakdown
-          - Technology recommendations
-        priority: 7
       - type: log_message
         level: info
-        message: "Requirements complete - spawning technical-architect for ${task_summary}"
+        message: "Chain executor handles requirements→architect transition for ${task_summary}"
     priority: 10
-    enabled: true
+    enabled: false
 
-  # DEPRECATED: This hook is no longer needed.
-  # Decomposition is now handled natively in Rust by the chain executor.
-  # See: process_decomposition() in src/services/prompt_chain_service.rs
-  # The step's decomposition config in technical_feature_workflow.yaml is used directly.
+  # Decomposition is handled by the chain executor via process_decomposition().
+  # Only enable for non-chain workflows.
   - id: process-architect-decomposition
-    description: "[DEPRECATED] Process technical-architect decomposition - now handled by chain executor"
+    description: "Process technical-architect decomposition (non-chain workflows only)"
     event:
       type: post_complete
     conditions:
