@@ -113,7 +113,17 @@ impl OutputValidator {
                     // If that fails, try stripping markdown code blocks
                     let cleaned = Self::strip_markdown_code_blocks(output);
                     serde_json::from_str::<serde_json::Value>(&cleaned)
-                        .context("Invalid JSON output")?;
+                        .with_context(|| {
+                            let preview_len = cleaned.len().min(500);
+                            let preview = &cleaned[..preview_len];
+                            let suffix = if cleaned.len() > 500 { "..." } else { "" };
+                            format!(
+                                "Failed to parse output as JSON. Output length: {} chars. Preview:\n{}{}",
+                                cleaned.len(),
+                                preview,
+                                suffix
+                            )
+                        })?;
                     Ok(true)
                 }
             }
@@ -138,7 +148,17 @@ impl OutputValidator {
 
         // Parse the output as JSON
         let instance: serde_json::Value = serde_json::from_str(&cleaned)
-            .context("Failed to parse output as JSON")?;
+            .with_context(|| {
+                let preview_len = cleaned.len().min(500);
+                let preview = &cleaned[..preview_len];
+                let suffix = if cleaned.len() > 500 { "..." } else { "" };
+                format!(
+                    "Failed to parse output as JSON. Output length: {} chars. Preview:\n{}{}",
+                    cleaned.len(),
+                    preview,
+                    suffix
+                )
+            })?;
 
         // Compile the schema - we need to own the schema to satisfy lifetime requirements
         let compiled_schema = JSONSchema::options()

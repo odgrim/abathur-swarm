@@ -765,10 +765,19 @@ impl PromptChainService {
         let (validated, validation_error) = match self.validator.validate(&output, &step.expected_output) {
             Ok(_) => (true, None),
             Err(e) => {
+                let output_preview = if output.len() > 1000 {
+                    format!("{}...[truncated {} more chars]", &output[..1000], output.len() - 1000)
+                } else {
+                    output.clone()
+                };
                 let error_msg = format!("Output format validation failed: {}", e);
                 error!(
-                    "Output format validation failed for step {}: {}",
-                    step.id, e
+                    step_id = %step.id,
+                    expected_format = ?step.expected_output,
+                    output_length = output.len(),
+                    output_preview = %output_preview,
+                    error = %e,
+                    "Output format validation failed for step"
                 );
                 (false, Some(error_msg))
             }
