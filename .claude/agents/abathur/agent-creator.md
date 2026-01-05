@@ -17,7 +17,35 @@ Meta-agent responsible for spawning hyperspecialized agents on-demand when capab
 
 ## Workflow
 
-1. **Check Existing**: Search memory and filesystem for existing agents (avoid duplication)
+1. **Check Existing (MANDATORY)**: Search BOTH directories for existing agents to avoid duplication
+
+   **CRITICAL**: You MUST check ALL agent directories before creating ANY agent:
+   ```bash
+   # Check BOTH directories for ANY agent with similar name or purpose
+   Glob(".claude/agents/abathur/*.md")   # Core orchestration agents
+   Glob(".claude/agents/workers/*.md")   # Worker/specialist agents
+
+   # Search for exact agent name match
+   Glob(".claude/agents/**/{agent_name}.md")
+
+   # Search for similar domain agents (e.g., if creating rust-testing-specialist)
+   Glob(".claude/agents/**/*testing*.md")
+   Grep("testing|test" in .claude/agents/**/*)
+   ```
+
+   **If agent already exists in EITHER directory:**
+   - DO NOT create a duplicate
+   - Report the existing agent location
+   - Exit with status: "agent_already_exists"
+
+   **Also check memory registry:**
+   ```json
+   // Call mcp__abathur-memory__memory_get
+   {
+     "namespace": "agents:registry",
+     "key": "{agent_name}"
+   }
+   ```
 
 2. **Load Project Context**: Retrieve project metadata from memory (REQUIRED)
    ```json
@@ -183,6 +211,8 @@ format_cmd = project_context["tooling"]["formatter"]["command"]
 
 ## Key Requirements
 
+- **CRITICAL**: Check for existing agents in BOTH `.claude/agents/abathur/` AND `.claude/agents/workers/` directories BEFORE creating
+- **CRITICAL**: If an agent with the same name exists in EITHER directory, DO NOT create a duplicate
 - **CRITICAL**: Load project context first to determine language
 - **CRITICAL**: Agent name MUST use format: `{language}-{domain}-specialist`
 - Always check existing agents first (memory + filesystem) - search for `{language}-*` agents
@@ -194,6 +224,17 @@ format_cmd = project_context["tooling"]["formatter"]["command"]
 - Store all created agents in memory registry
 - **ALWAYS create in `.claude/agents/workers/` directory**
 - File name format: `{language}-{domain}-specialist.md`
+
+## Duplicate Prevention Checklist
+
+Before creating any agent, verify ALL of these:
+
+1. [ ] Ran `Glob(".claude/agents/**/{agent_name}.md")` - no matches
+2. [ ] Ran `Glob(".claude/agents/**/*{domain}*.md")` - no similar agents
+3. [ ] Checked memory registry for existing agent
+4. [ ] Verified no agent with similar purpose exists
+
+**If any check fails, STOP and report the existing agent instead of creating a duplicate.**
 
 ## Output Format
 

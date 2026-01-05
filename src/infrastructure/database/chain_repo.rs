@@ -81,6 +81,7 @@ impl ChainRepository for ChainRepositoryImpl {
                         .context("Failed to deserialize steps")?,
                     validation_rules: serde_json::from_str(r.get::<String, _>("validation_rules").as_str())
                         .context("Failed to deserialize validation rules")?,
+                    max_parallelism: None,
                     created_at: parse_datetime(r.get::<String, _>("created_at").as_str())?,
                     updated_at: parse_datetime(r.get::<String, _>("updated_at").as_str())?,
                 };
@@ -116,6 +117,7 @@ impl ChainRepository for ChainRepositoryImpl {
                         .context("Failed to deserialize steps")?,
                     validation_rules: serde_json::from_str(r.get::<String, _>("validation_rules").as_str())
                         .context("Failed to deserialize validation rules")?,
+                    max_parallelism: None,
                     created_at: parse_datetime(r.get::<String, _>("created_at").as_str())?,
                     updated_at: parse_datetime(r.get::<String, _>("updated_at").as_str())?,
                 };
@@ -148,6 +150,7 @@ impl ChainRepository for ChainRepositoryImpl {
                     .context("Failed to deserialize steps")?,
                 validation_rules: serde_json::from_str(r.get::<String, _>("validation_rules").as_str())
                     .context("Failed to deserialize validation rules")?,
+                max_parallelism: None,
                 created_at: parse_datetime(r.get::<String, _>("created_at").as_str())?,
                 updated_at: parse_datetime(r.get::<String, _>("updated_at").as_str())?,
             };
