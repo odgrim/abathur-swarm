@@ -4,7 +4,7 @@ use crate::services::{DependencyResolver, PriorityCalculator, MemoryService};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 /// Service for managing task queue operations.
@@ -1177,6 +1177,11 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
         parent_task: &Task,
         mut child_tasks: Vec<Task>,
     ) -> Result<crate::domain::ports::task_repository::DecompositionResult> {
+        use crate::infrastructure::database::DatabaseError;
+
+        const MAX_RETRIES: u32 = 5;
+        const BASE_DELAY_MS: u64 = 10;
+
         if child_tasks.is_empty() {
             // No children to insert, just update the parent
             self.repo
@@ -1227,21 +1232,79 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
             task.status = initial_status;
         }
 
-        // Use the atomic repository method
-        let result = self.repo
-            .update_parent_and_insert_children_atomic(parent_task, &child_tasks)
-            .await
-            .context("Atomic decomposition failed")?;
+        // Capture state changes from parent_task to apply on retry
+        // These are the fields that need to be preserved across version refreshes
+        let awaiting_children = parent_task.awaiting_children.clone();
+        let target_status = parent_task.status;
+        let chain_handoff_state = parent_task.chain_handoff_state.clone();
 
-        info!(
-            parent_task_id = %result.parent_id,
-            parent_new_version = result.parent_new_version,
-            children_inserted = result.children_inserted.len(),
-            children_already_existed = result.children_already_existed.len(),
-            "Atomic decomposition completed"
-        );
+        // Retry loop with exponential backoff for optimistic lock conflicts
+        let mut current_parent = parent_task.clone();
+        let mut attempts = 0;
 
-        Ok(result)
+        loop {
+            // Use the atomic repository method
+            match self.repo
+                .update_parent_and_insert_children_atomic(&current_parent, &child_tasks)
+                .await
+            {
+                Ok(result) => {
+                    info!(
+                        parent_task_id = %result.parent_id,
+                        parent_new_version = result.parent_new_version,
+                        children_inserted = result.children_inserted.len(),
+                        children_already_existed = result.children_already_existed.len(),
+                        attempts = attempts + 1,
+                        "Atomic decomposition completed"
+                    );
+                    return Ok(result);
+                }
+                Err(DatabaseError::OptimisticLockConflict { task_id, expected_version }) => {
+                    attempts += 1;
+                    if attempts >= MAX_RETRIES {
+                        return Err(anyhow::anyhow!(
+                            "Atomic decomposition failed after {} retries: version conflict on task {} (expected version {}). \
+                            This may indicate high concurrent activity on this task.",
+                            attempts, task_id, expected_version
+                        ));
+                    }
+
+                    // Exponential backoff before retry
+                    let delay = BASE_DELAY_MS * (1 << attempts.min(5));
+                    warn!(
+                        parent_task_id = %parent_task.id,
+                        attempt = attempts,
+                        max_retries = MAX_RETRIES,
+                        expected_version = expected_version,
+                        delay_ms = delay,
+                        "Optimistic lock conflict in atomic decomposition, refreshing version and retrying"
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+
+                    // Re-read parent task to get fresh version
+                    current_parent = self.repo.get(parent_task.id).await?
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "Parent task {} not found during atomic decomposition retry",
+                            parent_task.id
+                        ))?;
+
+                    // Re-apply the state changes to the fresh version
+                    current_parent.awaiting_children = awaiting_children.clone();
+                    current_parent.status = target_status;
+                    current_parent.chain_handoff_state = chain_handoff_state.clone();
+
+                    debug!(
+                        parent_task_id = %parent_task.id,
+                        new_version = current_parent.version,
+                        "Refreshed parent task version for retry"
+                    );
+                }
+                Err(e) => {
+                    // Non-retryable error
+                    return Err(e).context("Atomic decomposition failed");
+                }
+            }
+        }
     }
 }
 
