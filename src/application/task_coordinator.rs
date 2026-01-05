@@ -1907,6 +1907,7 @@ mod tests {
             feature_branch: None,
             branch: None,
             worktree_path: None,
+            needs_worktree: None,
             validation_requirement: crate::domain::models::task::ValidationRequirement::None,
             validation_task_id: None,
             validating_task_id: None,

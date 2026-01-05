@@ -100,6 +100,18 @@ impl WorktreeService {
             return Ok(false);
         }
 
+        // Check if task explicitly doesn't need a worktree
+        // When needs_worktree == Some(false), skip task worktree creation
+        // This allows planning agents (e.g., technical-architect) to work without their own worktree
+        if task.needs_worktree == Some(false) {
+            debug!(
+                task_id = %task.id,
+                feature_branch = ?task.feature_branch,
+                "Task has needs_worktree=false, skipping task worktree setup"
+            );
+            return Ok(false);
+        }
+
         let feature_branch = task.feature_branch.clone().unwrap();
 
         info!(
@@ -727,6 +739,7 @@ mod tests {
             feature_branch: None,
             branch: None,
             worktree_path: None,
+            needs_worktree: None,
             validation_requirement: ValidationRequirement::None,
             validation_task_id: None,
             validating_task_id: None,
@@ -802,6 +815,24 @@ mod tests {
         let result = service.setup_task_worktree(&mut task).await.unwrap();
 
         // Should return false since no feature_branch
+        assert!(!result);
+        assert!(task.branch.is_none());
+        assert!(task.worktree_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_setup_task_worktree_needs_worktree_false() {
+        let mock_queue = Arc::new(MockTaskQueue::new());
+        let service = WorktreeService::new(mock_queue);
+
+        let mut task = create_test_task();
+        task.feature_branch = Some("feature/test".to_string());
+        task.needs_worktree = Some(false); // Explicitly set to false
+
+        let result = service.setup_task_worktree(&mut task).await.unwrap();
+
+        // Should return false since needs_worktree is explicitly false
+        // (e.g., for planning agents like technical-architect)
         assert!(!result);
         assert!(task.branch.is_none());
         assert!(task.worktree_path.is_none());

@@ -1088,6 +1088,14 @@ impl AgentExecutor {
             // feature_branch is set below after ensuring it exists
             feature_branch: derived_feature_branch.clone(),
             worktree_path: current_task.worktree_path.clone(),
+            // If step explicitly sets needs_branch=false, also set needs_worktree=false
+            // This prevents the worktree service from creating a task-specific worktree
+            // for planning steps (like technical-architect) that don't need isolation
+            needs_worktree: if next_step.needs_branch == Some(false) {
+                Some(false)
+            } else {
+                None // Let the worktree service use its default behavior
+            },
             validation_requirement: crate::domain::models::ValidationRequirement::None,
             validation_task_id: None,
             validating_task_id: None,
@@ -1995,6 +2003,8 @@ impl AgentExecutor {
                 feature_branch: child_feature_branch.clone(),
                 // worktree_path will be generated when task starts
                 worktree_path: None,
+                // Decomposition children need their own worktrees for isolation
+                needs_worktree: None,
                 validation_requirement: crate::domain::models::ValidationRequirement::None,
                 validation_task_id: None,
                 validating_task_id: None,

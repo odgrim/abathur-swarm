@@ -391,6 +391,7 @@ mod tests {
             feature_branch: None,
             branch: None,
             worktree_path: None,
+            needs_worktree: None,
             validation_requirement: ValidationRequirement::None,
             validation_task_id: None,
             validating_task_id: None,

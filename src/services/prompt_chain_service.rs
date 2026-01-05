@@ -1702,6 +1702,8 @@ impl PromptChainService {
             branch: branch_value,
             feature_branch,
             worktree_path,
+            // Tasks from task plans default to needing worktrees
+            needs_worktree: None,
             validation_requirement: crate::domain::models::ValidationRequirement::None,
             validation_task_id: None,
             validating_task_id: None,
@@ -1901,6 +1903,8 @@ impl PromptChainService {
                 feature_branch: Some(branch_name.clone()),
                 branch: None, // Will be created when task starts
                 worktree_path: None,
+                // Decomposition children need their own worktrees for isolation
+                needs_worktree: None,
                 validation_requirement: ValidationRequirement::None,
                 validation_task_id: None,
                 validating_task_id: None,

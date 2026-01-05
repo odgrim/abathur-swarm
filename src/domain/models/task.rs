@@ -257,6 +257,13 @@ pub struct Task {
     pub feature_branch: Option<String>,
     pub worktree_path: Option<String>,
 
+    /// Whether this task needs its own worktree.
+    ///
+    /// When `Some(true)`: Task will get its own worktree branched from feature_branch
+    /// When `Some(false)`: Task will NOT get its own worktree (uses feature branch worktree if available)
+    /// When `None`: Defaults to true for backward compatibility (creates worktree if feature_branch is set)
+    pub needs_worktree: Option<bool>,
+
     // Validation and workflow tracking fields
     /// Validation requirement for this task
     #[serde(default)]
@@ -360,6 +367,7 @@ impl Task {
             branch: None,
             feature_branch: None,
             worktree_path: None,
+            needs_worktree: None,
             validation_requirement: ValidationRequirement::None,
             validation_task_id: None,
             validating_task_id: None,

@@ -82,6 +82,9 @@ impl TaskRepositoryImpl {
             branch: row.get("branch"),
             feature_branch: row.get("feature_branch"),
             worktree_path: row.get("worktree_path"),
+            needs_worktree: row
+                .get::<Option<i64>, _>("needs_worktree")
+                .map(|v| v != 0),
 
             // Validation and workflow tracking fields
             validation_requirement: row
@@ -191,12 +194,12 @@ impl TaskRepository for TaskRepositoryImpl {
                 max_execution_timeout_seconds, submitted_at, started_at, completed_at,
                 last_updated_at, created_by, parent_task_id, session_id, source,
                 deadline, estimated_duration_seconds, branch, feature_branch,
-                worktree_path, validation_requirement, validation_task_id,
+                worktree_path, needs_worktree, validation_requirement, validation_task_id,
                 validating_task_id, remediation_count, is_remediation,
                 workflow_state, workflow_expectations, chain_id, chain_step_index,
                 awaiting_children, spawned_by_task_id, chain_handoff_state, idempotency_key, version
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             id,
             task.summary,
@@ -227,6 +230,7 @@ impl TaskRepository for TaskRepositoryImpl {
             task.branch,
             task.feature_branch,
             task.worktree_path,
+            task.needs_worktree,
             validation_requirement,
             validation_task_id,
             validating_task_id,
@@ -342,6 +346,7 @@ impl TaskRepository for TaskRepositoryImpl {
                 branch = ?,
                 feature_branch = ?,
                 worktree_path = ?,
+                needs_worktree = ?,
                 validation_requirement = ?,
                 validation_task_id = ?,
                 validating_task_id = ?,
@@ -384,6 +389,7 @@ impl TaskRepository for TaskRepositoryImpl {
             task.branch,
             task.feature_branch,
             task.worktree_path,
+            task.needs_worktree,
             validation_requirement,
             validation_task_id,
             validating_task_id,
@@ -895,12 +901,12 @@ impl TaskRepository for TaskRepositoryImpl {
                 max_execution_timeout_seconds, submitted_at, started_at, completed_at,
                 last_updated_at, created_by, parent_task_id, session_id, source,
                 deadline, estimated_duration_seconds, branch, feature_branch,
-                worktree_path, validation_requirement, validation_task_id,
+                worktree_path, needs_worktree, validation_requirement, validation_task_id,
                 validating_task_id, remediation_count, is_remediation,
                 workflow_state, workflow_expectations, chain_id, chain_step_index,
                 chain_handoff_state, idempotency_key
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&id)
@@ -932,6 +938,7 @@ impl TaskRepository for TaskRepositoryImpl {
         .bind(&task.branch)
         .bind(&task.feature_branch)
         .bind(&task.worktree_path)
+        .bind(task.needs_worktree)
         .bind(&validation_requirement)
         .bind(&validation_task_id)
         .bind(&validating_task_id)
@@ -1059,12 +1066,12 @@ impl TaskRepository for TaskRepositoryImpl {
                     max_execution_timeout_seconds, submitted_at, started_at, completed_at,
                     last_updated_at, created_by, parent_task_id, session_id, source,
                     deadline, estimated_duration_seconds, branch, feature_branch,
-                    worktree_path, validation_requirement, validation_task_id,
+                    worktree_path, needs_worktree, validation_requirement, validation_task_id,
                     validating_task_id, remediation_count, is_remediation,
                     workflow_state, workflow_expectations, chain_id, chain_step_index,
                     chain_handoff_state, idempotency_key, version
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&id)
@@ -1096,6 +1103,7 @@ impl TaskRepository for TaskRepositoryImpl {
             .bind(&task.branch)
             .bind(&task.feature_branch)
             .bind(&task.worktree_path)
+            .bind(task.needs_worktree)
             .bind(&validation_requirement)
             .bind(&validation_task_id)
             .bind(&validating_task_id)
@@ -1230,6 +1238,7 @@ impl TaskRepository for TaskRepositoryImpl {
                 branch = ?,
                 feature_branch = ?,
                 worktree_path = ?,
+                needs_worktree = ?,
                 validation_requirement = ?,
                 validation_task_id = ?,
                 validating_task_id = ?,
@@ -1273,6 +1282,7 @@ impl TaskRepository for TaskRepositoryImpl {
         .bind(&parent_task.branch)
         .bind(&parent_task.feature_branch)
         .bind(&parent_task.worktree_path)
+        .bind(parent_task.needs_worktree)
         .bind(&validation_requirement)
         .bind(&validation_task_id)
         .bind(&validating_task_id)
@@ -1365,12 +1375,12 @@ impl TaskRepository for TaskRepositoryImpl {
                     max_execution_timeout_seconds, submitted_at, started_at, completed_at,
                     last_updated_at, created_by, parent_task_id, session_id, source,
                     deadline, estimated_duration_seconds, branch, feature_branch,
-                    worktree_path, validation_requirement, validation_task_id,
+                    worktree_path, needs_worktree, validation_requirement, validation_task_id,
                     validating_task_id, remediation_count, is_remediation,
                     workflow_state, workflow_expectations, chain_id, chain_step_index,
                     chain_handoff_state, idempotency_key, version
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&id)
@@ -1402,6 +1412,7 @@ impl TaskRepository for TaskRepositoryImpl {
             .bind(&task.branch)
             .bind(&task.feature_branch)
             .bind(&task.worktree_path)
+            .bind(task.needs_worktree)
             .bind(&validation_requirement)
             .bind(&validation_task_id)
             .bind(&validating_task_id)
