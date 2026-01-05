@@ -1608,4 +1608,175 @@ mod tests {
 
         pool.close().await;
     }
+
+    #[tokio::test]
+    async fn test_atomic_decomposition_with_correct_version() {
+        let pool = setup_test_db().await;
+        let repo = TaskRepositoryImpl::new(pool.clone());
+
+        // Create parent task
+        let mut parent_task = Task::new(
+            "Parent task".to_string(),
+            "Parent description".to_string()
+        );
+        parent_task.status = TaskStatus::Running;
+        repo.insert(&parent_task).await.expect("Failed to insert parent");
+
+        // Re-read to get the correct version from DB (initial version is 1)
+        let parent_task = repo.get(parent_task.id).await.expect("Failed to get parent").unwrap();
+        assert_eq!(parent_task.version, 1, "Initial version should be 1");
+
+        // Create child tasks
+        let child1 = Task::new("Child 1".to_string(), "Child 1 description".to_string());
+        let child2 = Task::new("Child 2".to_string(), "Child 2 description".to_string());
+        let children = vec![child1.clone(), child2.clone()];
+
+        // Update parent to Blocked status (simulating awaiting children - using valid DB status)
+        // Note: The actual AwaitingChildren status is used in the domain model but the DB
+        // constraint only allows a fixed set of statuses. This test validates the version handling.
+        let mut updated_parent = parent_task.clone();
+        updated_parent.status = TaskStatus::Blocked;
+        updated_parent.awaiting_children = Some(vec![child1.id, child2.id]);
+
+        // Perform atomic decomposition
+        let result = repo
+            .update_parent_and_insert_children_atomic(&updated_parent, &children)
+            .await
+            .expect("Atomic decomposition should succeed");
+
+        assert_eq!(result.parent_id, parent_task.id);
+        assert_eq!(result.parent_new_version, 2, "Version should be incremented to 2");
+        assert_eq!(result.children_inserted.len(), 2, "Both children should be inserted");
+        assert!(result.children_already_existed.is_empty(), "No children should already exist");
+
+        // Verify parent was updated correctly
+        let final_parent = repo.get(parent_task.id).await.expect("Failed to get parent").unwrap();
+        assert_eq!(final_parent.status, TaskStatus::Blocked);
+        assert_eq!(final_parent.version, 2);
+
+        // Verify children were inserted
+        let child1_from_db = repo.get(child1.id).await.expect("Failed to get child1").unwrap();
+        assert_eq!(child1_from_db.summary, "Child 1");
+
+        let child2_from_db = repo.get(child2.id).await.expect("Failed to get child2").unwrap();
+        assert_eq!(child2_from_db.summary, "Child 2");
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_atomic_decomposition_fails_with_stale_version() {
+        let pool = setup_test_db().await;
+        let repo = TaskRepositoryImpl::new(pool.clone());
+
+        // Create parent task
+        let mut parent_task = Task::new(
+            "Parent task".to_string(),
+            "Parent description".to_string()
+        );
+        parent_task.status = TaskStatus::Running;
+        repo.insert(&parent_task).await.expect("Failed to insert parent");
+
+        // Read the task to get version 1
+        let parent_v1 = repo.get(parent_task.id).await.expect("Failed to get parent").unwrap();
+        assert_eq!(parent_v1.version, 1);
+
+        // Simulate another process updating the task (incrementing version)
+        let mut intermediate_update = parent_v1.clone();
+        intermediate_update.summary = "Updated by another process".to_string();
+        repo.update(&intermediate_update).await.expect("Intermediate update should succeed");
+
+        // Verify version is now 2
+        let parent_v2 = repo.get(parent_task.id).await.expect("Failed to get parent").unwrap();
+        assert_eq!(parent_v2.version, 2, "Version should be 2 after intermediate update");
+
+        // Now try to do atomic decomposition with the STALE version (v1)
+        let child = Task::new("Child".to_string(), "Child description".to_string());
+        let children = vec![child.clone()];
+
+        let mut stale_parent = parent_v1.clone(); // This has version 1, but DB has version 2
+        stale_parent.status = TaskStatus::Blocked; // Using valid DB status
+        stale_parent.awaiting_children = Some(vec![child.id]);
+
+        // This should fail with OptimisticLockConflict
+        let result = repo.update_parent_and_insert_children_atomic(&stale_parent, &children).await;
+
+        assert!(result.is_err(), "Atomic decomposition should fail with stale version");
+        let err = result.unwrap_err();
+        match err {
+            DatabaseError::OptimisticLockConflict { task_id, expected_version } => {
+                assert_eq!(task_id, parent_task.id);
+                assert_eq!(expected_version, 1, "Expected version should be 1 (the stale version)");
+            }
+            other => panic!("Expected OptimisticLockConflict, got {:?}", other),
+        }
+
+        // Verify no child was inserted (transaction was rolled back)
+        let child_from_db = repo.get(child.id).await.expect("Failed to get child");
+        assert!(child_from_db.is_none(), "Child should not exist - transaction should have rolled back");
+
+        // Verify parent was NOT updated to AwaitingChildren
+        let final_parent = repo.get(parent_task.id).await.expect("Failed to get parent").unwrap();
+        assert_eq!(final_parent.status, TaskStatus::Running, "Parent status should still be Running");
+        assert_eq!(final_parent.version, 2, "Parent version should still be 2");
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_atomic_decomposition_succeeds_with_fresh_version() {
+        // This test simulates the fix: re-reading the task to get fresh version before atomic op
+        let pool = setup_test_db().await;
+        let repo = TaskRepositoryImpl::new(pool.clone());
+
+        // Create parent task
+        let mut parent_task = Task::new(
+            "Parent task".to_string(),
+            "Parent description".to_string()
+        );
+        parent_task.status = TaskStatus::Running;
+        repo.insert(&parent_task).await.expect("Failed to insert parent");
+
+        // Read the task to get version 1
+        let parent_v1 = repo.get(parent_task.id).await.expect("Failed to get parent").unwrap();
+        assert_eq!(parent_v1.version, 1);
+
+        // Simulate another process updating the task (like setup_task_worktree would do)
+        let mut intermediate_update = parent_v1.clone();
+        intermediate_update.summary = "Updated by setup_task_worktree".to_string();
+        repo.update(&intermediate_update).await.expect("Intermediate update should succeed");
+
+        // Now, before atomic decomposition, re-read to get FRESH version (like the fix does)
+        let fresh_parent = repo.get(parent_task.id).await.expect("Failed to get fresh parent").unwrap();
+        assert_eq!(fresh_parent.version, 2, "Fresh parent should have version 2");
+
+        // Create child task
+        let child = Task::new("Child".to_string(), "Child description".to_string());
+        let children = vec![child.clone()];
+
+        // Prepare fresh parent for atomic decomposition using Blocked status (valid in DB)
+        let mut fresh_parent_for_decomp = fresh_parent.clone();
+        fresh_parent_for_decomp.status = TaskStatus::Blocked;
+        fresh_parent_for_decomp.awaiting_children = Some(vec![child.id]);
+
+        // Atomic decomposition should succeed with fresh version
+        let result = repo
+            .update_parent_and_insert_children_atomic(&fresh_parent_for_decomp, &children)
+            .await
+            .expect("Atomic decomposition should succeed with fresh version");
+
+        assert_eq!(result.parent_new_version, 3, "Version should be incremented to 3");
+        assert_eq!(result.children_inserted.len(), 1, "Child should be inserted");
+
+        // Verify parent was updated
+        let final_parent = repo.get(parent_task.id).await.expect("Failed to get parent").unwrap();
+        assert_eq!(final_parent.status, TaskStatus::Blocked);
+        assert_eq!(final_parent.version, 3);
+
+        // Verify child was inserted
+        let child_from_db = repo.get(child.id).await.expect("Failed to get child").unwrap();
+        assert_eq!(child_from_db.summary, "Child");
+
+        pool.close().await;
+    }
 }

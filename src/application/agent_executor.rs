@@ -332,8 +332,39 @@ impl AgentExecutor {
                                 }
 
                                 // ATOMIC: Update parent and insert children in single transaction
+                                //
+                                // CRITICAL: Re-read task to get fresh version right before atomic operation.
+                                // Even though we read at the start of the retry, the version may have
+                                // become stale during build_decomposition_tasks (which runs git commands).
+                                let mut fresh_task = self
+                                    .chain_service
+                                    .get_task_from_repo(task.id)
+                                    .await
+                                    .map_err(|e| {
+                                        ExecutionError::ExecutionFailed(format!(
+                                            "Failed to refresh task before atomic decomposition (retry): {}", e
+                                        ))
+                                    })?
+                                    .ok_or_else(|| {
+                                        ExecutionError::ExecutionFailed(format!(
+                                            "Task {} not found before atomic decomposition (retry)", task.id
+                                        ))
+                                    })?;
+
+                                // Apply the decomposition state to the fresh task
+                                fresh_task.awaiting_children = Some(child_ids.clone());
+                                fresh_task.status = TaskStatus::AwaitingChildren;
+                                fresh_task.chain_handoff_state = updated_task.chain_handoff_state.clone();
+
+                                info!(
+                                    task_id = %task.id,
+                                    fresh_version = fresh_task.version,
+                                    child_count = child_tasks.len(),
+                                    "Idempotent retry: attempting atomic decomposition with fresh task version"
+                                );
+
                                 match self.chain_service.update_parent_and_insert_children_atomic(
-                                    &updated_task,
+                                    &fresh_task,
                                     child_tasks,
                                 ).await {
                                     Ok(decomp_result) => {
@@ -341,6 +372,7 @@ impl AgentExecutor {
                                             task_id = %task.id,
                                             child_count = decomp_result.children_inserted.len(),
                                             already_existed = decomp_result.children_already_existed.len(),
+                                            parent_version = decomp_result.parent_new_version,
                                             "Idempotent retry: atomic decomposition succeeded, {} children inserted",
                                             decomp_result.children_inserted.len()
                                         );
@@ -676,8 +708,40 @@ impl AgentExecutor {
 
                         // ATOMIC: Update parent and insert children in single transaction
                         // This prevents orphaned children if parent update fails
+                        //
+                        // CRITICAL: Re-read task to get fresh version right before atomic operation.
+                        // The version may have become stale during build_decomposition_tasks due to
+                        // concurrent updates or timing issues. Without this, we may use an outdated
+                        // version and fail with OptimisticLockConflict.
+                        let mut fresh_task = self
+                            .chain_service
+                            .get_task_from_repo(task.id)
+                            .await
+                            .map_err(|e| {
+                                ExecutionError::ExecutionFailed(format!(
+                                    "Failed to refresh task before atomic decomposition: {}", e
+                                ))
+                            })?
+                            .ok_or_else(|| {
+                                ExecutionError::ExecutionFailed(format!(
+                                    "Task {} not found before atomic decomposition", task.id
+                                ))
+                            })?;
+
+                        // Apply the decomposition state to the fresh task
+                        fresh_task.awaiting_children = Some(child_ids.clone());
+                        fresh_task.status = TaskStatus::AwaitingChildren;
+                        fresh_task.chain_handoff_state = updated_task.chain_handoff_state.clone();
+
+                        info!(
+                            task_id = %task.id,
+                            fresh_version = fresh_task.version,
+                            child_count = child_tasks.len(),
+                            "Attempting atomic decomposition with fresh task version"
+                        );
+
                         match self.chain_service.update_parent_and_insert_children_atomic(
-                            &updated_task,
+                            &fresh_task,
                             child_tasks,
                         ).await {
                             Ok(decomp_result) => {
