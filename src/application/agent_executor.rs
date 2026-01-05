@@ -269,15 +269,85 @@ impl AgentExecutor {
                 "Step already has result_data, skipping re-execution (idempotent retry)"
             );
 
-            // Try to enqueue the next step
+            // Extract previous output from result_data
+            let previous_output = existing_result
+                .get("output")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            // CRITICAL: Check if this step has decomposition with wait_for_children
+            // If so, we must NOT enqueue the next step directly - the decomposition
+            // should handle spawning children and the parent waits for them.
+            // Re-run decomposition handling (it's idempotent due to child task idempotency keys)
+            if let Some(ref decomposition) = step.decomposition {
+                if decomposition.on_complete.wait_for_children {
+                    info!(
+                        task_id = %task.id,
+                        step_id = %step.id,
+                        "Idempotent retry: step has decomposition with wait_for_children=true, re-handling decomposition"
+                    );
+
+                    // Create mutable copy for decomposition handling
+                    let mut updated_task = task.clone();
+
+                    // Re-run decomposition - child tasks have idempotency keys so this is safe
+                    match self.handle_decomposition(previous_output, step, &mut updated_task, &chain).await {
+                        Ok(child_ids) => {
+                            if !child_ids.is_empty() {
+                                // Set task to AwaitingChildren status
+                                updated_task.awaiting_children = Some(child_ids.clone());
+                                updated_task.status = TaskStatus::AwaitingChildren;
+
+                                // Save the handoff state for when children complete
+                                let next_step_index = step_index + 1;
+                                if next_step_index < chain.steps.len() {
+                                    updated_task.chain_handoff_state = Some(ChainHandoffState {
+                                        pending_next_step_index: next_step_index,
+                                        chain_id: chain_id.to_string(),
+                                        pending_since: chrono::Utc::now(),
+                                        enqueue_attempts: 0,
+                                        last_error: None,
+                                        step_output: Some(previous_output.to_string()),
+                                    });
+                                }
+
+                                self.chain_service
+                                    .update_task(&updated_task)
+                                    .await
+                                    .map_err(|e| {
+                                        ExecutionError::ExecutionFailed(format!(
+                                            "Failed to save AwaitingChildren state on retry: {}", e
+                                        ))
+                                    })?;
+
+                                info!(
+                                    task_id = %task.id,
+                                    child_count = child_ids.len(),
+                                    "Idempotent retry: task now waiting for {} children to complete",
+                                    child_ids.len()
+                                );
+
+                                // Return existing result - children will handle continuation
+                                return serde_json::to_string_pretty(existing_result).map_err(|e| {
+                                    ExecutionError::ExecutionFailed(format!("Failed to serialize existing result: {}", e))
+                                });
+                            }
+                            // If no children (all already existed and completed?), fall through to normal next step
+                        }
+                        Err(e) => {
+                            // Decomposition failed on retry - this is a fatal error for wait_for_children=true
+                            return Err(ExecutionError::ExecutionFailed(format!(
+                                "Decomposition failed on idempotent retry for step {}: {}",
+                                step.id, e
+                            )));
+                        }
+                    }
+                }
+            }
+
+            // Try to enqueue the next step (only if no decomposition or decomposition completed)
             let next_step_index = step_index + 1;
             if next_step_index < chain.steps.len() {
-                // Extract previous output from result_data
-                let previous_output = existing_result
-                    .get("output")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-
                 info!(
                     task_id = %task.id,
                     next_step_index = next_step_index,
@@ -1730,6 +1800,60 @@ impl AgentExecutor {
             // Note: feature_branch is the parent branch (shared by all tasks in this feature)
             // branch is the task-specific branch from the template (already created above)
             // worktree_path will be generated by worktree_service when task runs
+
+            // CRITICAL: Build proper input_data object for child task
+            // This ensures the child task has all context needed for execution, including
+            // original_task_summary which is required by execute_task_in_chain
+            let mut child_input_data = serde_json::Map::new();
+
+            // Add the item (either as-is if object, or wrapped if primitive)
+            match item {
+                serde_json::Value::Object(obj) => {
+                    // Merge object fields into input_data
+                    for (key, value) in obj {
+                        child_input_data.insert(key.clone(), value.clone());
+                    }
+                    child_input_data.insert("item".to_string(), item.clone());
+                }
+                _ => {
+                    // For strings/primitives, add as "item" field
+                    child_input_data.insert("item".to_string(), item.clone());
+                }
+            }
+
+            // Add previous_output (the parent step's output) for chain context
+            child_input_data.insert("previous_output".to_string(), serde_json::json!(output));
+
+            // Preserve original task context from parent
+            // This is critical for branch naming and task identification
+            if let Some(ref parent_input) = parent_task.input_data {
+                if let Some(ots) = parent_input.get("original_task_summary") {
+                    child_input_data.insert("original_task_summary".to_string(), ots.clone());
+                }
+                if let Some(otd) = parent_input.get("original_task_description") {
+                    child_input_data.insert("original_task_description".to_string(), otd.clone());
+                }
+            }
+
+            // Fallback: use parent task summary/description if not in input_data
+            if !child_input_data.contains_key("original_task_summary") {
+                child_input_data.insert(
+                    "original_task_summary".to_string(),
+                    serde_json::json!(parent_task.summary),
+                );
+            }
+            if !child_input_data.contains_key("original_task_description") {
+                child_input_data.insert(
+                    "original_task_description".to_string(),
+                    serde_json::json!(parent_task.description),
+                );
+            }
+
+            // Add feature_name if available from output
+            if let Some(feature_name) = output_json.get("feature_name").and_then(|v| v.as_str()) {
+                child_input_data.insert("feature_name".to_string(), serde_json::json!(feature_name));
+            }
+
             let child_task = Task {
                 id: Uuid::new_v4(),
                 summary: Self::truncate_summary(&summary, 140),
@@ -1741,7 +1865,7 @@ impl AgentExecutor {
                 dependencies: None, // Children run in parallel
                 dependency_type: DependencyType::Sequential,
                 dependency_depth: parent_task.dependency_depth + 1,
-                input_data: Some(item.clone()), // Pass item data as input
+                input_data: Some(serde_json::Value::Object(child_input_data)),
                 result_data: None,
                 error_message: None,
                 retry_count: 0,
