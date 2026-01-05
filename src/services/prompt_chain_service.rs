@@ -1999,14 +1999,40 @@ impl PromptChainService {
         }
 
         // Atomically update parent and insert all children
-        let atomic_result = task_queue
+        info!(
+            step_id = %step.id,
+            parent_task_id = %parent_task.id,
+            parent_version = parent_task.version,
+            updated_parent_status = ?updated_parent.status,
+            child_count = child_count,
+            "Attempting atomic decomposition"
+        );
+
+        let atomic_result = match task_queue
             .update_parent_and_insert_children_atomic(&updated_parent, child_tasks)
             .await
-            .with_context(|| format!(
-                "Failed to atomically insert {} decomposition children for step {}",
-                child_count,
-                step.id
-            ))?;
+        {
+            Ok(result) => result,
+            Err(e) => {
+                error!(
+                    step_id = %step.id,
+                    parent_task_id = %parent_task.id,
+                    parent_version = parent_task.version,
+                    updated_parent_status = ?updated_parent.status,
+                    child_count = child_count,
+                    error = %e,
+                    error_chain = ?e,
+                    "Atomic decomposition FAILED - this is likely a schema or version conflict issue"
+                );
+                return Err(e).with_context(|| format!(
+                    "Failed to atomically insert {} decomposition children for step {} (parent version: {}, target status: {:?})",
+                    child_count,
+                    step.id,
+                    parent_task.version,
+                    updated_parent.status
+                ));
+            }
+        };
 
         info!(
             step_id = %step.id,
