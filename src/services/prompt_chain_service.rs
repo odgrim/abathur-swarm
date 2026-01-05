@@ -1647,65 +1647,49 @@ impl PromptChainService {
             .or_else(|| parent_task.and_then(|t| t.feature_branch.clone()));
 
         // Determine branch and worktree_path
+        // IMPORTANT: Each task MUST get its own unique worktree. Never inherit from parent.
+        // Parent worktrees are for the parent's work only. Subtasks branch from the feature
+        // branch and merge back to it when complete.
         let (branch_value, worktree_path) = if needs_worktree {
-            if let Some(parent) = parent_task {
-                if parent.branch.is_some() && parent.worktree_path.is_some() {
-                    info!(
-                        parent_branch = ?parent.branch,
-                        parent_worktree = ?parent.worktree_path,
-                        "Implementation task inheriting branch and worktree from parent"
-                    );
-                    (parent.branch.clone(), parent.worktree_path.clone())
-                } else if feature_branch.is_some() {
-                    let task_id_slug = task_def
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("task");
+            if let Some(ref fb) = feature_branch {
+                // ALWAYS create unique branch/worktree from feature branch
+                // Generate a unique task UUID for the worktree path
+                let task_uuid = uuid::Uuid::new_v4();
+                let task_uuid_str = task_uuid.to_string();
 
-                    let feature_name = feature_branch
-                        .as_ref()
-                        .and_then(|fb| fb.strip_prefix("feature/"))
-                        .unwrap_or("unknown");
-
-                    let task_uuid = uuid::Uuid::new_v4();
-                    let branch = format!("task/{}/{}", feature_name, task_id_slug);
-                    let worktree = format!(".abathur/worktrees/task-{}", task_uuid);
-
-                    info!(
-                        branch = %branch,
-                        worktree = %worktree,
-                        "Generated new task branch (parent has no task branch)"
-                    );
-
-                    (Some(branch), Some(worktree))
-                } else {
-                    warn!("needs_worktree is true but no parent task branch or feature_branch available");
-                    (None, None)
-                }
-            } else if feature_branch.is_some() {
+                // Use task definition ID for branch name (human-readable)
+                // Fall back to first 8 chars of task UUID if no ID provided
                 let task_id_slug = task_def
                     .get("id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("task");
+                    .unwrap_or(&task_uuid_str[..8]);
 
-                let feature_name = feature_branch
-                    .as_ref()
-                    .and_then(|fb| fb.strip_prefix("feature/"))
-                    .unwrap_or("unknown");
+                // Extract feature name from feature branch
+                let feature_name = fb
+                    .strip_prefix("feature/")
+                    .or_else(|| fb.strip_prefix("features/"))
+                    .unwrap_or(fb);
 
-                let task_uuid = uuid::Uuid::new_v4();
                 let branch = format!("task/{}/{}", feature_name, task_id_slug);
                 let worktree = format!(".abathur/worktrees/task-{}", task_uuid);
 
                 info!(
                     branch = %branch,
                     worktree = %worktree,
-                    "Generated new task branch (no parent task)"
+                    feature_branch = %fb,
+                    parent_task_id = ?parent_task.map(|p| p.id),
+                    "Generated unique task branch and worktree (branched from feature branch)"
                 );
 
                 (Some(branch), Some(worktree))
             } else {
-                warn!("needs_worktree is true but no feature_branch available");
+                // No feature_branch available - this is a configuration error
+                error!(
+                    task_id = ?task_def.get("id"),
+                    summary = ?task_def.get("summary"),
+                    "needs_worktree is true but no feature_branch available. \
+                     Task plans MUST include feature_branch for all tasks requiring worktrees."
+                );
                 (None, None)
             }
         } else {

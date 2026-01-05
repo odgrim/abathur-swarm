@@ -394,6 +394,21 @@ impl TaskCoordinator {
                 match worktree_service.setup_task_worktree(&mut task).await {
                     Ok(true) => {
                         info!(task_id = %task_id, "Task worktree created successfully");
+
+                        // CRITICAL: Validate worktree actually exists after setup
+                        // This catches cases where git commands failed silently or the
+                        // worktree was cleaned up by another process
+                        if let Err(e) = worktree_service.validate_worktree_exists(&task).await {
+                            error!(task_id = %task_id, error = ?e, "Worktree validation failed after setup");
+                            self.task_queue
+                                .mark_task_failed(
+                                    task_id,
+                                    format!("Worktree validation failed: {}", e)
+                                )
+                                .await
+                                .context("Failed to mark task as failed after worktree validation failure")?;
+                            return Err(e.context("Worktree validation failed after setup"));
+                        }
                     }
                     Ok(false) => {
                         debug!(task_id = %task_id, "Task does not need worktree (no feature_branch)");
@@ -528,6 +543,21 @@ impl TaskCoordinator {
             match worktree_service.setup_task_worktree(&mut task).await {
                 Ok(true) => {
                     info!(task_id = %task_id, "Task worktree created successfully");
+
+                    // CRITICAL: Validate worktree actually exists after setup
+                    // This catches cases where git commands failed silently or the
+                    // worktree was cleaned up by another process
+                    if let Err(e) = worktree_service.validate_worktree_exists(&task).await {
+                        error!(task_id = %task_id, error = ?e, "Worktree validation failed after setup");
+                        self.task_queue
+                            .mark_task_failed(
+                                task_id,
+                                format!("Worktree validation failed: {}", e)
+                            )
+                            .await
+                            .context("Failed to mark task as failed after worktree validation failure")?;
+                        return Err(e.context("Worktree validation failed after setup"));
+                    }
                 }
                 Ok(false) => {
                     debug!(task_id = %task_id, "Task does not need worktree (no feature_branch)");

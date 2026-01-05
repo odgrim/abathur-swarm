@@ -79,8 +79,10 @@ impl ChainRepository for ChainRepositoryImpl {
                     description: r.get("description"),
                     steps: serde_json::from_str(r.get::<String, _>("steps").as_str())
                         .context("Failed to deserialize steps")?,
-                    validation_rules: serde_json::from_str(r.get::<String, _>("validation_rules").as_str())
-                        .context("Failed to deserialize validation rules")?,
+                    validation_rules: serde_json::from_str(
+                        r.get::<String, _>("validation_rules").as_str(),
+                    )
+                    .context("Failed to deserialize validation rules")?,
                     max_parallelism: None,
                     created_at: parse_datetime(r.get::<String, _>("created_at").as_str())?,
                     updated_at: parse_datetime(r.get::<String, _>("updated_at").as_str())?,
@@ -115,8 +117,10 @@ impl ChainRepository for ChainRepositoryImpl {
                     description: r.get("description"),
                     steps: serde_json::from_str(r.get::<String, _>("steps").as_str())
                         .context("Failed to deserialize steps")?,
-                    validation_rules: serde_json::from_str(r.get::<String, _>("validation_rules").as_str())
-                        .context("Failed to deserialize validation rules")?,
+                    validation_rules: serde_json::from_str(
+                        r.get::<String, _>("validation_rules").as_str(),
+                    )
+                    .context("Failed to deserialize validation rules")?,
                     max_parallelism: None,
                     created_at: parse_datetime(r.get::<String, _>("created_at").as_str())?,
                     updated_at: parse_datetime(r.get::<String, _>("updated_at").as_str())?,
@@ -148,8 +152,10 @@ impl ChainRepository for ChainRepositoryImpl {
                 description: r.get("description"),
                 steps: serde_json::from_str(r.get::<String, _>("steps").as_str())
                     .context("Failed to deserialize steps")?,
-                validation_rules: serde_json::from_str(r.get::<String, _>("validation_rules").as_str())
-                    .context("Failed to deserialize validation rules")?,
+                validation_rules: serde_json::from_str(
+                    r.get::<String, _>("validation_rules").as_str(),
+                )
+                .context("Failed to deserialize validation rules")?,
                 max_parallelism: None,
                 created_at: parse_datetime(r.get::<String, _>("created_at").as_str())?,
                 updated_at: parse_datetime(r.get::<String, _>("updated_at").as_str())?,
@@ -413,7 +419,9 @@ impl ChainRepository for ChainRepositoryImpl {
             total_executions: row.get::<i64, _>("total") as usize,
             completed: row.try_get::<Option<i64>, _>("completed")?.unwrap_or(0) as usize,
             failed: row.try_get::<Option<i64>, _>("failed")?.unwrap_or(0) as usize,
-            validation_failed: row.try_get::<Option<i64>, _>("validation_failed")?.unwrap_or(0) as usize,
+            validation_failed: row
+                .try_get::<Option<i64>, _>("validation_failed")?
+                .unwrap_or(0) as usize,
             running: row.try_get::<Option<i64>, _>("running")?.unwrap_or(0) as usize,
             avg_duration_secs: row.try_get::<Option<f64>, _>("avg_duration")?,
         })

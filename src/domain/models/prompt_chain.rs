@@ -37,6 +37,10 @@ pub struct PromptChain {
     pub steps: Vec<PromptStep>,
     /// Validation rules applied across steps
     pub validation_rules: Vec<ValidationRule>,
+    /// Maximum number of steps to execute in parallel (default: unlimited)
+    /// Controls DAG workflow execution concurrency
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_parallelism: Option<usize>,
     /// Creation timestamp
     #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
@@ -54,6 +58,7 @@ impl PromptChain {
             description,
             steps: Vec::new(),
             validation_rules: Vec::new(),
+            max_parallelism: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -92,9 +97,28 @@ impl PromptChain {
                     });
                 }
             }
+
+            // Verify all depends_on references are valid
+            if let Some(deps) = &step.depends_on {
+                for dep_id in deps {
+                    if !self.steps.iter().any(|s| &s.id == dep_id) {
+                        return Err(ChainValidationError::InvalidDependency {
+                            step_id: step.id.clone(),
+                            dependency_id: dep_id.clone(),
+                        });
+                    }
+
+                    // Check for self-dependency
+                    if dep_id == &step.id {
+                        return Err(ChainValidationError::SelfDependency {
+                            step_id: step.id.clone(),
+                        });
+                    }
+                }
+            }
         }
 
-        // Check for cycles
+        // Check for cycles (handles both next_step and depends_on)
         if self.has_cycle() {
             return Err(ChainValidationError::CycleDetected);
         }
@@ -102,19 +126,75 @@ impl PromptChain {
         Ok(())
     }
 
-    /// Check if the chain has a cycle
+    /// Check if the chain has a cycle using DFS
+    /// Handles both next_step (sequential) and depends_on (DAG) relationships
     fn has_cycle(&self) -> bool {
-        let mut visited = std::collections::HashSet::new();
-        let mut current = self.steps.first().map(|s| &s.id);
+        use std::collections::{HashMap, HashSet};
 
-        while let Some(step_id) = current {
-            if !visited.insert(step_id) {
-                return true; // Cycle detected
+        // Build adjacency list for all edges
+        let mut graph: HashMap<&str, Vec<&str>> = HashMap::new();
+
+        for step in &self.steps {
+            let edges = graph.entry(step.id.as_str()).or_insert_with(Vec::new);
+
+            // Add next_step edge
+            if let Some(next_id) = &step.next_step {
+                edges.push(next_id.as_str());
             }
 
-            current = self
-                .get_step(step_id)
-                .and_then(|s| s.next_step.as_ref());
+            // Add depends_on edges (reverse direction: if A depends_on B, then B -> A)
+            if let Some(deps) = &step.depends_on {
+                for dep_id in deps {
+                    graph
+                        .entry(dep_id.as_str())
+                        .or_insert_with(Vec::new)
+                        .push(step.id.as_str());
+                }
+            }
+        }
+
+        // DFS cycle detection with three colors
+        let mut white: HashSet<&str> = self.steps.iter().map(|s| s.id.as_str()).collect();
+        let mut gray: HashSet<&str> = HashSet::new();
+        let mut black: HashSet<&str> = HashSet::new();
+
+        fn visit_dfs<'a>(
+            node: &'a str,
+            graph: &HashMap<&'a str, Vec<&'a str>>,
+            white: &mut HashSet<&'a str>,
+            gray: &mut HashSet<&'a str>,
+            black: &mut HashSet<&'a str>,
+        ) -> bool {
+            // Move from white to gray
+            white.remove(node);
+            gray.insert(node);
+
+            // Visit all neighbors
+            if let Some(neighbors) = graph.get(node) {
+                for &neighbor in neighbors {
+                    if black.contains(neighbor) {
+                        continue; // Already processed
+                    }
+                    if gray.contains(neighbor) {
+                        return true; // Back edge = cycle
+                    }
+                    if visit_dfs(neighbor, graph, white, gray, black) {
+                        return true;
+                    }
+                }
+            }
+
+            // Move from gray to black
+            gray.remove(node);
+            black.insert(node);
+            false
+        }
+
+        // Check all connected components
+        while let Some(&node) = white.iter().next() {
+            if visit_dfs(node, &graph, &mut white, &mut gray, &mut black) {
+                return true;
+            }
         }
 
         false
@@ -182,6 +262,11 @@ pub struct PromptStep {
     /// This is a core feature - no shell hooks required
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store_in_memory: Option<StepMemoryConfig>,
+    /// List of step IDs that must complete before this step can execute
+    /// Enables DAG-based workflow execution with explicit dependencies
+    /// If None, defaults to sequential execution (depends on previous step)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<Vec<String>>,
 }
 
 /// Configuration for storing step output in memory
@@ -330,6 +415,7 @@ impl PromptStep {
             branch_name_template: None,
             decomposition: None,
             store_in_memory: None,
+            depends_on: None,
         }
     }
 
@@ -399,6 +485,12 @@ impl PromptStep {
         self
     }
 
+    /// Set the step dependencies for DAG-based execution
+    pub fn with_depends_on(mut self, depends_on: Vec<String>) -> Self {
+        self.depends_on = Some(depends_on);
+        self
+    }
+
     /// Build the actual prompt by replacing variables
     ///
     /// Automatically appends format instructions based on `expected_output` type.
@@ -431,8 +523,7 @@ impl PromptStep {
     /// Get format instructions based on the expected output type
     fn get_format_instructions(&self) -> String {
         match &self.expected_output {
-            OutputFormat::Json { .. } => {
-                r#"
+            OutputFormat::Json { .. } => r#"
 ---
 ## OUTPUT FORMAT REQUIREMENT (CRITICAL)
 
@@ -455,8 +546,8 @@ CORRECT FORMAT:
 INCORRECT (will cause validation failure):
 - "Here is the result: {...}"
 - "Task complete. The JSON is: {...}"
-- Any text outside the JSON block"#.to_string()
-            }
+- Any text outside the JSON block"#
+                .to_string(),
             OutputFormat::Markdown => String::new(), // No special instructions needed
             OutputFormat::Plain => String::new(),    // No special instructions needed
         }
@@ -631,6 +722,13 @@ pub enum ChainValidationError {
     EmptyChain,
     #[error("Step {step_id} references invalid next step: {next_id}")]
     InvalidNextStep { step_id: String, next_id: String },
+    #[error("Step {step_id} references invalid dependency: {dependency_id}")]
+    InvalidDependency {
+        step_id: String,
+        dependency_id: String,
+    },
+    #[error("Step {step_id} has a self-dependency")]
+    SelfDependency { step_id: String },
     #[error("Chain contains a cycle")]
     CycleDetected,
 }
@@ -767,8 +865,12 @@ mod tests {
         assert_eq!(execution.status, ChainStatus::Running);
         assert_eq!(execution.current_step, 0);
 
-        let result =
-            StepResult::new("step1".to_string(), "output".to_string(), true, Duration::from_secs(1));
+        let result = StepResult::new(
+            "step1".to_string(),
+            "output".to_string(),
+            true,
+            Duration::from_secs(1),
+        );
         execution.add_result(result);
         assert_eq!(execution.current_step, 1);
 
@@ -845,7 +947,10 @@ mod tests {
 
         assert_eq!(config.key, "architecture");
         assert_eq!(config.memory_type, "episodic");
-        assert_eq!(config.namespace_template, Some("task:{task_id}:arch".to_string()));
+        assert_eq!(
+            config.namespace_template,
+            Some("task:{task_id}:arch".to_string())
+        );
     }
 
     #[test]
@@ -869,7 +974,10 @@ mod tests {
         let config = step.store_in_memory.unwrap();
         assert_eq!(config.key, "requirements");
         assert_eq!(config.memory_type, "semantic");
-        assert_eq!(config.namespace_template, Some("task:{task_id}:requirements".to_string()));
+        assert_eq!(
+            config.namespace_template,
+            Some("task:{task_id}:requirements".to_string())
+        );
     }
 
     #[test]
@@ -884,5 +992,202 @@ mod tests {
 
         assert_eq!(step.id, "simple_step");
         assert!(step.store_in_memory.is_none());
+    }
+
+    #[test]
+    fn test_depends_on_builder_pattern() {
+        let step = PromptStep::new(
+            "step3".to_string(),
+            "Execute step 3".to_string(),
+            "Worker".to_string(),
+            OutputFormat::Plain,
+        )
+        .with_depends_on(vec!["step1".to_string(), "step2".to_string()]);
+
+        assert_eq!(
+            step.depends_on,
+            Some(vec!["step1".to_string(), "step2".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_depends_on_serialization() {
+        let step = PromptStep::new(
+            "step1".to_string(),
+            "Test".to_string(),
+            "Tester".to_string(),
+            OutputFormat::Plain,
+        )
+        .with_depends_on(vec!["step0".to_string()]);
+
+        let json = serde_json::to_string(&step).unwrap();
+        assert!(json.contains("depends_on"));
+
+        let deserialized: PromptStep = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.depends_on, Some(vec!["step0".to_string()]));
+    }
+
+    #[test]
+    fn test_depends_on_backward_compatibility() {
+        // Old JSON without depends_on field should deserialize with None
+        let json = r#"{
+            "id": "step1",
+            "prompt_template": "Test",
+            "role": "Tester",
+            "expected_output": {"type": "plain"},
+            "next_step": null,
+            "timeout": null,
+            "pre_hooks": [],
+            "post_hooks": [],
+            "working_directory": null,
+            "needs_branch": null,
+            "branch_parent": null,
+            "branch_name_template": null,
+            "decomposition": null,
+            "store_in_memory": null
+        }"#;
+
+        let step: PromptStep = serde_json::from_str(json).unwrap();
+        assert_eq!(step.depends_on, None);
+    }
+
+    #[test]
+    fn test_chain_validation_invalid_dependency() {
+        let mut chain = PromptChain::new("Test".to_string(), "Test chain".to_string());
+        let step = PromptStep::new(
+            "step1".to_string(),
+            "Test".to_string(),
+            "Tester".to_string(),
+            OutputFormat::Plain,
+        )
+        .with_depends_on(vec!["nonexistent".to_string()]);
+        chain.add_step(step);
+
+        assert!(matches!(
+            chain.validate(),
+            Err(ChainValidationError::InvalidDependency { .. })
+        ));
+    }
+
+    #[test]
+    fn test_chain_validation_self_dependency() {
+        let mut chain = PromptChain::new("Test".to_string(), "Test chain".to_string());
+        let step = PromptStep::new(
+            "step1".to_string(),
+            "Test".to_string(),
+            "Tester".to_string(),
+            OutputFormat::Plain,
+        )
+        .with_depends_on(vec!["step1".to_string()]); // Self-dependency
+        chain.add_step(step);
+
+        assert!(matches!(
+            chain.validate(),
+            Err(ChainValidationError::SelfDependency { .. })
+        ));
+    }
+
+    #[test]
+    fn test_dag_cycle_detection() {
+        let mut chain = PromptChain::new("DAG".to_string(), "DAG with cycle".to_string());
+
+        // Create a cycle: step1 -> step2 -> step3 -> step1 (via depends_on)
+        let step1 = PromptStep::new(
+            "step1".to_string(),
+            "Test".to_string(),
+            "Tester".to_string(),
+            OutputFormat::Plain,
+        )
+        .with_depends_on(vec!["step3".to_string()]);
+
+        let step2 = PromptStep::new(
+            "step2".to_string(),
+            "Test".to_string(),
+            "Tester".to_string(),
+            OutputFormat::Plain,
+        )
+        .with_depends_on(vec!["step1".to_string()]);
+
+        let step3 = PromptStep::new(
+            "step3".to_string(),
+            "Test".to_string(),
+            "Tester".to_string(),
+            OutputFormat::Plain,
+        )
+        .with_depends_on(vec!["step2".to_string()]);
+
+        chain.add_step(step1);
+        chain.add_step(step2);
+        chain.add_step(step3);
+
+        assert!(matches!(
+            chain.validate(),
+            Err(ChainValidationError::CycleDetected)
+        ));
+    }
+
+    #[test]
+    fn test_dag_no_cycle_parallel_execution() {
+        let mut chain = PromptChain::new("DAG".to_string(), "Valid DAG".to_string());
+
+        // Create a valid DAG:
+        // step1 and step2 have no dependencies (can run in parallel)
+        // step3 depends on both step1 and step2
+        let step1 = PromptStep::new(
+            "step1".to_string(),
+            "Test".to_string(),
+            "Tester".to_string(),
+            OutputFormat::Plain,
+        );
+
+        let step2 = PromptStep::new(
+            "step2".to_string(),
+            "Test".to_string(),
+            "Tester".to_string(),
+            OutputFormat::Plain,
+        );
+
+        let step3 = PromptStep::new(
+            "step3".to_string(),
+            "Test".to_string(),
+            "Tester".to_string(),
+            OutputFormat::Plain,
+        )
+        .with_depends_on(vec!["step1".to_string(), "step2".to_string()]);
+
+        chain.add_step(step1);
+        chain.add_step(step2);
+        chain.add_step(step3);
+
+        assert!(chain.validate().is_ok());
+    }
+
+    #[test]
+    fn test_max_parallelism_serialization() {
+        let mut chain = PromptChain::new("Test".to_string(), "Test chain".to_string());
+        chain.max_parallelism = Some(4);
+
+        let json = serde_json::to_string(&chain).unwrap();
+        assert!(json.contains("max_parallelism"));
+
+        let deserialized: PromptChain = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.max_parallelism, Some(4));
+    }
+
+    #[test]
+    fn test_max_parallelism_backward_compatibility() {
+        // Old JSON without max_parallelism should deserialize with None
+        let json = r#"{
+            "id": "chain1",
+            "name": "Test",
+            "description": "Test chain",
+            "steps": [],
+            "validation_rules": [],
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z"
+        }"#;
+
+        let chain: PromptChain = serde_json::from_str(json).unwrap();
+        assert_eq!(chain.max_parallelism, None);
     }
 }

@@ -73,17 +73,34 @@ impl WorktreeService {
     /// - Database update fails
     #[instrument(skip(self, task), fields(task_id = %task.id, feature_branch = ?task.feature_branch))]
     pub async fn setup_task_worktree(&self, task: &mut Task) -> Result<bool> {
-        // Check if task has a feature branch - required for worktree creation
-        let feature_branch = match &task.feature_branch {
-            Some(fb) => fb.clone(),
-            None => {
-                debug!(
+        // Check for inconsistent state: task has branch/worktree_path but no feature_branch
+        // This indicates a bug in task creation - all worktree tasks must have feature_branch
+        if task.feature_branch.is_none() {
+            if task.branch.is_some() || task.worktree_path.is_some() {
+                error!(
                     task_id = %task.id,
-                    "Task has no feature_branch, skipping worktree setup"
+                    branch = ?task.branch,
+                    worktree_path = ?task.worktree_path,
+                    "Task has branch/worktree_path but no feature_branch - inconsistent state"
                 );
-                return Ok(false);
+                return Err(anyhow::anyhow!(
+                    "Task {} has branch ({:?}) or worktree_path ({:?}) set but no feature_branch. \
+                     This is an inconsistent state - all tasks with worktree configuration must have feature_branch set.",
+                    task.id,
+                    task.branch,
+                    task.worktree_path
+                ));
             }
-        };
+
+            // Task doesn't need a worktree - this is fine
+            debug!(
+                task_id = %task.id,
+                "Task has no feature_branch, skipping worktree setup"
+            );
+            return Ok(false);
+        }
+
+        let feature_branch = task.feature_branch.clone().unwrap();
 
         info!(
             task_id = %task.id,
@@ -129,6 +146,52 @@ impl WorktreeService {
         );
 
         Ok(true)
+    }
+
+    /// Validate that a task's worktree exists and is valid.
+    ///
+    /// Call this after `setup_task_worktree` to verify the worktree was actually created.
+    /// This is a safety check to ensure tasks don't run in the wrong directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `task` - The task to validate
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Worktree exists and is valid, or task doesn't require a worktree
+    /// * `Err` - Worktree should exist but doesn't
+    #[instrument(skip(self, task), fields(task_id = %task.id))]
+    pub async fn validate_worktree_exists(&self, task: &Task) -> Result<()> {
+        // If task has no worktree_path, nothing to validate
+        let Some(ref worktree_path) = task.worktree_path else {
+            return Ok(());
+        };
+
+        // Validate the worktree actually exists
+        if !self.is_valid_worktree(worktree_path).await? {
+            error!(
+                task_id = %task.id,
+                worktree_path = %worktree_path,
+                branch = ?task.branch,
+                feature_branch = ?task.feature_branch,
+                "Task has worktree_path set but worktree does not exist or is invalid"
+            );
+            return Err(anyhow::anyhow!(
+                "Worktree validation failed for task {}: path '{}' does not exist or is not a valid git worktree. \
+                 The worktree may have been cleaned up prematurely or creation failed silently.",
+                task.id,
+                worktree_path
+            ));
+        }
+
+        debug!(
+            task_id = %task.id,
+            worktree_path = %worktree_path,
+            "Worktree validation passed"
+        );
+
+        Ok(())
     }
 
     /// Generate branch name and worktree path for a task.
