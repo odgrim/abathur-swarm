@@ -399,12 +399,33 @@ impl TaskCoordinator {
                         debug!(task_id = %task_id, "Task does not need worktree (no feature_branch)");
                     }
                     Err(e) => {
-                        // Worktree creation failed - revert to Ready and return error
-                        error!(task_id = %task_id, error = ?e, "Failed to create task worktree");
-                        self.task_queue
-                            .update_task_status(task_id, TaskStatus::Ready)
-                            .await
-                            .context("Failed to revert task status to Ready after worktree failure")?;
+                        // Worktree creation failed
+                        error!(task_id = %task_id, error = ?e, version = task.version, "Failed to create task worktree");
+
+                        // SAFEGUARD: If version is very high, it means this task has been
+                        // repeatedly failing in a loop (claim→fail→revert→claim→...).
+                        // Mark as Failed to break the loop instead of reverting to Ready.
+                        const MAX_REVERT_VERSION: u32 = 100;
+                        if task.version > MAX_REVERT_VERSION {
+                            error!(
+                                task_id = %task_id,
+                                version = task.version,
+                                "Task version too high, marking as failed to break infinite retry loop"
+                            );
+                            self.task_queue
+                                .mark_task_failed(
+                                    task_id,
+                                    format!("Worktree creation failed repeatedly (version {}): {}", task.version, e)
+                                )
+                                .await
+                                .context("Failed to mark task as failed after repeated worktree failures")?;
+                        } else {
+                            // Normal case: revert to Ready and return error
+                            self.task_queue
+                                .update_task_status(task_id, TaskStatus::Ready)
+                                .await
+                                .context("Failed to revert task status to Ready after worktree failure")?;
+                        }
                         return Err(e.context("Failed to set up task worktree"));
                     }
                 }
@@ -419,11 +440,29 @@ impl TaskCoordinator {
 
                 if hook_result.should_block() {
                     warn!("PreStart hook blocked task {} - reverting to Ready status", task_id);
-                    // Revert status to Ready if hook blocks
-                    self.task_queue
-                        .update_task_status(task_id, TaskStatus::Ready)
-                        .await
-                        .context("Failed to revert task status to Ready")?;
+
+                    // SAFEGUARD: If version is very high, mark as failed instead of reverting
+                    const MAX_REVERT_VERSION: u32 = 100;
+                    if task.version > MAX_REVERT_VERSION {
+                        error!(
+                            task_id = %task_id,
+                            version = task.version,
+                            "Task version too high, marking as failed to break infinite hook block loop"
+                        );
+                        self.task_queue
+                            .mark_task_failed(
+                                task_id,
+                                format!("PreStart hook blocked repeatedly (version {})", task.version)
+                            )
+                            .await
+                            .context("Failed to mark task as failed after repeated hook blocks")?;
+                    } else {
+                        // Revert status to Ready if hook blocks
+                        self.task_queue
+                            .update_task_status(task_id, TaskStatus::Ready)
+                            .await
+                            .context("Failed to revert task status to Ready")?;
+                    }
                     return Ok(None);
                 }
             }
@@ -494,12 +533,30 @@ impl TaskCoordinator {
                     debug!(task_id = %task_id, "Task does not need worktree (no feature_branch)");
                 }
                 Err(e) => {
-                    // Worktree creation failed - revert to Ready and return error
-                    error!(task_id = %task_id, error = ?e, "Failed to create task worktree");
-                    self.task_queue
-                        .update_task_status(task_id, TaskStatus::Ready)
-                        .await
-                        .context("Failed to revert task status to Ready after worktree failure")?;
+                    // Worktree creation failed
+                    error!(task_id = %task_id, error = ?e, version = task.version, "Failed to create task worktree");
+
+                    // SAFEGUARD: If version is very high, mark as failed instead of reverting
+                    const MAX_REVERT_VERSION: u32 = 100;
+                    if task.version > MAX_REVERT_VERSION {
+                        error!(
+                            task_id = %task_id,
+                            version = task.version,
+                            "Task version too high, marking as failed to break infinite retry loop"
+                        );
+                        self.task_queue
+                            .mark_task_failed(
+                                task_id,
+                                format!("Worktree creation failed repeatedly (version {}): {}", task.version, e)
+                            )
+                            .await
+                            .context("Failed to mark task as failed after repeated worktree failures")?;
+                    } else {
+                        self.task_queue
+                            .update_task_status(task_id, TaskStatus::Ready)
+                            .await
+                            .context("Failed to revert task status to Ready after worktree failure")?;
+                    }
                     return Err(e.context("Failed to set up task worktree"));
                 }
             }
@@ -514,11 +571,28 @@ impl TaskCoordinator {
 
             if hook_result.should_block() {
                 warn!("PreStart hook blocked task {} - reverting to Ready status", task_id);
-                // Revert status to Ready if hook blocks
-                self.task_queue
-                    .update_task_status(task_id, TaskStatus::Ready)
-                    .await
-                    .context("Failed to revert task status to Ready")?;
+
+                // SAFEGUARD: If version is very high, mark as failed instead of reverting
+                const MAX_REVERT_VERSION: u32 = 100;
+                if task.version > MAX_REVERT_VERSION {
+                    error!(
+                        task_id = %task_id,
+                        version = task.version,
+                        "Task version too high, marking as failed to break infinite hook block loop"
+                    );
+                    self.task_queue
+                        .mark_task_failed(
+                            task_id,
+                            format!("PreStart hook blocked repeatedly (version {})", task.version)
+                        )
+                        .await
+                        .context("Failed to mark task as failed after repeated hook blocks")?;
+                } else {
+                    self.task_queue
+                        .update_task_status(task_id, TaskStatus::Ready)
+                        .await
+                        .context("Failed to revert task status to Ready")?;
+                }
                 return Ok(());
             }
         }
