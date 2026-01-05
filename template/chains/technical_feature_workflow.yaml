@@ -8,6 +8,9 @@ steps:
       Task: {task_description}
       Project Context: {project_context}
 
+      IMPORTANT: You MUST output the requirements analysis as JSON text in your response.
+      Do not only use MCP tools - you must write the JSON directly in your response text.
+
       Output the requirements analysis in JSON format:
       {
         "feature_name": "Short kebab-case name for this feature (e.g., user-authentication, payment-integration, api-rate-limiting)",
@@ -107,6 +110,9 @@ steps:
     prompt: |
       Requirements from previous step:
       {previous_output}
+
+      IMPORTANT: You MUST output the architecture design as JSON text in your response.
+      Do not only use MCP tools - you must write the JSON directly in your response text.
 
       Output the architecture design in JSON format:
       {

@@ -4,10 +4,34 @@
 ///! metadata like model configuration, tools, MCP servers, etc.
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Custom deserializer that accepts either a YAML array or a comma-separated string
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        Vec(Vec<String>),
+        String(String),
+    }
+
+    match StringOrVec::deserialize(deserializer)? {
+        StringOrVec::Vec(v) => Ok(v),
+        StringOrVec::String(s) => {
+            if s.is_empty() {
+                Ok(vec![])
+            } else {
+                Ok(s.split(',').map(|s| s.trim().to_string()).collect())
+            }
+        }
+    }
+}
 
 /// Agent metadata extracted from markdown frontmatter
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,9 +49,11 @@ pub struct AgentMetadata {
     pub color: Option<String>,
 
     /// List of tools the agent can use
+    #[serde(deserialize_with = "deserialize_string_or_vec")]
     pub tools: Vec<String>,
 
     /// List of MCP servers the agent can access
+    #[serde(deserialize_with = "deserialize_string_or_vec")]
     pub mcp_servers: Vec<String>,
 }
 
@@ -404,5 +430,48 @@ model: opus
 
         let content = AgentMetadata::extract_prompt_content(markdown).unwrap();
         assert_eq!(content, "");
+    }
+
+    #[test]
+    fn test_parse_comma_separated_tools_and_mcp_servers() {
+        // This is the format used in actual agent files
+        let markdown = r#"---
+name: rust-domain-models-specialist
+description: "Use for implementing Rust domain models"
+model: sonnet
+color: Orange
+tools: Read, Write, Edit, Bash
+mcp_servers: abathur-memory, abathur-task-queue
+---
+
+# Agent body
+"#;
+
+        let metadata = AgentMetadata::from_markdown(markdown).unwrap();
+        assert_eq!(metadata.name, "rust-domain-models-specialist");
+        assert_eq!(metadata.model, "sonnet");
+        assert_eq!(metadata.tools, vec!["Read", "Write", "Edit", "Bash"]);
+        assert_eq!(metadata.mcp_servers, vec!["abathur-memory", "abathur-task-queue"]);
+    }
+
+    #[test]
+    fn test_parse_yaml_array_tools_and_mcp_servers() {
+        // Also support proper YAML array format
+        let markdown = r#"---
+name: test-agent
+model: opus
+tools:
+  - Read
+  - Write
+mcp_servers:
+  - abathur-memory
+---
+
+# Agent body
+"#;
+
+        let metadata = AgentMetadata::from_markdown(markdown).unwrap();
+        assert_eq!(metadata.tools, vec!["Read", "Write"]);
+        assert_eq!(metadata.mcp_servers, vec!["abathur-memory"]);
     }
 }

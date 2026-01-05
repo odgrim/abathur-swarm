@@ -538,21 +538,44 @@ impl LlmSubstrate for ClaudeCodeSubstrate {
                 // Try to extract it, but fall back to raw output if parsing fails
                 let content = match serde_json::from_str::<serde_json::Value>(&output) {
                     Ok(json) if json.is_object() => {
+                        // Log all keys in the JSON for debugging
+                        let keys: Vec<&str> = json.as_object()
+                            .map(|obj| obj.keys().map(|k| k.as_str()).collect())
+                            .unwrap_or_default();
+                        tracing::debug!(
+                            task_id = %request.task_id,
+                            json_keys = ?keys,
+                            "Claude CLI JSON wrapper structure"
+                        );
+
                         // Look for the "result" field in the wrapper
                         if let Some(result) = json.get("result") {
                             if let Some(result_str) = result.as_str() {
-                                tracing::info!(
-                                    task_id = %request.task_id,
-                                    "Extracted agent output from Claude CLI result wrapper"
-                                );
+                                // Check if result is empty - this is the bug!
+                                if result_str.is_empty() {
+                                    tracing::warn!(
+                                        task_id = %request.task_id,
+                                        json_keys = ?keys,
+                                        full_json = %output,
+                                        "Claude CLI result field is empty string! Full JSON logged above"
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        task_id = %request.task_id,
+                                        result_length = result_str.len(),
+                                        "Extracted agent output from Claude CLI result wrapper"
+                                    );
+                                }
                                 result_str.to_string()
                             } else {
-                                // Result is not a string, use the whole thing
+                                // Result is not a string - maybe it's a JSON object?
+                                // Serialize it back to string if so
                                 tracing::warn!(
                                     task_id = %request.task_id,
-                                    "Claude CLI result field is not a string, using raw output"
+                                    result_type = ?result,
+                                    "Claude CLI result field is not a string, serializing JSON value"
                                 );
-                                output
+                                serde_json::to_string(result).unwrap_or(output)
                             }
                         } else {
                             // No result field, assume the whole output is the content

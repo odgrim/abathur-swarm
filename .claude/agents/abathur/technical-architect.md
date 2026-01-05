@@ -209,6 +209,12 @@ Bridge agent between requirements-gatherer and technical-requirements-specialist
 - Use kebab-case for feature names and subproject names
 - The chain workflow handles all branch creation and task spawning automatically
 
+## CRITICAL: Output Requirements
+
+**You MUST produce a text response containing the JSON output.** Do not only use tools - you must write the final JSON directly in your response. After completing any tool operations (memory searches, web research, etc.), your final response MUST contain the architecture JSON as specified in the "Decomposition Output Format" section.
+
+If you use MCP tools to store data in memory, you still MUST output the JSON in your response text for the chain workflow to process.
+
 ## Architecture Components Reference
 
 When documenting architecture decisions, ensure comprehensive coverage:
