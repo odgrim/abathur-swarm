@@ -1869,9 +1869,10 @@ impl AgentExecutor {
                 }
             }
 
-            // Create the task-specific branch from the template
-            // This is the branch the child task will work in (not the feature_branch)
-            self.ensure_branch_exists(&sanitized_branch, child_feature_branch.as_deref().unwrap_or(&parent_ref)).await?;
+            // NOTE: Task-specific branch is created lazily by worktree_service when the task
+            // actually runs. This prevents orphan branches for tasks that never execute
+            // (e.g., cancelled, failed dependencies). The branch name is stored on the task
+            // and worktree_service.create_worktree() handles creating both branch + worktree.
 
             // Substitute task templates
             let task_config = &decomposition.per_item.task;
