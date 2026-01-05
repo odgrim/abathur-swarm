@@ -287,8 +287,24 @@ impl AgentExecutor {
                         "Idempotent retry: step has decomposition with wait_for_children=true, re-handling decomposition"
                     );
 
-                    // Create mutable copy for decomposition handling
-                    let mut updated_task = task.clone();
+                    // CRITICAL: Re-read task from database to get fresh version.
+                    // The task passed in may have a stale version if it was modified between
+                    // the first execution attempt and this retry (e.g., by setup_task_worktree
+                    // or other concurrent processes).
+                    let mut updated_task = self
+                        .chain_service
+                        .get_task_from_repo(task.id)
+                        .await
+                        .map_err(|e| {
+                            ExecutionError::ExecutionFailed(format!(
+                                "Failed to refresh task for retry: {}", e
+                            ))
+                        })?
+                        .ok_or_else(|| {
+                            ExecutionError::ExecutionFailed(format!(
+                                "Task {} not found during retry", task.id
+                            ))
+                        })?;
 
                     // Re-run decomposition - child tasks have idempotency keys so this is safe
                     match self.handle_decomposition(previous_output, step, &mut updated_task, &chain).await {
@@ -311,14 +327,77 @@ impl AgentExecutor {
                                     });
                                 }
 
-                                self.chain_service
-                                    .update_task(&updated_task)
-                                    .await
-                                    .map_err(|e| {
-                                        ExecutionError::ExecutionFailed(format!(
-                                            "Failed to save AwaitingChildren state on retry: {}", e
-                                        ))
-                                    })?;
+                                // Retry loop for AwaitingChildren update with fresh re-reads
+                                // This handles version conflicts from concurrent updates
+                                let max_update_attempts = 3;
+                                let mut last_error = None;
+                                for attempt in 0..max_update_attempts {
+                                    if attempt > 0 {
+                                        // Re-read task to get fresh version
+                                        updated_task = match self.chain_service.get_task_from_repo(task.id).await {
+                                            Ok(Some(t)) => t,
+                                            Ok(None) => {
+                                                return Err(ExecutionError::ExecutionFailed(format!(
+                                                    "Task {} not found during AwaitingChildren update retry", task.id
+                                                )));
+                                            }
+                                            Err(e) => {
+                                                return Err(ExecutionError::ExecutionFailed(format!(
+                                                    "Failed to re-read task for AwaitingChildren update: {}", e
+                                                )));
+                                            }
+                                        };
+                                        // Re-apply the AwaitingChildren state
+                                        updated_task.awaiting_children = Some(child_ids.clone());
+                                        updated_task.status = TaskStatus::AwaitingChildren;
+                                        if next_step_index < chain.steps.len() {
+                                            updated_task.chain_handoff_state = Some(ChainHandoffState {
+                                                pending_next_step_index: next_step_index,
+                                                chain_id: chain_id.to_string(),
+                                                pending_since: chrono::Utc::now(),
+                                                enqueue_attempts: 0,
+                                                last_error: None,
+                                                step_output: Some(previous_output.to_string()),
+                                            });
+                                        }
+                                        debug!(
+                                            task_id = %task.id,
+                                            attempt = attempt + 1,
+                                            version = updated_task.version,
+                                            "Retrying AwaitingChildren update with fresh version"
+                                        );
+                                    }
+
+                                    match self.chain_service.update_task(&updated_task).await {
+                                        Ok(()) => {
+                                            if attempt > 0 {
+                                                info!(
+                                                    task_id = %task.id,
+                                                    attempts = attempt + 1,
+                                                    "AwaitingChildren update succeeded after retry"
+                                                );
+                                            }
+                                            last_error = None;
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                task_id = %task.id,
+                                                attempt = attempt + 1,
+                                                error = ?e,
+                                                "AwaitingChildren update failed, will retry"
+                                            );
+                                            last_error = Some(e);
+                                        }
+                                    }
+                                }
+
+                                if let Some(e) = last_error {
+                                    return Err(ExecutionError::ExecutionFailed(format!(
+                                        "Failed to save AwaitingChildren state after {} attempts: {}",
+                                        max_update_attempts, e
+                                    )));
+                                }
 
                                 info!(
                                     task_id = %task.id,
@@ -645,14 +724,77 @@ impl AgentExecutor {
                             });
                         }
 
-                        self.chain_service
-                            .update_task(&updated_task)
-                            .await
-                            .map_err(|e| {
-                                ExecutionError::ExecutionFailed(format!(
-                                    "Failed to save AwaitingChildren state: {}", e
-                                ))
-                            })?;
+                        // Retry loop for AwaitingChildren update with fresh re-reads
+                        // This handles version conflicts from concurrent updates
+                        let max_update_attempts = 3;
+                        let mut last_error = None;
+                        for attempt in 0..max_update_attempts {
+                            if attempt > 0 {
+                                // Re-read task to get fresh version
+                                updated_task = match self.chain_service.get_task_from_repo(task.id).await {
+                                    Ok(Some(t)) => t,
+                                    Ok(None) => {
+                                        return Err(ExecutionError::ExecutionFailed(format!(
+                                            "Task {} not found during AwaitingChildren update retry", task.id
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        return Err(ExecutionError::ExecutionFailed(format!(
+                                            "Failed to re-read task for AwaitingChildren update: {}", e
+                                        )));
+                                    }
+                                };
+                                // Re-apply the AwaitingChildren state
+                                updated_task.awaiting_children = Some(child_ids.clone());
+                                updated_task.status = TaskStatus::AwaitingChildren;
+                                if next_step_index < chain.steps.len() {
+                                    updated_task.chain_handoff_state = Some(ChainHandoffState {
+                                        pending_next_step_index: next_step_index,
+                                        chain_id: chain_id.to_string(),
+                                        pending_since: chrono::Utc::now(),
+                                        enqueue_attempts: 0,
+                                        last_error: None,
+                                        step_output: Some(result.output.clone()),
+                                    });
+                                }
+                                debug!(
+                                    task_id = %task.id,
+                                    attempt = attempt + 1,
+                                    version = updated_task.version,
+                                    "Retrying AwaitingChildren update with fresh version"
+                                );
+                            }
+
+                            match self.chain_service.update_task(&updated_task).await {
+                                Ok(()) => {
+                                    if attempt > 0 {
+                                        info!(
+                                            task_id = %task.id,
+                                            attempts = attempt + 1,
+                                            "AwaitingChildren update succeeded after retry"
+                                        );
+                                    }
+                                    last_error = None;
+                                    break;
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        task_id = %task.id,
+                                        attempt = attempt + 1,
+                                        error = ?e,
+                                        "AwaitingChildren update failed, will retry"
+                                    );
+                                    last_error = Some(e);
+                                }
+                            }
+                        }
+
+                        if let Some(e) = last_error {
+                            return Err(ExecutionError::ExecutionFailed(format!(
+                                "Failed to save AwaitingChildren state after {} attempts: {}",
+                                max_update_attempts, e
+                            )));
+                        }
 
                         info!(
                             task_id = %task.id,
@@ -1461,6 +1603,8 @@ impl AgentExecutor {
                                     task.feature_branch = Some(branch_name.clone());
                                 }
                                 self.chain_service.update_task(task).await?;
+                                // CRITICAL: Increment version in-memory to match database
+                                task.version += 1;
                                 return Ok(());
                             }
                         }
@@ -1492,6 +1636,8 @@ impl AgentExecutor {
                 task.feature_branch = Some(branch_name.clone());
             }
             self.chain_service.update_task(task).await?;
+            // CRITICAL: Increment version in-memory to match database
+            task.version += 1;
             return Ok(());
         }
 
@@ -1550,6 +1696,8 @@ impl AgentExecutor {
 
         // Save updated task to database
         self.chain_service.update_task(task).await?;
+        // CRITICAL: Increment version in-memory to match database
+        task.version += 1;
         info!(
             task_id = %task.id,
             branch = %branch_name,

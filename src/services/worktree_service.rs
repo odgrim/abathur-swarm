@@ -305,6 +305,12 @@ impl WorktreeService {
             .await
             .context("Failed to update task with worktree fields")?;
 
+        // CRITICAL: Increment version in-memory to match database.
+        // The database update incremented the version, but the task object
+        // still has the old version. Without this, subsequent updates will
+        // fail with OptimisticLockConflict.
+        task.version += 1;
+
         debug!(
             task_id = %task.id,
             branch = %branch,
