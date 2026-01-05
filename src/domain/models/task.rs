@@ -71,6 +71,7 @@ pub enum TaskSource {
     AgentRequirements,
     AgentPlanner,
     AgentImplementation,
+    Chain,
 }
 
 impl fmt::Display for TaskSource {
@@ -80,6 +81,7 @@ impl fmt::Display for TaskSource {
             Self::AgentRequirements => write!(f, "agent_requirements"),
             Self::AgentPlanner => write!(f, "agent_planner"),
             Self::AgentImplementation => write!(f, "agent_implementation"),
+            Self::Chain => write!(f, "chain"),
         }
     }
 }
@@ -93,6 +95,7 @@ impl FromStr for TaskSource {
             "agent_requirements" => Ok(Self::AgentRequirements),
             "agent_planner" => Ok(Self::AgentPlanner),
             "agent_implementation" => Ok(Self::AgentImplementation),
+            "chain" => Ok(Self::Chain),
             _ => Err(anyhow::anyhow!("Invalid task source: {s}")),
         }
     }

@@ -7,6 +7,7 @@ use crate::domain::models::prompt_chain::{
     ChainExecution, ChainStatus, OutputFormat, PromptChain, PromptStep, StepResult, ValidationRule,
     ValidationType,
 };
+use crate::domain::models::task::{DependencyType, TaskSource, TaskStatus, ValidationRequirement};
 use crate::domain::models::{AgentMetadata, AgentMetadataRegistry, HookContext, Memory, MemoryType, Task};
 use crate::domain::ports::{ChainRepository, ExecutionParameters, SubstrateRequest, TaskQueueService};
 use crate::infrastructure::substrates::SubstrateRegistry;
@@ -492,7 +493,7 @@ impl PromptChainService {
             self.execute_hooks(&step.post_hooks, task, &step.id, "post", Some(&result)).await?;
         }
 
-        // Check if this step should spawn implementation tasks
+        // Check if this step should spawn implementation tasks (from tasks array in output)
         if self.should_spawn_tasks(step) {
             info!(
                 step_id = %step.id,
@@ -508,6 +509,37 @@ impl PromptChainService {
                     "Failed to spawn tasks from step {} output. This is a fatal error to prevent hung workflows.",
                     step.id
                 ))?;
+        }
+
+        // Check if this step has decomposition configuration (fan-out pattern)
+        if self.has_decomposition(step) {
+            if let Some(parent_task) = task {
+                info!(
+                    step_id = %step.id,
+                    "Step has decomposition config, processing fan-out"
+                );
+
+                // CRITICAL: Decomposition failures are fatal to prevent hung workflows
+                let child_count = self.process_decomposition(step, &result, parent_task, &chain.id).await
+                    .with_context(|| format!(
+                        "Failed to process decomposition for step {}. This is a fatal error to prevent hung workflows.",
+                        step.id
+                    ))?;
+
+                if child_count > 0 {
+                    info!(
+                        step_id = %step.id,
+                        child_count = child_count,
+                        "Decomposition spawned {} child tasks",
+                        child_count
+                    );
+                }
+            } else {
+                warn!(
+                    step_id = %step.id,
+                    "Step has decomposition config but no parent task provided"
+                );
+            }
         }
 
         Ok(result)
@@ -639,6 +671,37 @@ impl PromptChainService {
                         "Failed to spawn tasks from step {} output. This is a fatal error to prevent hung workflows.",
                         step.id
                     ))?;
+            }
+
+            // Check if this step has decomposition configuration (fan-out pattern)
+            if self.has_decomposition(step) {
+                if let Some(parent_task) = task {
+                    info!(
+                        step_id = %step.id,
+                        "Step has decomposition config, processing fan-out"
+                    );
+
+                    // CRITICAL: Decomposition failures are fatal to prevent hung workflows
+                    let child_count = self.process_decomposition(step, &result, parent_task, &chain.id).await
+                        .with_context(|| format!(
+                            "Failed to process decomposition for step {}. This is a fatal error to prevent hung workflows.",
+                            step.id
+                        ))?;
+
+                    if child_count > 0 {
+                        info!(
+                            step_id = %step.id,
+                            child_count = child_count,
+                            "Decomposition spawned {} child tasks",
+                            child_count
+                        );
+                    }
+                } else {
+                    warn!(
+                        step_id = %step.id,
+                        "Step has decomposition config but no parent task provided"
+                    );
+                }
             }
         }
 
@@ -1713,6 +1776,429 @@ impl PromptChainService {
         task_queue.submit_task(task).await
     }
 
+    /// Process decomposition for a step that has decomposition configuration.
+    ///
+    /// This is core functionality for fan-out workflows where a step (like technical-architect)
+    /// outputs a list of subprojects that should each get their own branch and child task.
+    ///
+    /// # Arguments
+    /// * `step` - The step with decomposition config
+    /// * `result` - The step execution result containing the output to decompose
+    /// * `parent_task` - The parent task that will wait for children
+    /// * `chain_id` - The chain ID for context
+    ///
+    /// # Returns
+    /// * `Ok(child_count)` - Number of child tasks spawned
+    /// * `Err(_)` - If decomposition fails (fatal error)
+    /// Check if a step has decomposition configuration
+    fn has_decomposition(&self, step: &PromptStep) -> bool {
+        step.decomposition.is_some() && self.task_queue_service.is_some()
+    }
+
+    #[instrument(skip(self, step, result, parent_task), fields(step_id = %step.id))]
+    async fn process_decomposition(
+        &self,
+        step: &PromptStep,
+        result: &StepResult,
+        parent_task: &Task,
+        chain_id: &str,
+    ) -> Result<usize> {
+        let Some(ref decomposition) = step.decomposition else {
+            return Ok(0); // No decomposition configured
+        };
+
+        let Some(ref task_queue) = self.task_queue_service else {
+            warn!(
+                step_id = %step.id,
+                "decomposition configured but no task queue service available"
+            );
+            return Ok(0);
+        };
+
+        info!(
+            step_id = %step.id,
+            items_path = %decomposition.items_path,
+            "Processing decomposition from step output"
+        );
+
+        // Parse output as JSON
+        let cleaned_output = OutputValidator::strip_markdown_code_blocks(&result.output);
+        let output_json: serde_json::Value = serde_json::from_str(&cleaned_output)
+            .with_context(|| format!(
+                "Failed to parse step output as JSON for decomposition. Output starts with: {}",
+                &cleaned_output[..cleaned_output.len().min(200)]
+            ))?;
+
+        // Extract feature_name for branch templates
+        let feature_name = output_json
+            .get("feature_name")
+            .and_then(|v| v.as_str())
+            .map(|s| Self::sanitize_branch_name(s))
+            .unwrap_or_else(|| "unnamed".to_string());
+
+        // Extract items using items_path (dot-notation JSON path)
+        let items = self.extract_items_by_path(&output_json, &decomposition.items_path)?;
+
+        if items.is_empty() {
+            info!(
+                step_id = %step.id,
+                items_path = %decomposition.items_path,
+                "No items found for decomposition"
+            );
+            return Ok(0);
+        }
+
+        info!(
+            step_id = %step.id,
+            item_count = items.len(),
+            feature_name = %feature_name,
+            "Found {} items for decomposition",
+            items.len()
+        );
+
+        // Build child tasks
+        let mut child_tasks = Vec::with_capacity(items.len());
+        let mut child_ids = Vec::with_capacity(items.len());
+
+        for (idx, item) in items.iter().enumerate() {
+            // Get item name (string or object with "name" field)
+            let item_name = match item {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Object(obj) => obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&format!("item-{}", idx))
+                    .to_string(),
+                _ => format!("item-{}", idx),
+            };
+
+            let sanitized_item_name = Self::sanitize_branch_name(&item_name);
+
+            // Create branch name from template
+            let branch_name = self.substitute_decomposition_template(
+                &decomposition.per_item.branch.template,
+                &feature_name,
+                &sanitized_item_name,
+                item,
+                &result.output,
+            );
+
+            // Create task summary and description
+            let summary = self.substitute_decomposition_template(
+                &decomposition.per_item.task.summary,
+                &feature_name,
+                &sanitized_item_name,
+                item,
+                &result.output,
+            );
+
+            let description = self.substitute_decomposition_template(
+                &decomposition.per_item.task.description,
+                &feature_name,
+                &sanitized_item_name,
+                item,
+                &result.output,
+            );
+
+            // Generate idempotency key for this child task
+            let idempotency_key = format!(
+                "decomposition:{}:{}:{}:{}",
+                chain_id,
+                step.id,
+                parent_task.id,
+                sanitized_item_name
+            );
+
+            // Build the child task
+            let child_task = Task {
+                id: uuid::Uuid::new_v4(),
+                summary,
+                description,
+                agent_type: decomposition.per_item.task.agent_type.clone(),
+                priority: decomposition.per_item.task.priority,
+                calculated_priority: decomposition.per_item.task.priority as f64,
+                status: TaskStatus::Pending,
+                dependencies: Some(vec![parent_task.id]),
+                dependency_type: DependencyType::Sequential,
+                dependency_depth: parent_task.dependency_depth + 1,
+                input_data: Some(serde_json::json!({
+                    "parent_output": result.output,
+                    "item": item,
+                    "feature_name": feature_name,
+                    "item_name": item_name,
+                })),
+                result_data: None,
+                error_message: None,
+                retry_count: 0,
+                max_retries: 3,
+                max_execution_timeout_seconds: 3600,
+                submitted_at: chrono::Utc::now(),
+                started_at: None,
+                completed_at: None,
+                last_updated_at: chrono::Utc::now(),
+                created_by: Some(format!("chain:{}:step:{}", chain_id, step.id)),
+                parent_task_id: Some(parent_task.id),
+                session_id: parent_task.session_id.clone(),
+                source: TaskSource::Chain,
+                deadline: None,
+                estimated_duration_seconds: None,
+                feature_branch: Some(branch_name.clone()),
+                branch: None, // Will be created when task starts
+                worktree_path: None,
+                validation_requirement: ValidationRequirement::None,
+                validation_task_id: None,
+                validating_task_id: None,
+                remediation_count: 0,
+                is_remediation: false,
+                workflow_state: None,
+                workflow_expectations: None,
+                chain_id: if decomposition.per_item.task.continue_chain {
+                    Some(chain_id.to_string())
+                } else {
+                    None
+                },
+                // Chain step index is 0 - the chain executor will resolve the correct step
+                // based on continue_at_step when continuing the chain
+                chain_step_index: 0,
+                awaiting_children: None,
+                spawned_by_task_id: Some(parent_task.id),
+                chain_handoff_state: None,
+                idempotency_key: Some(idempotency_key),
+                version: 1,
+            };
+
+            child_ids.push(child_task.id);
+            child_tasks.push(child_task);
+
+            info!(
+                step_id = %step.id,
+                item_name = %item_name,
+                branch_name = %branch_name,
+                "Prepared decomposition child task"
+            );
+        }
+
+        let child_count = child_tasks.len();
+
+        // Clone parent task for modification
+        let mut updated_parent = parent_task.clone();
+
+        // Update parent task to await children if configured
+        if decomposition.on_complete.wait_for_children {
+            updated_parent.status = TaskStatus::AwaitingChildren;
+            updated_parent.awaiting_children = Some(child_ids.clone());
+            updated_parent.last_updated_at = chrono::Utc::now();
+
+            info!(
+                step_id = %step.id,
+                parent_task_id = %parent_task.id,
+                child_count = child_count,
+                "Parent task set to await {} children",
+                child_count
+            );
+        }
+
+        // Atomically update parent and insert all children
+        let atomic_result = task_queue
+            .update_parent_and_insert_children_atomic(&updated_parent, child_tasks)
+            .await
+            .with_context(|| format!(
+                "Failed to atomically insert {} decomposition children for step {}",
+                child_count,
+                step.id
+            ))?;
+
+        info!(
+            step_id = %step.id,
+            parent_task_id = %parent_task.id,
+            children_inserted = atomic_result.children_inserted.len(),
+            children_already_existed = atomic_result.children_already_existed.len(),
+            "Decomposition complete: {} children spawned",
+            child_count
+        );
+
+        // Ensure feature branches exist for all children
+        for (idx, child_id) in atomic_result.children_inserted.iter().enumerate() {
+            let item = &items[idx];
+            let item_name = match item {
+                serde_json::Value::String(s) => Self::sanitize_branch_name(s),
+                serde_json::Value::Object(obj) => obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| Self::sanitize_branch_name(s))
+                    .unwrap_or_else(|| format!("item-{}", idx)),
+                _ => format!("item-{}", idx),
+            };
+
+            let branch_name = self.substitute_decomposition_template(
+                &decomposition.per_item.branch.template,
+                &feature_name,
+                &item_name,
+                item,
+                &parent_task.id.to_string(), // Not used but required
+            );
+
+            // Create the feature branch from parent
+            if let Err(e) = self
+                .ensure_feature_branch_exists(&branch_name, &decomposition.per_item.branch.parent)
+                .await
+            {
+                warn!(
+                    branch_name = %branch_name,
+                    error = ?e,
+                    "Failed to create feature branch for decomposition child (continuing anyway)"
+                );
+            } else {
+                debug!(
+                    branch_name = %branch_name,
+                    child_id = %child_id,
+                    "Created feature branch for decomposition child"
+                );
+            }
+        }
+
+        Ok(child_count)
+    }
+
+    /// Extract items from JSON output using dot-notation path
+    fn extract_items_by_path(
+        &self,
+        json: &serde_json::Value,
+        path: &str,
+    ) -> Result<Vec<serde_json::Value>> {
+        let mut current = json;
+
+        for part in path.split('.') {
+            current = current.get(part).with_context(|| {
+                format!(
+                    "Path '{}' not found in output (failed at '{}')",
+                    path, part
+                )
+            })?;
+        }
+
+        match current {
+            serde_json::Value::Array(arr) => Ok(arr.clone()),
+            _ => Err(anyhow::anyhow!(
+                "Path '{}' does not point to an array",
+                path
+            )),
+        }
+    }
+
+    /// Substitute variables in decomposition templates
+    fn substitute_decomposition_template(
+        &self,
+        template: &str,
+        feature_name: &str,
+        item_name: &str,
+        item: &serde_json::Value,
+        previous_output: &str,
+    ) -> String {
+        let mut result = template.to_string();
+
+        // Basic substitutions
+        result = result.replace("{feature_name}", feature_name);
+        result = result.replace("{item}", item_name);
+
+        // Item field substitutions like {item.name}, {item.description}
+        if let serde_json::Value::Object(obj) = item {
+            for (key, value) in obj {
+                let placeholder = format!("{{item.{}}}", key);
+                let replacement = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => value.to_string(),
+                };
+                result = result.replace(&placeholder, &replacement);
+            }
+        }
+
+        // Previous output (truncated for summaries)
+        if result.contains("{previous_output}") {
+            let truncated = if previous_output.len() > 2000 {
+                format!("{}...", &previous_output[..2000])
+            } else {
+                previous_output.to_string()
+            };
+            result = result.replace("{previous_output}", &truncated);
+        }
+
+        result
+    }
+
+    /// Sanitize a string for use as a branch name
+    fn sanitize_branch_name(name: &str) -> String {
+        name.to_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+            .collect::<String>()
+            .trim_matches('-')
+            .chars()
+            .take(50)
+            .collect()
+    }
+
+    /// Ensure a feature branch exists, creating it from parent if needed
+    async fn ensure_feature_branch_exists(&self, branch_name: &str, parent: &str) -> Result<()> {
+        use std::process::Stdio;
+        use tokio::process::Command;
+
+        // Check if branch exists
+        let check = Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{}", branch_name)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await?;
+
+        if check.success() {
+            debug!(branch = %branch_name, "Branch already exists");
+            return Ok(());
+        }
+
+        // Determine parent ref
+        let parent_ref = if parent == "main" || parent == "master" {
+            // Check which one exists
+            let main_exists = Command::new("git")
+                .args(["show-ref", "--verify", "--quiet", "refs/heads/main"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if main_exists {
+                "main"
+            } else {
+                "master"
+            }
+        } else {
+            parent
+        };
+
+        // Create the branch
+        let output = Command::new("git")
+            .args(["branch", branch_name, parent_ref])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "Failed to create branch '{}' from '{}': {}",
+                branch_name,
+                parent_ref,
+                stderr
+            ));
+        }
+
+        info!(branch = %branch_name, parent = %parent_ref, "Created feature branch");
+        Ok(())
+    }
+
     /// Store step output to memory (core feature, no shell hooks required)
     ///
     /// This is called when a step has `store_in_memory` configuration set.
@@ -2104,5 +2590,181 @@ mod tests {
         // Call store_step_output_to_memory
         let store_result = service.store_step_output_to_memory(&step, &result, Some(&task)).await;
         assert!(store_result.is_ok(), "Expected Ok, got {:?}", store_result);
+    }
+
+    // ============================================================================
+    // Decomposition Tests
+    // ============================================================================
+
+    #[test]
+    fn test_sanitize_branch_name() {
+        // Basic alphanumeric
+        assert_eq!(
+            PromptChainService::sanitize_branch_name("my-feature"),
+            "my-feature"
+        );
+
+        // Uppercase to lowercase
+        assert_eq!(
+            PromptChainService::sanitize_branch_name("My-Feature"),
+            "my-feature"
+        );
+
+        // Special characters replaced with hyphens
+        assert_eq!(
+            PromptChainService::sanitize_branch_name("user authentication"),
+            "user-authentication"
+        );
+
+        // Multiple special chars
+        assert_eq!(
+            PromptChainService::sanitize_branch_name("user/auth@system!"),
+            "user-auth-system"
+        );
+
+        // Truncation to 50 chars
+        let long_name = "a".repeat(60);
+        assert_eq!(
+            PromptChainService::sanitize_branch_name(&long_name).len(),
+            50
+        );
+
+        // Leading/trailing hyphens trimmed
+        assert_eq!(
+            PromptChainService::sanitize_branch_name("--test--"),
+            "test"
+        );
+    }
+
+    #[test]
+    fn test_extract_items_by_path() {
+        let service = PromptChainService::new();
+
+        // Simple path
+        let json = serde_json::json!({
+            "items": ["a", "b", "c"]
+        });
+        let result = service.extract_items_by_path(&json, "items");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 3);
+
+        // Nested path
+        let json = serde_json::json!({
+            "decomposition": {
+                "subprojects": ["frontend", "backend"]
+            }
+        });
+        let result = service.extract_items_by_path(&json, "decomposition.subprojects");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 2);
+
+        // Missing path
+        let json = serde_json::json!({
+            "other": "value"
+        });
+        let result = service.extract_items_by_path(&json, "decomposition.subprojects");
+        assert!(result.is_err());
+
+        // Path not an array
+        let json = serde_json::json!({
+            "decomposition": {
+                "subprojects": "not-an-array"
+            }
+        });
+        let result = service.extract_items_by_path(&json, "decomposition.subprojects");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_substitute_decomposition_template() {
+        let service = PromptChainService::new();
+
+        // Basic substitutions
+        let template = "feature/{feature_name}-{item}";
+        let result = service.substitute_decomposition_template(
+            template,
+            "user-auth",
+            "frontend",
+            &serde_json::json!({}),
+            "",
+        );
+        assert_eq!(result, "feature/user-auth-frontend");
+
+        // Item field substitutions
+        let template = "Create specs for {item.name}: {item.description}";
+        let item = serde_json::json!({
+            "name": "api",
+            "description": "REST API module"
+        });
+        let result = service.substitute_decomposition_template(
+            template,
+            "feature",
+            "api",
+            &item,
+            "",
+        );
+        assert_eq!(result, "Create specs for api: REST API module");
+
+        // Previous output substitution (truncated)
+        let template = "Context: {previous_output}";
+        let long_output = "x".repeat(3000);
+        let result = service.substitute_decomposition_template(
+            template,
+            "",
+            "",
+            &serde_json::json!({}),
+            &long_output,
+        );
+        assert!(result.len() < 2100); // Truncated to ~2000 + "Context: " + "..."
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_has_decomposition_no_task_queue() {
+        use crate::domain::models::prompt_chain::{
+            BranchConfig, DecompositionConfig, OnDecompositionComplete, PerItemConfig,
+            TaskSpawnConfig,
+        };
+
+        let service = PromptChainService::new();
+        assert!(service.task_queue_service.is_none());
+
+        // Step with decomposition config but no task queue
+        let mut step = PromptStep::new(
+            "test".to_string(),
+            "test".to_string(),
+            "test".to_string(),
+            OutputFormat::Plain,
+        );
+        step.decomposition = Some(DecompositionConfig {
+            items_path: "items".to_string(),
+            per_item: PerItemConfig {
+                branch: BranchConfig {
+                    template: "feature/{item}".to_string(),
+                    parent: "main".to_string(),
+                },
+                task: TaskSpawnConfig {
+                    agent_type: "test".to_string(),
+                    summary: "Test {item}".to_string(),
+                    description: "Test".to_string(),
+                    priority: 5,
+                    continue_chain: false,
+                    continue_at_step: None,
+                },
+            },
+            on_complete: OnDecompositionComplete::default(),
+        });
+
+        // Should return false because no task queue service
+        assert!(!service.has_decomposition(&step));
+
+        // Step without decomposition
+        let step_no_decomp = PromptStep::new(
+            "test".to_string(),
+            "test".to_string(),
+            "test".to_string(),
+            OutputFormat::Plain,
+        );
+        assert!(!service.has_decomposition(&step_no_decomp));
     }
 }

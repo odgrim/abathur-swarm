@@ -65,7 +65,7 @@ for i in $(seq 0 $((SUBPROJECT_COUNT - 1))); do
     fi
 
     echo ""
-    echo "[INFO] Processing feature $((i + 1))/$FEATURE_COUNT: $FEATURE_NAME"
+    echo "[INFO] Processing feature $((i + 1))/$SUBPROJECT_COUNT: $FEATURE_NAME"
 
     # Sanitize feature name (remove spaces, special chars, lowercase)
     FEATURE_NAME_CLEAN=$(echo "$FEATURE_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//')
@@ -142,5 +142,5 @@ Expected Deliverables:
 done
 
 echo ""
-echo "[INFO] ✓ Completed processing decomposition - $FEATURE_COUNT features processed"
+echo "[INFO] ✓ Completed processing decomposition - $SUBPROJECT_COUNT features processed"
 exit 0

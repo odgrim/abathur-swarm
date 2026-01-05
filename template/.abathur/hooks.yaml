@@ -148,22 +148,23 @@ hooks:
     priority: 10
     enabled: true
 
+  # DEPRECATED: This hook is no longer needed.
+  # Decomposition is now handled natively in Rust by the chain executor.
+  # See: process_decomposition() in src/services/prompt_chain_service.rs
+  # The step's decomposition config in technical_feature_workflow.yaml is used directly.
   - id: process-architect-decomposition
-    description: "Process technical-architect decomposition - spawns tech-req-spec tasks for all subprojects (single or multiple)"
+    description: "[DEPRECATED] Process technical-architect decomposition - now handled by chain executor"
     event:
       type: post_complete
     conditions:
       - agent_type: technical-architect
         task_status: completed
     actions:
-      - type: run_script
-        script_path: ./.abathur/hooks/process_architect_decomposition.sh
-        args: ["${task_id}"]
       - type: log_message
         level: info
-        message: "Processing architect decomposition for ${task_summary}"
+        message: "Decomposition processed by chain executor for ${task_summary}"
     priority: 10
-    enabled: true
+    enabled: false
 
   # ============================================================================
   # TASK-LEVEL HOOKS
