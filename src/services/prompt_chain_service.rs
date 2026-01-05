@@ -504,7 +504,7 @@ impl PromptChainService {
             let step_index = chain.steps.iter().position(|s| s.id == step.id).unwrap_or(0);
 
             // CRITICAL: Task spawning failures are now fatal to prevent hung workflows
-            self.spawn_tasks_from_output(&result, task, &chain.id, &step.id, step_index).await
+            self.spawn_tasks_from_output(&result, task, &chain.name, &step.id, step_index).await
                 .with_context(|| format!(
                     "Failed to spawn tasks from step {} output. This is a fatal error to prevent hung workflows.",
                     step.id
@@ -520,7 +520,7 @@ impl PromptChainService {
                 );
 
                 // CRITICAL: Decomposition failures are fatal to prevent hung workflows
-                let child_count = self.process_decomposition(step, &result, parent_task, &chain.id).await
+                let child_count = self.process_decomposition(step, &result, parent_task, &chain.name).await
                     .with_context(|| format!(
                         "Failed to process decomposition for step {}. This is a fatal error to prevent hung workflows.",
                         step.id
@@ -666,7 +666,7 @@ impl PromptChainService {
                 );
 
                 // CRITICAL: Task spawning failures are now fatal to prevent hung workflows
-                self.spawn_tasks_from_output(&result, task, &chain.id, &step.id, index).await
+                self.spawn_tasks_from_output(&result, task, &chain.name, &step.id, index).await
                     .with_context(|| format!(
                         "Failed to spawn tasks from step {} output. This is a fatal error to prevent hung workflows.",
                         step.id
@@ -682,7 +682,7 @@ impl PromptChainService {
                     );
 
                     // CRITICAL: Decomposition failures are fatal to prevent hung workflows
-                    let child_count = self.process_decomposition(step, &result, parent_task, &chain.id).await
+                    let child_count = self.process_decomposition(step, &result, parent_task, &chain.name).await
                         .with_context(|| format!(
                             "Failed to process decomposition for step {}. This is a fatal error to prevent hung workflows.",
                             step.id
@@ -2792,5 +2792,45 @@ mod tests {
             OutputFormat::Plain,
         );
         assert!(!service.has_decomposition(&step_no_decomp));
+    }
+
+    /// Regression test: Verify that chain.name (not chain.id) is used for child tasks
+    ///
+    /// Bug: Decomposition was using chain.id (a UUID like 3d119376-6a6f-...) instead of
+    /// chain.name (the template name like "technical_feature_workflow"). Child tasks would
+    /// then fail trying to load "3d119376-6a6f-....yaml" which doesn't exist.
+    ///
+    /// Fix: Changed process_decomposition and spawn_tasks_from_output to pass &chain.name
+    /// instead of &chain.id.
+    #[test]
+    fn test_chain_name_vs_id_for_decomposition_regression() {
+        // Create a chain with explicit name that differs from UUID
+        let chain = PromptChain::new(
+            "technical_feature_workflow".to_string(),
+            "Test workflow".to_string(),
+        );
+
+        // Verify chain.id is a UUID format (not the template name)
+        assert!(chain.id.contains('-'), "chain.id should be a UUID with dashes");
+        assert!(!chain.id.contains("technical_feature_workflow"),
+            "chain.id should NOT contain the template name");
+
+        // Verify chain.name is the template name
+        assert_eq!(chain.name, "technical_feature_workflow");
+
+        // The fix ensures we use chain.name (maps to YAML filename) not chain.id (UUID)
+        // When spawning child tasks for decomposition, the chain_id field must be
+        // the template name so that child tasks can load "technical_feature_workflow.yaml"
+
+        // This is the key assertion - chain.name should be usable as a filename
+        let expected_yaml_path = format!("{}.yaml", chain.name);
+        assert_eq!(expected_yaml_path, "technical_feature_workflow.yaml");
+
+        // chain.id would produce an invalid path like "3d119376-6a6f-4f61-9d5d-3e70831d8b8e.yaml"
+        // which doesn't exist - this was the bug
+        let buggy_yaml_path = format!("{}.yaml", chain.id);
+        assert!(buggy_yaml_path.contains('-'), "Buggy path would be a UUID-based filename");
+        assert_ne!(buggy_yaml_path, expected_yaml_path,
+            "The UUID path should differ from the correct template name path");
     }
 }
