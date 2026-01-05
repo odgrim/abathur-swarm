@@ -1171,6 +1171,78 @@ impl crate::domain::ports::TaskQueueService for TaskQueueService {
 
         Ok(result)
     }
+
+    async fn update_parent_and_insert_children_atomic(
+        &self,
+        parent_task: &Task,
+        mut child_tasks: Vec<Task>,
+    ) -> Result<crate::domain::ports::task_repository::DecompositionResult> {
+        if child_tasks.is_empty() {
+            // No children to insert, just update the parent
+            self.repo
+                .update(parent_task)
+                .await
+                .context("Failed to update parent task")?;
+
+            return Ok(crate::domain::ports::task_repository::DecompositionResult::new(
+                parent_task.id,
+                parent_task.version + 1,
+            ));
+        }
+
+        // Fetch all existing tasks for dependency validation
+        let all_tasks = self
+            .repo
+            .list(&TaskFilters::default())
+            .await
+            .context("Failed to fetch existing tasks for atomic decomposition")?;
+
+        // Validate and prepare all child tasks
+        for task in child_tasks.iter_mut() {
+            // Validate task
+            task.validate_summary()
+                .context("Child task summary validation failed")?;
+            task.validate_priority()
+                .context("Child task priority validation failed")?;
+
+            // Validate dependencies exist (child tasks typically depend on nothing initially)
+            if task.has_dependencies() {
+                self.dependency_resolver
+                    .validate_dependencies(task, &all_tasks)
+                    .context("Child task dependency validation failed")?;
+
+                // Calculate dependency depth
+                let depth = self
+                    .dependency_resolver
+                    .calculate_depth(task, &all_tasks)
+                    .context("Failed to calculate child task dependency depth")?;
+                self.priority_calc.update_task_priority(task, depth);
+            } else {
+                // No dependencies - depth is 0
+                self.priority_calc.update_task_priority(task, 0);
+            }
+
+            // Determine initial status
+            let initial_status = self.resolve_single_task_status(task, &all_tasks);
+            task.status = initial_status;
+        }
+
+        // Use the atomic repository method
+        let result = self.repo
+            .update_parent_and_insert_children_atomic(parent_task, &child_tasks)
+            .await
+            .context("Atomic decomposition failed")?;
+
+        info!(
+            parent_task_id = %result.parent_id,
+            parent_new_version = result.parent_new_version,
+            children_inserted = result.children_inserted.len(),
+            children_already_existed = result.children_already_existed.len(),
+            "Atomic decomposition completed"
+        );
+
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -1205,6 +1277,11 @@ mod tests {
             async fn get_by_idempotency_key(&self, idempotency_key: &str) -> Result<Option<Task>, DatabaseError>;
             async fn insert_task_idempotent(&self, task: &Task) -> Result<IdempotentInsertResult, DatabaseError>;
             async fn insert_tasks_transactional(&self, tasks: &[Task]) -> Result<crate::domain::ports::task_repository::BatchInsertResult, DatabaseError>;
+            async fn update_parent_and_insert_children_atomic(
+                &self,
+                parent_task: &Task,
+                child_tasks: &[Task],
+            ) -> Result<crate::domain::ports::task_repository::DecompositionResult, DatabaseError>;
         }
     }
 

@@ -1,5 +1,5 @@
 use crate::domain::models::{Task, TaskStatus};
-use crate::domain::ports::task_repository::{IdempotentInsertResult, TaskFilters, TaskRepository};
+use crate::domain::ports::task_repository::{DecompositionResult, IdempotentInsertResult, TaskFilters, TaskRepository};
 use crate::infrastructure::database::{utils::parse_datetime, DatabaseError};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -1135,6 +1135,313 @@ impl TaskRepository for TaskRepositoryImpl {
             inserted = result.inserted.len(),
             already_existed = result.already_existed.len(),
             "Transactional batch insert completed successfully"
+        );
+
+        Ok(result)
+    }
+
+    async fn update_parent_and_insert_children_atomic(
+        &self,
+        parent_task: &Task,
+        child_tasks: &[Task],
+    ) -> Result<DecompositionResult, DatabaseError> {
+        use crate::domain::ports::task_repository::generate_auto_idempotency_key;
+
+        info!(
+            parent_task_id = %parent_task.id,
+            parent_version = parent_task.version,
+            child_count = child_tasks.len(),
+            "Starting atomic decomposition transaction (parent update + children insert)"
+        );
+
+        // Start transaction
+        let mut tx = self.pool.begin().await?;
+
+        // ========== STEP 1: Update parent task with optimistic locking ==========
+        let parent_id = parent_task.id.to_string();
+        let status = parent_task.status.to_string();
+        let dependency_type = parent_task.dependency_type.to_string();
+        let dependencies = parent_task
+            .dependencies
+            .as_ref()
+            .and_then(|d| serde_json::to_string(d).ok());
+        let input_data = parent_task
+            .input_data
+            .as_ref()
+            .and_then(|v| serde_json::to_string(v).ok());
+        let result_data = parent_task
+            .result_data
+            .as_ref()
+            .and_then(|v| serde_json::to_string(v).ok());
+        let started_at = parent_task.started_at.as_ref().map(|dt| dt.to_rfc3339());
+        let completed_at = parent_task.completed_at.as_ref().map(|dt| dt.to_rfc3339());
+        let last_updated_at = Utc::now().to_rfc3339();
+        let parent_task_id_fk = parent_task.parent_task_id.as_ref().map(|id| id.to_string());
+        let session_id = parent_task.session_id.as_ref().map(|id| id.to_string());
+        let source = parent_task.source.to_string();
+        let deadline = parent_task.deadline.as_ref().map(|dt| dt.to_rfc3339());
+        let validation_requirement = serde_json::to_string(&parent_task.validation_requirement).ok();
+        let validation_task_id = parent_task.validation_task_id.as_ref().map(|id| id.to_string());
+        let validating_task_id = parent_task.validating_task_id.as_ref().map(|id| id.to_string());
+        let workflow_state = parent_task.workflow_state
+            .as_ref()
+            .and_then(|s| serde_json::to_string(s).ok());
+        let workflow_expectations = parent_task.workflow_expectations
+            .as_ref()
+            .and_then(|e| serde_json::to_string(e).ok());
+        let awaiting_children = parent_task.awaiting_children
+            .as_ref()
+            .and_then(|c| serde_json::to_string(c).ok());
+        let spawned_by_task_id = parent_task.spawned_by_task_id.as_ref().map(|id| id.to_string());
+        let chain_handoff_state = parent_task.chain_handoff_state
+            .as_ref()
+            .and_then(|s| serde_json::to_string(s).ok());
+
+        let new_version = parent_task.version + 1;
+
+        // Update parent with optimistic locking
+        let update_result = sqlx::query(
+            r#"
+            UPDATE tasks SET
+                summary = ?,
+                description = ?,
+                agent_type = ?,
+                priority = ?,
+                calculated_priority = ?,
+                status = ?,
+                dependencies = ?,
+                dependency_type = ?,
+                dependency_depth = ?,
+                input_data = ?,
+                result_data = ?,
+                error_message = ?,
+                retry_count = ?,
+                max_retries = ?,
+                max_execution_timeout_seconds = ?,
+                started_at = ?,
+                completed_at = ?,
+                last_updated_at = ?,
+                created_by = ?,
+                parent_task_id = ?,
+                session_id = ?,
+                source = ?,
+                deadline = ?,
+                estimated_duration_seconds = ?,
+                branch = ?,
+                feature_branch = ?,
+                worktree_path = ?,
+                validation_requirement = ?,
+                validation_task_id = ?,
+                validating_task_id = ?,
+                remediation_count = ?,
+                is_remediation = ?,
+                workflow_state = ?,
+                workflow_expectations = ?,
+                chain_id = ?,
+                awaiting_children = ?,
+                spawned_by_task_id = ?,
+                chain_handoff_state = ?,
+                idempotency_key = ?,
+                version = ?
+            WHERE id = ? AND version = ?
+            "#,
+        )
+        .bind(&parent_task.summary)
+        .bind(&parent_task.description)
+        .bind(&parent_task.agent_type)
+        .bind(parent_task.priority)
+        .bind(parent_task.calculated_priority)
+        .bind(&status)
+        .bind(&dependencies)
+        .bind(&dependency_type)
+        .bind(parent_task.dependency_depth)
+        .bind(&input_data)
+        .bind(&result_data)
+        .bind(&parent_task.error_message)
+        .bind(parent_task.retry_count)
+        .bind(parent_task.max_retries)
+        .bind(parent_task.max_execution_timeout_seconds)
+        .bind(&started_at)
+        .bind(&completed_at)
+        .bind(&last_updated_at)
+        .bind(&parent_task.created_by)
+        .bind(&parent_task_id_fk)
+        .bind(&session_id)
+        .bind(&source)
+        .bind(&deadline)
+        .bind(parent_task.estimated_duration_seconds)
+        .bind(&parent_task.branch)
+        .bind(&parent_task.feature_branch)
+        .bind(&parent_task.worktree_path)
+        .bind(&validation_requirement)
+        .bind(&validation_task_id)
+        .bind(&validating_task_id)
+        .bind(parent_task.remediation_count)
+        .bind(parent_task.is_remediation)
+        .bind(&workflow_state)
+        .bind(&workflow_expectations)
+        .bind(&parent_task.chain_id)
+        .bind(&awaiting_children)
+        .bind(&spawned_by_task_id)
+        .bind(&chain_handoff_state)
+        .bind(&parent_task.idempotency_key)
+        .bind(new_version)
+        .bind(&parent_id)
+        .bind(parent_task.version)
+        .execute(&mut *tx)
+        .await?;
+
+        // Check if parent was updated (optimistic lock check)
+        if update_result.rows_affected() == 0 {
+            // Rollback is automatic when tx is dropped
+            warn!(
+                parent_task_id = %parent_task.id,
+                expected_version = parent_task.version,
+                "Optimistic lock conflict on parent task, rolling back transaction"
+            );
+            return Err(DatabaseError::OptimisticLockConflict {
+                task_id: parent_task.id,
+                expected_version: parent_task.version,
+            });
+        }
+
+        info!(
+            parent_task_id = %parent_task.id,
+            new_version = new_version,
+            "Parent task updated successfully in transaction"
+        );
+
+        // ========== STEP 2: Insert all child tasks ==========
+        let mut result = DecompositionResult::new(parent_task.id, new_version);
+
+        for task in child_tasks {
+            let id = task.id.to_string();
+            let status = task.status.to_string();
+            let dependency_type = task.dependency_type.to_string();
+            let dependencies = task
+                .dependencies
+                .as_ref()
+                .and_then(|d| serde_json::to_string(d).ok());
+            let input_data = task
+                .input_data
+                .as_ref()
+                .and_then(|v| serde_json::to_string(v).ok());
+            let result_data = task
+                .result_data
+                .as_ref()
+                .and_then(|v| serde_json::to_string(v).ok());
+            let submitted_at = task.submitted_at.to_rfc3339();
+            let started_at = task.started_at.as_ref().map(|dt| dt.to_rfc3339());
+            let completed_at = task.completed_at.as_ref().map(|dt| dt.to_rfc3339());
+            let last_updated_at = task.last_updated_at.to_rfc3339();
+            let parent_task_id = task.parent_task_id.as_ref().map(|id| id.to_string());
+            let session_id = task.session_id.as_ref().map(|id| id.to_string());
+            let source = task.source.to_string();
+            let deadline = task.deadline.as_ref().map(|dt| dt.to_rfc3339());
+            let validation_requirement = serde_json::to_string(&task.validation_requirement).ok();
+            let validation_task_id = task.validation_task_id.as_ref().map(|id| id.to_string());
+            let validating_task_id = task.validating_task_id.as_ref().map(|id| id.to_string());
+            let workflow_state = task.workflow_state
+                .as_ref()
+                .and_then(|s| serde_json::to_string(s).ok());
+            let workflow_expectations = task.workflow_expectations
+                .as_ref()
+                .and_then(|e| serde_json::to_string(e).ok());
+            let chain_step_index = task.chain_step_index as i64;
+            let chain_handoff_state = task.chain_handoff_state
+                .as_ref()
+                .and_then(|s| serde_json::to_string(s).ok());
+            let idempotency_key = task.idempotency_key.clone().unwrap_or_else(|| {
+                generate_auto_idempotency_key(task)
+            });
+
+            // Use INSERT OR IGNORE for idempotency within the transaction
+            let insert_result = sqlx::query(
+                r#"
+                INSERT OR IGNORE INTO tasks (
+                    id, summary, description, agent_type, priority, calculated_priority,
+                    status, dependencies, dependency_type, dependency_depth,
+                    input_data, result_data, error_message, retry_count, max_retries,
+                    max_execution_timeout_seconds, submitted_at, started_at, completed_at,
+                    last_updated_at, created_by, parent_task_id, session_id, source,
+                    deadline, estimated_duration_seconds, branch, feature_branch,
+                    worktree_path, validation_requirement, validation_task_id,
+                    validating_task_id, remediation_count, is_remediation,
+                    workflow_state, workflow_expectations, chain_id, chain_step_index,
+                    chain_handoff_state, idempotency_key, version
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(&id)
+            .bind(&task.summary)
+            .bind(&task.description)
+            .bind(&task.agent_type)
+            .bind(task.priority)
+            .bind(task.calculated_priority)
+            .bind(&status)
+            .bind(&dependencies)
+            .bind(&dependency_type)
+            .bind(task.dependency_depth)
+            .bind(&input_data)
+            .bind(&result_data)
+            .bind(&task.error_message)
+            .bind(task.retry_count)
+            .bind(task.max_retries)
+            .bind(task.max_execution_timeout_seconds)
+            .bind(&submitted_at)
+            .bind(&started_at)
+            .bind(&completed_at)
+            .bind(&last_updated_at)
+            .bind(&task.created_by)
+            .bind(&parent_task_id)
+            .bind(&session_id)
+            .bind(&source)
+            .bind(&deadline)
+            .bind(task.estimated_duration_seconds)
+            .bind(&task.branch)
+            .bind(&task.feature_branch)
+            .bind(&task.worktree_path)
+            .bind(&validation_requirement)
+            .bind(&validation_task_id)
+            .bind(&validating_task_id)
+            .bind(task.remediation_count)
+            .bind(task.is_remediation)
+            .bind(&workflow_state)
+            .bind(&workflow_expectations)
+            .bind(&task.chain_id)
+            .bind(chain_step_index)
+            .bind(&chain_handoff_state)
+            .bind(&idempotency_key)
+            .bind(task.version)
+            .execute(&mut *tx)
+            .await?;
+
+            if insert_result.rows_affected() == 0 {
+                debug!(
+                    idempotency_key = %idempotency_key,
+                    "Child task already exists in transaction, skipping"
+                );
+                result.children_already_existed.push(idempotency_key);
+            } else {
+                debug!(
+                    child_task_id = %task.id,
+                    idempotency_key = %idempotency_key,
+                    "Child task inserted in transaction"
+                );
+                result.children_inserted.push(task.id);
+            }
+        }
+
+        // ========== STEP 3: Commit the transaction ==========
+        tx.commit().await?;
+
+        info!(
+            parent_task_id = %parent_task.id,
+            parent_new_version = new_version,
+            children_inserted = result.children_inserted.len(),
+            children_already_existed = result.children_already_existed.len(),
+            "Atomic decomposition transaction committed successfully"
         );
 
         Ok(result)

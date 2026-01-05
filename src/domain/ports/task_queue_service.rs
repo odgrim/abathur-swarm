@@ -1,5 +1,5 @@
 use crate::domain::models::task::{Task, TaskStatus};
-use crate::domain::ports::task_repository::{BatchInsertResult, IdempotentInsertResult};
+use crate::domain::ports::task_repository::{BatchInsertResult, DecompositionResult, IdempotentInsertResult};
 use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -273,4 +273,30 @@ pub trait TaskQueueService: Send + Sync {
     /// * `Ok(usize)` - Number of tasks that were updated to Ready status
     /// * `Err` - If database error
     async fn resolve_dependencies_for_completed_task(&self, completed_task_id: Uuid) -> Result<usize>;
+
+    /// Atomically update a parent task and insert child tasks in a single transaction
+    ///
+    /// This is critical for decomposition workflows where:
+    /// - Parent must be updated to AwaitingChildren status
+    /// - Child tasks must be spawned
+    /// - Both must happen atomically to prevent orphaned children on parent update failure
+    ///
+    /// # Arguments
+    ///
+    /// * `parent_task` - The parent task with updated fields (status, awaiting_children, etc.)
+    /// * `child_tasks` - The child tasks to insert
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(DecompositionResult)` - Transaction succeeded
+    /// * `Err` - Transaction failed (either optimistic lock conflict or other error)
+    ///
+    /// # Atomicity Guarantee
+    /// If the parent update fails (e.g., version conflict), no children are inserted.
+    /// If any child insert fails, the parent update is rolled back.
+    async fn update_parent_and_insert_children_atomic(
+        &self,
+        parent_task: &Task,
+        child_tasks: Vec<Task>,
+    ) -> Result<DecompositionResult>;
 }

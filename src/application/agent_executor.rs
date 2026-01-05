@@ -307,10 +307,14 @@ impl AgentExecutor {
                         })?;
 
                     // Re-run decomposition - child tasks have idempotency keys so this is safe
-                    match self.handle_decomposition(previous_output, step, &mut updated_task, &chain).await {
-                        Ok(child_ids) => {
-                            if !child_ids.is_empty() {
-                                // Set task to AwaitingChildren status
+                    // Uses atomic operation to update parent + insert children together
+                    match self.build_decomposition_tasks(previous_output, step, &mut updated_task, &chain).await {
+                        Ok(child_tasks) => {
+                            if !child_tasks.is_empty() {
+                                // Collect child IDs for awaiting_children field
+                                let child_ids: Vec<Uuid> = child_tasks.iter().map(|t| t.id).collect();
+
+                                // Prepare parent task for AwaitingChildren status
                                 updated_task.awaiting_children = Some(child_ids.clone());
                                 updated_task.status = TaskStatus::AwaitingChildren;
 
@@ -327,89 +331,32 @@ impl AgentExecutor {
                                     });
                                 }
 
-                                // Retry loop for AwaitingChildren update with fresh re-reads
-                                // This handles version conflicts from concurrent updates
-                                let max_update_attempts = 3;
-                                let mut last_error = None;
-                                for attempt in 0..max_update_attempts {
-                                    if attempt > 0 {
-                                        // Re-read task to get fresh version
-                                        updated_task = match self.chain_service.get_task_from_repo(task.id).await {
-                                            Ok(Some(t)) => t,
-                                            Ok(None) => {
-                                                return Err(ExecutionError::ExecutionFailed(format!(
-                                                    "Task {} not found during AwaitingChildren update retry", task.id
-                                                )));
-                                            }
-                                            Err(e) => {
-                                                return Err(ExecutionError::ExecutionFailed(format!(
-                                                    "Failed to re-read task for AwaitingChildren update: {}", e
-                                                )));
-                                            }
-                                        };
-                                        // Re-apply the AwaitingChildren state
-                                        updated_task.awaiting_children = Some(child_ids.clone());
-                                        updated_task.status = TaskStatus::AwaitingChildren;
-                                        if next_step_index < chain.steps.len() {
-                                            updated_task.chain_handoff_state = Some(ChainHandoffState {
-                                                pending_next_step_index: next_step_index,
-                                                chain_id: chain_id.to_string(),
-                                                pending_since: chrono::Utc::now(),
-                                                enqueue_attempts: 0,
-                                                last_error: None,
-                                                step_output: Some(previous_output.to_string()),
-                                            });
-                                        }
-                                        debug!(
+                                // ATOMIC: Update parent and insert children in single transaction
+                                match self.chain_service.update_parent_and_insert_children_atomic(
+                                    &updated_task,
+                                    child_tasks,
+                                ).await {
+                                    Ok(decomp_result) => {
+                                        info!(
                                             task_id = %task.id,
-                                            attempt = attempt + 1,
-                                            version = updated_task.version,
-                                            "Retrying AwaitingChildren update with fresh version"
+                                            child_count = decomp_result.children_inserted.len(),
+                                            already_existed = decomp_result.children_already_existed.len(),
+                                            "Idempotent retry: atomic decomposition succeeded, {} children inserted",
+                                            decomp_result.children_inserted.len()
                                         );
-                                    }
 
-                                    match self.chain_service.update_task(&updated_task).await {
-                                        Ok(()) => {
-                                            if attempt > 0 {
-                                                info!(
-                                                    task_id = %task.id,
-                                                    attempts = attempt + 1,
-                                                    "AwaitingChildren update succeeded after retry"
-                                                );
-                                            }
-                                            last_error = None;
-                                            break;
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                task_id = %task.id,
-                                                attempt = attempt + 1,
-                                                error = ?e,
-                                                "AwaitingChildren update failed, will retry"
-                                            );
-                                            last_error = Some(e);
-                                        }
+                                        // Return existing result - children will handle continuation
+                                        return serde_json::to_string_pretty(existing_result).map_err(|e| {
+                                            ExecutionError::ExecutionFailed(format!("Failed to serialize existing result: {}", e))
+                                        });
+                                    }
+                                    Err(e) => {
+                                        return Err(ExecutionError::ExecutionFailed(format!(
+                                            "Atomic decomposition failed on retry: {}",
+                                            e
+                                        )));
                                     }
                                 }
-
-                                if let Some(e) = last_error {
-                                    return Err(ExecutionError::ExecutionFailed(format!(
-                                        "Failed to save AwaitingChildren state after {} attempts: {}",
-                                        max_update_attempts, e
-                                    )));
-                                }
-
-                                info!(
-                                    task_id = %task.id,
-                                    child_count = child_ids.len(),
-                                    "Idempotent retry: task now waiting for {} children to complete",
-                                    child_ids.len()
-                                );
-
-                                // Return existing result - children will handle continuation
-                                return serde_json::to_string_pretty(existing_result).map_err(|e| {
-                                    ExecutionError::ExecutionFailed(format!("Failed to serialize existing result: {}", e))
-                                });
                             }
                             // If no children (all already existed and completed?), fall through to normal next step
                         }
@@ -703,11 +650,14 @@ impl AgentExecutor {
                 "Step has decomposition config, processing fan-out"
             );
 
-            // Process decomposition and spawn child tasks
-            match self.handle_decomposition(&result.output, step, &mut updated_task, &chain).await {
-                Ok(child_ids) => {
-                    if !child_ids.is_empty() && decomposition.on_complete.wait_for_children {
-                        // Set task to AwaitingChildren status - it will resume when all children complete
+            // Build child tasks (but don't submit yet)
+            match self.build_decomposition_tasks(&result.output, step, &mut updated_task, &chain).await {
+                Ok(child_tasks) => {
+                    if !child_tasks.is_empty() && decomposition.on_complete.wait_for_children {
+                        // Collect child IDs for awaiting_children field
+                        let child_ids: Vec<Uuid> = child_tasks.iter().map(|t| t.id).collect();
+
+                        // Prepare parent task for AwaitingChildren status
                         updated_task.awaiting_children = Some(child_ids.clone());
                         updated_task.status = TaskStatus::AwaitingChildren;
 
@@ -724,88 +674,34 @@ impl AgentExecutor {
                             });
                         }
 
-                        // Retry loop for AwaitingChildren update with fresh re-reads
-                        // This handles version conflicts from concurrent updates
-                        let max_update_attempts = 3;
-                        let mut last_error = None;
-                        for attempt in 0..max_update_attempts {
-                            if attempt > 0 {
-                                // Re-read task to get fresh version
-                                updated_task = match self.chain_service.get_task_from_repo(task.id).await {
-                                    Ok(Some(t)) => t,
-                                    Ok(None) => {
-                                        return Err(ExecutionError::ExecutionFailed(format!(
-                                            "Task {} not found during AwaitingChildren update retry", task.id
-                                        )));
-                                    }
-                                    Err(e) => {
-                                        return Err(ExecutionError::ExecutionFailed(format!(
-                                            "Failed to re-read task for AwaitingChildren update: {}", e
-                                        )));
-                                    }
-                                };
-                                // Re-apply the AwaitingChildren state
-                                updated_task.awaiting_children = Some(child_ids.clone());
-                                updated_task.status = TaskStatus::AwaitingChildren;
-                                if next_step_index < chain.steps.len() {
-                                    updated_task.chain_handoff_state = Some(ChainHandoffState {
-                                        pending_next_step_index: next_step_index,
-                                        chain_id: chain_id.to_string(),
-                                        pending_since: chrono::Utc::now(),
-                                        enqueue_attempts: 0,
-                                        last_error: None,
-                                        step_output: Some(result.output.clone()),
-                                    });
-                                }
-                                debug!(
+                        // ATOMIC: Update parent and insert children in single transaction
+                        // This prevents orphaned children if parent update fails
+                        match self.chain_service.update_parent_and_insert_children_atomic(
+                            &updated_task,
+                            child_tasks,
+                        ).await {
+                            Ok(decomp_result) => {
+                                info!(
                                     task_id = %task.id,
-                                    attempt = attempt + 1,
-                                    version = updated_task.version,
-                                    "Retrying AwaitingChildren update with fresh version"
+                                    child_count = decomp_result.children_inserted.len(),
+                                    already_existed = decomp_result.children_already_existed.len(),
+                                    parent_version = decomp_result.parent_new_version,
+                                    "Atomic decomposition succeeded - parent updated and {} children inserted",
+                                    decomp_result.children_inserted.len()
                                 );
-                            }
 
-                            match self.chain_service.update_task(&updated_task).await {
-                                Ok(()) => {
-                                    if attempt > 0 {
-                                        info!(
-                                            task_id = %task.id,
-                                            attempts = attempt + 1,
-                                            "AwaitingChildren update succeeded after retry"
-                                        );
-                                    }
-                                    last_error = None;
-                                    break;
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        task_id = %task.id,
-                                        attempt = attempt + 1,
-                                        error = ?e,
-                                        "AwaitingChildren update failed, will retry"
-                                    );
-                                    last_error = Some(e);
-                                }
+                                // Don't enqueue next step - will be done when children complete
+                                // Return the step result (children will continue from here)
+                                return Ok(result.output.clone());
+                            }
+                            Err(e) => {
+                                // Atomic operation failed - no children were inserted
+                                return Err(ExecutionError::ExecutionFailed(format!(
+                                    "Atomic decomposition failed: {}. Parent task not updated, no children spawned.",
+                                    e
+                                )));
                             }
                         }
-
-                        if let Some(e) = last_error {
-                            return Err(ExecutionError::ExecutionFailed(format!(
-                                "Failed to save AwaitingChildren state after {} attempts: {}",
-                                max_update_attempts, e
-                            )));
-                        }
-
-                        info!(
-                            task_id = %task.id,
-                            child_count = child_ids.len(),
-                            "Task now waiting for {} children to complete",
-                            child_ids.len()
-                        );
-
-                        // Don't enqueue next step - will be done when children complete
-                        // Return the step result (children will continue from here)
-                        return Ok(result.output.clone());
                     }
                 }
                 Err(e) => {
@@ -1797,16 +1693,15 @@ impl AgentExecutor {
     /// Parses step output, extracts items from items_path, and spawns a child task
     /// for each item with its own branch.
     ///
-    /// Returns the IDs of spawned child tasks.
-    async fn handle_decomposition(
+    /// Returns the built child tasks (NOT submitted - caller must use atomic operation).
+    async fn build_decomposition_tasks(
         &self,
         output: &str,
         step: &crate::domain::models::prompt_chain::PromptStep,
         parent_task: &mut Task,
         chain: &crate::domain::models::prompt_chain::PromptChain,
-    ) -> Result<Vec<Uuid>> {
+    ) -> Result<Vec<Task>> {
         use crate::infrastructure::validators::output_validator::OutputValidator;
-        use crate::domain::ports::task_repository::IdempotentInsertResult;
 
         let decomposition = step.decomposition.as_ref()
             .ok_or_else(|| anyhow::anyhow!("No decomposition config"))?;
@@ -1845,7 +1740,7 @@ impl AgentExecutor {
             items_array.len()
         );
 
-        let mut child_ids = Vec::with_capacity(items_array.len());
+        let mut child_tasks = Vec::with_capacity(items_array.len());
         let now = chrono::Utc::now();
 
         for (idx, item) in items_array.iter().enumerate() {
@@ -2056,42 +1951,18 @@ impl AgentExecutor {
                 version: 1,
             };
 
-            // Submit the child task
-            match self.chain_service.submit_task_idempotent(child_task).await {
-                Ok(insert_result) => {
-                    let task_id = match insert_result {
-                        IdempotentInsertResult::Inserted(id) => {
-                            info!(
-                                child_task_id = %id,
-                                branch = %sanitized_branch,
-                                "Spawned new child task"
-                            );
-                            id
-                        }
-                        IdempotentInsertResult::AlreadyExists(id) => {
-                            info!(
-                                child_task_id = %id,
-                                branch = %sanitized_branch,
-                                "Child task already exists (idempotent)"
-                            );
-                            id
-                        }
-                    };
-                    child_ids.push(task_id);
-                }
-                Err(e) => {
-                    warn!(
-                        task_id = %parent_task.id,
-                        error = ?e,
-                        item_index = idx,
-                        "Failed to spawn child task"
-                    );
-                    // Continue with other items even if one fails
-                }
-            }
+            // Add to collection (NOT submitted yet - caller handles atomic submission)
+            debug!(
+                task_id = %child_task.id,
+                branch = %sanitized_branch,
+                feature_branch = ?child_feature_branch,
+                agent_type = %child_task.agent_type,
+                "Built child task for decomposition"
+            );
+            child_tasks.push(child_task);
         }
 
-        Ok(child_ids)
+        Ok(child_tasks)
     }
 
     /// Navigate a JSON value using a dot-separated path (e.g., "decomposition.subprojects")

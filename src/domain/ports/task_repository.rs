@@ -391,6 +391,66 @@ pub trait TaskRepository: Send + Sync {
         }
         Ok(result)
     }
+
+    /// Atomically update a parent task and insert child tasks in a single transaction.
+    ///
+    /// This method performs an atomic operation that:
+    /// 1. Updates the parent task (with optimistic locking via version check)
+    /// 2. Inserts all child tasks (idempotently)
+    /// 3. Either all operations succeed, or all are rolled back
+    ///
+    /// This is critical for decomposition workflows where:
+    /// - Parent must be updated to AwaitingChildren status
+    /// - Child tasks must be spawned
+    /// - Both must happen atomically to prevent orphaned children on parent update failure
+    ///
+    /// # Arguments
+    /// * `parent_task` - The parent task with updated fields (status, awaiting_children, etc.)
+    /// * `child_tasks` - The child tasks to insert
+    ///
+    /// # Returns
+    /// * `Ok(DecompositionResult)` - Transaction succeeded
+    /// * `Err(DatabaseError::OptimisticLockConflict)` - Parent version conflict (need to retry with fresh read)
+    /// * `Err(DatabaseError)` - Other database error (transaction rolled back)
+    ///
+    /// # Atomicity Guarantee
+    /// If the parent update fails (e.g., version conflict), no children are inserted.
+    /// If any child insert fails (non-idempotent failure), the parent update is rolled back.
+    async fn update_parent_and_insert_children_atomic(
+        &self,
+        parent_task: &Task,
+        child_tasks: &[Task],
+    ) -> Result<DecompositionResult, DatabaseError>;
+}
+
+/// Result of an atomic decomposition operation (parent update + child insert)
+#[derive(Debug, Clone)]
+pub struct DecompositionResult {
+    /// The parent task ID that was updated
+    pub parent_id: Uuid,
+    /// New version of the parent task after update
+    pub parent_new_version: u32,
+    /// Child tasks that were inserted
+    pub children_inserted: Vec<Uuid>,
+    /// Child tasks that already existed (by idempotency key)
+    pub children_already_existed: Vec<String>,
+}
+
+impl DecompositionResult {
+    /// Create a new decomposition result
+    pub fn new(parent_id: Uuid, parent_new_version: u32) -> Self {
+        Self {
+            parent_id,
+            parent_new_version,
+            children_inserted: Vec::new(),
+            children_already_existed: Vec::new(),
+        }
+    }
+
+    /// Total number of children processed
+    pub fn children_total(&self) -> usize {
+        self.children_inserted.len() + self.children_already_existed.len()
+    }
 }
 
 /// Result of an idempotent task insertion attempt

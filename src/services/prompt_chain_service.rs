@@ -188,6 +188,24 @@ impl PromptChainService {
         task_queue.update_task(task).await
     }
 
+    /// Atomically update parent task and insert child tasks in a single transaction
+    ///
+    /// This is critical for decomposition workflows where:
+    /// - Parent must be updated to AwaitingChildren status
+    /// - Child tasks must be spawned
+    /// - Both must happen atomically to prevent orphaned children on parent update failure
+    pub async fn update_parent_and_insert_children_atomic(
+        &self,
+        parent_task: &Task,
+        child_tasks: Vec<Task>,
+    ) -> Result<crate::domain::ports::task_repository::DecompositionResult> {
+        let Some(ref task_queue) = self.task_queue_service else {
+            anyhow::bail!("Task queue service not configured");
+        };
+
+        task_queue.update_parent_and_insert_children_atomic(parent_task, child_tasks).await
+    }
+
     /// Get tasks that depend on a given task (wrapper for AgentExecutor to use)
     pub async fn get_dependent_tasks(&self, task_id: uuid::Uuid) -> Result<Vec<Task>> {
         let Some(ref task_queue) = self.task_queue_service else {

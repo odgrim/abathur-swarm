@@ -605,6 +605,32 @@ mod tests {
         async fn resolve_dependencies_for_completed_task(&self, _completed_task_id: uuid::Uuid) -> Result<usize> {
             Ok(0)
         }
+
+        async fn update_parent_and_insert_children_atomic(
+            &self,
+            parent_task: &Task,
+            child_tasks: Vec<Task>,
+        ) -> Result<crate::domain::ports::task_repository::DecompositionResult> {
+            use crate::domain::ports::task_repository::DecompositionResult;
+            let mut tasks = self.tasks.lock().unwrap();
+
+            // Update parent
+            tasks.insert(parent_task.id, parent_task.clone());
+
+            // Insert children
+            let mut children_inserted = Vec::new();
+            for child in child_tasks {
+                children_inserted.push(child.id);
+                tasks.insert(child.id, child);
+            }
+
+            Ok(DecompositionResult {
+                parent_id: parent_task.id,
+                parent_new_version: parent_task.version + 1,
+                children_inserted,
+                children_already_existed: vec![],
+            })
+        }
     }
 
     fn create_test_task() -> Task {
