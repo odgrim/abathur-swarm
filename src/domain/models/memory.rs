@@ -1,270 +1,483 @@
-use chrono::{DateTime, Utc};
-use schemars::JsonSchema;
+//! Memory domain model.
+//!
+//! Three-tier memory system:
+//! - Working: Ephemeral, session-scoped scratch space
+//! - Episodic: Short-term memories with decay
+//! - Semantic: Long-term extracted patterns and knowledge
+
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::fmt;
-use std::str::FromStr;
+use uuid::Uuid;
 
-/// Type of memory storage
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum MemoryType {
-    /// Semantic memory - facts and knowledge
-    Semantic,
-    /// Episodic memory - events and experiences
+/// Memory tier classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryTier {
+    /// Ephemeral, session-scoped
+    Working,
+    /// Short-term with decay
     Episodic,
-    /// Procedural memory - how-to knowledge and processes
-    Procedural,
+    /// Long-term patterns
+    Semantic,
 }
 
-impl fmt::Display for MemoryType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Default for MemoryTier {
+    fn default() -> Self {
+        Self::Working
+    }
+}
+
+impl MemoryTier {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Semantic => write!(f, "semantic"),
-            Self::Episodic => write!(f, "episodic"),
-            Self::Procedural => write!(f, "procedural"),
+            Self::Working => "working",
+            Self::Episodic => "episodic",
+            Self::Semantic => "semantic",
         }
     }
-}
 
-impl FromStr for MemoryType {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
-            "semantic" => Ok(Self::Semantic),
-            "episodic" => Ok(Self::Episodic),
-            "procedural" => Ok(Self::Procedural),
-            _ => Err(anyhow::anyhow!("Invalid memory type: {s}")),
+            "working" => Some(Self::Working),
+            "episodic" => Some(Self::Episodic),
+            "semantic" => Some(Self::Semantic),
+            _ => None,
+        }
+    }
+
+    /// Get default TTL for this tier.
+    pub fn default_ttl(&self) -> Option<Duration> {
+        match self {
+            Self::Working => Some(Duration::hours(1)),
+            Self::Episodic => Some(Duration::days(7)),
+            Self::Semantic => None, // No expiry
         }
     }
 }
 
-/// Memory entry with soft delete support
-///
-/// Supports hierarchical namespaces and soft deletes.
-/// Values are stored as JSON for flexibility.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+/// Type of memory content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryType {
+    /// Raw text/fact
+    Fact,
+    /// Code snippet
+    Code,
+    /// Decision or choice made
+    Decision,
+    /// Error or failure
+    Error,
+    /// Pattern or insight
+    Pattern,
+    /// Reference to external resource
+    Reference,
+    /// Agent interaction context
+    Context,
+}
+
+impl Default for MemoryType {
+    fn default() -> Self {
+        Self::Fact
+    }
+}
+
+impl MemoryType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fact => "fact",
+            Self::Code => "code",
+            Self::Decision => "decision",
+            Self::Error => "error",
+            Self::Pattern => "pattern",
+            Self::Reference => "reference",
+            Self::Context => "context",
+        }
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "fact" => Some(Self::Fact),
+            "code" => Some(Self::Code),
+            "decision" => Some(Self::Decision),
+            "error" => Some(Self::Error),
+            "pattern" => Some(Self::Pattern),
+            "reference" => Some(Self::Reference),
+            "context" => Some(Self::Context),
+            _ => None,
+        }
+    }
+}
+
+/// Memory entry metadata.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryMetadata {
+    /// Source of the memory (agent, task, user)
+    pub source: Option<String>,
+    /// Associated task ID
+    pub task_id: Option<Uuid>,
+    /// Associated goal ID
+    pub goal_id: Option<Uuid>,
+    /// Tags for categorization
+    pub tags: Vec<String>,
+    /// Relevance score (0.0-1.0)
+    pub relevance: f32,
+    /// Custom key-value pairs
+    pub custom: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// A memory entry in the system.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
-    /// Auto-incrementing database ID
-    pub id: i64,
-
-    /// Hierarchical namespace (e.g., "user:alice:preferences")
-    pub namespace: String,
-
-    /// Unique key within namespace
+    /// Unique identifier
+    pub id: Uuid,
+    /// Memory key (for lookup)
     pub key: String,
-
-    /// JSON value stored in memory
-    pub value: Value,
-
-    /// Type of memory
+    /// Namespace for organization
+    pub namespace: String,
+    /// Memory content
+    pub content: String,
+    /// Memory tier
+    pub tier: MemoryTier,
+    /// Memory type
     pub memory_type: MemoryType,
-
-    /// Soft delete flag
-    pub is_deleted: bool,
-
-    /// Optional metadata as JSON
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Value>,
-
-    /// Creator identifier (user or agent)
-    pub created_by: String,
-
-    /// Last updater identifier (user or agent)
-    pub updated_by: String,
-
-    /// Creation timestamp
+    /// Metadata
+    pub metadata: MemoryMetadata,
+    /// Access count (for decay calculation)
+    pub access_count: u32,
+    /// Last access time
+    pub last_accessed: DateTime<Utc>,
+    /// When created
     pub created_at: DateTime<Utc>,
-
-    /// Last update timestamp
+    /// When updated
     pub updated_at: DateTime<Utc>,
+    /// Expiration time (None = never expires)
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Version for optimistic locking
+    pub version: u64,
 }
 
 impl Memory {
-    /// Create a new memory entry
-    pub fn new(
-        namespace: String,
-        key: String,
-        value: Value,
-        memory_type: MemoryType,
-        created_by: String,
-    ) -> Self {
+    /// Create a new working memory.
+    pub fn working(key: impl Into<String>, content: impl Into<String>) -> Self {
         let now = Utc::now();
         Self {
-            id: 0, // Will be set by database
-            namespace,
-            key,
-            value,
-            memory_type,
-            is_deleted: false,
-            metadata: None,
-            created_by: created_by.clone(),
-            updated_by: created_by,
+            id: Uuid::new_v4(),
+            key: key.into(),
+            namespace: "default".to_string(),
+            content: content.into(),
+            tier: MemoryTier::Working,
+            memory_type: MemoryType::Fact,
+            metadata: MemoryMetadata::default(),
+            access_count: 0,
+            last_accessed: now,
             created_at: now,
             updated_at: now,
+            expires_at: Some(now + Duration::hours(1)),
+            version: 1,
         }
     }
 
-    /// Create a new Memory instance with metadata
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_metadata(
-        namespace: String,
-        key: String,
-        value: Value,
-        memory_type: MemoryType,
-        metadata: Value,
-        created_by: String,
-    ) -> Self {
-        let mut memory = Self::new(namespace, key, value, memory_type, created_by);
-        memory.metadata = Some(metadata);
-        memory
+    /// Create a new episodic memory.
+    pub fn episodic(key: impl Into<String>, content: impl Into<String>) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            key: key.into(),
+            namespace: "default".to_string(),
+            content: content.into(),
+            tier: MemoryTier::Episodic,
+            memory_type: MemoryType::Fact,
+            metadata: MemoryMetadata::default(),
+            access_count: 0,
+            last_accessed: now,
+            created_at: now,
+            updated_at: now,
+            expires_at: Some(now + Duration::days(7)),
+            version: 1,
+        }
     }
 
-
-    /// Check if this memory is deleted
-    pub fn is_deleted(&self) -> bool {
-        self.is_deleted
+    /// Create a new semantic memory (no expiry).
+    pub fn semantic(key: impl Into<String>, content: impl Into<String>) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            key: key.into(),
+            namespace: "default".to_string(),
+            content: content.into(),
+            tier: MemoryTier::Semantic,
+            memory_type: MemoryType::Pattern,
+            metadata: MemoryMetadata::default(),
+            access_count: 0,
+            last_accessed: now,
+            created_at: now,
+            updated_at: now,
+            expires_at: None,
+            version: 1,
+        }
     }
 
-    /// Mark this memory as deleted (soft delete)
-    pub fn mark_deleted(&mut self) {
-        self.is_deleted = true;
+    /// Set namespace.
+    pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.namespace = namespace.into();
+        self
+    }
+
+    /// Set memory type.
+    pub fn with_type(mut self, memory_type: MemoryType) -> Self {
+        self.memory_type = memory_type;
+        self
+    }
+
+    /// Set source.
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.metadata.source = Some(source.into());
+        self
+    }
+
+    /// Set associated task.
+    pub fn with_task(mut self, task_id: Uuid) -> Self {
+        self.metadata.task_id = Some(task_id);
+        self
+    }
+
+    /// Set associated goal.
+    pub fn with_goal(mut self, goal_id: Uuid) -> Self {
+        self.metadata.goal_id = Some(goal_id);
+        self
+    }
+
+    /// Add a tag.
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        self.metadata.tags.push(tag.into());
+        self
+    }
+
+    /// Set TTL from now.
+    pub fn with_ttl(mut self, duration: Duration) -> Self {
+        self.expires_at = Some(Utc::now() + duration);
+        self
+    }
+
+    /// Check if memory is expired.
+    pub fn is_expired(&self) -> bool {
+        match self.expires_at {
+            Some(exp) => Utc::now() > exp,
+            None => false,
+        }
+    }
+
+    /// Record an access (updates access count and last_accessed).
+    pub fn record_access(&mut self) {
+        self.access_count += 1;
+        self.last_accessed = Utc::now();
         self.updated_at = Utc::now();
+        self.version += 1;
     }
 
-    /// Check if memory is active (not deleted)
-    pub const fn is_active(&self) -> bool {
-        !self.is_deleted
+    /// Calculate decay factor (0.0 = fully decayed, 1.0 = fresh).
+    /// Uses exponential decay based on time since last access.
+    pub fn decay_factor(&self) -> f32 {
+        let age = Utc::now() - self.last_accessed;
+        let hours = age.num_hours() as f32;
+
+        // Half-life depends on tier
+        let half_life_hours = match self.tier {
+            MemoryTier::Working => 0.5,   // 30 minutes
+            MemoryTier::Episodic => 24.0, // 1 day
+            MemoryTier::Semantic => 168.0, // 1 week (but never expires)
+        };
+
+        // Exponential decay: factor = 2^(-age/half_life)
+        // Access count slows decay
+        let access_bonus = (self.access_count as f32).ln_1p() * 0.1;
+        let effective_age = (hours - access_bonus).max(0.0);
+
+        0.5_f32.powf(effective_age / half_life_hours)
     }
 
-    /// Get the full namespace path as a string
-    pub fn namespace_path(&self) -> String {
-        format!("{}:{}", self.namespace, self.key)
+    /// Promote memory to higher tier.
+    pub fn promote(&mut self) -> Result<(), String> {
+        match self.tier {
+            MemoryTier::Working => {
+                self.tier = MemoryTier::Episodic;
+                self.expires_at = Some(Utc::now() + Duration::days(7));
+            }
+            MemoryTier::Episodic => {
+                self.tier = MemoryTier::Semantic;
+                self.expires_at = None;
+            }
+            MemoryTier::Semantic => {
+                return Err("Cannot promote semantic memory".to_string());
+            }
+        }
+        self.updated_at = Utc::now();
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Validate memory.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.key.is_empty() {
+            return Err("Memory key cannot be empty".to_string());
+        }
+        if self.namespace.is_empty() {
+            return Err("Memory namespace cannot be empty".to_string());
+        }
+        if self.content.is_empty() {
+            return Err("Memory content cannot be empty".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Query specification for memory retrieval.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryQuery {
+    /// Key pattern (supports wildcards)
+    pub key_pattern: Option<String>,
+    /// Namespace filter
+    pub namespace: Option<String>,
+    /// Tier filter
+    pub tier: Option<MemoryTier>,
+    /// Type filter
+    pub memory_type: Option<MemoryType>,
+    /// Tag filter (any match)
+    pub tags: Vec<String>,
+    /// Minimum decay factor
+    pub min_decay: Option<f32>,
+    /// Associated task
+    pub task_id: Option<Uuid>,
+    /// Associated goal
+    pub goal_id: Option<Uuid>,
+    /// Full-text search query
+    pub search_query: Option<String>,
+    /// Maximum results
+    pub limit: Option<usize>,
+}
+
+impl MemoryQuery {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn namespace(mut self, ns: impl Into<String>) -> Self {
+        self.namespace = Some(ns.into());
+        self
+    }
+
+    pub fn tier(mut self, tier: MemoryTier) -> Self {
+        self.tier = Some(tier);
+        self
+    }
+
+    pub fn key_like(mut self, pattern: impl Into<String>) -> Self {
+        self.key_pattern = Some(pattern.into());
+        self
+    }
+
+    pub fn search(mut self, query: impl Into<String>) -> Self {
+        self.search_query = Some(query.into());
+        self
+    }
+
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        self.tags.push(tag.into());
+        self
+    }
+
+    pub fn for_task(mut self, task_id: Uuid) -> Self {
+        self.task_id = Some(task_id);
+        self
+    }
+
+    pub fn for_goal(mut self, goal_id: Uuid) -> Self {
+        self.goal_id = Some(goal_id);
+        self
+    }
+
+    pub fn limit(mut self, n: usize) -> Self {
+        self.limit = Some(n);
+        self
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
-    fn test_memory_type_display() {
-        assert_eq!(MemoryType::Semantic.to_string(), "semantic");
-        assert_eq!(MemoryType::Episodic.to_string(), "episodic");
-        assert_eq!(MemoryType::Procedural.to_string(), "procedural");
+    fn test_working_memory() {
+        let mem = Memory::working("test_key", "test content");
+        assert_eq!(mem.tier, MemoryTier::Working);
+        assert!(mem.expires_at.is_some());
+        assert!(!mem.is_expired());
     }
 
     #[test]
-    fn test_memory_type_from_str() {
-        assert_eq!(
-            "semantic".parse::<MemoryType>().unwrap(),
-            MemoryType::Semantic
-        );
-        assert_eq!(
-            "EPISODIC".parse::<MemoryType>().unwrap(),
-            MemoryType::Episodic
-        );
-        assert_eq!(
-            "Procedural".parse::<MemoryType>().unwrap(),
-            MemoryType::Procedural
-        );
-        assert!("invalid".parse::<MemoryType>().is_err());
+    fn test_semantic_memory() {
+        let mem = Memory::semantic("pattern_key", "learned pattern");
+        assert_eq!(mem.tier, MemoryTier::Semantic);
+        assert!(mem.expires_at.is_none());
+        assert!(!mem.is_expired());
     }
 
     #[test]
-    fn test_memory_new() {
-        let memory = Memory::new(
-            "test:namespace".to_string(),
-            "key1".to_string(),
-            json!({"data": "value"}),
-            MemoryType::Semantic,
-            "user1".to_string(),
-        );
+    fn test_memory_promotion() {
+        let mut mem = Memory::working("key", "content");
+        assert_eq!(mem.tier, MemoryTier::Working);
 
-        assert_eq!(memory.namespace, "test:namespace");
-        assert_eq!(memory.key, "key1");
-        assert_eq!(memory.memory_type, MemoryType::Semantic);
-        assert!(!memory.is_deleted);
-        assert_eq!(memory.created_by, "user1");
-        assert_eq!(memory.updated_by, "user1");
+        mem.promote().unwrap();
+        assert_eq!(mem.tier, MemoryTier::Episodic);
+
+        mem.promote().unwrap();
+        assert_eq!(mem.tier, MemoryTier::Semantic);
+
+        assert!(mem.promote().is_err()); // Cannot promote further
     }
 
     #[test]
-    fn test_memory_mark_deleted() {
-        let mut memory = Memory::new(
-            "test:namespace".to_string(),
-            "key1".to_string(),
-            json!({"data": "value"}),
-            MemoryType::Semantic,
-            "user1".to_string(),
-        );
-
-        assert!(memory.is_active());
-        memory.mark_deleted();
-        assert!(!memory.is_active());
-        assert!(memory.is_deleted);
+    fn test_decay_factor() {
+        let mem = Memory::working("key", "content");
+        // Fresh memory should have high decay factor
+        assert!(mem.decay_factor() > 0.9);
     }
 
     #[test]
-    fn test_memory_namespace_path() {
-        let memory = Memory::new(
-            "user:alice".to_string(),
-            "preferences".to_string(),
-            json!({}),
-            MemoryType::Semantic,
-            "alice".to_string(),
-        );
+    fn test_record_access() {
+        let mut mem = Memory::working("key", "content");
+        assert_eq!(mem.access_count, 0);
 
-        assert_eq!(memory.namespace_path(), "user:alice:preferences");
+        mem.record_access();
+        assert_eq!(mem.access_count, 1);
+        assert!(mem.version > 1);
     }
 
     #[test]
-    fn test_memory_creation() {
-        let memory = Memory::new(
-            "user:alice:preferences".to_string(),
-            "theme".to_string(),
-            json!({"color": "dark"}),
-            MemoryType::Semantic,
-            "alice".to_string(),
-        );
+    fn test_memory_validation() {
+        let mem = Memory::working("", "content");
+        assert!(mem.validate().is_err());
 
-        assert_eq!(memory.namespace, "user:alice:preferences");
-        assert_eq!(memory.key, "theme");
-        assert_eq!(memory.memory_type, MemoryType::Semantic);
-        assert!(!memory.is_deleted());
-        assert_eq!(memory.created_by, "alice");
-        assert_eq!(memory.updated_by, "alice");
+        let mem = Memory::working("key", "");
+        assert!(mem.validate().is_err());
+
+        let mem = Memory::working("key", "content");
+        assert!(mem.validate().is_ok());
     }
 
     #[test]
-    fn test_memory_with_metadata() {
-        let memory = Memory::with_metadata(
-            "user:bob:history".to_string(),
-            "last_login".to_string(),
-            json!("2025-10-25T12:00:00Z"),
-            MemoryType::Episodic,
-            json!({"source": "web"}),
-            "system".to_string(),
-        );
+    fn test_memory_query_builder() {
+        let query = MemoryQuery::new()
+            .namespace("agents")
+            .tier(MemoryTier::Semantic)
+            .search("pattern")
+            .limit(10);
 
-        assert!(memory.metadata.is_some());
-        assert_eq!(memory.metadata.unwrap(), json!({"source": "web"}));
-    }
-
-    #[test]
-    fn test_memory_soft_delete() {
-        let mut memory = Memory::new(
-            "test:namespace".to_string(),
-            "test_key".to_string(),
-            json!({}),
-            MemoryType::Semantic,
-            "test".to_string(),
-        );
-
-        assert!(!memory.is_deleted());
-        memory.mark_deleted();
-        assert!(memory.is_deleted());
+        assert_eq!(query.namespace, Some("agents".to_string()));
+        assert_eq!(query.tier, Some(MemoryTier::Semantic));
+        assert_eq!(query.search_query, Some("pattern".to_string()));
+        assert_eq!(query.limit, Some(10));
     }
 }

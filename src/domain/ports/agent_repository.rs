@@ -1,83 +1,71 @@
+//! Agent repository port.
+
 use async_trait::async_trait;
-use chrono::Duration;
 use uuid::Uuid;
 
-use crate::domain::models::{Agent, AgentStatus};
-use crate::infrastructure::database::DatabaseError;
+use crate::domain::errors::DomainResult;
+use crate::domain::models::{AgentInstance, AgentStatus, AgentTemplate, AgentTier, InstanceStatus};
 
-/// Repository interface for agent persistence operations
-///
-/// This trait defines the contract for agent data access following
-/// the repository pattern and Clean Architecture principles.
+/// Filter criteria for listing agents.
+#[derive(Debug, Clone, Default)]
+pub struct AgentFilter {
+    pub tier: Option<AgentTier>,
+    pub status: Option<AgentStatus>,
+    pub name_pattern: Option<String>,
+}
+
+/// Repository interface for Agent persistence.
 #[async_trait]
 pub trait AgentRepository: Send + Sync {
-    /// Insert a new agent into the repository
-    ///
-    /// # Arguments
-    /// * `agent` - The agent to insert
-    ///
-    /// # Returns
-    /// * `Ok(())` on success
-    /// * `Err(DatabaseError)` on failure (e.g., duplicate ID, constraint violation)
-    async fn insert(&self, agent: Agent) -> Result<(), DatabaseError>;
+    // Template operations
 
-    /// Get an agent by ID
-    ///
-    /// # Arguments
-    /// * `id` - The agent UUID
-    ///
-    /// # Returns
-    /// * `Ok(Some(agent))` if found
-    /// * `Ok(None)` if not found
-    /// * `Err(DatabaseError)` on query failure
-    async fn get(&self, id: Uuid) -> Result<Option<Agent>, DatabaseError>;
+    /// Create a new agent template.
+    async fn create_template(&self, template: &AgentTemplate) -> DomainResult<()>;
 
-    /// Update an existing agent
-    ///
-    /// # Arguments
-    /// * `agent` - The agent with updated fields
-    ///
-    /// # Returns
-    /// * `Ok(())` on success
-    /// * `Err(DatabaseError)` on failure
-    async fn update(&self, agent: Agent) -> Result<(), DatabaseError>;
+    /// Get an agent template by ID.
+    async fn get_template(&self, id: Uuid) -> DomainResult<Option<AgentTemplate>>;
 
-    /// List agents, optionally filtered by status
-    ///
-    /// # Arguments
-    /// * `status` - Optional status filter (None returns all agents)
-    ///
-    /// # Returns
-    /// * `Ok(Vec<Agent>)` - List of matching agents
-    /// * `Err(DatabaseError)` on query failure
-    async fn list(&self, status: Option<AgentStatus>) -> Result<Vec<Agent>, DatabaseError>;
+    /// Get an agent template by name (latest version).
+    async fn get_template_by_name(&self, name: &str) -> DomainResult<Option<AgentTemplate>>;
 
-    /// Find stale agents based on heartbeat threshold
-    ///
-    /// Returns agents whose last heartbeat is older than the threshold.
-    /// Used for detecting and cleaning up dead agents.
-    ///
-    /// # Arguments
-    /// * `heartbeat_threshold` - Maximum age of heartbeat before considering agent stale
-    ///
-    /// # Returns
-    /// * `Ok(Vec<Agent>)` - List of stale agents
-    /// * `Err(DatabaseError)` on query failure
-    async fn find_stale_agents(
-        &self,
-        heartbeat_threshold: Duration,
-    ) -> Result<Vec<Agent>, DatabaseError>;
+    /// Get a specific version of an agent template.
+    async fn get_template_version(&self, name: &str, version: u32) -> DomainResult<Option<AgentTemplate>>;
 
-    /// Update an agent's heartbeat to current time
-    ///
-    /// Lightweight operation to update only the heartbeat timestamp
-    /// without requiring a full agent update.
-    ///
-    /// # Arguments
-    /// * `id` - The agent UUID
-    ///
-    /// # Returns
-    /// * `Ok(())` on success
-    /// * `Err(DatabaseError)` on failure (e.g., agent not found)
-    async fn update_heartbeat(&self, id: Uuid) -> Result<(), DatabaseError>;
+    /// Update an agent template.
+    async fn update_template(&self, template: &AgentTemplate) -> DomainResult<()>;
+
+    /// Delete an agent template.
+    async fn delete_template(&self, id: Uuid) -> DomainResult<()>;
+
+    /// List templates with optional filters.
+    async fn list_templates(&self, filter: AgentFilter) -> DomainResult<Vec<AgentTemplate>>;
+
+    /// List templates by tier.
+    async fn list_by_tier(&self, tier: AgentTier) -> DomainResult<Vec<AgentTemplate>>;
+
+    /// Get active templates.
+    async fn get_active_templates(&self) -> DomainResult<Vec<AgentTemplate>>;
+
+    // Instance operations
+
+    /// Create a new agent instance.
+    async fn create_instance(&self, instance: &AgentInstance) -> DomainResult<()>;
+
+    /// Get an agent instance by ID.
+    async fn get_instance(&self, id: Uuid) -> DomainResult<Option<AgentInstance>>;
+
+    /// Update an agent instance.
+    async fn update_instance(&self, instance: &AgentInstance) -> DomainResult<()>;
+
+    /// Delete an agent instance.
+    async fn delete_instance(&self, id: Uuid) -> DomainResult<()>;
+
+    /// List instances by status.
+    async fn list_instances_by_status(&self, status: InstanceStatus) -> DomainResult<Vec<AgentInstance>>;
+
+    /// Get running instances for a template.
+    async fn get_running_instances(&self, template_name: &str) -> DomainResult<Vec<AgentInstance>>;
+
+    /// Count running instances by template.
+    async fn count_running_by_template(&self) -> DomainResult<std::collections::HashMap<String, u32>>;
 }

@@ -1,195 +1,177 @@
-//! Init command handler
-//!
-//! Thin adapter that delegates to infrastructure setup module.
+//! Implementation of the `abathur init` command.
 
 use anyhow::{Context, Result};
-use crate::domain::models::{Task, TaskSource};
-use crate::domain::ports::TaskRepository;
-use crate::infrastructure::config::ConfigLoader;
-use crate::infrastructure::database::{DatabaseConnection, TaskRepositoryImpl};
-use crate::infrastructure::setup;
-use serde_json::json;
+use clap::Args;
+use std::path::{Path, PathBuf};
+use tokio::fs;
 
-/// Handle init command
-pub async fn handle_init(force: bool, template_repo: &str, skip_clone: bool, json_output: bool) -> Result<()> {
-    if json_output {
-        let output = json!({
-            "status": "initializing",
-            "force": force
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("Initializing Abathur...");
-        println!();
+use crate::adapters::sqlite::initialize_database;
+use crate::cli::output::{output, CommandOutput};
+
+#[derive(Args, Debug)]
+pub struct InitArgs {
+    /// Force reinitialization even if already initialized
+    #[arg(long, short)]
+    pub force: bool,
+
+    /// Target directory (defaults to current directory)
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct InitOutput {
+    pub success: bool,
+    pub message: String,
+    pub initialized_path: PathBuf,
+    pub directories_created: Vec<String>,
+    pub database_initialized: bool,
+    pub agents_copied: usize,
+}
+
+impl CommandOutput for InitOutput {
+    fn to_human(&self) -> String {
+        let mut lines = vec![self.message.clone()];
+        if !self.directories_created.is_empty() {
+            lines.push("\nCreated directories:".to_string());
+            for dir in &self.directories_created {
+                lines.push(format!("  - {}", dir));
+            }
+        }
+        if self.database_initialized {
+            lines.push("\nDatabase initialized at .abathur/abathur.db".to_string());
+        }
+        if self.agents_copied > 0 {
+            lines.push(format!("\nCopied {} baseline agent(s)", self.agents_copied));
+        }
+        lines.join("\n")
     }
 
-    // Get setup paths
-    let paths = setup::SetupPaths::new()?;
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+}
+
+pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
+    let target_path = if args.path.is_absolute() {
+        args.path.clone()
+    } else {
+        std::env::current_dir().context("Failed to get current directory")?.join(&args.path)
+    };
+
+    let abathur_dir = target_path.join(".abathur");
+    let claude_dir = target_path.join(".claude");
 
     // Check if already initialized
-    if !force && paths.is_initialized() {
-        if json_output {
-            let output = json!({
-                "status": "already_initialized",
-                "message": "Abathur is already initialized. Use --force to reinitialize."
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        } else {
-            println!("✓ Abathur is already initialized!");
-            println!();
-            println!("Configuration: {}", paths.config_file.display());
-            println!("Database: {}", paths.database_file.display());
-            println!();
-            println!("Use 'abathur init --force' to reinitialize.");
-        }
+    if abathur_dir.exists() && !args.force {
+        let output_data = InitOutput {
+            success: false,
+            message: "Project already initialized. Use --force to reinitialize.".to_string(),
+            initialized_path: target_path,
+            directories_created: vec![],
+            database_initialized: false,
+            agents_copied: 0,
+        };
+        output(&output_data, json_mode);
         return Ok(());
     }
 
-    // Step 1: Create config directory
-    setup::create_config_dir(&paths, force)?;
-    if !json_output {
-        println!("✓ Created config directory: {}", paths.config_dir.display());
+    // If forcing, remove existing
+    if args.force && abathur_dir.exists() {
+        fs::remove_dir_all(&abathur_dir).await.context("Failed to remove existing .abathur directory")?;
     }
 
-    // Step 2: Create config file
-    setup::create_config_file(&paths, force)?;
-    if !json_output {
-        println!("✓ Created config file: {}", paths.config_file.display());
-    }
+    let mut directories_created = vec![];
 
-    // Step 3: Run migrations
-    setup::run_migrations(&paths, force).await?;
-    if !json_output {
-        println!("✓ Database initialized: {}", paths.database_file.display());
-    }
+    // Create directories
+    let dirs = [
+        abathur_dir.clone(),
+        abathur_dir.join("worktrees"),
+        abathur_dir.join("logs"),
+        claude_dir.clone(),
+        claude_dir.join("agents"),
+    ];
 
-    // Step 3.5: Enqueue project-context-scanner task
-    let config = ConfigLoader::load().context("Failed to load config")?;
-    let database_url = format!("sqlite:{}", config.database.path);
-    let db = DatabaseConnection::new(&database_url)
-        .await
-        .context("Failed to create database connection")?;
-    let task_repo = TaskRepositoryImpl::new(db.pool().clone());
-
-    // Create the project-context-scanner task with highest priority
-    let mut scanner_task = Task::new(
-        "Scan project context".to_string(),
-        "Initial project scan to detect language, framework, and conventions.".to_string(),
-    );
-    scanner_task.agent_type = "project-context-scanner".to_string();
-    scanner_task.priority = 10; // Highest priority - runs first
-    scanner_task.source = TaskSource::Human;
-
-    // Insert the task into the database
-    task_repo.insert(&scanner_task)
-        .await
-        .context("Failed to enqueue project-context-scanner task")?;
-
-    if !json_output {
-        println!("✓ Enqueued project-context-scanner task (priority: 10)");
-    }
-
-    // Step 4: Clone template repository (if not skipped)
-    let template_dir = if !skip_clone {
-        let dir = setup::clone_template_repo(template_repo, force)?;
-        if !json_output {
-            println!("✓ Cloned template repository to {}", dir.display());
+    for dir in &dirs {
+        if !dir.exists() {
+            fs::create_dir_all(dir).await.with_context(|| format!("Failed to create {:?}", dir))?;
+            let relative = dir.strip_prefix(&target_path).unwrap_or(dir).to_string_lossy().to_string();
+            directories_created.push(relative);
         }
-        Some(dir)
-    } else {
-        if !json_output {
-            println!("⚠ Skipping template repository clone");
-        }
-        None
+    }
+
+    // Initialize database
+    let db_path = abathur_dir.join("abathur.db");
+    let db_url = format!("sqlite:{}", db_path.display());
+    initialize_database(&db_url).await.context("Failed to initialize database")?;
+
+    // Copy agents if source exists
+    let agents_copied = copy_baseline_agents(&target_path).await.unwrap_or(0);
+
+    let output_data = InitOutput {
+        success: true,
+        message: if args.force {
+            "Project reinitialized successfully.".to_string()
+        } else {
+            "Project initialized successfully.".to_string()
+        },
+        initialized_path: target_path,
+        directories_created,
+        database_initialized: true,
+        agents_copied,
     };
 
-    // Step 5: Copy agent templates
-    if let Some(ref template_dir) = template_dir {
-        setup::copy_agent_templates(&paths, template_dir, force)?;
-        if !json_output {
-            println!("✓ Copied agent templates");
-        }
-
-        // Step 6: Copy hooks configuration
-        setup::copy_hooks_config(&paths, template_dir, force)?;
-        if !json_output {
-            println!("✓ Copied hooks configuration");
-        }
-
-        // Step 7: Copy hook scripts
-        setup::copy_hook_scripts(&paths, template_dir, force)?;
-        if !json_output {
-            println!("✓ Copied hook scripts");
-        }
-
-        // Step 7.5: Copy core Abathur scripts
-        setup::copy_scripts(&paths, template_dir, force)?;
-        if !json_output {
-            println!("✓ Copied core Abathur scripts");
-        }
-
-        // Step 8: Merge MCP server configuration
-        setup::merge_mcp_config(template_dir, force)?;
-        if !json_output {
-            println!("✓ Merged MCP server configuration");
-        }
-
-        // Step 9: Copy chain templates
-        setup::copy_chain_templates(&paths, template_dir, force)?;
-        if !json_output {
-            println!("✓ Copied chain templates");
-        }
-
-        // Step 10: Clean up temporary template directory
-        if let Err(e) = std::fs::remove_dir_all(template_dir) {
-            if !json_output {
-                println!("⚠ Warning: Failed to clean up temporary template directory: {}", e);
-            }
-        } else if !json_output {
-            println!("✓ Cleaned up temporary files");
-        }
-    }
-
-    if json_output {
-        let output = json!({
-            "status": "initialized",
-            "config_dir": paths.config_dir.display().to_string(),
-            "config_file": paths.config_file.display().to_string(),
-            "database": paths.database_file.display().to_string(),
-            "agents_dir": paths.agents_dir.display().to_string(),
-            "hooks_file": paths.hooks_file.display().to_string(),
-            "hooks_dir": paths.hooks_dir.display().to_string(),
-            "scripts_dir": paths.scripts_dir.display().to_string(),
-            "chains_dir": paths.chains_dir.display().to_string(),
-            "initial_task": {
-                "id": scanner_task.id.to_string(),
-                "agent_type": "project-context-scanner",
-                "priority": 10,
-                "summary": "Scan project context"
-            }
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!();
-        println!("✓ Abathur initialized successfully!");
-        println!();
-        println!("Configuration: {}", paths.config_file.display());
-        println!("Database: {}", paths.database_file.display());
-        println!("Agents: {}", paths.agents_dir.display());
-        println!("Hooks: {}", paths.hooks_file.display());
-        println!("Scripts: {}", paths.scripts_dir.display());
-        println!("Chains: {}", paths.chains_dir.display());
-        println!();
-        println!("Initial task enqueued:");
-        println!("  - project-context-scanner (priority: 10)");
-        println!("  - Will run first when swarm starts");
-        println!();
-        println!("Next steps:");
-        println!("  1. Edit your config file to customize settings");
-        println!("  2. Set ANTHROPIC_API_KEY environment variable");
-        println!("  3. Customize hooks in {} if needed", paths.hooks_file.display());
-        println!("  4. Run 'abathur swarm start' to start the orchestrator");
-    }
-
+    output(&output_data, json_mode);
     Ok(())
+}
+
+async fn copy_baseline_agents(target_path: &Path) -> Result<usize> {
+    let target_agents = target_path.join(".claude").join("agents");
+
+    // Check if we're in the source repo (has agent definitions)
+    let source_agents = target_path.join(".claude").join("agents");
+    if source_agents.exists() {
+        let meta_planner = source_agents.join("meta-planner.md");
+        if meta_planner.exists() {
+            // Already has agents, don't copy
+            return Ok(0);
+        }
+    }
+
+    // Try to find source agents from executable location
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            if let Some(parent) = exe_dir.parent() {
+                let source = parent.join(".claude").join("agents");
+                if source.exists() {
+                    return copy_agents_recursive(&source, &target_agents).await;
+                }
+            }
+        }
+    }
+
+    Ok(0)
+}
+
+async fn copy_agents_recursive(source: &Path, target: &Path) -> Result<usize> {
+    let mut count = 0;
+    let mut entries = fs::read_dir(source).await?;
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let target_path = target.join(&file_name);
+
+        if path.is_dir() {
+            if !target_path.exists() {
+                fs::create_dir_all(&target_path).await?;
+            }
+            count += Box::pin(copy_agents_recursive(&path, &target_path)).await?;
+        } else if path.extension().is_some_and(|ext| ext == "md") {
+            fs::copy(&path, &target_path).await?;
+            count += 1;
+        }
+    }
+
+    Ok(count)
 }

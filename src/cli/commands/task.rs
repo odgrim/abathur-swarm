@@ -1,452 +1,429 @@
+//! Task CLI commands.
+
 use anyhow::{Context, Result};
+use clap::{Args, Subcommand};
+use std::sync::Arc;
+use uuid::Uuid;
 
-use crate::cli::models::TaskStatus;
-use crate::cli::output::table::{format_queue_stats_table, format_task_table};
-use crate::cli::service::TaskQueueServiceAdapter;
+use crate::adapters::sqlite::{
+    SqliteGoalRepository, SqliteTaskRepository, initialize_database
+};
+use crate::cli::output::{output, CommandOutput};
+use crate::domain::models::{Task, TaskContext, TaskPriority, TaskStatus};
+use crate::domain::ports::TaskFilter;
+use crate::services::TaskService;
 
-/// Handle task submit command
-pub async fn handle_submit(
-    service: &TaskQueueServiceAdapter,
-    description: String,
-    agent_type: String,
-    summary: Option<String>,
-    priority: u8,
-    dependencies: Vec<String>,
-    chain_id: Option<String>,
-    feature_branch: Option<String>,
-    needs_worktree: bool,
-    json: bool,
-) -> Result<()> {
-    // Resolve dependency prefixes to full UUIDs
-    let mut resolved_deps = Vec::new();
-    for dep_prefix in &dependencies {
-        let dep_id = service
-            .resolve_task_id_prefix(dep_prefix)
-            .await
-            .context(format!("Failed to resolve dependency '{}'", dep_prefix))?;
-        resolved_deps.push(dep_id);
-    }
-
-    // Generate summary from description if not provided
-    // Take first 140 characters (max summary length)
-    let task_summary = summary.unwrap_or_else(|| {
-        if description.len() <= 140 {
-            description.clone()
-        } else {
-            format!("{}...", &description[..137])
-        }
-    });
-
-    // Determine effective chain_id
-    // - If user specified "none", set to None (no chain)
-    // - If user specified a value, use it
-    // - If not specified, default to "technical_feature_workflow"
-    let effective_chain_id = match chain_id.as_deref() {
-        Some("none") => None, // Special value to explicitly disable chains
-        Some(id) => Some(id.to_string()), // User-specified chain
-        None => Some("technical_feature_workflow".to_string()), // Default chain
-    };
-
-    let task_id = service
-        .submit_task(
-            task_summary.clone(),
-            description.clone(),
-            agent_type.clone(),
-            priority,
-            resolved_deps.clone(),
-            effective_chain_id.clone(),
-            feature_branch.clone(),
-            needs_worktree,
-        )
-        .await
-        .context("Failed to submit task")?;
-
-    if json {
-        let output = serde_json::json!({
-            "task_id": task_id,
-            "summary": task_summary,
-            "description": description,
-            "agent_type": agent_type,
-            "priority": priority,
-            "dependencies": resolved_deps,
-            "chain_id": effective_chain_id,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("Task submitted successfully!");
-        println!("  Task ID: {}", task_id);
-        println!("  Summary: {}", task_summary);
-        println!("  Description: {}", description);
-        println!("  Agent type: {}", agent_type);
-        println!("  Priority: {}", priority);
-        if let Some(ref chain) = effective_chain_id {
-            println!("  Chain: {}", chain);
-        } else {
-            println!("  Chain: none (single agent execution)");
-        }
-        if !dependencies.is_empty() {
-            println!("  Dependencies: {} task(s)", dependencies.len());
-        }
-    }
-
-    Ok(())
+#[derive(Args, Debug)]
+pub struct TaskArgs {
+    #[command(subcommand)]
+    pub command: TaskCommands,
 }
 
-/// Handle task list command
-pub async fn handle_list(
-    service: &TaskQueueServiceAdapter,
-    status_filter: Option<TaskStatus>,
-    limit: usize,
-    json: bool,
-) -> Result<()> {
-    let tasks = service
-        .list_tasks(status_filter, limit)
-        .await
-        .context("Failed to list tasks")?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&tasks)?);
-    } else {
-        if tasks.is_empty() {
-            println!("No tasks found.");
-            return Ok(());
-        }
-
-        println!("Tasks:");
-        println!("{}", format_task_table(&tasks));
-        println!("\nShowing {} task(s)", tasks.len());
-    }
-
-    Ok(())
+#[derive(Subcommand, Debug)]
+pub enum TaskCommands {
+    /// Submit a new task
+    Submit {
+        /// Task title
+        title: String,
+        /// Task description
+        #[arg(short, long)]
+        description: Option<String>,
+        /// Priority (low, normal, high, critical)
+        #[arg(short, long, default_value = "normal")]
+        priority: String,
+        /// Associated goal ID
+        #[arg(short, long)]
+        goal: Option<String>,
+        /// Parent task ID
+        #[arg(long)]
+        parent: Option<String>,
+        /// Agent type to assign
+        #[arg(short, long)]
+        agent: Option<String>,
+        /// Dependencies (task IDs)
+        #[arg(long)]
+        depends_on: Vec<String>,
+        /// Input context for the task
+        #[arg(long)]
+        input: Option<String>,
+        /// Idempotency key
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// List tasks
+    List {
+        /// Filter by status
+        #[arg(short, long)]
+        status: Option<String>,
+        /// Filter by priority
+        #[arg(short, long)]
+        priority: Option<String>,
+        /// Filter by goal ID
+        #[arg(short, long)]
+        goal: Option<String>,
+        /// Filter by agent type
+        #[arg(short, long)]
+        agent: Option<String>,
+        /// Show only ready tasks
+        #[arg(long)]
+        ready: bool,
+        /// Maximum number of results
+        #[arg(short, long, default_value = "50")]
+        limit: usize,
+    },
+    /// Show task details
+    Show {
+        /// Task ID
+        id: String,
+    },
+    /// Cancel a task
+    Cancel {
+        /// Task ID
+        id: String,
+    },
+    /// Retry a failed task
+    Retry {
+        /// Task ID
+        id: String,
+    },
+    /// Show task status summary
+    Status,
 }
 
-/// Handle task show command
-pub async fn handle_show(service: &TaskQueueServiceAdapter, task_id_prefix: String, json: bool) -> Result<()> {
-    // Resolve task ID prefix
-    let task_id = service
-        .resolve_task_id_prefix(&task_id_prefix)
-        .await
-        .context(format!("Failed to resolve task ID '{}'", task_id_prefix))?;
-
-    let task = service
-        .get_task(task_id)
-        .await
-        .context("Failed to retrieve task")?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Task {} not found. Use 'abathur task list' to see available tasks.",
-                task_id
-            )
-        })?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&task)?);
-    } else {
-        println!("Task Details:");
-        println!("  ID: {}", task.id);
-        println!("  Status: {}", task.status);
-        println!("  Summary: {}", task.summary);
-        println!("  Description: {}", task.description);
-        println!("  Agent type: {}", task.agent_type);
-        println!(
-            "  Priority: {} (computed: {:.1})",
-            task.base_priority, task.computed_priority
-        );
-        println!(
-            "  Created at: {}",
-            task.created_at.format("%Y-%m-%d %H:%M:%S UTC")
-        );
-        println!(
-            "  Updated at: {}",
-            task.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
-        );
-
-        if let Some(started_at) = task.started_at {
-            println!(
-                "  Started at: {}",
-                started_at.format("%Y-%m-%d %H:%M:%S UTC")
-            );
-        }
-
-        if let Some(completed_at) = task.completed_at {
-            println!(
-                "  Completed at: {}",
-                completed_at.format("%Y-%m-%d %H:%M:%S UTC")
-            );
-        }
-
-        if let Some(chain_id) = &task.chain_id {
-            println!("  Chain ID: {}", chain_id);
-        }
-
-        // Branch and worktree information - always display with None indication
-        println!("\n  Git Branch Information:");
-        match &task.feature_branch {
-            Some(fb) => println!("    Feature Branch: {}", fb),
-            None => println!("    Feature Branch: <not set>"),
-        }
-
-        match &task.branch {
-            Some(b) => println!("    Task Branch: {}", b),
-            None => println!("    Task Branch: <not set>"),
-        }
-
-        match &task.worktree_path {
-            Some(wp) => println!("    Worktree Path: {}", wp),
-            None => println!("    Worktree Path: <not set>"),
-        }
-
-        if !task.dependencies.is_empty() {
-            println!("  Dependencies:");
-            for dep in &task.dependencies {
-                println!("    - {}", dep);
-            }
-        }
-    }
-
-    Ok(())
+#[derive(Debug, serde::Serialize)]
+pub struct TaskOutput {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub priority: String,
+    pub goal_id: Option<String>,
+    pub agent_type: Option<String>,
+    pub depends_on: Vec<String>,
+    pub retry_count: u32,
 }
 
-/// Handle task update command
-pub async fn handle_update(
-    service: &TaskQueueServiceAdapter,
-    task_id_prefixes: Vec<String>,
-    status: Option<String>,
-    priority: Option<u8>,
-    agent_type: Option<String>,
-    add_dependency: Vec<String>,
-    remove_dependency: Vec<String>,
-    retry: bool,
-    cancel: bool,
-    json: bool,
-) -> Result<()> {
-    // Validate that at least one update operation is specified
-    if status.is_none()
-        && priority.is_none()
-        && agent_type.is_none()
-        && add_dependency.is_empty()
-        && remove_dependency.is_empty()
-        && !retry
-        && !cancel
-    {
-        return Err(anyhow::anyhow!(
-            "At least one update operation must be specified (--status, --priority, --agent-type, --add-dependency, --remove-dependency, --retry, or --cancel)"
+impl From<&Task> for TaskOutput {
+    fn from(task: &Task) -> Self {
+        Self {
+            id: task.id.to_string(),
+            title: task.title.clone(),
+            status: task.status.as_str().to_string(),
+            priority: task.priority.as_str().to_string(),
+            goal_id: task.goal_id.map(|id| id.to_string()),
+            agent_type: task.agent_type.clone(),
+            depends_on: task.depends_on.iter().map(|id| id.to_string()).collect(),
+            retry_count: task.retry_count,
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct TaskListOutput {
+    pub tasks: Vec<TaskOutput>,
+    pub total: usize,
+}
+
+impl CommandOutput for TaskListOutput {
+    fn to_human(&self) -> String {
+        if self.tasks.is_empty() {
+            return "No tasks found.".to_string();
+        }
+
+        let mut lines = vec![format!("Found {} task(s):\n", self.total)];
+        lines.push(format!(
+            "{:<12} {:<25} {:<10} {:<10} {:<12}",
+            "ID", "TITLE", "STATUS", "PRIORITY", "AGENT"
         ));
+        lines.push("-".repeat(70));
+
+        for task in &self.tasks {
+            lines.push(format!(
+                "{:<12} {:<25} {:<10} {:<10} {:<12}",
+                &task.id[..8],
+                truncate(&task.title, 23),
+                task.status,
+                task.priority,
+                task.agent_type.as_deref().unwrap_or("-")
+            ));
+        }
+
+        lines.join("\n")
     }
 
-    // Resolve all task ID prefixes
-    let mut task_ids = Vec::new();
-    for prefix in &task_id_prefixes {
-        let task_id = service
-            .resolve_task_id_prefix(prefix)
-            .await
-            .context(format!("Failed to resolve task ID '{}'", prefix))?;
-        task_ids.push(task_id);
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct TaskDetailOutput {
+    pub task: TaskOutput,
+    pub description: String,
+    pub context_input: String,
+    pub worktree_path: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+impl CommandOutput for TaskDetailOutput {
+    fn to_human(&self) -> String {
+        let mut lines = vec![
+            format!("Task: {}", self.task.title),
+            format!("ID: {}", self.task.id),
+            format!("Status: {}", self.task.status),
+            format!("Priority: {}", self.task.priority),
+        ];
+
+        if let Some(goal) = &self.task.goal_id {
+            lines.push(format!("Goal: {}", goal));
+        }
+        if let Some(agent) = &self.task.agent_type {
+            lines.push(format!("Agent: {}", agent));
+        }
+
+        lines.push(format!("Description: {}", self.description));
+
+        if !self.context_input.is_empty() {
+            lines.push(format!("Input: {}", truncate(&self.context_input, 100)));
+        }
+
+        if !self.task.depends_on.is_empty() {
+            lines.push(format!("\nDependencies ({}):", self.task.depends_on.len()));
+            for dep in &self.task.depends_on {
+                lines.push(format!("  - {}", &dep[..8]));
+            }
+        }
+
+        if let Some(path) = &self.worktree_path {
+            lines.push(format!("Worktree: {}", path));
+        }
+
+        lines.push(format!("\nCreated: {}", self.created_at));
+        if let Some(started) = &self.started_at {
+            lines.push(format!("Started: {}", started));
+        }
+        if let Some(completed) = &self.completed_at {
+            lines.push(format!("Completed: {}", completed));
+        }
+        lines.push(format!("Retries: {}", self.task.retry_count));
+
+        lines.join("\n")
     }
 
-    // Resolve dependency prefixes
-    let mut resolved_add_deps = Vec::new();
-    for dep_prefix in &add_dependency {
-        let dep_id = service
-            .resolve_task_id_prefix(dep_prefix)
-            .await
-            .context(format!("Failed to resolve add-dependency '{}'", dep_prefix))?;
-        resolved_add_deps.push(dep_id);
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct TaskActionOutput {
+    pub success: bool,
+    pub message: String,
+    pub task: Option<TaskOutput>,
+}
+
+impl CommandOutput for TaskActionOutput {
+    fn to_human(&self) -> String {
+        self.message.clone()
     }
 
-    let mut resolved_remove_deps = Vec::new();
-    for dep_prefix in &remove_dependency {
-        let dep_id = service
-            .resolve_task_id_prefix(dep_prefix)
-            .await
-            .context(format!("Failed to resolve remove-dependency '{}'", dep_prefix))?;
-        resolved_remove_deps.push(dep_id);
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct TaskStatusOutput {
+    pub pending: u64,
+    pub ready: u64,
+    pub blocked: u64,
+    pub running: u64,
+    pub complete: u64,
+    pub failed: u64,
+    pub canceled: u64,
+    pub total: u64,
+}
+
+impl CommandOutput for TaskStatusOutput {
+    fn to_human(&self) -> String {
+        let mut lines = vec!["Task Status Summary:".to_string()];
+        lines.push(format!("  Pending:   {}", self.pending));
+        lines.push(format!("  Ready:     {}", self.ready));
+        lines.push(format!("  Running:   {}", self.running));
+        lines.push(format!("  Blocked:   {}", self.blocked));
+        lines.push(format!("  Complete:  {}", self.complete));
+        lines.push(format!("  Failed:    {}", self.failed));
+        lines.push(format!("  Canceled:  {}", self.canceled));
+        lines.push("  -----------".to_string());
+        lines.push(format!("  Total:     {}", self.total));
+        lines.join("\n")
     }
 
-    let mut results = Vec::new();
-    let mut errors = Vec::new();
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+}
 
-    // Update each task
-    for task_id in &task_ids {
-        let result = service
-            .update_task(
-                *task_id,
-                status.as_deref(),
+pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
+    let pool = initialize_database("sqlite:.abathur/abathur.db")
+        .await
+        .context("Failed to initialize database. Run 'abathur init' first.")?;
+
+    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+    let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
+    let service = TaskService::new(task_repo, goal_repo);
+
+    match args.command {
+        TaskCommands::Submit {
+            title,
+            description,
+            priority,
+            goal,
+            parent,
+            agent,
+            depends_on,
+            input,
+            idempotency_key,
+        } => {
+            let priority = TaskPriority::from_str(&priority)
+                .ok_or_else(|| anyhow::anyhow!("Invalid priority: {}", priority))?;
+
+            let goal_id = goal
+                .map(|g| Uuid::parse_str(&g))
+                .transpose()
+                .context("Invalid goal ID")?;
+
+            let parent_id = parent
+                .map(|p| Uuid::parse_str(&p))
+                .transpose()
+                .context("Invalid parent ID")?;
+
+            let deps: Vec<Uuid> = depends_on
+                .iter()
+                .map(|d| Uuid::parse_str(d))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("Invalid dependency ID")?;
+
+            let context = input.map(|i| TaskContext {
+                input: i,
+                ..Default::default()
+            });
+
+            let task = service.submit_task(
+                title,
+                description.unwrap_or_default(),
+                goal_id,
+                parent_id,
                 priority,
-                agent_type.clone(),
-                resolved_add_deps.clone(),
-                resolved_remove_deps.clone(),
-                retry,
-                cancel,
-            )
-            .await;
+                agent,
+                deps,
+                context,
+                idempotency_key,
+            ).await?;
 
-        match result {
-            Ok(()) => results.push(*task_id),
-            Err(e) => errors.push((*task_id, e)),
-        }
-    }
-
-    if json {
-        let output = serde_json::json!({
-            "successful": results,
-            "failed": errors.iter().map(|(id, e)| {
-                serde_json::json!({
-                    "task_id": id,
-                    "error": e.to_string()
-                })
-            }).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        if !results.is_empty() {
-            println!("Successfully updated {} task(s):", results.len());
-            for task_id in results {
-                println!("  - {}", task_id);
-            }
+            let out = TaskActionOutput {
+                success: true,
+                message: format!("Task submitted: {} (status: {})", task.id, task.status.as_str()),
+                task: Some(TaskOutput::from(&task)),
+            };
+            output(&out, json_mode);
         }
 
-        if !errors.is_empty() {
-            println!("\nFailed to update {} task(s):", errors.len());
-            for (task_id, error) in errors {
-                println!("  - {}: {}", task_id, error);
-            }
+        TaskCommands::List { status, priority, goal, agent, ready, limit } => {
+            let tasks = if ready {
+                service.get_ready_tasks(limit).await?
+            } else {
+                let filter = TaskFilter {
+                    status: status.as_ref().and_then(|s| TaskStatus::from_str(s)),
+                    priority: priority.as_ref().and_then(|p| TaskPriority::from_str(p)),
+                    goal_id: goal.as_ref().and_then(|g| Uuid::parse_str(g).ok()),
+                    agent_type: agent,
+                    parent_id: None,
+                };
+                service.list_tasks(filter).await?
+            };
+
+            let out = TaskListOutput {
+                total: tasks.len(),
+                tasks: tasks.iter().map(TaskOutput::from).collect(),
+            };
+            output(&out, json_mode);
+        }
+
+        TaskCommands::Show { id } => {
+            let uuid = Uuid::parse_str(&id).context("Invalid task ID")?;
+            let task = service.get_task(uuid).await?
+                .ok_or_else(|| anyhow::anyhow!("Task not found: {}", id))?;
+
+            let out = TaskDetailOutput {
+                task: TaskOutput::from(&task),
+                description: task.description.clone(),
+                context_input: task.context.input.clone(),
+                worktree_path: task.worktree_path.clone(),
+                created_at: task.created_at.to_rfc3339(),
+                started_at: task.started_at.map(|t| t.to_rfc3339()),
+                completed_at: task.completed_at.map(|t| t.to_rfc3339()),
+            };
+            output(&out, json_mode);
+        }
+
+        TaskCommands::Cancel { id } => {
+            let uuid = Uuid::parse_str(&id).context("Invalid task ID")?;
+            let task = service.cancel_task(uuid).await?;
+
+            let out = TaskActionOutput {
+                success: true,
+                message: format!("Task canceled: {}", task.id),
+                task: Some(TaskOutput::from(&task)),
+            };
+            output(&out, json_mode);
+        }
+
+        TaskCommands::Retry { id } => {
+            let uuid = Uuid::parse_str(&id).context("Invalid task ID")?;
+            let task = service.retry_task(uuid).await?;
+
+            let out = TaskActionOutput {
+                success: true,
+                message: format!("Task retried: {} (retry #{})", task.id, task.retry_count),
+                task: Some(TaskOutput::from(&task)),
+            };
+            output(&out, json_mode);
+        }
+
+        TaskCommands::Status => {
+            let counts = service.get_status_counts().await?;
+
+            let pending = *counts.get(&TaskStatus::Pending).unwrap_or(&0);
+            let ready = *counts.get(&TaskStatus::Ready).unwrap_or(&0);
+            let blocked = *counts.get(&TaskStatus::Blocked).unwrap_or(&0);
+            let running = *counts.get(&TaskStatus::Running).unwrap_or(&0);
+            let complete = *counts.get(&TaskStatus::Complete).unwrap_or(&0);
+            let failed = *counts.get(&TaskStatus::Failed).unwrap_or(&0);
+            let canceled = *counts.get(&TaskStatus::Canceled).unwrap_or(&0);
+
+            let out = TaskStatusOutput {
+                pending,
+                ready,
+                blocked,
+                running,
+                complete,
+                failed,
+                canceled,
+                total: pending + ready + blocked + running + complete + failed + canceled,
+            };
+            output(&out, json_mode);
         }
     }
 
     Ok(())
 }
 
-/// Handle task status command
-pub async fn handle_status(service: &TaskQueueServiceAdapter, json: bool) -> Result<()> {
-    let stats = service
-        .get_queue_stats()
-        .await
-        .context("Failed to get queue statistics")?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&stats)?);
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
     } else {
-        println!("Queue Status:");
-        println!("{}", format_queue_stats_table(&stats));
+        format!("{}...", &s[..max_len - 3])
     }
-
-    Ok(())
-}
-
-/// Handle task resolve command
-///
-/// Resolves dependencies for all Pending/Blocked tasks and updates them to Ready
-/// if their dependencies are satisfied.
-pub async fn handle_resolve(service: &TaskQueueServiceAdapter, json: bool) -> Result<()> {
-    let count = service
-        .resolve_dependencies()
-        .await
-        .context("Failed to resolve task dependencies")?;
-
-    if json {
-        let output = serde_json::json!({
-            "status": "success",
-            "tasks_updated": count,
-            "message": format!("{} task(s) updated to Ready status", count)
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("Task Dependency Resolution");
-        println!("=========================");
-        println!("Tasks updated to Ready: {}", count);
-
-        if count > 0 {
-            println!("\nRun 'abathur task list --status ready' to view ready tasks.");
-        } else {
-            println!("\nNo tasks were ready to be updated.");
-            println!("Check 'abathur task list --status pending' or '--status blocked' for pending tasks.");
-        }
-    }
-
-    Ok(())
-}
-
-/// Handle task prune command
-///
-/// Validates and deletes tasks from the queue. Tasks can only be deleted if all their
-/// dependent tasks are in terminal states (completed, failed, or cancelled).
-pub async fn handle_prune(
-    service: &TaskQueueServiceAdapter,
-    task_id_prefixes: Vec<String>,
-    dry_run: bool,
-    json: bool,
-) -> Result<()> {
-    if task_id_prefixes.is_empty() {
-        return Err(anyhow::anyhow!("At least one task ID must be provided"));
-    }
-
-    // Resolve all task ID prefixes to full UUIDs
-    let mut task_ids = Vec::new();
-    for prefix in &task_id_prefixes {
-        let task_id = service
-            .resolve_task_id_prefix(prefix)
-            .await
-            .context(format!("Failed to resolve task ID '{}'", prefix))?;
-        task_ids.push(task_id);
-    }
-
-    // Call the prune service method
-    let result = service
-        .prune_tasks(task_ids.clone(), dry_run)
-        .await
-        .context("Failed to prune tasks")?;
-
-    if json {
-        let output = serde_json::json!({
-            "deleted_count": result.deleted_count,
-            "deleted_ids": result.deleted_ids,
-            "blocked_tasks": result.blocked_tasks.iter().map(|b| {
-                serde_json::json!({
-                    "task_id": b.task_id,
-                    "reason": b.reason,
-                    "non_terminal_dependents": b.non_terminal_dependents,
-                })
-            }).collect::<Vec<_>>(),
-            "dry_run": result.dry_run,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        if dry_run {
-            println!("Task Pruning Validation (Dry Run)");
-            println!("==================================");
-        } else {
-            println!("Task Pruning Results");
-            println!("====================");
-        }
-
-        if result.deleted_count > 0 {
-            println!("\n✓ Deleted {} task(s):", result.deleted_count);
-            for task_id in &result.deleted_ids {
-                println!("  - {}", task_id);
-            }
-        } else if !dry_run {
-            println!("\nNo tasks were deleted.");
-        }
-
-        if !result.blocked_tasks.is_empty() {
-            println!("\n✗ {} task(s) blocked from deletion:", result.blocked_tasks.len());
-            for blocked in &result.blocked_tasks {
-                println!("  - {} ({})", blocked.task_id, blocked.reason);
-                if !blocked.non_terminal_dependents.is_empty() {
-                    println!("    Non-terminal dependents:");
-                    for dep_id in &blocked.non_terminal_dependents {
-                        println!("      - {}", dep_id);
-                    }
-                }
-            }
-        }
-
-        if dry_run && result.blocked_tasks.is_empty() {
-            println!("\n✓ All tasks can be safely deleted.");
-            println!("Run without --dry-run to perform actual deletion.");
-        }
-    }
-
-    Ok(())
 }

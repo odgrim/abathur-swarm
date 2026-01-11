@@ -1,726 +1,409 @@
-use crate::domain::models::{Citation, Memory, MemoryType, SearchResult};
-use crate::domain::ports::{ChunkingService, EmbeddingRepository, MemoryRepository};
-use anyhow::{Context, Result, anyhow};
-use chrono::Utc;
-use serde_json::Value;
+//! Memory service implementing business logic with decay management.
+
 use std::sync::Arc;
-use tracing::{error, info, instrument};
 use uuid::Uuid;
 
-/// Service for managing memory operations
-///
-/// Coordinates memory CRUD operations with the repository layer, providing
-/// business logic for versioning, soft deletes, namespace management, and
-/// optional vector search capabilities.
-///
-/// # Examples
-///
-/// ```no_run
-/// use abathur::services::MemoryService;
-/// use abathur::domain::models::{Memory, MemoryType};
-/// use std::sync::Arc;
-/// use serde_json::json;
-///
-/// # async fn example(repo: Arc<dyn abathur::domain::ports::MemoryRepository>) -> anyhow::Result<()> {
-/// let service = MemoryService::new(repo, None, None);
-///
-/// // Add a new memory
-/// let memory = Memory::new(
-///     "user:alice".to_string(),
-///     "preferences".to_string(),
-///     json!({"theme": "dark"}),
-///     MemoryType::Semantic,
-///     "alice".to_string(),
-/// );
-/// service.add(memory).await?;
-///
-/// // Get the latest version
-/// let retrieved = service.get("user:alice", "preferences").await?;
-/// # Ok(())
-/// # }
-/// ```
-pub struct MemoryService {
-    repo: Arc<dyn MemoryRepository>,
-    vector_store: Option<Arc<dyn EmbeddingRepository>>,
-    chunker: Option<Arc<dyn ChunkingService>>,
+use crate::domain::errors::{DomainError, DomainResult};
+use crate::domain::models::{Memory, MemoryMetadata, MemoryQuery, MemoryTier, MemoryType};
+use crate::domain::ports::MemoryRepository;
+
+/// Configuration for memory decay thresholds.
+#[derive(Debug, Clone)]
+pub struct DecayConfig {
+    /// Decay threshold below which working memories are pruned
+    pub working_prune_threshold: f32,
+    /// Decay threshold below which episodic memories are pruned
+    pub episodic_prune_threshold: f32,
+    /// Access count threshold for promotion to episodic
+    pub promote_to_episodic_threshold: u32,
+    /// Access count threshold for promotion to semantic
+    pub promote_to_semantic_threshold: u32,
 }
 
-impl MemoryService {
-    /// Create a new `MemoryService` with the given repository and optional vector capabilities
-    ///
-    /// # Arguments
-    /// * `repo` - Arc-wrapped trait object implementing `MemoryRepository`
-    /// * `vector_store` - Optional vector storage for semantic search
-    /// * `chunker` - Optional text chunking service
-    ///
-    /// Vector search features are only available if both `vector_store` and `chunker` are provided.
-    pub fn new(
-        repo: Arc<dyn MemoryRepository>,
-        vector_store: Option<Arc<dyn EmbeddingRepository>>,
-        chunker: Option<Arc<dyn ChunkingService>>,
-    ) -> Self {
-        if vector_store.is_some() && chunker.is_some() {
-            info!("MemoryService initialized with vector search capabilities");
-        } else {
-            info!("MemoryService initialized without vector search (graceful degradation)");
-        }
+impl Default for DecayConfig {
+    fn default() -> Self {
         Self {
-            repo,
-            vector_store,
-            chunker,
+            working_prune_threshold: 0.1,
+            episodic_prune_threshold: 0.05,
+            promote_to_episodic_threshold: 5,
+            promote_to_semantic_threshold: 20,
+        }
+    }
+}
+
+pub struct MemoryService<R: MemoryRepository> {
+    repository: Arc<R>,
+    decay_config: DecayConfig,
+}
+
+impl<R: MemoryRepository> MemoryService<R> {
+    pub fn new(repository: Arc<R>) -> Self {
+        Self {
+            repository,
+            decay_config: DecayConfig::default(),
         }
     }
 
-    /// Add a new memory entry
-    ///
-    /// Validates the memory and inserts it into the repository. The memory
-    /// will be assigned version 1 automatically. If vector search capabilities
-    /// are enabled, the memory will also be indexed for semantic search.
-    ///
-    /// # Arguments
-    /// * `memory` - The memory entry to add
-    ///
-    /// # Returns
-    /// * `Ok(i64)` - The database ID of the inserted memory
-    /// * `Err(_)` - If validation or insertion fails
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - Memory already exists (namespace + key combination)
-    /// - Repository insert operation fails
-    ///
-    /// # Note
-    /// Vector indexing errors are logged but don't fail the operation.
-    /// Traditional memory storage always succeeds even if vector indexing fails.
-    #[instrument(skip(self, memory), fields(namespace = %memory.namespace, key = %memory.key), err)]
-    pub async fn add(&self, memory: Memory) -> Result<i64> {
-        // Validate memory doesn't already exist
-        if let Some(existing) = self
-            .repo
-            .get(&memory.namespace, &memory.key)
-            .await
-            .context("Failed to check for existing memory")?
-            && existing.is_active()
-        {
-            return Err(anyhow!(
-                "Memory already exists at {}:{}. Use update() to modify it.",
-                memory.namespace,
-                memory.key
-            ));
+    pub fn with_decay_config(mut self, config: DecayConfig) -> Self {
+        self.decay_config = config;
+        self
+    }
+
+    /// Store a new memory.
+    pub async fn store(
+        &self,
+        key: String,
+        content: String,
+        namespace: String,
+        tier: MemoryTier,
+        memory_type: MemoryType,
+        metadata: Option<MemoryMetadata>,
+    ) -> DomainResult<Memory> {
+        let mut memory = match tier {
+            MemoryTier::Working => Memory::working(key, content),
+            MemoryTier::Episodic => Memory::episodic(key, content),
+            MemoryTier::Semantic => Memory::semantic(key, content),
+        };
+
+        memory = memory.with_namespace(namespace).with_type(memory_type);
+
+        if let Some(meta) = metadata {
+            memory.metadata = meta;
         }
 
-        let namespace = memory.namespace.clone();
-        let key = memory.key.clone();
-        let value = memory.value.clone();
-        let created_by = memory.created_by.clone();
+        memory.validate().map_err(DomainError::ValidationFailed)?;
+        self.repository.store(&memory).await?;
 
-        // 1. Insert into traditional memory
-        let id = self
-            .repo
-            .insert(memory)
-            .await
-            .context("Failed to insert memory")?;
+        Ok(memory)
+    }
 
-        info!("Memory added successfully with ID: {}", id);
+    /// Store a working memory (convenience method).
+    pub async fn remember(
+        &self,
+        key: String,
+        content: String,
+        namespace: &str,
+    ) -> DomainResult<Memory> {
+        self.store(
+            key,
+            content,
+            namespace.to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await
+    }
 
-        // 2. ALSO index in vector storage for semantic search (graceful degradation)
-        if let (Some(vector_store), Some(chunker)) = (&self.vector_store, &self.chunker) {
-            // Extract text content from the JSON value
-            let text_content = match &value {
-                Value::String(s) => s.clone(),
-                other => serde_json::to_string_pretty(other)
-                    .unwrap_or_else(|_| other.to_string()),
-            };
+    /// Store a semantic memory (long-term).
+    pub async fn learn(
+        &self,
+        key: String,
+        content: String,
+        namespace: &str,
+    ) -> DomainResult<Memory> {
+        self.store(
+            key,
+            content,
+            namespace.to_string(),
+            MemoryTier::Semantic,
+            MemoryType::Pattern,
+            None,
+        ).await
+    }
 
-            // Create citation with namespace:key for traceability
-            let citation = Citation {
-                source: format!("memory:{}:{} (created by {})", namespace, key, created_by),
-                page: None,
-                url: None,
-                timestamp: Utc::now(),
-            };
+    /// Get a memory by ID and record the access.
+    pub async fn recall(&self, id: Uuid) -> DomainResult<Option<Memory>> {
+        let memory = self.repository.get(id).await?;
 
-            // Generate a parent document ID for chunking
-            let parent_id = Uuid::new_v4().to_string();
+        if let Some(mut mem) = memory {
+            mem.record_access();
+            self.repository.update(&mem).await?;
 
-            // Chunk and index (errors don't fail the overall operation)
-            match chunker.chunk(&text_content, &parent_id).await {
-                Ok(chunks) if !chunks.is_empty() => {
-                    // Insert all chunks with embeddings
-                    for chunk in chunks {
-                        let chunk_metadata = serde_json::json!({
-                            "parent_id": parent_id,
-                            "chunk_index": chunk.chunk_index,
-                            "token_count": chunk.token_count,
-                        });
+            // Check if should be promoted
+            self.check_promotion(&mut mem).await?;
 
-                        match vector_store
-                            .insert(
-                                &chunk.id,
-                                &namespace,
-                                &chunk.content,
-                                Some(chunk_metadata),
-                                Some(citation.clone()),
-                            )
-                            .await
-                        {
-                            Ok(_) => {}
-                            Err(e) => {
-                                error!("Failed to insert chunk to vector storage: {}", e);
-                            }
-                        }
-                    }
-                    info!(
-                        "Memory also indexed for semantic search: namespace={}, chunks={}",
-                        namespace,
-                        parent_id
-                    );
-                }
-                Ok(_) => {
-                    // Empty chunks, skip vector storage
-                }
-                Err(e) => {
-                    // Log but don't fail - traditional memory still works
-                    error!("Failed to chunk memory for vector storage: {}", e);
-                }
+            Ok(Some(mem))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get a memory by key and namespace.
+    pub async fn recall_by_key(&self, key: &str, namespace: &str) -> DomainResult<Option<Memory>> {
+        let memory = self.repository.get_by_key(key, namespace).await?;
+
+        if let Some(mut mem) = memory {
+            mem.record_access();
+            self.repository.update(&mem).await?;
+            self.check_promotion(&mut mem).await?;
+            Ok(Some(mem))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Query memories without recording access.
+    pub async fn query(&self, query: MemoryQuery) -> DomainResult<Vec<Memory>> {
+        self.repository.query(query).await
+    }
+
+    /// Full-text search in memories.
+    pub async fn search(
+        &self,
+        query: &str,
+        namespace: Option<&str>,
+        limit: usize,
+    ) -> DomainResult<Vec<Memory>> {
+        self.repository.search(query, namespace, limit).await
+    }
+
+    /// Get memories for a specific task.
+    pub async fn get_task_context(&self, task_id: Uuid) -> DomainResult<Vec<Memory>> {
+        self.repository.get_for_task(task_id).await
+    }
+
+    /// Get memories for a specific goal.
+    pub async fn get_goal_context(&self, goal_id: Uuid) -> DomainResult<Vec<Memory>> {
+        self.repository.get_for_goal(goal_id).await
+    }
+
+    /// Delete a memory.
+    pub async fn forget(&self, id: Uuid) -> DomainResult<()> {
+        self.repository.delete(id).await
+    }
+
+    /// Prune expired memories.
+    pub async fn prune_expired(&self) -> DomainResult<u64> {
+        self.repository.prune_expired().await
+    }
+
+    /// Prune decayed memories (below threshold).
+    pub async fn prune_decayed(&self) -> DomainResult<u64> {
+        let mut count = 0;
+
+        // Prune working memories
+        let decayed = self.repository.get_decayed(self.decay_config.working_prune_threshold).await?;
+        for mem in decayed {
+            if mem.tier == MemoryTier::Working {
+                self.repository.delete(mem.id).await?;
+                count += 1;
             }
         }
 
-        Ok(id)
-    }
-
-    /// Get the latest version of a memory
-    ///
-    /// Retrieves the most recent version of a memory entry by namespace and key.
-    /// Returns None if the memory doesn't exist or has been soft deleted.
-    ///
-    /// # Arguments
-    /// * `namespace` - The hierarchical namespace
-    /// * `key` - The key within the namespace
-    ///
-    /// # Returns
-    /// * `Ok(Some(Memory))` - The latest version if found and active
-    /// * `Ok(None)` - If not found or deleted
-    /// * `Err(_)` - If query fails
-    #[instrument(skip(self), err)]
-    pub async fn get(&self, namespace: &str, key: &str) -> Result<Option<Memory>> {
-        self.repo
-            .get(namespace, key)
-            .await
-            .context("Failed to retrieve memory")
-    }
-
-
-    /// Search memories by namespace prefix and optional type
-    ///
-    /// Returns the latest version of each memory matching the criteria,
-    /// excluding soft-deleted entries.
-    ///
-    /// # Arguments
-    /// * `namespace_prefix` - Prefix to match (e.g., "user:alice" matches "user:alice:*")
-    /// * `memory_type` - Optional filter by memory type
-    /// * `limit` - Maximum number of results (defaults to 50)
-    ///
-    /// # Returns
-    /// * `Ok(Vec<Memory>)` - List of matching memories
-    /// * `Err(_)` - If query fails
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use abathur::services::MemoryService;
-    /// # use abathur::domain::models::MemoryType;
-    /// # use std::sync::Arc;
-    /// # async fn example(service: &MemoryService) -> anyhow::Result<()> {
-    /// // Search all semantic memories for user alice
-    /// let memories = service.search(
-    ///     "user:alice",
-    ///     Some(MemoryType::Semantic),
-    ///     Some(100)
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[instrument(skip(self), err)]
-    pub async fn search(
-        &self,
-        namespace_prefix: &str,
-        memory_type: Option<MemoryType>,
-        limit: Option<usize>,
-    ) -> Result<Vec<Memory>> {
-        let limit = limit.unwrap_or(50);
-
-        self.repo
-            .search(namespace_prefix, memory_type, limit)
-            .await
-            .context("Failed to search memories")
-    }
-
-    /// Update a memory
-    ///
-    /// Updates the memory with a new value.
-    ///
-    /// # Arguments
-    /// * `namespace` - The hierarchical namespace
-    /// * `key` - The key within the namespace
-    /// * `value` - The new value
-    /// * `updated_by` - Identifier of who is updating
-    ///
-    /// # Returns
-    /// * `Ok(())` - If update succeeds
-    /// * `Err(_)` - If update fails or memory not found
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - Memory doesn't exist
-    /// - Memory has been soft deleted
-    /// - Repository update operation fails
-    #[instrument(skip(self, value), err)]
-    pub async fn update(
-        &self,
-        namespace: &str,
-        key: &str,
-        value: Value,
-        updated_by: &str,
-    ) -> Result<()> {
-        // Verify memory exists and is active
-        let existing = self
-            .repo
-            .get(namespace, key)
-            .await
-            .context("Failed to check existing memory")?
-            .ok_or_else(|| anyhow!("Memory not found at {namespace}:{key}"))?;
-
-        if !existing.is_active() {
-            return Err(anyhow!("Cannot update deleted memory at {namespace}:{key}"));
+        // Prune episodic memories
+        let decayed = self.repository.get_decayed(self.decay_config.episodic_prune_threshold).await?;
+        for mem in decayed {
+            if mem.tier == MemoryTier::Episodic {
+                self.repository.delete(mem.id).await?;
+                count += 1;
+            }
         }
 
-        // Update via repository
-        self.repo
-            .update(namespace, key, value, updated_by)
-            .await
-            .context("Failed to update memory")
+        Ok(count)
     }
 
-    /// Soft delete a memory
-    ///
-    /// Marks the memory as deleted without physically removing it from storage.
-    /// Deleted memories won't appear in `get()` or `search()` results.
-    ///
-    /// # Arguments
-    /// * `namespace` - The hierarchical namespace
-    /// * `key` - The key within the namespace
-    ///
-    /// # Returns
-    /// * `Ok(())` - If successfully deleted
-    /// * `Err(_)` - If deletion fails or memory not found
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - Memory doesn't exist
-    /// - Repository delete operation fails
-    #[instrument(skip(self), err)]
-    pub async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
-        // Verify memory exists
-        self.repo
-            .get(namespace, key)
-            .await
-            .context("Failed to check existing memory")?
-            .ok_or_else(|| anyhow!("Memory not found at {namespace}:{key}"))?;
+    /// Run full maintenance: prune expired and decayed.
+    pub async fn run_maintenance(&self) -> DomainResult<MaintenanceReport> {
+        let expired = self.prune_expired().await?;
+        let decayed = self.prune_decayed().await?;
 
-        // Soft delete
-        self.repo
-            .delete(namespace, key)
-            .await
-            .context("Failed to delete memory")
+        // Check for promotion candidates
+        let promoted = self.check_all_promotions().await?;
+
+        Ok(MaintenanceReport {
+            expired_pruned: expired,
+            decayed_pruned: decayed,
+            promoted,
+        })
     }
 
-    /// Count memories matching criteria
-    ///
-    /// # Arguments
-    /// * `namespace_prefix` - Prefix to match
-    /// * `memory_type` - Optional filter by type
-    ///
-    /// # Returns
-    /// * `Ok(usize)` - Count of matching memories (excluding deleted)
-    /// * `Err(_)` - If query fails
-    #[instrument(skip(self), err)]
-    pub async fn count(
-        &self,
-        namespace_prefix: &str,
-        memory_type: Option<MemoryType>,
-    ) -> Result<usize> {
-        self.repo
-            .count(namespace_prefix, memory_type)
-            .await
-            .context("Failed to count memories")
+    /// Check if a memory should be promoted based on access patterns.
+    async fn check_promotion(&self, memory: &mut Memory) -> DomainResult<bool> {
+        let should_promote = match memory.tier {
+            MemoryTier::Working => {
+                memory.access_count >= self.decay_config.promote_to_episodic_threshold
+            }
+            MemoryTier::Episodic => {
+                memory.access_count >= self.decay_config.promote_to_semantic_threshold
+            }
+            MemoryTier::Semantic => false,
+        };
+
+        if should_promote {
+            memory.promote().map_err(DomainError::ValidationFailed)?;
+            self.repository.update(memory).await?;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
-    /// Semantic search across vector memories using natural language queries
-    ///
-    /// Performs similarity search across all memories that have been indexed
-    /// for vector search. Returns memories ordered by semantic relevance.
-    ///
-    /// # Arguments
-    /// * `query` - Natural language search query
-    /// * `limit` - Maximum number of results to return
-    /// * `namespace_filter` - Optional namespace prefix to filter results
-    ///
-    /// # Returns
-    /// * `Ok(Vec<SearchResult>)` - Ordered by relevance (most relevant first)
-    /// * `Err(_)` - If search fails or vector search not available
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - Vector search capabilities not initialized
-    /// - Search operation fails
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use abathur::services::MemoryService;
-    /// # use std::sync::Arc;
-    /// # async fn example(service: &MemoryService) -> anyhow::Result<()> {
-    /// // Search for authentication-related memories
-    /// let results = service.vector_search(
-    ///     "authentication and authorization implementation",
-    ///     10,
-    ///     Some("docs:")
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[instrument(skip(self), err)]
-    pub async fn vector_search(
-        &self,
-        query: &str,
-        limit: usize,
-        namespace_filter: Option<&str>,
-    ) -> Result<Vec<SearchResult>> {
-        let vector_store = self
-            .vector_store
-            .as_ref()
-            .ok_or_else(|| anyhow!("Vector search not available. Initialize MemoryService with vector_store and chunker."))?;
+    /// Check all non-semantic memories for promotion.
+    async fn check_all_promotions(&self) -> DomainResult<u64> {
+        let mut promoted = 0;
 
-        info!("Performing vector search: query='{}', limit={}", query, limit);
+        // Check working memories
+        let working = self.repository.list_by_tier(MemoryTier::Working).await?;
+        for mut mem in working {
+            if mem.access_count >= self.decay_config.promote_to_episodic_threshold
+                && self.check_promotion(&mut mem).await? {
+                    promoted += 1;
+                }
+        }
 
-        vector_store
-            .search_similar(query, limit, namespace_filter)
-            .await
-            .context("Vector search failed")
+        // Check episodic memories
+        let episodic = self.repository.list_by_tier(MemoryTier::Episodic).await?;
+        for mut mem in episodic {
+            if mem.access_count >= self.decay_config.promote_to_semantic_threshold
+                && self.check_promotion(&mut mem).await? {
+                    promoted += 1;
+                }
+        }
+
+        Ok(promoted)
     }
 
-    /// List all vector memory namespaces with their document counts
-    ///
-    /// Returns a list of namespaces that have memories indexed for vector search,
-    /// along with the count of documents in each namespace.
-    ///
-    /// # Returns
-    /// * `Ok(Vec<(String, usize)>)` - List of (namespace, count) tuples
-    /// * `Err(_)` - If operation fails or vector search not available
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - Vector search capabilities not initialized
-    /// - List operation fails
-    #[instrument(skip(self), err)]
-    pub async fn list_vector_namespaces(&self) -> Result<Vec<(String, usize)>> {
-        let vector_store = self
-            .vector_store
-            .as_ref()
-            .ok_or_else(|| anyhow!("Vector search not available. Initialize MemoryService with vector_store and chunker."))?;
+    /// Get memory statistics.
+    pub async fn get_stats(&self) -> DomainResult<MemoryStats> {
+        let counts = self.repository.count_by_tier().await?;
 
-        vector_store
-            .list_namespaces()
-            .await
-            .context("Failed to list vector namespaces")
+        Ok(MemoryStats {
+            working_count: *counts.get(&MemoryTier::Working).unwrap_or(&0),
+            episodic_count: *counts.get(&MemoryTier::Episodic).unwrap_or(&0),
+            semantic_count: *counts.get(&MemoryTier::Semantic).unwrap_or(&0),
+        })
     }
+}
 
+/// Report from maintenance run.
+#[derive(Debug, Clone)]
+pub struct MaintenanceReport {
+    pub expired_pruned: u64,
+    pub decayed_pruned: u64,
+    pub promoted: u64,
+}
+
+/// Memory statistics.
+#[derive(Debug, Clone)]
+pub struct MemoryStats {
+    pub working_count: u64,
+    pub episodic_count: u64,
+    pub semantic_count: u64,
+}
+
+impl MemoryStats {
+    pub fn total(&self) -> u64 {
+        self.working_count + self.episodic_count + self.semantic_count
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mockall::mock;
-    use mockall::predicate::*;
-    use serde_json::json;
+    use crate::adapters::sqlite::{create_test_pool, SqliteMemoryRepository, Migrator, all_embedded_migrations};
 
-    mock! {
-        MemoryRepo {}
-
-        #[async_trait::async_trait]
-        impl MemoryRepository for MemoryRepo {
-            async fn insert(&self, memory: Memory) -> Result<i64>;
-            async fn get(&self, namespace: &str, key: &str) -> Result<Option<Memory>>;
-            async fn search(
-                &self,
-                namespace_prefix: &str,
-                memory_type: Option<MemoryType>,
-                limit: usize,
-            ) -> Result<Vec<Memory>>;
-            async fn update(
-                &self,
-                namespace: &str,
-                key: &str,
-                value: Value,
-                updated_by: &str,
-            ) -> Result<()>;
-            async fn delete(&self, namespace: &str, key: &str) -> Result<()>;
-            async fn count(
-                &self,
-                namespace_prefix: &str,
-                memory_type: Option<MemoryType>,
-            ) -> Result<usize>;
-        }
-    }
-
-    fn create_test_memory() -> Memory {
-        Memory::new(
-            "test:namespace".to_string(),
-            "key1".to_string(),
-            json!({"data": "value"}),
-            MemoryType::Semantic,
-            "test_user".to_string(),
-        )
+    async fn setup_service() -> MemoryService<SqliteMemoryRepository> {
+        let pool = create_test_pool().await.unwrap();
+        let migrator = Migrator::new(pool.clone());
+        migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
+        let repo = Arc::new(SqliteMemoryRepository::new(pool));
+        MemoryService::new(repo)
     }
 
     #[tokio::test]
-    async fn test_add_new_memory() {
-        let mut mock_repo = MockMemoryRepo::new();
-        let memory = create_test_memory();
+    async fn test_remember_and_recall() {
+        let service = setup_service().await;
 
-        // Expect get to return None (doesn't exist)
-        mock_repo
-            .expect_get()
-            .with(eq("test:namespace"), eq("key1"))
-            .times(1)
-            .returning(|_, _| Ok(None));
+        let memory = service.remember(
+            "test_key".to_string(),
+            "test content".to_string(),
+            "test",
+        ).await.unwrap();
 
-        // Expect insert to succeed
-        mock_repo.expect_insert().times(1).returning(|_| Ok(42));
+        assert_eq!(memory.tier, MemoryTier::Working);
 
-        let service = MemoryService::new(Arc::new(mock_repo), None, None);
-        let result = service.add(memory).await;
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 42);
+        let recalled = service.recall(memory.id).await.unwrap().unwrap();
+        assert_eq!(recalled.access_count, 1);
     }
 
     #[tokio::test]
-    async fn test_add_existing_memory_fails() {
-        let mut mock_repo = MockMemoryRepo::new();
-        let memory = create_test_memory();
-        let existing = create_test_memory();
+    async fn test_learn_semantic() {
+        let service = setup_service().await;
 
-        // Expect get to return existing memory
-        mock_repo
-            .expect_get()
-            .with(eq("test:namespace"), eq("key1"))
-            .times(1)
-            .returning(move |_, _| Ok(Some(existing.clone())));
+        let memory = service.learn(
+            "pattern_key".to_string(),
+            "learned pattern".to_string(),
+            "patterns",
+        ).await.unwrap();
 
-        let service = MemoryService::new(Arc::new(mock_repo), None, None);
-        let result = service.add(memory).await;
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already exists"));
+        assert_eq!(memory.tier, MemoryTier::Semantic);
+        assert!(memory.expires_at.is_none());
     }
 
     #[tokio::test]
-    async fn test_get_memory() {
-        let mut mock_repo = MockMemoryRepo::new();
-        let expected = create_test_memory();
+    async fn test_recall_by_key() {
+        let service = setup_service().await;
 
-        mock_repo
-            .expect_get()
-            .with(eq("test:namespace"), eq("key1"))
-            .times(1)
-            .returning(move |_, _| Ok(Some(expected.clone())));
+        service.remember(
+            "lookup".to_string(),
+            "value to find".to_string(),
+            "test",
+        ).await.unwrap();
 
-        let service = MemoryService::new(Arc::new(mock_repo), None, None);
-        let result = service.get("test:namespace", "key1").await;
-
-        assert!(result.is_ok());
-        let memory = result.unwrap();
-        assert!(memory.is_some());
-        assert_eq!(memory.unwrap().namespace, "test:namespace");
+        let found = service.recall_by_key("lookup", "test").await.unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().content, "value to find");
     }
 
     #[tokio::test]
-    async fn test_get_nonexistent_memory() {
-        let mut mock_repo = MockMemoryRepo::new();
+    async fn test_stats() {
+        let service = setup_service().await;
 
-        mock_repo
-            .expect_get()
-            .with(eq("test:namespace"), eq("key1"))
-            .times(1)
-            .returning(|_, _| Ok(None));
+        service.remember("w1".to_string(), "content".to_string(), "test").await.unwrap();
+        service.remember("w2".to_string(), "content".to_string(), "test").await.unwrap();
+        service.learn("s1".to_string(), "content".to_string(), "test").await.unwrap();
 
-        let service = MemoryService::new(Arc::new(mock_repo), None, None);
-        let result = service.get("test:namespace", "key1").await;
-
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+        let stats = service.get_stats().await.unwrap();
+        assert_eq!(stats.working_count, 2);
+        assert_eq!(stats.semantic_count, 1);
+        assert_eq!(stats.total(), 3);
     }
 
     #[tokio::test]
-    async fn test_search_memories() {
-        let mut mock_repo = MockMemoryRepo::new();
-        let memory1 = create_test_memory();
-        let memory2 = Memory::new(
-            "test:namespace".to_string(),
-            "key2".to_string(),
-            json!({"data": "value2"}),
-            MemoryType::Semantic,
-            "test_user".to_string(),
-        );
+    async fn test_promotion_on_access() {
+        let service = setup_service().await
+            .with_decay_config(DecayConfig {
+                promote_to_episodic_threshold: 3,
+                ..Default::default()
+            });
 
-        mock_repo
-            .expect_search()
-            .with(eq("test:namespace"), eq(Some(MemoryType::Semantic)), eq(50))
-            .times(1)
-            .returning(move |_, _, _| Ok(vec![memory1.clone(), memory2.clone()]));
+        let memory = service.remember(
+            "promote_me".to_string(),
+            "content".to_string(),
+            "test",
+        ).await.unwrap();
 
-        let service = MemoryService::new(Arc::new(mock_repo), None, None);
-        let result = service
-            .search("test:namespace", Some(MemoryType::Semantic), None)
-            .await;
+        // Access multiple times to trigger promotion
+        service.recall(memory.id).await.unwrap();
+        service.recall(memory.id).await.unwrap();
+        let promoted = service.recall(memory.id).await.unwrap().unwrap();
 
-        assert!(result.is_ok());
-        let memories = result.unwrap();
-        assert_eq!(memories.len(), 2);
+        assert_eq!(promoted.tier, MemoryTier::Episodic);
     }
 
     #[tokio::test]
-    async fn test_update_memory() {
-        let mut mock_repo = MockMemoryRepo::new();
-        let existing = create_test_memory();
-        let new_value = json!({"data": "updated"});
+    async fn test_forget() {
+        let service = setup_service().await;
 
-        // Expect get to return existing memory
-        mock_repo
-            .expect_get()
-            .with(eq("test:namespace"), eq("key1"))
-            .times(1)
-            .returning(move |_, _| Ok(Some(existing.clone())));
+        let memory = service.remember(
+            "forget_me".to_string(),
+            "content".to_string(),
+            "test",
+        ).await.unwrap();
 
-        // Expect update to succeed
-        mock_repo
-            .expect_update()
-            .with(
-                eq("test:namespace"),
-                eq("key1"),
-                eq(new_value.clone()),
-                eq("updater"),
-            )
-            .times(1)
-            .returning(|_, _, _, _| Ok(()));
+        service.forget(memory.id).await.unwrap();
 
-        let service = MemoryService::new(Arc::new(mock_repo), None, None);
-        let result = service
-            .update("test:namespace", "key1", new_value, "updater")
-            .await;
-
-        assert!(result.is_ok());
+        let recalled = service.recall(memory.id).await.unwrap();
+        assert!(recalled.is_none());
     }
-
-    #[tokio::test]
-    async fn test_update_nonexistent_memory_fails() {
-        let mut mock_repo = MockMemoryRepo::new();
-
-        mock_repo
-            .expect_get()
-            .with(eq("test:namespace"), eq("key1"))
-            .times(1)
-            .returning(|_, _| Ok(None));
-
-        let service = MemoryService::new(Arc::new(mock_repo), None, None);
-        let result = service
-            .update("test:namespace", "key1", json!({}), "updater")
-            .await;
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
-    }
-
-    #[tokio::test]
-    async fn test_update_deleted_memory_fails() {
-        let mut mock_repo = MockMemoryRepo::new();
-        let mut deleted = create_test_memory();
-        deleted.mark_deleted();
-
-        mock_repo
-            .expect_get()
-            .with(eq("test:namespace"), eq("key1"))
-            .times(1)
-            .returning(move |_, _| Ok(Some(deleted.clone())));
-
-        let service = MemoryService::new(Arc::new(mock_repo), None, None);
-        let result = service
-            .update("test:namespace", "key1", json!({}), "updater")
-            .await;
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("deleted"));
-    }
-
-    #[tokio::test]
-    async fn test_delete_memory() {
-        let mut mock_repo = MockMemoryRepo::new();
-        let existing = create_test_memory();
-
-        mock_repo
-            .expect_get()
-            .with(eq("test:namespace"), eq("key1"))
-            .times(1)
-            .returning(move |_, _| Ok(Some(existing.clone())));
-
-        mock_repo
-            .expect_delete()
-            .with(eq("test:namespace"), eq("key1"))
-            .times(1)
-            .returning(|_, _| Ok(()));
-
-        let service = MemoryService::new(Arc::new(mock_repo), None, None);
-        let result = service.delete("test:namespace", "key1").await;
-
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_delete_nonexistent_memory_fails() {
-        let mut mock_repo = MockMemoryRepo::new();
-
-        mock_repo
-            .expect_get()
-            .with(eq("test:namespace"), eq("key1"))
-            .times(1)
-            .returning(|_, _| Ok(None));
-
-        let service = MemoryService::new(Arc::new(mock_repo), None, None);
-        let result = service.delete("test:namespace", "key1").await;
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
-    }
-
-    #[tokio::test]
-    async fn test_count_memories() {
-        let mut mock_repo = MockMemoryRepo::new();
-
-        mock_repo
-            .expect_count()
-            .with(eq("test:namespace"), eq(Some(MemoryType::Semantic)))
-            .times(1)
-            .returning(|_, _| Ok(5));
-
-        let service = MemoryService::new(Arc::new(mock_repo), None, None);
-        let result = service
-            .count("test:namespace", Some(MemoryType::Semantic))
-            .await;
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 5);
-    }
-
 }

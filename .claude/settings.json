@@ -1,11 +1,43 @@
 {
-  "enableAllProjectMcpServers": true,
+  "mcpServers": {
+    "abathur-memory": {
+      "command": "abathur",
+      "args": [
+        "mcp",
+        "memory-http",
+        "--port",
+        "3100"
+      ],
+      "env": {}
+    },
+    "abathur-tasks": {
+      "command": "abathur",
+      "args": [
+        "mcp",
+        "tasks-http",
+        "--port",
+        "3101"
+      ],
+      "env": {}
+    }
+  },
   "permissions": {
-    "allow": [
-      "mcp__abathur-memory__*",
-      "mcp__abathur-task-queue__*",
-      "WebFetch",
-      "WebSearch"
+    "allowedTools": [
+      "read",
+      "write",
+      "edit",
+      "shell",
+      "glob",
+      "grep",
+      "memory_query",
+      "memory_search",
+      "memory_store",
+      "memory_get",
+      "task_submit",
+      "task_list",
+      "task_get",
+      "task_update_status",
+      "goals_list"
     ]
   }
 }
