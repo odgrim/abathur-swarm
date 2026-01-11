@@ -1,0 +1,739 @@
+//! Evolution Loop service for agent template refinement.
+//!
+//! Implements the evolution paradigm from the design docs:
+//! 1. Execute: Run agents on tasks, track outcomes
+//! 2. Evaluate: Measure effectiveness based on success rate
+//! 3. Evolve: Refine struggling templates, version all changes
+
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use uuid::Uuid;
+
+/// Configuration for the evolution loop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvolutionConfig {
+    /// Minimum tasks before evaluation.
+    pub min_tasks_for_evaluation: usize,
+    /// Success rate threshold for refinement (60%).
+    pub refinement_threshold: f64,
+    /// Success rate threshold for major refinement (40%).
+    pub major_refinement_threshold: f64,
+    /// Tasks required for major refinement evaluation.
+    pub major_refinement_min_tasks: usize,
+    /// Window for detecting regression after version change.
+    pub regression_detection_window_hours: i64,
+    /// Minimum tasks after version change to detect regression.
+    pub regression_min_tasks: usize,
+    /// Threshold for regression detection (success rate drop).
+    pub regression_threshold: f64,
+    /// Whether to automatically revert on regression.
+    pub auto_revert_enabled: bool,
+}
+
+impl Default for EvolutionConfig {
+    fn default() -> Self {
+        Self {
+            min_tasks_for_evaluation: 5,
+            refinement_threshold: 0.60,
+            major_refinement_threshold: 0.40,
+            major_refinement_min_tasks: 10,
+            regression_detection_window_hours: 24,
+            regression_min_tasks: 3,
+            regression_threshold: 0.15, // 15% drop
+            auto_revert_enabled: true,
+        }
+    }
+}
+
+/// Outcome of a task execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskOutcome {
+    Success,
+    Failure,
+    GoalViolation,
+}
+
+/// Recorded task execution for tracking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskExecution {
+    pub task_id: Uuid,
+    pub template_name: String,
+    pub template_version: u32,
+    pub outcome: TaskOutcome,
+    pub executed_at: DateTime<Utc>,
+    pub turns_used: u32,
+    pub tokens_used: u64,
+    pub downstream_tasks: Vec<Uuid>,
+}
+
+/// Statistics for an agent template.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateStats {
+    pub template_name: String,
+    pub template_version: u32,
+    pub total_tasks: usize,
+    pub successful_tasks: usize,
+    pub failed_tasks: usize,
+    pub goal_violations: usize,
+    pub success_rate: f64,
+    pub avg_turns: f64,
+    pub avg_tokens: f64,
+    pub first_execution: Option<DateTime<Utc>>,
+    pub last_execution: Option<DateTime<Utc>>,
+}
+
+impl TemplateStats {
+    pub fn new(template_name: String, template_version: u32) -> Self {
+        Self {
+            template_name,
+            template_version,
+            total_tasks: 0,
+            successful_tasks: 0,
+            failed_tasks: 0,
+            goal_violations: 0,
+            success_rate: 0.0,
+            avg_turns: 0.0,
+            avg_tokens: 0.0,
+            first_execution: None,
+            last_execution: None,
+        }
+    }
+
+    fn update(&mut self, execution: &TaskExecution) {
+        self.total_tasks += 1;
+
+        match execution.outcome {
+            TaskOutcome::Success => self.successful_tasks += 1,
+            TaskOutcome::Failure => self.failed_tasks += 1,
+            TaskOutcome::GoalViolation => {
+                self.failed_tasks += 1;
+                self.goal_violations += 1;
+            }
+        }
+
+        self.success_rate = if self.total_tasks > 0 {
+            self.successful_tasks as f64 / self.total_tasks as f64
+        } else {
+            0.0
+        };
+
+        // Update averages
+        let n = self.total_tasks as f64;
+        self.avg_turns = (self.avg_turns * (n - 1.0) + execution.turns_used as f64) / n;
+        self.avg_tokens = (self.avg_tokens * (n - 1.0) + execution.tokens_used as f64) / n;
+
+        if self.first_execution.is_none() {
+            self.first_execution = Some(execution.executed_at);
+        }
+        self.last_execution = Some(execution.executed_at);
+    }
+}
+
+/// Evolution trigger type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EvolutionTrigger {
+    /// Success rate below refinement threshold.
+    LowSuccessRate,
+    /// Success rate below major refinement threshold.
+    VeryLowSuccessRate,
+    /// Goal violations detected.
+    GoalViolations,
+    /// Downstream impact degraded.
+    DownstreamImpact,
+    /// Regression after version change.
+    Regression,
+}
+
+/// Evolution event for audit/logging.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvolutionEvent {
+    pub id: Uuid,
+    pub template_name: String,
+    pub template_version: u32,
+    pub trigger: EvolutionTrigger,
+    pub stats_at_trigger: TemplateStats,
+    pub action_taken: EvolutionAction,
+    pub occurred_at: DateTime<Utc>,
+}
+
+/// Action taken by the evolution loop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EvolutionAction {
+    /// Template flagged for refinement.
+    FlaggedForRefinement { severity: RefinementSeverity },
+    /// Automatic reversion to previous version.
+    Reverted { from_version: u32, to_version: u32 },
+    /// No action taken (informational).
+    NoAction { reason: String },
+}
+
+/// Severity of refinement needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RefinementSeverity {
+    Minor,
+    Major,
+    Immediate,
+}
+
+/// Refinement request for the Meta-Planner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefinementRequest {
+    pub id: Uuid,
+    pub template_name: String,
+    pub template_version: u32,
+    pub severity: RefinementSeverity,
+    pub trigger: EvolutionTrigger,
+    pub stats: TemplateStats,
+    pub failed_task_ids: Vec<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub status: RefinementStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RefinementStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Failed,
+}
+
+impl RefinementRequest {
+    pub fn new(
+        template_name: String,
+        template_version: u32,
+        severity: RefinementSeverity,
+        trigger: EvolutionTrigger,
+        stats: TemplateStats,
+        failed_task_ids: Vec<Uuid>,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            template_name,
+            template_version,
+            severity,
+            trigger,
+            stats,
+            failed_task_ids,
+            created_at: Utc::now(),
+            status: RefinementStatus::Pending,
+        }
+    }
+}
+
+/// In-memory state for the evolution loop.
+struct EvolutionState {
+    /// Task executions by template name.
+    executions: HashMap<String, Vec<TaskExecution>>,
+    /// Computed stats by template name.
+    stats: HashMap<String, TemplateStats>,
+    /// Pending refinement requests.
+    refinement_queue: Vec<RefinementRequest>,
+    /// Evolution events for audit.
+    events: Vec<EvolutionEvent>,
+    /// Previous version stats for regression detection.
+    previous_version_stats: HashMap<String, TemplateStats>,
+    /// Version change timestamps.
+    version_change_times: HashMap<String, (u32, DateTime<Utc>)>,
+}
+
+impl EvolutionState {
+    fn new() -> Self {
+        Self {
+            executions: HashMap::new(),
+            stats: HashMap::new(),
+            refinement_queue: Vec::new(),
+            events: Vec::new(),
+            previous_version_stats: HashMap::new(),
+            version_change_times: HashMap::new(),
+        }
+    }
+}
+
+/// Evolution Loop service.
+pub struct EvolutionLoop {
+    config: EvolutionConfig,
+    state: Arc<RwLock<EvolutionState>>,
+}
+
+impl EvolutionLoop {
+    pub fn new(config: EvolutionConfig) -> Self {
+        Self {
+            config,
+            state: Arc::new(RwLock::new(EvolutionState::new())),
+        }
+    }
+
+    pub fn with_default_config() -> Self {
+        Self::new(EvolutionConfig::default())
+    }
+
+    /// Record a task execution.
+    pub async fn record_execution(&self, execution: TaskExecution) {
+        let mut state = self.state.write().await;
+
+        // Check if we need to handle version change first
+        let needs_version_reset = if let Some(stats) = state.stats.get(&execution.template_name) {
+            stats.template_version != execution.template_version
+        } else {
+            false
+        };
+
+        if needs_version_reset {
+            // Clone previous stats for regression detection
+            if let Some(prev_stats) = state.stats.get(&execution.template_name).cloned() {
+                state.previous_version_stats.insert(
+                    execution.template_name.clone(),
+                    prev_stats,
+                );
+            }
+            state.version_change_times.insert(
+                execution.template_name.clone(),
+                (execution.template_version, Utc::now()),
+            );
+            // Remove old stats so we can insert fresh ones
+            state.stats.remove(&execution.template_name);
+        }
+
+        // Update or create stats
+        let stats = state
+            .stats
+            .entry(execution.template_name.clone())
+            .or_insert_with(|| {
+                TemplateStats::new(
+                    execution.template_name.clone(),
+                    execution.template_version,
+                )
+            });
+
+        stats.update(&execution);
+
+        // Store execution
+        state
+            .executions
+            .entry(execution.template_name.clone())
+            .or_default()
+            .push(execution);
+    }
+
+    /// Evaluate templates and trigger evolution if needed.
+    pub async fn evaluate(&self) -> Vec<EvolutionEvent> {
+        let mut state = self.state.write().await;
+        let mut events = Vec::new();
+
+        let template_names: Vec<String> = state.stats.keys().cloned().collect();
+
+        for template_name in template_names {
+            let stats = match state.stats.get(&template_name) {
+                Some(s) => s.clone(),
+                None => continue,
+            };
+
+            // Skip if not enough tasks
+            if stats.total_tasks < self.config.min_tasks_for_evaluation {
+                continue;
+            }
+
+            let mut trigger = None;
+            let mut severity = RefinementSeverity::Minor;
+
+            // Check for goal violations (immediate review)
+            if stats.goal_violations > 0 {
+                trigger = Some(EvolutionTrigger::GoalViolations);
+                severity = RefinementSeverity::Immediate;
+            }
+            // Check for very low success rate
+            else if stats.total_tasks >= self.config.major_refinement_min_tasks
+                && stats.success_rate < self.config.major_refinement_threshold
+            {
+                trigger = Some(EvolutionTrigger::VeryLowSuccessRate);
+                severity = RefinementSeverity::Major;
+            }
+            // Check for low success rate
+            else if stats.success_rate < self.config.refinement_threshold {
+                trigger = Some(EvolutionTrigger::LowSuccessRate);
+                severity = RefinementSeverity::Minor;
+            }
+
+            // Check for regression
+            if trigger.is_none() {
+                if let Some((new_version, change_time)) =
+                    state.version_change_times.get(&template_name)
+                {
+                    if stats.template_version == *new_version {
+                        let window =
+                            Duration::hours(self.config.regression_detection_window_hours);
+                        let in_window = Utc::now() - *change_time < window;
+
+                        if in_window && stats.total_tasks >= self.config.regression_min_tasks {
+                            if let Some(prev_stats) =
+                                state.previous_version_stats.get(&template_name)
+                            {
+                                let rate_drop = prev_stats.success_rate - stats.success_rate;
+                                if rate_drop >= self.config.regression_threshold {
+                                    trigger = Some(EvolutionTrigger::Regression);
+                                    severity = RefinementSeverity::Immediate;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(trig) = trigger {
+                let action = if trig == EvolutionTrigger::Regression
+                    && self.config.auto_revert_enabled
+                {
+                    // Auto-revert
+                    if let Some(prev_stats) = state.previous_version_stats.get(&template_name) {
+                        EvolutionAction::Reverted {
+                            from_version: stats.template_version,
+                            to_version: prev_stats.template_version,
+                        }
+                    } else {
+                        EvolutionAction::FlaggedForRefinement { severity }
+                    }
+                } else {
+                    // Create refinement request
+                    let failed_task_ids = state
+                        .executions
+                        .get(&template_name)
+                        .map(|execs| {
+                            execs
+                                .iter()
+                                .filter(|e| e.outcome != TaskOutcome::Success)
+                                .map(|e| e.task_id)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    let request = RefinementRequest::new(
+                        template_name.clone(),
+                        stats.template_version,
+                        severity,
+                        trig,
+                        stats.clone(),
+                        failed_task_ids,
+                    );
+                    state.refinement_queue.push(request);
+
+                    EvolutionAction::FlaggedForRefinement { severity }
+                };
+
+                let event = EvolutionEvent {
+                    id: Uuid::new_v4(),
+                    template_name: template_name.clone(),
+                    template_version: stats.template_version,
+                    trigger: trig,
+                    stats_at_trigger: stats.clone(),
+                    action_taken: action,
+                    occurred_at: Utc::now(),
+                };
+
+                state.events.push(event.clone());
+                events.push(event);
+            }
+        }
+
+        events
+    }
+
+    /// Get stats for a template.
+    pub async fn get_stats(&self, template_name: &str) -> Option<TemplateStats> {
+        let state = self.state.read().await;
+        state.stats.get(template_name).cloned()
+    }
+
+    /// Get all template stats.
+    pub async fn get_all_stats(&self) -> Vec<TemplateStats> {
+        let state = self.state.read().await;
+        state.stats.values().cloned().collect()
+    }
+
+    /// Get pending refinement requests.
+    pub async fn get_pending_refinements(&self) -> Vec<RefinementRequest> {
+        let state = self.state.read().await;
+        state
+            .refinement_queue
+            .iter()
+            .filter(|r| r.status == RefinementStatus::Pending)
+            .cloned()
+            .collect()
+    }
+
+    /// Mark a refinement request as in progress.
+    pub async fn start_refinement(&self, request_id: Uuid) -> bool {
+        let mut state = self.state.write().await;
+        for request in &mut state.refinement_queue {
+            if request.id == request_id && request.status == RefinementStatus::Pending {
+                request.status = RefinementStatus::InProgress;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Mark a refinement request as completed.
+    pub async fn complete_refinement(&self, request_id: Uuid, success: bool) {
+        let mut state = self.state.write().await;
+        for request in &mut state.refinement_queue {
+            if request.id == request_id {
+                request.status = if success {
+                    RefinementStatus::Completed
+                } else {
+                    RefinementStatus::Failed
+                };
+                break;
+            }
+        }
+    }
+
+    /// Record a version change for a template.
+    pub async fn record_version_change(&self, template_name: &str, new_version: u32) {
+        let mut state = self.state.write().await;
+
+        // Store current stats as previous version
+        let prev_stats = state.stats.get(template_name).cloned();
+        if let Some(stats) = prev_stats {
+            state.previous_version_stats.insert(
+                template_name.to_string(),
+                stats,
+            );
+        }
+
+        // Record version change time
+        state.version_change_times.insert(
+            template_name.to_string(),
+            (new_version, Utc::now()),
+        );
+    }
+
+    /// Get evolution events for audit.
+    pub async fn get_events(&self, limit: Option<usize>) -> Vec<EvolutionEvent> {
+        let state = self.state.read().await;
+        let events: Vec<_> = state.events.iter().rev().cloned().collect();
+        match limit {
+            Some(n) => events.into_iter().take(n).collect(),
+            None => events,
+        }
+    }
+
+    /// Get templates needing attention (sorted by urgency).
+    pub async fn get_templates_needing_attention(&self) -> Vec<(String, RefinementSeverity)> {
+        let state = self.state.read().await;
+        let mut result: Vec<_> = state
+            .refinement_queue
+            .iter()
+            .filter(|r| r.status == RefinementStatus::Pending)
+            .map(|r| (r.template_name.clone(), r.severity))
+            .collect();
+
+        // Sort by severity (Immediate > Major > Minor)
+        result.sort_by_key(|(_, s)| match s {
+            RefinementSeverity::Immediate => 0,
+            RefinementSeverity::Major => 1,
+            RefinementSeverity::Minor => 2,
+        });
+
+        result
+    }
+
+    /// Clear all state (for testing).
+    #[cfg(test)]
+    pub async fn clear(&self) {
+        let mut state = self.state.write().await;
+        state.executions.clear();
+        state.stats.clear();
+        state.refinement_queue.clear();
+        state.events.clear();
+        state.previous_version_stats.clear();
+        state.version_change_times.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_execution(
+        template_name: &str,
+        version: u32,
+        outcome: TaskOutcome,
+    ) -> TaskExecution {
+        TaskExecution {
+            task_id: Uuid::new_v4(),
+            template_name: template_name.to_string(),
+            template_version: version,
+            outcome,
+            executed_at: Utc::now(),
+            turns_used: 10,
+            tokens_used: 1000,
+            downstream_tasks: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_record_execution() {
+        let evolution = EvolutionLoop::with_default_config();
+
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Success))
+            .await;
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Success))
+            .await;
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+
+        let stats = evolution.get_stats("test-agent").await.unwrap();
+        assert_eq!(stats.total_tasks, 3);
+        assert_eq!(stats.successful_tasks, 2);
+        assert_eq!(stats.failed_tasks, 1);
+        assert!((stats.success_rate - 0.666).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn test_low_success_rate_trigger() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 2,
+            refinement_threshold: 0.60,
+            major_refinement_threshold: 0.40,
+            major_refinement_min_tasks: 3, // Lower threshold for test
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // 1 success, 3 failures = 25% success rate
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Success))
+            .await;
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+
+        let events = evolution.evaluate().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].trigger, EvolutionTrigger::VeryLowSuccessRate);
+    }
+
+    #[tokio::test]
+    async fn test_goal_violation_trigger() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::GoalViolation))
+            .await;
+
+        let events = evolution.evaluate().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].trigger, EvolutionTrigger::GoalViolations);
+    }
+
+    #[tokio::test]
+    async fn test_version_change_detection() {
+        let evolution = EvolutionLoop::with_default_config();
+
+        // Record executions for version 1
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Success))
+            .await;
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Success))
+            .await;
+
+        // Change to version 2
+        evolution
+            .record_execution(make_execution("test-agent", 2, TaskOutcome::Success))
+            .await;
+
+        let stats = evolution.get_stats("test-agent").await.unwrap();
+        assert_eq!(stats.template_version, 2);
+        assert_eq!(stats.total_tasks, 1); // Reset for new version
+    }
+
+    #[tokio::test]
+    async fn test_refinement_queue() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 2,
+            refinement_threshold: 0.80,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // 50% success rate (below 80%)
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Success))
+            .await;
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+
+        evolution.evaluate().await;
+
+        let pending = evolution.get_pending_refinements().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].template_name, "test-agent");
+    }
+
+    #[tokio::test]
+    async fn test_refinement_lifecycle() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            refinement_threshold: 0.80,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+        evolution.evaluate().await;
+
+        let pending = evolution.get_pending_refinements().await;
+        let request_id = pending[0].id;
+
+        // Start refinement
+        assert!(evolution.start_refinement(request_id).await);
+
+        // Complete refinement
+        evolution.complete_refinement(request_id, true).await;
+
+        // Should no longer be pending
+        let pending = evolution.get_pending_refinements().await;
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_events_history() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        evolution
+            .record_execution(make_execution("agent-a", 1, TaskOutcome::GoalViolation))
+            .await;
+        evolution
+            .record_execution(make_execution("agent-b", 1, TaskOutcome::GoalViolation))
+            .await;
+
+        evolution.evaluate().await;
+
+        let events = evolution.get_events(None).await;
+        assert_eq!(events.len(), 2);
+    }
+}

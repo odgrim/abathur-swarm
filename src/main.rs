@@ -22,6 +22,7 @@ async fn main() {
         Commands::Agent(args) => abathur::cli::commands::agent::execute(args, cli.json).await,
         Commands::Worktree(args) => abathur::cli::commands::worktree::execute(args, cli.json).await,
         Commands::Swarm(args) => abathur::cli::commands::swarm::execute(args, cli.json).await,
+        Commands::Mcp(args) => abathur::cli::commands::mcp::execute(args, cli.json).await,
     };
 
     if let Err(err) = result {

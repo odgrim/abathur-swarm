@@ -9,6 +9,7 @@ use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{Goal, GoalConstraint, GoalMetadata, GoalPriority, GoalStatus};
 use crate::domain::ports::{GoalFilter, GoalRepository};
 
+#[derive(Clone)]
 pub struct SqliteGoalRepository {
     pool: SqlitePool,
 }

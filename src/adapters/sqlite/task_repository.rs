@@ -11,6 +11,7 @@ use crate::domain::models::{
 };
 use crate::domain::ports::{TaskFilter, TaskRepository};
 
+#[derive(Clone)]
 pub struct SqliteTaskRepository {
     pool: SqlitePool,
 }

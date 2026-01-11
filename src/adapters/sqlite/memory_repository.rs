@@ -9,6 +9,7 @@ use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{Memory, MemoryMetadata, MemoryQuery, MemoryTier, MemoryType};
 use crate::domain::ports::MemoryRepository;
 
+#[derive(Clone)]
 pub struct SqliteMemoryRepository {
     pool: SqlitePool,
 }

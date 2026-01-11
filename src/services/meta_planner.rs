@@ -2,6 +2,9 @@
 //!
 //! The meta-planner enables the swarm to create new agent templates,
 //! decompose goals into tasks, and improve agent performance over time.
+//!
+//! Supports both heuristic decomposition and LLM-powered decomposition
+//! using Claude Code CLI.
 
 use std::sync::Arc;
 use uuid::Uuid;
@@ -11,6 +14,7 @@ use crate::domain::models::{
     AgentTemplate, AgentTier, Task, TaskPriority, ToolCapability,
 };
 use crate::domain::ports::{AgentRepository, GoalRepository, TaskRepository};
+use crate::services::llm_planner::{LlmPlanner, LlmPlannerConfig, PlanningContext};
 
 /// Configuration for the meta-planner.
 #[derive(Debug, Clone)]
@@ -23,6 +27,10 @@ pub struct MetaPlannerConfig {
     pub auto_generate_agents: bool,
     /// Maximum tasks per goal decomposition.
     pub max_tasks_per_decomposition: usize,
+    /// Whether to use LLM for decomposition (vs heuristic).
+    pub use_llm_decomposition: bool,
+    /// LLM planner configuration.
+    pub llm_config: Option<LlmPlannerConfig>,
 }
 
 impl Default for MetaPlannerConfig {
@@ -32,6 +40,8 @@ impl Default for MetaPlannerConfig {
             default_agent_tier: AgentTier::Worker,
             auto_generate_agents: false,
             max_tasks_per_decomposition: 10,
+            use_llm_decomposition: false,
+            llm_config: None,
         }
     }
 }
@@ -165,14 +175,82 @@ where
 
     /// Decompose a goal into tasks.
     ///
-    /// This is a simple heuristic decomposition. In a real system,
-    /// this would use an LLM to intelligently decompose the goal.
+    /// If LLM decomposition is enabled, uses Claude to intelligently
+    /// analyze the goal and create a detailed task DAG. Otherwise,
+    /// falls back to simple heuristic decomposition.
     pub async fn decompose_goal(&self, goal_id: Uuid) -> DomainResult<DecompositionPlan> {
+        if self.config.use_llm_decomposition {
+            // Use LLM-based decomposition
+            self.decompose_goal_with_llm(goal_id, None).await
+        } else {
+            // Use heuristic decomposition
+            self.decompose_goal_heuristic(goal_id).await
+        }
+    }
+
+    /// Decompose a goal using LLM (Claude Code CLI).
+    ///
+    /// This method uses the LlmPlanner to intelligently decompose the goal
+    /// into a detailed task DAG with proper dependencies.
+    pub async fn decompose_goal_with_llm(
+        &self,
+        goal_id: Uuid,
+        context: Option<PlanningContext>,
+    ) -> DomainResult<DecompositionPlan> {
         let goal = self.goal_repo.get(goal_id).await?
             .ok_or(DomainError::GoalNotFound(goal_id))?;
 
-        // For now, create a simple single-task decomposition
-        // In a real system, this would use an LLM to analyze the goal
+        // Get LLM config or use defaults
+        let llm_config = self.config.llm_config.clone()
+            .unwrap_or_else(LlmPlannerConfig::default);
+
+        let llm_planner = LlmPlanner::new(llm_config);
+
+        // Build planning context
+        let planning_context = if let Some(ctx) = context {
+            ctx
+        } else {
+            // Get existing agent types for context
+            use crate::domain::ports::AgentFilter;
+            let agents = self.agent_repo.list_templates(AgentFilter::default()).await?;
+            let agent_names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
+
+            PlanningContext::new().with_agents(agent_names)
+        };
+
+        // Get LLM decomposition
+        let decomposition = llm_planner.decompose_goal(&goal, &planning_context).await?;
+
+        // Convert to internal TaskSpec format
+        let tasks = llm_planner.to_task_specs(&decomposition);
+        let complexity = llm_planner.parse_complexity(&decomposition.complexity);
+
+        // Limit tasks if configured
+        let tasks = if tasks.len() > self.config.max_tasks_per_decomposition {
+            tasks.into_iter()
+                .take(self.config.max_tasks_per_decomposition)
+                .collect()
+        } else {
+            tasks
+        };
+
+        Ok(DecompositionPlan {
+            goal_id,
+            tasks,
+            required_agents: decomposition.required_capabilities,
+            estimated_complexity: complexity,
+        })
+    }
+
+    /// Decompose a goal using simple heuristics.
+    ///
+    /// Creates a single task from the goal. Use this as a fallback
+    /// when LLM decomposition is unavailable or for simple goals.
+    pub async fn decompose_goal_heuristic(&self, goal_id: Uuid) -> DomainResult<DecompositionPlan> {
+        let goal = self.goal_repo.get(goal_id).await?
+            .ok_or(DomainError::GoalNotFound(goal_id))?;
+
+        // Create a simple single-task decomposition
         let task_spec = TaskSpec {
             title: format!("Implement: {}", goal.name),
             description: goal.description.clone(),

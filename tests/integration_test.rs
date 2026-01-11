@@ -232,6 +232,8 @@ async fn test_goal_decomposition() {
         default_agent_tier: AgentTier::Worker,
         auto_generate_agents: true,
         max_tasks_per_decomposition: 10,
+        use_llm_decomposition: false, // Use heuristic for tests
+        llm_config: None,
     };
 
     let meta_planner = MetaPlanner::new(
@@ -303,15 +305,17 @@ async fn test_substrate_registry() {
 /// Test swarm orchestrator creation and basic operations.
 #[tokio::test]
 async fn test_swarm_orchestrator_basic() {
-    let (goal_repo, task_repo, _, _, worktree_repo) = setup_test_repos().await;
+    let (goal_repo, task_repo, _, agent_repo, worktree_repo) = setup_test_repos().await;
 
     let substrate: Arc<dyn Substrate> = Arc::from(SubstrateRegistry::mock_substrate());
-    let config = SwarmConfig::default();
+    let mut config = SwarmConfig::default();
+    config.use_worktrees = false; // Disable worktrees for test
 
     let orchestrator = SwarmOrchestrator::new(
         goal_repo.clone(),
         task_repo.clone(),
         worktree_repo.clone(),
+        agent_repo.clone(),
         substrate,
         config,
     );

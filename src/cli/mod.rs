@@ -43,6 +43,8 @@ pub enum Commands {
     Worktree(commands::worktree::WorktreeArgs),
     /// Control the swarm orchestrator
     Swarm(commands::swarm::SwarmArgs),
+    /// Start and manage MCP (Model Context Protocol) HTTP servers
+    Mcp(commands::mcp::McpArgs),
 }
 
 pub fn handle_error(err: anyhow::Error, json_mode: bool) -> ! {
