@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{GoalConstraint, ConstraintType, Task, TaskStatus};
 use crate::domain::ports::{GoalRepository, TaskRepository, WorktreeRepository};
+use crate::services::goal_alignment::{AlignmentConfig, GoalAlignmentService, HolisticEvaluation};
 
 /// Configuration for the integration verifier.
 #[derive(Debug, Clone)]
@@ -96,6 +97,7 @@ where
     goal_repo: Arc<G>,
     worktree_repo: Arc<W>,
     config: VerifierConfig,
+    alignment_service: GoalAlignmentService<G>,
 }
 
 impl<T, G, W> IntegrationVerifierService<T, G, W>
@@ -110,12 +112,40 @@ where
         worktree_repo: Arc<W>,
         config: VerifierConfig,
     ) -> Self {
+        let alignment_service = GoalAlignmentService::with_defaults(goal_repo.clone());
         Self {
             task_repo,
             goal_repo,
             worktree_repo,
             config,
+            alignment_service,
         }
+    }
+
+    /// Create with custom alignment configuration.
+    pub fn with_alignment_config(
+        task_repo: Arc<T>,
+        goal_repo: Arc<G>,
+        worktree_repo: Arc<W>,
+        config: VerifierConfig,
+        alignment_config: AlignmentConfig,
+    ) -> Self {
+        let alignment_service = GoalAlignmentService::new(goal_repo.clone(), alignment_config);
+        Self {
+            task_repo,
+            goal_repo,
+            worktree_repo,
+            config,
+            alignment_service,
+        }
+    }
+
+    /// Evaluate task against all active goals using holistic alignment.
+    pub async fn verify_goal_alignment(&self, task_id: Uuid) -> DomainResult<HolisticEvaluation> {
+        let task = self.task_repo.get(task_id).await?
+            .ok_or(DomainError::TaskNotFound(task_id))?;
+
+        self.alignment_service.evaluate_task(&task).await
     }
 
     /// Verify a task is ready for merge.
@@ -133,11 +163,15 @@ where
         let deps_check = self.check_dependencies_complete(&task).await?;
         checks.push(deps_check);
 
-        // 3. Check goal constraints
+        // 3. Check goal constraints (legacy)
         if let Some(goal_id) = task.goal_id {
             let constraint_check = self.verify_goal_constraints(&task, goal_id).await?;
             checks.push(constraint_check);
         }
+
+        // 4. Holistic goal alignment check against ALL active goals
+        let alignment_check = self.check_holistic_alignment(&task).await?;
+        checks.push(alignment_check);
 
         // 4. Get worktree path and run code checks
         let worktree = self.worktree_repo.get_by_task(task_id).await?;
@@ -252,6 +286,58 @@ where
                             "status": format!("{:?}", t.status)
                         })
                     }).collect::<Vec<_>>()
+                })),
+            })
+        }
+    }
+
+    /// Check holistic alignment against all active goals.
+    async fn check_holistic_alignment(&self, task: &Task) -> DomainResult<VerificationCheck> {
+        let evaluation = self.alignment_service.evaluate_task(task).await?;
+
+        if evaluation.passes {
+            Ok(VerificationCheck {
+                name: "goal_alignment".to_string(),
+                passed: true,
+                message: format!(
+                    "Task aligns with {}/{} active goals (score: {:.1}%)",
+                    evaluation.goals_satisfied,
+                    evaluation.goal_alignments.len(),
+                    evaluation.overall_score * 100.0
+                ),
+                details: Some(serde_json::json!({
+                    "overall_score": evaluation.overall_score,
+                    "goals_satisfied": evaluation.goals_satisfied,
+                    "goals_with_concerns": evaluation.goals_with_concerns,
+                    "summary": evaluation.summary
+                })),
+            })
+        } else {
+            let violations: Vec<_> = evaluation.goal_alignments.iter()
+                .filter(|a| !a.violations.is_empty())
+                .flat_map(|a| a.violations.iter().map(|v| {
+                    serde_json::json!({
+                        "goal": &a.goal_name,
+                        "constraint": &v.constraint_name,
+                        "description": &v.description,
+                        "severity": v.severity
+                    })
+                }))
+                .collect();
+
+            Ok(VerificationCheck {
+                name: "goal_alignment".to_string(),
+                passed: false,
+                message: format!(
+                    "Task fails holistic alignment (score: {:.1}%, {} violations)",
+                    evaluation.overall_score * 100.0,
+                    violations.len()
+                ),
+                details: Some(serde_json::json!({
+                    "overall_score": evaluation.overall_score,
+                    "goals_satisfied": evaluation.goals_satisfied,
+                    "violations": violations,
+                    "recommendations": evaluation.recommendations
                 })),
             })
         }

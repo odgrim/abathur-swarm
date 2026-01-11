@@ -12,6 +12,8 @@ use crate::domain::models::{
 };
 use crate::domain::ports::{AgentRepository, Substrate, TaskRepository};
 use crate::services::guardrails::{GuardrailResult, Guardrails};
+use crate::services::circuit_breaker::{CircuitBreakerService, CircuitScope};
+use crate::services::dag_restructure::DagRestructureService;
 
 /// Configuration for the DAG executor.
 #[derive(Debug, Clone)]
@@ -132,6 +134,8 @@ where
     substrate: Arc<dyn Substrate>,
     config: ExecutorConfig,
     guardrails: Option<Arc<Guardrails>>,
+    circuit_breaker: Option<Arc<CircuitBreakerService>>,
+    restructure_service: Option<Arc<DagRestructureService>>,
     status: Arc<RwLock<ExecutionStatus>>,
     results: Arc<RwLock<ExecutionResults>>,
 }
@@ -153,6 +157,8 @@ where
             substrate,
             config,
             guardrails: None,
+            circuit_breaker: None,
+            restructure_service: None,
             status: Arc::new(RwLock::new(ExecutionStatus::Pending)),
             results: Arc::new(RwLock::new(ExecutionResults::default())),
         }
@@ -161,6 +167,18 @@ where
     /// Add guardrails to the executor.
     pub fn with_guardrails(mut self, guardrails: Arc<Guardrails>) -> Self {
         self.guardrails = Some(guardrails);
+        self
+    }
+
+    /// Add circuit breaker to the executor.
+    pub fn with_circuit_breaker(mut self, circuit_breaker: Arc<CircuitBreakerService>) -> Self {
+        self.circuit_breaker = Some(circuit_breaker);
+        self
+    }
+
+    /// Add restructure service to the executor for failure recovery.
+    pub fn with_restructure_service(mut self, restructure_service: Arc<DagRestructureService>) -> Self {
+        self.restructure_service = Some(restructure_service);
         self
     }
 
@@ -295,10 +313,26 @@ where
         let mut handles = vec![];
 
         for &task_id in wave {
-            let _node = match dag.nodes.get(&task_id) {
+            let node = match dag.nodes.get(&task_id) {
                 Some(n) => n.clone(),
                 None => continue,
             };
+
+            // Check circuit breaker for this task's goal chain
+            if let Some(ref cb) = self.circuit_breaker {
+                if let Some(goal_id) = node.goal_id {
+                    let check_result = cb.check(CircuitScope::task_chain(goal_id)).await;
+                    if check_result.is_blocked() {
+                        // Skip this task - circuit is open
+                        let _ = event_tx.send(ExecutionEvent::TaskFailed {
+                            task_id,
+                            error: "Circuit breaker open for goal chain".to_string(),
+                            retry_count: 0,
+                        }).await;
+                        continue;
+                    }
+                }
+            }
 
             let permit = semaphore.clone().acquire_owned().await
                 .map_err(|_| DomainError::ValidationFailed("Semaphore error".to_string()))?;
@@ -310,11 +344,14 @@ where
             let event_tx = event_tx.clone();
             let total_tokens = total_tokens.clone();
             let guardrails = guardrails.clone();
+            let circuit_breaker = self.circuit_breaker.clone();
+            let goal_id = node.goal_id;
 
             let handle = tokio::spawn(async move {
                 let _permit = permit;
                 execute_single_task(
                     task_id,
+                    goal_id,
                     task_repo,
                     agent_repo,
                     substrate,
@@ -322,6 +359,7 @@ where
                     event_tx,
                     total_tokens,
                     guardrails,
+                    circuit_breaker,
                 ).await
             });
 
@@ -361,6 +399,7 @@ where
 /// Execute a single task with retry logic and timeout.
 async fn execute_single_task<T, A>(
     task_id: Uuid,
+    goal_id: Option<Uuid>,
     task_repo: Arc<T>,
     agent_repo: Arc<A>,
     substrate: Arc<dyn Substrate>,
@@ -368,6 +407,7 @@ async fn execute_single_task<T, A>(
     event_tx: mpsc::Sender<ExecutionEvent>,
     total_tokens: Arc<RwLock<u64>>,
     guardrails: Option<Arc<Guardrails>>,
+    circuit_breaker: Option<Arc<CircuitBreakerService>>,
 ) -> TaskResult
 where
     T: TaskRepository + 'static,
@@ -515,6 +555,11 @@ where
                         g.register_task_end(task_id, true).await;
                     }
 
+                    // Record success with circuit breaker
+                    if let (Some(ref cb), Some(gid)) = (&circuit_breaker, goal_id) {
+                        cb.record_success(CircuitScope::task_chain(gid)).await;
+                    }
+
                     let result = TaskResult {
                         task_id,
                         status: TaskStatus::Complete,
@@ -558,6 +603,11 @@ where
     }
 
     let error_msg = last_error.unwrap_or_else(|| "Unknown error".to_string());
+
+    // Record failure with circuit breaker
+    if let (Some(ref cb), Some(gid)) = (&circuit_breaker, goal_id) {
+        cb.record_failure(CircuitScope::task_chain(gid), &error_msg).await;
+    }
 
     let _ = event_tx.send(ExecutionEvent::TaskFailed {
         task_id,

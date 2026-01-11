@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
     AgentConstraint, AgentInstance, AgentStatus, AgentTemplate, AgentTier,
-    InstanceStatus, ToolCapability,
+    InstanceStatus, ToolCapability, specialist_templates,
 };
 use crate::domain::ports::{AgentFilter, AgentRepository};
 
@@ -244,6 +244,54 @@ impl<R: AgentRepository> AgentService<R> {
         for template in templates {
             let has_all_tools = required_tools.iter().all(|tool| template.has_tool(tool));
             if has_all_tools && self.can_spawn(&template.name).await? {
+                return Ok(Some(template));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Load baseline specialist templates.
+    ///
+    /// This should be called during system initialization to ensure
+    /// all core specialist agents are available. Returns the number
+    /// of templates created (skips existing ones).
+    pub async fn load_baseline_specialists(&self) -> DomainResult<usize> {
+        let specialists = specialist_templates::create_baseline_specialists();
+        let mut created = 0;
+
+        for template in specialists {
+            // Check if already exists
+            if self.repository.get_template_by_name(&template.name).await?.is_none() {
+                self.repository.create_template(&template).await?;
+                created += 1;
+                tracing::info!("Registered baseline specialist: {}", template.name);
+            }
+        }
+
+        if created > 0 {
+            tracing::info!("Loaded {} baseline specialist templates", created);
+        }
+
+        Ok(created)
+    }
+
+    /// Get a specialist by capability.
+    pub async fn get_specialist_by_capability(
+        &self,
+        capability: &str,
+    ) -> DomainResult<Option<AgentTemplate>> {
+        let filter = AgentFilter {
+            tier: Some(AgentTier::Specialist),
+            status: Some(AgentStatus::Active),
+            ..Default::default()
+        };
+
+        let templates = self.repository.list_templates(filter).await?;
+
+        // Find specialist with matching capability
+        for template in templates {
+            if template.agent_card.capabilities.iter().any(|c| c == capability) {
                 return Ok(Some(template));
             }
         }

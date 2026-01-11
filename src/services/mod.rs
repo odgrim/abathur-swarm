@@ -1,13 +1,19 @@
 //! Application services for the Abathur swarm system.
 
 pub mod agent_service;
+pub mod audit_log;
+pub mod circuit_breaker;
+pub mod cold_start;
 pub mod config;
 pub mod dag_executor;
+pub mod dag_restructure;
 pub mod evolution_loop;
+pub mod goal_alignment;
 pub mod goal_service;
 pub mod guardrails;
 pub mod integration_verifier;
 pub mod llm_planner;
+pub mod memory_decay_daemon;
 pub mod memory_service;
 pub mod merge_queue;
 pub mod meta_planner;
@@ -16,13 +22,19 @@ pub mod task_service;
 pub mod worktree_service;
 
 pub use agent_service::AgentService;
-pub use config::{Config, ConfigError};
+pub use audit_log::{AuditAction, AuditActor, AuditCategory, AuditEntry, AuditFilter, AuditLevel, AuditLogConfig, AuditLogService, AuditStats, DecisionRationale};
+pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerService, CircuitCheckResult, CircuitScope, CircuitState, CircuitStats as CircuitBreakerStats, CircuitTrippedEvent, RecoveryAction, RecoveryPolicy};
+pub use cold_start::{ColdStartConfig, ColdStartReport, ColdStartService, Convention, ConventionCategory, Dependency, ProjectType};
+pub use config::{Config, ConfigError, A2AFederationConfig, TrustedSwarmConfig, TrustLevel, FederationAuthMethod, SwarmIdentityConfig};
 pub use dag_executor::{DagExecutor, ExecutorConfig, ExecutionEvent, ExecutionResults, ExecutionStatus, TaskResult};
+pub use dag_restructure::{DagRestructureService, FailedAttempt, NewTaskSpec, RestructureConfig, RestructureContext, RestructureDecision, RestructureTrigger, TaskPriorityModifier};
 pub use evolution_loop::{EvolutionConfig, EvolutionEvent, EvolutionLoop, EvolutionTrigger, RefinementRequest, RefinementSeverity, TaskExecution, TaskOutcome, TemplateStats};
+pub use goal_alignment::{AlignmentConfig, ConstraintViolation, GoalAlignmentResult, GoalAlignmentService, HolisticEvaluation, WorkArtifact};
 pub use goal_service::GoalService;
 pub use guardrails::{GuardrailResult, Guardrails, GuardrailsConfig, RuntimeMetrics};
 pub use integration_verifier::{IntegrationVerifierService, VerificationCheck, VerificationResult, VerifierConfig, TestResult};
 pub use llm_planner::{LlmPlanner, LlmPlannerConfig, LlmDecomposition, LlmTaskSpec, PlanningContext, AgentRefinementSuggestion};
+pub use memory_decay_daemon::{DaemonHandle, DaemonStatus, DecayDaemonConfig, DecayDaemonEvent, MemoryDecayDaemon, StopReason};
 pub use memory_service::{DecayConfig, MaintenanceReport, MemoryService, MemoryStats};
 pub use merge_queue::{MergeQueue, MergeQueueConfig, MergeQueueStats, MergeRequest, MergeResult, MergeStage, MergeStatus};
 pub use meta_planner::{AgentMetrics, AgentSpec, Complexity, DecompositionPlan, MetaPlanner, MetaPlannerConfig, TaskSpec};

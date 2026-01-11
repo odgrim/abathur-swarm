@@ -21,6 +21,9 @@ pub enum ConfigError {
 #[derive(Default)]
 pub struct Config {
     pub limits: LimitsConfig,
+    pub spawn_limits: SpawnLimitsConfig,
+    pub restructure_limits: RestructureLimitsConfig,
+    pub evolution: EvolutionConfig,
     pub memory: MemoryConfig,
     pub worktrees: WorktreeConfig,
     pub a2a: A2AConfig,
@@ -49,6 +52,102 @@ impl Default for LimitsConfig {
             max_concurrent_tasks: 5,
             max_retries: 3,
             task_timeout_secs: 300,
+        }
+    }
+}
+
+/// Configuration for spawn limits (task creation boundaries).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SpawnLimitsConfig {
+    /// Maximum depth of subtask nesting.
+    pub max_subtask_depth: u32,
+    /// Maximum number of subtasks per task.
+    pub max_subtasks_per_task: u32,
+    /// Maximum total descendants from a root task.
+    pub max_total_descendants: u32,
+    /// Whether to allow extension requests when limits are reached.
+    pub allow_limit_extensions: bool,
+    /// Maximum extensions allowed per task tree.
+    pub max_extensions: u32,
+}
+
+impl Default for SpawnLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_subtask_depth: 5,
+            max_subtasks_per_task: 10,
+            max_total_descendants: 100,
+            allow_limit_extensions: true,
+            max_extensions: 2,
+        }
+    }
+}
+
+/// Configuration for DAG restructuring limits (malleability).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RestructureLimitsConfig {
+    /// Maximum times a task subtree can be restructured.
+    pub max_restructure_attempts: u32,
+    /// Minimum time between restructure attempts (seconds).
+    pub restructure_cooldown_secs: u64,
+    /// Maximum depth of restructuring (how many parent levels to consider).
+    pub max_restructure_depth: u32,
+    /// Whether to allow automatic restructuring on failure.
+    pub auto_restructure_on_failure: bool,
+    /// Minimum success rate to avoid restructuring trigger.
+    pub min_success_rate_for_stability: f64,
+}
+
+impl Default for RestructureLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_restructure_attempts: 3,
+            restructure_cooldown_secs: 300,
+            max_restructure_depth: 2,
+            auto_restructure_on_failure: true,
+            min_success_rate_for_stability: 0.5,
+        }
+    }
+}
+
+/// Configuration for evolution (agent template refinement).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EvolutionConfig {
+    /// Minimum tasks before evaluating performance.
+    pub min_tasks_for_evaluation: u32,
+    /// Success rate threshold for triggering minor refinement.
+    pub minor_refinement_threshold: f64,
+    /// Success rate threshold for triggering major refinement.
+    pub major_refinement_threshold: f64,
+    /// Success rate threshold for immediate action.
+    pub immediate_action_threshold: f64,
+    /// Maximum template versions to retain.
+    pub max_template_versions: u32,
+    /// Whether to enable automatic reversion on regression.
+    pub auto_revert_on_regression: bool,
+    /// Minimum improvement required to keep a new version.
+    pub min_improvement_to_keep: f64,
+    /// Window size for computing rolling success rates.
+    pub evaluation_window_size: u32,
+    /// Cooldown between refinement attempts (seconds).
+    pub refinement_cooldown_secs: u64,
+}
+
+impl Default for EvolutionConfig {
+    fn default() -> Self {
+        Self {
+            min_tasks_for_evaluation: 10,
+            minor_refinement_threshold: 0.6,
+            major_refinement_threshold: 0.4,
+            immediate_action_threshold: 0.2,
+            max_template_versions: 5,
+            auto_revert_on_regression: true,
+            min_improvement_to_keep: 0.05,
+            evaluation_window_size: 20,
+            refinement_cooldown_secs: 3600,
         }
     }
 }
@@ -102,6 +201,8 @@ pub struct A2AConfig {
     pub request_timeout_secs: u64,
     pub max_message_size: usize,
     pub enabled: bool,
+    /// Federation settings for cross-swarm collaboration.
+    pub federation: A2AFederationConfig,
 }
 
 impl Default for A2AConfig {
@@ -111,6 +212,175 @@ impl Default for A2AConfig {
             request_timeout_secs: 30,
             max_message_size: 1024 * 1024,
             enabled: false,
+            federation: A2AFederationConfig::default(),
+        }
+    }
+}
+
+/// Configuration for A2A federation (cross-swarm collaboration).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct A2AFederationConfig {
+    /// Whether federation with external swarms is enabled.
+    pub enabled: bool,
+    /// List of trusted external swarm endpoints.
+    pub trusted_swarms: Vec<TrustedSwarmConfig>,
+    /// Whether to enable automatic swarm discovery via mDNS or registry.
+    pub discovery_enabled: bool,
+    /// Discovery registry URL (if using centralized discovery).
+    pub discovery_registry_url: Option<String>,
+    /// Maximum concurrent requests to external swarms.
+    pub max_external_requests: u32,
+    /// Rate limit per external swarm (requests per minute).
+    pub rate_limit_per_swarm: u32,
+    /// Timeout for external swarm requests (seconds).
+    pub external_request_timeout_secs: u64,
+    /// Whether to accept inbound tasks from external swarms.
+    pub allow_inbound_tasks: bool,
+    /// Maximum concurrent inbound tasks from external swarms.
+    pub max_inbound_tasks: u32,
+    /// Authentication method for federation.
+    pub auth_method: FederationAuthMethod,
+    /// This swarm's public identity for federation.
+    pub swarm_identity: Option<SwarmIdentityConfig>,
+    /// Capabilities to advertise to other swarms.
+    pub advertised_capabilities: Vec<String>,
+    /// Task types that can be delegated to external swarms.
+    pub delegatable_task_types: Vec<String>,
+    /// Whether to require mutual TLS for federation connections.
+    pub require_mtls: bool,
+}
+
+impl Default for A2AFederationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trusted_swarms: Vec::new(),
+            discovery_enabled: false,
+            discovery_registry_url: None,
+            max_external_requests: 10,
+            rate_limit_per_swarm: 60,
+            external_request_timeout_secs: 60,
+            allow_inbound_tasks: false,
+            max_inbound_tasks: 5,
+            auth_method: FederationAuthMethod::default(),
+            swarm_identity: None,
+            advertised_capabilities: Vec::new(),
+            delegatable_task_types: Vec::new(),
+            require_mtls: false,
+        }
+    }
+}
+
+/// Configuration for a trusted external swarm.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrustedSwarmConfig {
+    /// Unique identifier for the trusted swarm.
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Base URL for the swarm's A2A gateway.
+    pub endpoint: String,
+    /// Authentication token for this swarm (if using token auth).
+    pub auth_token: Option<String>,
+    /// Public key for this swarm (if using key-based auth).
+    pub public_key: Option<String>,
+    /// Trust level (affects what operations are allowed).
+    pub trust_level: TrustLevel,
+    /// Whether this swarm is currently active.
+    pub active: bool,
+    /// Capabilities this swarm offers.
+    pub capabilities: Vec<String>,
+    /// Rate limit override for this specific swarm.
+    pub rate_limit_override: Option<u32>,
+}
+
+impl Default for TrustedSwarmConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            endpoint: String::new(),
+            auth_token: None,
+            public_key: None,
+            trust_level: TrustLevel::default(),
+            active: true,
+            capabilities: Vec::new(),
+            rate_limit_override: None,
+        }
+    }
+}
+
+/// Trust level for external swarms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustLevel {
+    /// Full trust - can delegate any task type.
+    Full,
+    /// High trust - can delegate most task types.
+    High,
+    /// Medium trust - can delegate limited task types.
+    #[default]
+    Medium,
+    /// Low trust - read-only collaboration.
+    Low,
+    /// Untrusted - no collaboration allowed.
+    Untrusted,
+}
+
+/// Authentication method for federation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FederationAuthMethod {
+    /// No authentication (not recommended).
+    #[default]
+    None,
+    /// Pre-shared token authentication.
+    Token,
+    /// Public/private key pair authentication.
+    KeyPair,
+    /// Mutual TLS authentication.
+    MutualTls,
+    /// OAuth2 / OIDC authentication.
+    OAuth2 {
+        issuer_url: String,
+        client_id: String,
+        client_secret: Option<String>,
+    },
+}
+
+/// Configuration for this swarm's federation identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SwarmIdentityConfig {
+    /// Unique identifier for this swarm.
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Description of this swarm's purpose.
+    pub description: Option<String>,
+    /// Contact information for swarm administrators.
+    pub contact: Option<String>,
+    /// Path to private key file (for key-based auth).
+    pub private_key_path: Option<String>,
+    /// Path to public key file (for key-based auth).
+    pub public_key_path: Option<String>,
+    /// Path to TLS certificate (for mTLS).
+    pub tls_cert_path: Option<String>,
+    /// Path to TLS key (for mTLS).
+    pub tls_key_path: Option<String>,
+}
+
+impl Default for SwarmIdentityConfig {
+    fn default() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "unnamed-swarm".to_string(),
+            description: None,
+            contact: None,
+            private_key_path: None,
+            public_key_path: None,
+            tls_cert_path: None,
+            tls_key_path: None,
         }
     }
 }

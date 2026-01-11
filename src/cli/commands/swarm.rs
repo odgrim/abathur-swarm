@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 use tokio::sync::mpsc;
 
+use crate::domain::ports::NullMemoryRepository;
 use crate::services::{SwarmConfig, SwarmOrchestrator, SwarmEvent};
 
 #[derive(Args, Debug)]
@@ -339,7 +340,7 @@ async fn run_swarm_foreground(
         ..Default::default()
     };
 
-    let orchestrator = SwarmOrchestrator::new(
+    let orchestrator: SwarmOrchestrator<_, _, _, _, NullMemoryRepository> = SwarmOrchestrator::new(
         goal_repo,
         task_repo,
         worktree_repo,
@@ -626,7 +627,7 @@ async fn run_tick(json_mode: bool) -> Result<()> {
     let mut config = SwarmConfig::default();
     config.use_worktrees = false; // Disable worktrees for tick command
 
-    let orchestrator = SwarmOrchestrator::new(
+    let orchestrator: SwarmOrchestrator<_, _, _, _, NullMemoryRepository> = SwarmOrchestrator::new(
         goal_repo,
         task_repo,
         worktree_repo,

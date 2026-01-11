@@ -15,7 +15,7 @@ use abathur::domain::models::{
     AgentTier, MemoryTier, SubstrateType, TaskDag,
 };
 use abathur::domain::ports::{
-    GoalRepository, TaskRepository, TaskFilter, Substrate, MemoryRepository,
+    GoalRepository, TaskRepository, TaskFilter, Substrate, MemoryRepository, NullMemoryRepository,
 };
 use abathur::services::{
     GoalService, TaskService, MemoryService, AgentService, WorktreeService,
@@ -311,7 +311,7 @@ async fn test_swarm_orchestrator_basic() {
     let mut config = SwarmConfig::default();
     config.use_worktrees = false; // Disable worktrees for test
 
-    let orchestrator = SwarmOrchestrator::new(
+    let orchestrator: SwarmOrchestrator<_, _, _, _, NullMemoryRepository> = SwarmOrchestrator::new(
         goal_repo.clone(),
         task_repo.clone(),
         worktree_repo.clone(),

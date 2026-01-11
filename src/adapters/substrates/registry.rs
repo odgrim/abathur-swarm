@@ -3,23 +3,31 @@
 use crate::domain::models::SubstrateType;
 use crate::domain::ports::{Substrate, SubstrateFactory};
 
+use super::anthropic_api::{AnthropicApiConfig, AnthropicApiSubstrate};
 use super::claude_code::{ClaudeCodeConfig, ClaudeCodeSubstrate};
 use super::mock::MockSubstrate;
 
 /// Registry of available substrates.
 pub struct SubstrateRegistry {
     claude_code_config: Option<ClaudeCodeConfig>,
+    anthropic_api_config: Option<AnthropicApiConfig>,
 }
 
 impl SubstrateRegistry {
     pub fn new() -> Self {
         Self {
             claude_code_config: Some(ClaudeCodeConfig::default()),
+            anthropic_api_config: Some(AnthropicApiConfig::default()),
         }
     }
 
     pub fn with_claude_code_config(mut self, config: ClaudeCodeConfig) -> Self {
         self.claude_code_config = Some(config);
+        self
+    }
+
+    pub fn with_anthropic_api_config(mut self, config: AnthropicApiConfig) -> Self {
+        self.anthropic_api_config = Some(config);
         self
     }
 
@@ -31,10 +39,15 @@ impl SubstrateRegistry {
                 Box::new(ClaudeCodeSubstrate::new(config))
             }
             SubstrateType::AnthropicApi => {
-                // For now, fall back to Claude Code
-                // TODO: Implement direct API substrate
-                let config = self.claude_code_config.clone().unwrap_or_default();
-                Box::new(ClaudeCodeSubstrate::new(config))
+                let config = self.anthropic_api_config.clone().unwrap_or_default();
+                // If we can't create the API substrate, fall back to Claude Code
+                match AnthropicApiSubstrate::new(config) {
+                    Ok(substrate) => Box::new(substrate),
+                    Err(_) => {
+                        let config = self.claude_code_config.clone().unwrap_or_default();
+                        Box::new(ClaudeCodeSubstrate::new(config))
+                    }
+                }
             }
             SubstrateType::Mock => {
                 Box::new(MockSubstrate::new())

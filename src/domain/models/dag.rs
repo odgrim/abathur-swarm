@@ -13,6 +13,7 @@ use super::task::{Task, TaskStatus};
 pub struct DagNode {
     pub task_id: Uuid,
     pub task_title: String,
+    pub goal_id: Option<Uuid>,
     pub status: TaskStatus,
     pub dependencies: Vec<Uuid>,
     pub dependents: Vec<Uuid>,
@@ -23,6 +24,7 @@ impl DagNode {
         Self {
             task_id: task.id,
             task_title: task.title.clone(),
+            goal_id: task.goal_id,
             status: task.status,
             dependencies: task.depends_on.clone(),
             dependents: vec![],

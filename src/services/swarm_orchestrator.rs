@@ -17,9 +17,13 @@ use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
     Goal, GoalStatus, SessionStatus, SubstrateConfig, SubstrateRequest, Task, TaskDag, TaskStatus,
 };
-use crate::domain::ports::{AgentRepository, GoalRepository, Substrate, TaskRepository, WorktreeRepository};
+use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, NullMemoryRepository, Substrate, TaskRepository, WorktreeRepository};
 use crate::services::{
-    DagExecutor, ExecutionResults, ExecutionStatus, ExecutorConfig,
+    AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, AuditLogConfig, AuditLogService,
+    CircuitBreakerConfig, CircuitBreakerService, CircuitScope,
+    ColdStartConfig, ColdStartService, ColdStartReport,
+    DagExecutor, DecayDaemonConfig, DaemonHandle, ExecutionResults, ExecutionStatus, ExecutorConfig,
+    MemoryDecayDaemon, MemoryService,
     WorktreeConfig, WorktreeService,
 };
 
@@ -130,31 +134,38 @@ pub struct SwarmStats {
 }
 
 /// The main swarm orchestrator.
-pub struct SwarmOrchestrator<G, T, W, A>
+pub struct SwarmOrchestrator<G, T, W, A, M = NullMemoryRepository>
 where
     G: GoalRepository + 'static,
     T: TaskRepository + 'static,
     W: WorktreeRepository + 'static,
     A: AgentRepository + 'static,
+    M: MemoryRepository + 'static,
 {
     goal_repo: Arc<G>,
     task_repo: Arc<T>,
     worktree_repo: Arc<W>,
     agent_repo: Arc<A>,
+    memory_repo: Option<Arc<M>>,
     substrate: Arc<dyn Substrate>,
     config: SwarmConfig,
     status: Arc<RwLock<OrchestratorStatus>>,
     stats: Arc<RwLock<SwarmStats>>,
     agent_semaphore: Arc<Semaphore>,
     total_tokens: Arc<AtomicU64>,
+    // Integrated services
+    audit_log: Arc<AuditLogService>,
+    circuit_breaker: Arc<CircuitBreakerService>,
+    decay_daemon_handle: Arc<RwLock<Option<DaemonHandle>>>,
 }
 
-impl<G, T, W, A> SwarmOrchestrator<G, T, W, A>
+impl<G, T, W, A, M> SwarmOrchestrator<G, T, W, A, M>
 where
     G: GoalRepository + 'static,
     T: TaskRepository + 'static,
     W: WorktreeRepository + 'static,
     A: AgentRepository + 'static,
+    M: MemoryRepository + 'static,
 {
     pub fn new(
         goal_repo: Arc<G>,
@@ -170,12 +181,164 @@ where
             task_repo,
             worktree_repo,
             agent_repo,
+            memory_repo: None,
             substrate,
             config,
             status: Arc::new(RwLock::new(OrchestratorStatus::Idle)),
             stats: Arc::new(RwLock::new(SwarmStats::default())),
             agent_semaphore: Arc::new(Semaphore::new(max_agents)),
             total_tokens: Arc::new(AtomicU64::new(0)),
+            audit_log: Arc::new(AuditLogService::with_defaults()),
+            circuit_breaker: Arc::new(CircuitBreakerService::with_defaults()),
+            decay_daemon_handle: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Create orchestrator with memory repository for cold start and decay daemon.
+    pub fn with_memory_repo(mut self, memory_repo: Arc<M>) -> Self {
+        self.memory_repo = Some(memory_repo);
+        self
+    }
+
+    /// Create orchestrator with custom audit log configuration.
+    pub fn with_audit_log(mut self, config: AuditLogConfig) -> Self {
+        self.audit_log = Arc::new(AuditLogService::new(config));
+        self
+    }
+
+    /// Create orchestrator with custom circuit breaker configuration.
+    pub fn with_circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
+        self.circuit_breaker = Arc::new(CircuitBreakerService::new(config));
+        self
+    }
+
+    /// Get the audit log service for external use.
+    pub fn audit_log(&self) -> &Arc<AuditLogService> {
+        &self.audit_log
+    }
+
+    /// Get the circuit breaker service for external use.
+    pub fn circuit_breaker(&self) -> &Arc<CircuitBreakerService> {
+        &self.circuit_breaker
+    }
+
+    /// Run cold start analysis if memory is empty.
+    pub async fn cold_start(&self) -> DomainResult<Option<ColdStartReport>>
+    where
+        M: MemoryRepository + Send + Sync + 'static,
+    {
+        let Some(ref memory_repo) = self.memory_repo else {
+            return Ok(None);
+        };
+
+        // Create memory service
+        let memory_service = MemoryService::new(memory_repo.clone());
+
+        // Check if we have any existing memories
+        let stats = memory_service.get_stats().await?;
+        let total_memories = stats.total();
+        if total_memories > 0 {
+            self.audit_log.info(
+                AuditCategory::System,
+                AuditAction::SwarmStarted,
+                format!("Skipping cold start - {} existing memories found", total_memories),
+            ).await;
+            return Ok(None);
+        }
+
+        // Run cold start
+        self.audit_log.info(
+            AuditCategory::System,
+            AuditAction::SwarmStarted,
+            "Running cold start analysis...",
+        ).await;
+
+        let cold_start_service = ColdStartService::new(
+            memory_service,
+            ColdStartConfig {
+                project_root: self.config.repo_path.clone(),
+                ..Default::default()
+            },
+        );
+
+        let report = cold_start_service.gather_context().await?;
+
+        self.audit_log.info(
+            AuditCategory::Memory,
+            AuditAction::MemoryStored,
+            format!(
+                "Cold start complete: {} memories created, project type: {}",
+                report.memories_created, report.project_type
+            ),
+        ).await;
+
+        Ok(Some(report))
+    }
+
+    /// Start the memory decay daemon.
+    pub async fn start_decay_daemon(&self) -> DomainResult<()>
+    where
+        M: MemoryRepository + Send + Sync + 'static,
+    {
+        let Some(ref memory_repo) = self.memory_repo else {
+            return Ok(());
+        };
+
+        let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
+        let daemon = MemoryDecayDaemon::new(memory_service, DecayDaemonConfig::default());
+
+        // Get the handle before running
+        let handle = daemon.handle();
+
+        // Store the handle
+        {
+            let mut daemon_handle = self.decay_daemon_handle.write().await;
+            *daemon_handle = Some(handle);
+        }
+
+        // Run daemon and log events in background
+        let audit_log = self.audit_log.clone();
+        tokio::spawn(async move {
+            let mut event_rx = daemon.run().await;
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    crate::services::DecayDaemonEvent::Started => {
+                        audit_log.info(
+                            AuditCategory::System,
+                            AuditAction::SwarmStarted,
+                            "Memory decay daemon started",
+                        ).await;
+                    }
+                    crate::services::DecayDaemonEvent::MaintenanceCompleted { run_number, report, .. } => {
+                        audit_log.info(
+                            AuditCategory::Memory,
+                            AuditAction::MemoryPruned,
+                            format!(
+                                "Memory maintenance #{}: {} expired, {} decayed, {} promoted",
+                                run_number, report.expired_pruned, report.decayed_pruned, report.promoted
+                            ),
+                        ).await;
+                    }
+                    crate::services::DecayDaemonEvent::Stopped { reason } => {
+                        audit_log.info(
+                            AuditCategory::System,
+                            AuditAction::SwarmStopped,
+                            format!("Memory decay daemon stopped: {:?}", reason),
+                        ).await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Stop the memory decay daemon.
+    pub async fn stop_decay_daemon(&self) {
+        let daemon_handle = self.decay_daemon_handle.read().await;
+        if let Some(ref handle) = *daemon_handle {
+            handle.stop();
         }
     }
 
@@ -186,6 +349,13 @@ where
             *status = OrchestratorStatus::Running;
         }
         let _ = event_tx.send(SwarmEvent::Started).await;
+
+        // Log swarm startup
+        self.audit_log.info(
+            AuditCategory::System,
+            AuditAction::SwarmStarted,
+            format!("Swarm orchestrator started with max {} agents", self.config.max_agents),
+        ).await;
 
         // Main orchestration loop
         loop {
@@ -219,6 +389,16 @@ where
             // Wait before next iteration
             tokio::time::sleep(tokio::time::Duration::from_millis(self.config.poll_interval_ms)).await;
         }
+
+        // Log swarm shutdown
+        self.audit_log.info(
+            AuditCategory::System,
+            AuditAction::SwarmStopped,
+            "Swarm orchestrator stopped",
+        ).await;
+
+        // Stop decay daemon if running
+        self.stop_decay_daemon().await;
 
         let _ = event_tx.send(SwarmEvent::Stopped).await;
         Ok(())
@@ -324,6 +504,24 @@ where
 
         // Spawn agents for ready tasks
         for task in ready_tasks {
+            // Check circuit breaker for this goal's task chain
+            let scope = CircuitScope::task_chain(goal.id);
+            let check_result = self.circuit_breaker.check(scope.clone()).await;
+
+            if check_result.is_blocked() {
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Warning,
+                        AuditCategory::Execution,
+                        AuditAction::CircuitBreakerTriggered,
+                        AuditActor::System,
+                        format!("Task {} blocked by circuit breaker for goal {}", task.id, goal.id),
+                    )
+                    .with_entity(task.id, "task"),
+                ).await;
+                continue;
+            }
+
             // Try to acquire agent permit
             if let Ok(permit) = self.agent_semaphore.clone().try_acquire_owned() {
                 // Get agent template for system prompt
@@ -351,6 +549,7 @@ where
 
                 // Spawn task execution
                 let task_id = task.id;
+                let goal_id = goal.id;
                 let task_description = task.description.clone();
                 let substrate = self.substrate.clone();
                 let task_repo = self.task_repo.clone();
@@ -359,6 +558,8 @@ where
                 let max_turns = self.config.default_max_turns;
                 let total_tokens = self.total_tokens.clone();
                 let use_worktrees = self.config.use_worktrees;
+                let circuit_breaker = self.circuit_breaker.clone();
+                let audit_log = self.audit_log.clone();
 
                 tokio::spawn(async move {
                     let _permit = permit;
@@ -394,6 +595,21 @@ where
                                 let _ = completed_task.transition_to(TaskStatus::Complete);
                                 let _ = task_repo.update(&completed_task).await;
 
+                                // Record success with circuit breaker
+                                circuit_breaker.record_success(CircuitScope::task_chain(goal_id)).await;
+
+                                // Log task completion
+                                audit_log.log(
+                                    AuditEntry::new(
+                                        AuditLevel::Info,
+                                        AuditCategory::Task,
+                                        AuditAction::TaskCompleted,
+                                        AuditActor::System,
+                                        format!("Task completed: {} tokens used", tokens),
+                                    )
+                                    .with_entity(task_id, "task"),
+                                ).await;
+
                                 // Mark worktree as completed
                                 if use_worktrees {
                                     if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
@@ -411,40 +627,80 @@ where
                                 let tokens = session.total_tokens();
                                 total_tokens.fetch_add(tokens, Ordering::Relaxed);
 
+                                let error_msg = session.error.clone().unwrap_or_else(|| "Unknown error".to_string());
+
                                 completed_task.retry_count += 1;
                                 let _ = completed_task.transition_to(TaskStatus::Failed);
                                 let _ = task_repo.update(&completed_task).await;
 
+                                // Record failure with circuit breaker
+                                circuit_breaker.record_failure(
+                                    CircuitScope::task_chain(goal_id),
+                                    &error_msg,
+                                ).await;
+
+                                // Log task failure
+                                audit_log.log(
+                                    AuditEntry::new(
+                                        AuditLevel::Warning,
+                                        AuditCategory::Task,
+                                        AuditAction::TaskFailed,
+                                        AuditActor::System,
+                                        format!("Task failed: {}", error_msg),
+                                    )
+                                    .with_entity(task_id, "task"),
+                                ).await;
+
                                 // Mark worktree as failed
                                 if use_worktrees {
                                     if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
-                                        wt.fail(session.error.clone().unwrap_or_else(|| "Unknown error".to_string()));
+                                        wt.fail(error_msg.clone());
                                         let _ = worktree_repo.update(&wt).await;
                                     }
                                 }
 
                                 let _ = event_tx.send(SwarmEvent::TaskFailed {
                                     task_id,
-                                    error: session.error.unwrap_or_else(|| "Unknown error".to_string()),
+                                    error: error_msg,
                                     retry_count: completed_task.retry_count,
                                 }).await;
                             }
                             Err(e) => {
+                                let error_msg = e.to_string();
+
                                 completed_task.retry_count += 1;
                                 let _ = completed_task.transition_to(TaskStatus::Failed);
                                 let _ = task_repo.update(&completed_task).await;
 
+                                // Record failure with circuit breaker
+                                circuit_breaker.record_failure(
+                                    CircuitScope::task_chain(goal_id),
+                                    &error_msg,
+                                ).await;
+
+                                // Log task failure
+                                audit_log.log(
+                                    AuditEntry::new(
+                                        AuditLevel::Error,
+                                        AuditCategory::Task,
+                                        AuditAction::TaskFailed,
+                                        AuditActor::System,
+                                        format!("Task execution error: {}", error_msg),
+                                    )
+                                    .with_entity(task_id, "task"),
+                                ).await;
+
                                 // Mark worktree as failed
                                 if use_worktrees {
                                     if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
-                                        wt.fail(e.to_string());
+                                        wt.fail(error_msg.clone());
                                         let _ = worktree_repo.update(&wt).await;
                                     }
                                 }
 
                                 let _ = event_tx.send(SwarmEvent::TaskFailed {
                                     task_id,
-                                    error: e.to_string(),
+                                    error: error_msg,
                                     retry_count: completed_task.retry_count,
                                 }).await;
                             }
@@ -719,8 +975,8 @@ where
 mod tests {
     use super::*;
     use crate::adapters::sqlite::{
-        create_test_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
-        SqliteWorktreeRepository, Migrator, all_embedded_migrations,
+        create_test_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository,
+        SqliteTaskRepository, SqliteWorktreeRepository, Migrator, all_embedded_migrations,
     };
     use crate::adapters::substrates::MockSubstrate;
 
@@ -729,6 +985,7 @@ mod tests {
         SqliteTaskRepository,
         SqliteWorktreeRepository,
         SqliteAgentRepository,
+        SqliteMemoryRepository,
     > {
         let pool = create_test_pool().await.unwrap();
         let migrator = Migrator::new(pool.clone());
@@ -737,12 +994,14 @@ mod tests {
         let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
         let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
         let worktree_repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
-        let agent_repo = Arc::new(SqliteAgentRepository::new(pool));
+        let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+        let memory_repo = Arc::new(SqliteMemoryRepository::new(pool));
         let substrate: Arc<dyn Substrate> = Arc::new(MockSubstrate::new());
         let mut config = SwarmConfig::default();
         config.use_worktrees = false; // Disable worktrees for tests
 
         SwarmOrchestrator::new(goal_repo, task_repo, worktree_repo, agent_repo, substrate, config)
+            .with_memory_repo(memory_repo)
     }
 
     #[tokio::test]
