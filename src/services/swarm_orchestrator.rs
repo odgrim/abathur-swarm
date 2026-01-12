@@ -646,6 +646,7 @@ where
         let evolution_loop = self.evolution_loop.clone();
         let track_evolution = self.config.track_evolution;
         let swarm_event_tx = event_tx.clone();
+        let agent_repo_for_events = self.agent_repo.clone();
 
         let event_forwarder = tokio::spawn(async move {
             while let Some(event) = exec_event_rx.recv().await {
@@ -681,10 +682,20 @@ where
                         // Record in evolution loop
                         if track_evolution {
                             let turns = result.session.as_ref().map(|s| s.turns_completed).unwrap_or(0);
+                            let template_name = result.session.as_ref()
+                                .map(|s| s.agent_template.clone())
+                                .unwrap_or_else(|| "dag_executor".to_string());
+
+                            // Look up template version from agent repository
+                            let template_version = match agent_repo_for_events.get_template_by_name(&template_name).await {
+                                Ok(Some(t)) => t.version,
+                                _ => 1,
+                            };
+
                             let execution = TaskExecution {
                                 task_id,
-                                template_name: "dag_executor".to_string(),
-                                template_version: 1,
+                                template_name,
+                                template_version,
                                 outcome: TaskOutcome::Success,
                                 executed_at: chrono::Utc::now(),
                                 turns_used: turns,
@@ -772,12 +783,20 @@ where
 
                             // Record as goal violation in evolution loop
                             if self.config.track_evolution {
+                                let template_name = task_result.session.as_ref()
+                                    .map(|s| s.agent_template.clone())
+                                    .unwrap_or_else(|| "unknown".to_string());
+
+                                // Look up template version from agent repository
+                                let template_version = match self.agent_repo.get_template_by_name(&template_name).await {
+                                    Ok(Some(t)) => t.version,
+                                    _ => 1,
+                                };
+
                                 let execution = TaskExecution {
                                     task_id: task_result.task_id,
-                                    template_name: task_result.session.as_ref()
-                                        .map(|s| s.agent_template.clone())
-                                        .unwrap_or_else(|| "unknown".to_string()),
-                                    template_version: 1,
+                                    template_name,
+                                    template_version,
                                     outcome: TaskOutcome::GoalViolation,
                                     executed_at: chrono::Utc::now(),
                                     turns_used: task_result.session.as_ref()
@@ -1672,18 +1691,19 @@ where
                 let agent_type = task.agent_type.clone().unwrap_or_else(|| "default".to_string());
                 let system_prompt = self.get_agent_system_prompt(&agent_type).await;
 
+                // Get agent template for version tracking and capabilities
+                let (template_version, capabilities) = match self.agent_repo.get_template_by_name(&agent_type).await {
+                    Ok(Some(template)) => {
+                        let caps: Vec<String> = template.tools.iter()
+                            .map(|t| t.name.clone())
+                            .collect();
+                        (template.version, caps)
+                    }
+                    _ => (1, vec!["task-execution".to_string()]),
+                };
+
                 // Register agent capabilities with A2A gateway if configured
                 if self.config.mcp_servers.a2a_gateway.is_some() {
-                    // Get capabilities from agent template
-                    let capabilities = match self.agent_repo.get_template_by_name(&agent_type).await {
-                        Ok(Some(template)) => {
-                            template.tools.iter()
-                                .map(|t| t.name.clone())
-                                .collect()
-                        }
-                        _ => vec!["task-execution".to_string()],
-                    };
-
                     if let Err(e) = self.register_agent_capabilities(&agent_type, capabilities).await {
                         tracing::warn!("Failed to register agent '{}' capabilities: {}", agent_type, e);
                     }
@@ -1725,6 +1745,7 @@ where
                 let evolution_loop = self.evolution_loop.clone();
                 let track_evolution = self.config.track_evolution;
                 let agent_type_for_evolution = agent_type.clone();
+                let template_version_for_evolution = template_version;
                 let mcp_servers = self.config.mcp_servers.clone();
                 // Configuration for post-completion workflow
                 let verify_on_completion = self.config.verify_on_completion;
@@ -1786,7 +1807,7 @@ where
                                     let execution = TaskExecution {
                                         task_id,
                                         template_name: agent_type_for_evolution.clone(),
-                                        template_version: 1, // Would come from agent repo
+                                        template_version: template_version_for_evolution,
                                         outcome: TaskOutcome::Success,
                                         executed_at: chrono::Utc::now(),
                                         turns_used: turns,
@@ -1914,7 +1935,7 @@ where
                                     let execution = TaskExecution {
                                         task_id,
                                         template_name: agent_type_for_evolution.clone(),
-                                        template_version: 1,
+                                        template_version: template_version_for_evolution,
                                         outcome: TaskOutcome::Failure,
                                         executed_at: chrono::Utc::now(),
                                         turns_used: turns,
@@ -1968,7 +1989,7 @@ where
                                     let execution = TaskExecution {
                                         task_id,
                                         template_name: agent_type_for_evolution.clone(),
-                                        template_version: 1,
+                                        template_version: template_version_for_evolution,
                                         outcome: TaskOutcome::Failure,
                                         executed_at: chrono::Utc::now(),
                                         turns_used: 0,
