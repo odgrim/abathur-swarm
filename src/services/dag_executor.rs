@@ -559,6 +559,55 @@ fn build_mcp_context(config: &ExecutorConfig) -> String {
     context
 }
 
+/// Build upstream artifacts context for agent system prompt.
+/// Provides context about artifacts produced by dependency tasks.
+async fn build_upstream_artifacts_context<T: TaskRepository>(
+    task: &crate::domain::models::Task,
+    task_repo: &T,
+) -> String {
+    if task.depends_on.is_empty() {
+        return String::new();
+    }
+
+    let mut context = String::new();
+    let mut artifacts_found = false;
+
+    for dep_id in &task.depends_on {
+        if let Ok(Some(dep_task)) = task_repo.get(*dep_id).await {
+            if dep_task.status == TaskStatus::Complete && !dep_task.artifacts.is_empty() {
+                if !artifacts_found {
+                    context.push_str("\n\n## Upstream Artifacts\n\n");
+                    context.push_str("The following artifacts from completed dependency tasks are available:\n\n");
+                    artifacts_found = true;
+                }
+
+                context.push_str(&format!("### From: {}\n", dep_task.title));
+                for artifact in &dep_task.artifacts {
+                    context.push_str(&format!(
+                        "- **{}**: `{}`\n",
+                        format!("{:?}", artifact.artifact_type),
+                        artifact.uri
+                    ));
+                    if let Some(ref checksum) = artifact.checksum {
+                        context.push_str(&format!("  - Commit: {}\n", checksum));
+                    }
+                }
+                if let Some(ref wt_path) = dep_task.worktree_path {
+                    context.push_str(&format!("  - Worktree path: {}\n", wt_path));
+                }
+                context.push('\n');
+            }
+        }
+    }
+
+    if artifacts_found {
+        context.push_str("You can use these artifacts as starting points or references for your work.\n");
+        context.push_str("---\n\n");
+    }
+
+    context
+}
+
 /// Execute a single task with retry logic and timeout.
 async fn execute_single_task<T, A>(
     task_id: Uuid,
@@ -636,6 +685,9 @@ where
         task_title: task.title.clone(),
     }).await;
 
+    // Fetch artifacts from upstream dependencies for context injection
+    let upstream_artifacts_context = build_upstream_artifacts_context(&task, &*task_repo).await;
+
     // Update task status to Running
     let mut running_task = task.clone();
     if running_task.transition_to(TaskStatus::Running).is_ok() {
@@ -676,18 +728,19 @@ where
         ctx
     };
 
-    // Build enhanced system prompt with goal context, project context, constraints, and MCP services
+    // Build enhanced system prompt with goal context, project context, constraints, artifacts, and MCP services
     let goal_context = build_goal_context(&active_goals, task.goal_id);
     let mcp_context = build_mcp_context(&config);
     let project_context = config.project_context.as_ref().map_or(String::new(), |ctx| {
         format!("\n\n## Project Context\n\n{}", ctx)
     });
     let system_prompt = format!(
-        "{}{}{}{}{}",
+        "{}{}{}{}{}{}",
         base_system_prompt,
         constraints_context,
         project_context,
         goal_context,
+        upstream_artifacts_context,
         mcp_context
     );
 

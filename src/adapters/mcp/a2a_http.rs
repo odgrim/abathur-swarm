@@ -421,6 +421,20 @@ pub struct A2ASession {
 }
 
 /// Shared state for the A2A HTTP gateway.
+/// A pending delegation request for orchestrator consumption.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingDelegation {
+    pub id: Uuid,
+    pub sender_id: String,
+    pub target_agent: String,
+    pub task_description: String,
+    pub parent_task_id: Option<Uuid>,
+    pub goal_id: Option<Uuid>,
+    pub priority: String,
+    pub created_at: DateTime<Utc>,
+    pub acknowledged: bool,
+}
+
 pub struct A2AState {
     /// Registered agent cards.
     pub agent_cards: RwLock<HashMap<String, A2AAgentCard>>,
@@ -430,6 +444,8 @@ pub struct A2AState {
     pub sessions: RwLock<HashMap<String, A2ASession>>,
     /// Messages between agents.
     pub messages: RwLock<HashMap<Uuid, A2AMessage>>,
+    /// Pending delegations for orchestrator consumption.
+    pub delegations: RwLock<HashMap<Uuid, PendingDelegation>>,
     /// Configuration.
     pub config: A2AHttpConfig,
 }
@@ -441,6 +457,7 @@ impl A2AState {
             tasks: RwLock::new(HashMap::new()),
             sessions: RwLock::new(HashMap::new()),
             messages: RwLock::new(HashMap::new()),
+            delegations: RwLock::new(HashMap::new()),
             config,
         }
     }
@@ -497,6 +514,10 @@ impl A2AHttpGateway {
             .route("/tasks/{task_id}/stream", get(stream_task))
             // Health check
             .route("/health", get(health_check))
+            // Delegation endpoints (for orchestrator integration)
+            .route("/api/v1/delegations", post(create_delegation))
+            .route("/api/v1/delegations/pending", get(list_pending_delegations))
+            .route("/api/v1/delegations/{delegation_id}/ack", post(acknowledge_delegation))
             .with_state(state);
 
         if self.config.enable_cors {
@@ -549,6 +570,73 @@ impl A2AHttpGateway {
 
 async fn health_check() -> &'static str {
     "OK"
+}
+
+/// Request to create a delegation.
+#[derive(Debug, Clone, Deserialize)]
+struct CreateDelegationRequest {
+    sender_id: String,
+    target_agent: String,
+    task_description: String,
+    parent_task_id: Option<Uuid>,
+    goal_id: Option<Uuid>,
+    #[serde(default = "default_priority")]
+    priority: String,
+}
+
+fn default_priority() -> String {
+    "normal".to_string()
+}
+
+/// Create a new delegation request.
+async fn create_delegation(
+    State(state): State<Arc<A2AState>>,
+    Json(request): Json<CreateDelegationRequest>,
+) -> Result<Json<PendingDelegation>, (StatusCode, String)> {
+    let delegation = PendingDelegation {
+        id: Uuid::new_v4(),
+        sender_id: request.sender_id,
+        target_agent: request.target_agent,
+        task_description: request.task_description,
+        parent_task_id: request.parent_task_id,
+        goal_id: request.goal_id,
+        priority: request.priority,
+        created_at: Utc::now(),
+        acknowledged: false,
+    };
+
+    let mut delegations = state.delegations.write().await;
+    let id = delegation.id;
+    delegations.insert(id, delegation.clone());
+
+    Ok(Json(delegation))
+}
+
+/// List pending (unacknowledged) delegations.
+async fn list_pending_delegations(
+    State(state): State<Arc<A2AState>>,
+) -> Json<Vec<PendingDelegation>> {
+    let delegations = state.delegations.read().await;
+    let pending: Vec<PendingDelegation> = delegations
+        .values()
+        .filter(|d| !d.acknowledged)
+        .cloned()
+        .collect();
+    Json(pending)
+}
+
+/// Acknowledge a delegation (mark as processed).
+async fn acknowledge_delegation(
+    State(state): State<Arc<A2AState>>,
+    Path(delegation_id): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let mut delegations = state.delegations.write().await;
+    if let Some(delegation) = delegations.get_mut(&delegation_id) {
+        delegation.acknowledged = true;
+        Ok(StatusCode::OK)
+    } else {
+        Err((StatusCode::NOT_FOUND, "Delegation not found".to_string()))
+    }
 }
 
 async fn handle_jsonrpc(
