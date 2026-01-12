@@ -33,13 +33,13 @@ This creates:
 Set a goal (goals are convergent and guide work, they don't complete):
 
 ```bash
-abathur goal set "Build a REST API for user management" --priority high
+abathur goal set "Maintain a clean, well-tested codebase with comprehensive documentation" --priority high
 ```
 
 Submit a task:
 
 ```bash
-abathur task submit "Implement user registration endpoint" --goal <goal-id>
+abathur task submit "Add user registration endpoint with input validation" --goal <goal-id>
 ```
 
 Start the swarm:
