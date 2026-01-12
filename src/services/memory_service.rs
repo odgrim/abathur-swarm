@@ -297,6 +297,251 @@ impl MemoryStats {
     }
 }
 
+/// Represents a potential conflict between memories.
+#[derive(Debug, Clone)]
+pub struct MemoryConflict {
+    /// First memory in the conflict.
+    pub memory_a: Uuid,
+    /// Second memory in the conflict.
+    pub memory_b: Uuid,
+    /// Key that both memories relate to.
+    pub key: String,
+    /// Similarity score indicating how related the memories are (0.0-1.0).
+    pub similarity: f64,
+    /// Whether the conflict has been automatically resolved.
+    pub resolved: bool,
+    /// Resolution strategy applied, if any.
+    pub resolution: Option<ConflictResolution>,
+}
+
+/// Resolution strategy for memory conflicts.
+#[derive(Debug, Clone)]
+pub enum ConflictResolution {
+    /// Kept the newer memory, deprecated the older one.
+    PreferNewer { kept_id: Uuid, deprecated_id: Uuid },
+    /// Kept the memory with higher confidence.
+    PreferHigherConfidence { kept_id: Uuid, deprecated_id: Uuid },
+    /// Merged content from both memories.
+    SoftMerge { merged_id: Uuid, merged_content: String },
+    /// Flagged for human review (no automatic resolution).
+    FlaggedForReview,
+}
+
+/// Result of a query with conflict information.
+#[derive(Debug, Clone)]
+pub struct QueryResultWithConflicts {
+    /// The query results.
+    pub memories: Vec<Memory>,
+    /// Any detected conflicts among the results.
+    pub conflicts: Vec<MemoryConflict>,
+}
+
+impl<R: MemoryRepository> MemoryService<R> {
+    /// Query memories and detect any conflicts among results.
+    ///
+    /// This method performs a standard query but additionally analyzes
+    /// the returned memories for potential contradictions.
+    pub async fn query_with_conflict_detection(
+        &self,
+        query: MemoryQuery,
+    ) -> DomainResult<QueryResultWithConflicts> {
+        let memories = self.repository.query(query).await?;
+        let conflicts = self.detect_conflicts(&memories);
+
+        Ok(QueryResultWithConflicts { memories, conflicts })
+    }
+
+    /// Search with conflict detection.
+    pub async fn search_with_conflict_detection(
+        &self,
+        query: &str,
+        namespace: Option<&str>,
+        limit: usize,
+    ) -> DomainResult<QueryResultWithConflicts> {
+        let memories = self.repository.search(query, namespace, limit).await?;
+        let conflicts = self.detect_conflicts(&memories);
+
+        Ok(QueryResultWithConflicts { memories, conflicts })
+    }
+
+    /// Detect conflicts among a set of memories.
+    ///
+    /// Conflict detection works by:
+    /// 1. Grouping memories by key (same key = potential conflict)
+    /// 2. Checking if grouped memories have divergent content
+    /// 3. Flagging memories with the same namespace and key but different content
+    pub fn detect_conflicts(&self, memories: &[Memory]) -> Vec<MemoryConflict> {
+        use std::collections::HashMap;
+
+        let mut conflicts = Vec::new();
+
+        // Group by (namespace, key)
+        let mut grouped: HashMap<(String, String), Vec<&Memory>> = HashMap::new();
+        for mem in memories {
+            let key = (mem.namespace.clone(), mem.key.clone());
+            grouped.entry(key).or_default().push(mem);
+        }
+
+        // Check each group for conflicts
+        for ((namespace, key), group) in grouped {
+            if group.len() < 2 {
+                continue;
+            }
+
+            // Compare all pairs in the group
+            for i in 0..group.len() {
+                for j in (i + 1)..group.len() {
+                    let mem_a = group[i];
+                    let mem_b = group[j];
+
+                    // Check if content differs significantly
+                    let similarity = self.compute_content_similarity(&mem_a.content, &mem_b.content);
+
+                    // If content is different (low similarity), it's a potential conflict
+                    // High similarity (>0.9) means they're essentially the same
+                    if similarity < 0.9 {
+                        let resolution = self.suggest_resolution(mem_a, mem_b, similarity);
+                        conflicts.push(MemoryConflict {
+                            memory_a: mem_a.id,
+                            memory_b: mem_b.id,
+                            key: format!("{}:{}", namespace, key),
+                            similarity,
+                            resolved: resolution.is_some(),
+                            resolution,
+                        });
+                    }
+                }
+            }
+        }
+
+        conflicts
+    }
+
+    /// Compute similarity between two pieces of content.
+    /// Returns a value between 0.0 (completely different) and 1.0 (identical).
+    fn compute_content_similarity(&self, content_a: &str, content_b: &str) -> f64 {
+        if content_a == content_b {
+            return 1.0;
+        }
+
+        // Simple word-overlap based similarity (Jaccard coefficient)
+        let lowercase_a = content_a.to_lowercase();
+        let lowercase_b = content_b.to_lowercase();
+        let words_a: std::collections::HashSet<&str> =
+            lowercase_a.split_whitespace().collect();
+        let words_b: std::collections::HashSet<&str> =
+            lowercase_b.split_whitespace().collect();
+
+        if words_a.is_empty() && words_b.is_empty() {
+            return 1.0;
+        }
+
+        let intersection = words_a.intersection(&words_b).count() as f64;
+        let union = words_a.union(&words_b).count() as f64;
+
+        if union == 0.0 {
+            return 1.0;
+        }
+
+        intersection / union
+    }
+
+    /// Suggest a resolution strategy for a conflict.
+    fn suggest_resolution(
+        &self,
+        mem_a: &Memory,
+        mem_b: &Memory,
+        similarity: f64,
+    ) -> Option<ConflictResolution> {
+        // If very low similarity, needs human review
+        if similarity < 0.3 {
+            return Some(ConflictResolution::FlaggedForReview);
+        }
+
+        // Prefer higher tier memory (semantic > episodic > working)
+        let tier_order = |tier: &MemoryTier| match tier {
+            MemoryTier::Semantic => 3,
+            MemoryTier::Episodic => 2,
+            MemoryTier::Working => 1,
+        };
+
+        if tier_order(&mem_a.tier) != tier_order(&mem_b.tier) {
+            let (kept, deprecated) = if tier_order(&mem_a.tier) > tier_order(&mem_b.tier) {
+                (mem_a.id, mem_b.id)
+            } else {
+                (mem_b.id, mem_a.id)
+            };
+            return Some(ConflictResolution::PreferHigherConfidence {
+                kept_id: kept,
+                deprecated_id: deprecated,
+            });
+        }
+
+        // Same tier - prefer newer memory
+        let (newer, older) = if mem_a.created_at > mem_b.created_at {
+            (mem_a.id, mem_b.id)
+        } else {
+            (mem_b.id, mem_a.id)
+        };
+
+        Some(ConflictResolution::PreferNewer {
+            kept_id: newer,
+            deprecated_id: older,
+        })
+    }
+
+    /// Apply a conflict resolution.
+    pub async fn resolve_conflict(
+        &self,
+        conflict: &MemoryConflict,
+    ) -> DomainResult<()> {
+        match &conflict.resolution {
+            Some(ConflictResolution::PreferNewer { deprecated_id, .. })
+            | Some(ConflictResolution::PreferHigherConfidence { deprecated_id, .. }) => {
+                // Mark the deprecated memory as superseded (we could delete or just flag)
+                if let Some(mut deprecated) = self.repository.get(*deprecated_id).await? {
+                    // Add superseded flag to metadata
+                    deprecated.metadata.tags.push("superseded".to_string());
+                    self.repository.update(&deprecated).await?;
+                }
+            }
+            Some(ConflictResolution::SoftMerge { merged_id, merged_content }) => {
+                // Update the merged memory with combined content
+                if let Some(mut merged) = self.repository.get(*merged_id).await? {
+                    merged.content = merged_content.clone();
+                    merged.metadata.tags.push("merged".to_string());
+                    self.repository.update(&merged).await?;
+                }
+
+                // Mark the other memory as merged-into
+                let other_id = if conflict.memory_a == *merged_id {
+                    conflict.memory_b
+                } else {
+                    conflict.memory_a
+                };
+                if let Some(mut other) = self.repository.get(other_id).await? {
+                    other.metadata.tags.push("merged-into".to_string());
+                    other.metadata.tags.push(format!("merged-into:{}", merged_id));
+                    self.repository.update(&other).await?;
+                }
+            }
+            Some(ConflictResolution::FlaggedForReview) | None => {
+                // Just mark both memories as needing review
+                for id in [conflict.memory_a, conflict.memory_b] {
+                    if let Some(mut mem) = self.repository.get(id).await? {
+                        if !mem.metadata.tags.contains(&"needs-review".to_string()) {
+                            mem.metadata.tags.push("needs-review".to_string());
+                            self.repository.update(&mem).await?;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

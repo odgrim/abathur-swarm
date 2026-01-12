@@ -606,6 +606,11 @@ async fn run_swarm_foreground(
                         println!("  DAG restructure: {} - {}", task_id, decision);
                     }
                 }
+                SwarmEvent::AgentCreated { agent_type, tier } => {
+                    if !json_mode {
+                        println!("  Agent created: {} (tier: {})", agent_type, tier);
+                    }
+                }
                 SwarmEvent::StatusUpdate(stats) => {
                     if !json_mode && stats.active_goals > 0 {
                         println!("Status: {} active goals, {} running tasks, {} tokens used",

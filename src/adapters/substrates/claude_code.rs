@@ -96,8 +96,14 @@ impl ClaudeCodeSubstrate {
             args.push(request.system_prompt.clone());
         }
 
-        // MCP servers
+        // MCP servers - only pass if they're actual MCP protocol servers (not HTTP REST APIs)
+        // HTTP REST APIs (like Abathur's memory/tasks servers) should be documented in
+        // the system prompt for agents to use via WebFetch tool
         for server in &request.config.mcp_servers {
+            // Skip HTTP URLs as they're REST APIs, not MCP servers
+            if server.starts_with("http://") || server.starts_with("https://") {
+                continue;
+            }
             args.push("--mcp".to_string());
             args.push(server.clone());
         }

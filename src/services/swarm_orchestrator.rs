@@ -30,6 +30,7 @@ use crate::services::{
     MergeQueue, MergeQueueConfig,
     MetaPlanner, MetaPlannerConfig,
     WorktreeConfig, WorktreeService,
+    dag_restructure::{DagRestructureService, RestructureContext, RestructureDecision, RestructureTrigger, TaskPriorityModifier},
 };
 
 /// Configuration for the swarm orchestrator.
@@ -149,6 +150,8 @@ pub enum SwarmEvent {
     EvolutionTriggered { template_name: String, trigger: String },
     /// Specialist agent spawned for special handling.
     SpecialistSpawned { specialist_type: String, trigger: String, task_id: Option<Uuid> },
+    /// Agent dynamically created through capability-driven genesis.
+    AgentCreated { agent_type: String, tier: String },
     /// Goal alignment evaluated.
     GoalAlignmentEvaluated { task_id: Uuid, overall_score: f64, passes: bool },
     /// DAG restructure triggered for a permanently failed task.
@@ -211,6 +214,8 @@ where
     goal_alignment: Option<Arc<GoalAlignmentService<G>>>,
     // Active goals cache for agent context
     active_goals_cache: Arc<RwLock<Vec<Goal>>>,
+    // DAG restructure service for failure recovery
+    restructure_service: Arc<tokio::sync::Mutex<DagRestructureService>>,
 }
 
 impl<G, T, W, A, M> SwarmOrchestrator<G, T, W, A, M>
@@ -249,6 +254,7 @@ where
             evolution_loop: Arc::new(EvolutionLoop::with_default_config()),
             goal_alignment,
             active_goals_cache: Arc::new(RwLock::new(Vec::new())),
+            restructure_service: Arc::new(tokio::sync::Mutex::new(DagRestructureService::with_defaults())),
         }
     }
 
@@ -495,6 +501,55 @@ where
         Ok(())
     }
 
+    /// Register all existing agent templates with the A2A gateway at startup.
+    ///
+    /// This enables agent discovery for all known agent types.
+    async fn register_all_agent_templates(&self) -> DomainResult<()> {
+        // Get all agent templates from the repository
+        use crate::domain::ports::AgentFilter;
+        let templates = self.agent_repo.list_templates(AgentFilter::default()).await?;
+
+        if templates.is_empty() {
+            self.audit_log.info(
+                AuditCategory::Agent,
+                AuditAction::AgentSpawned,
+                "No agent templates to register with A2A gateway".to_string(),
+            ).await;
+            return Ok(());
+        }
+
+        let mut registered_count = 0;
+        for template in templates {
+            // Extract capabilities from template tools
+            let capabilities: Vec<String> = template.tools
+                .iter()
+                .map(|t| t.name.clone())
+                .collect();
+
+            // Add default capability if no tools defined
+            let capabilities = if capabilities.is_empty() {
+                vec!["task-execution".to_string()]
+            } else {
+                capabilities
+            };
+
+            if self.register_agent_capabilities(&template.name, capabilities).await.is_ok() {
+                registered_count += 1;
+            }
+        }
+
+        self.audit_log.info(
+            AuditCategory::Agent,
+            AuditAction::AgentSpawned,
+            format!(
+                "Registered {} agent templates with A2A gateway at startup",
+                registered_count
+            ),
+        ).await;
+
+        Ok(())
+    }
+
     /// Execute a goal's tasks using the DagExecutor for wave-based parallel execution.
     ///
     /// This provides structured execution with waves, guardrails, and circuit breakers.
@@ -524,6 +579,9 @@ where
             tasks_server_url: self.config.mcp_servers.tasks_server.clone(),
         };
 
+        // Create restructure service for failure recovery
+        let restructure_service = Arc::new(crate::services::dag_restructure::DagRestructureService::with_defaults());
+
         let executor = DagExecutor::new(
             self.task_repo.clone(),
             self.agent_repo.clone(),
@@ -531,7 +589,8 @@ where
             executor_config,
         )
         .with_goal_repo(self.goal_repo.clone())
-        .with_circuit_breaker(self.circuit_breaker.clone());
+        .with_circuit_breaker(self.circuit_breaker.clone())
+        .with_restructure_service(restructure_service.clone());
 
         // Create execution event channel
         let (exec_event_tx, mut exec_event_rx) = mpsc::channel::<ExecutionEvent>(100);
@@ -643,10 +702,170 @@ where
         });
 
         // Execute the DAG
-        let results = executor.execute_with_events(&dag, exec_event_tx).await?;
+        let mut results = executor.execute_with_events(&dag, exec_event_tx).await?;
 
         // Wait for event forwarder to finish
         let _ = event_forwarder.await;
+
+        // Post-execution verification: verify completed tasks and update state on failures
+        if self.config.verify_on_completion {
+            let mut verification_failures = 0;
+
+            for task_result in &results.task_results {
+                if task_result.status == TaskStatus::Complete {
+                    // Verify the task
+                    match self.verify_task(task_result.task_id).await {
+                        Ok(Some(verification)) if !verification.passed => {
+                            // Verification failed - update task status
+                            if let Ok(Some(mut task)) = self.task_repo.get(task_result.task_id).await {
+                                if task.transition_to(TaskStatus::Failed).is_ok() {
+                                    let _ = self.task_repo.update(&task).await;
+                                }
+                            }
+                            verification_failures += 1;
+
+                            // Record as goal violation in evolution loop
+                            if self.config.track_evolution {
+                                let execution = TaskExecution {
+                                    task_id: task_result.task_id,
+                                    template_name: task_result.session.as_ref()
+                                        .map(|s| s.agent_template.clone())
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                    template_version: 1,
+                                    outcome: TaskOutcome::GoalViolation,
+                                    executed_at: chrono::Utc::now(),
+                                    turns_used: task_result.session.as_ref()
+                                        .map(|s| s.turns_completed)
+                                        .unwrap_or(0),
+                                    tokens_used: task_result.session.as_ref()
+                                        .map(|s| s.total_tokens())
+                                        .unwrap_or(0),
+                                    downstream_tasks: vec![],
+                                };
+                                self.evolution_loop.record_execution(execution).await;
+                            }
+
+                            // Emit verification event
+                            let checks_total = verification.checks.len();
+                            let checks_passed = verification.checks.iter().filter(|c| c.passed).count();
+                            let _ = event_tx.send(SwarmEvent::TaskVerified {
+                                task_id: task_result.task_id,
+                                passed: false,
+                                checks_passed,
+                                checks_total,
+                            }).await;
+
+                            self.audit_log.log(
+                                AuditEntry::new(
+                                    AuditLevel::Warning,
+                                    AuditCategory::Task,
+                                    AuditAction::TaskFailed,
+                                    AuditActor::System,
+                                    format!(
+                                        "Task {} failed verification: {}/{} checks passed. {}",
+                                        task_result.task_id, checks_passed, checks_total,
+                                        verification.failures_summary.unwrap_or_default()
+                                    ),
+                                )
+                                .with_entity(task_result.task_id, "task"),
+                            ).await;
+                        }
+                        Ok(Some(verification)) => {
+                            // Verification passed
+                            let checks_total = verification.checks.len();
+                            let checks_passed = verification.checks.iter().filter(|c| c.passed).count();
+                            let _ = event_tx.send(SwarmEvent::TaskVerified {
+                                task_id: task_result.task_id,
+                                passed: true,
+                                checks_passed,
+                                checks_total,
+                            }).await;
+                        }
+                        _ => {}
+                    }
+
+                    // Also check goal alignment
+                    if let Some(ref alignment_svc) = self.goal_alignment {
+                        if let Ok(Some(task)) = self.task_repo.get(task_result.task_id).await {
+                            if let Ok(eval) = alignment_svc.evaluate_task(&task).await {
+                                let _ = event_tx.send(SwarmEvent::GoalAlignmentEvaluated {
+                                    task_id: task_result.task_id,
+                                    overall_score: eval.overall_score,
+                                    passes: eval.passes,
+                                }).await;
+
+                                if !eval.passes {
+                                    self.audit_log.log(
+                                        AuditEntry::new(
+                                            AuditLevel::Warning,
+                                            AuditCategory::Goal,
+                                            AuditAction::GoalFailed,
+                                            AuditActor::System,
+                                            format!(
+                                                "Task {} has low goal alignment: {:.0}% ({}/{}). {}",
+                                                task_result.task_id,
+                                                eval.overall_score * 100.0,
+                                                eval.goals_satisfied,
+                                                eval.goal_alignments.len(),
+                                                eval.summary
+                                            ),
+                                        )
+                                        .with_entity(task_result.task_id, "task"),
+                                    ).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Update results to reflect verification failures
+            if verification_failures > 0 {
+                results.completed_tasks = results.completed_tasks.saturating_sub(verification_failures);
+                results.failed_tasks += verification_failures;
+            }
+        }
+
+        // Persist successful task outputs to memory for future agent reference
+        if let Some(ref memory_repo) = self.memory_repo {
+            use crate::domain::models::Memory;
+
+            for task_result in &results.task_results {
+                if task_result.status == TaskStatus::Complete {
+                    if let Some(ref session) = task_result.session {
+                        if let Some(ref result_text) = session.result {
+                            // Store task output as episodic memory for future agent reference
+                            let task = self.task_repo.get(task_result.task_id).await
+                                .ok()
+                                .flatten();
+
+                            let key = format!("task/{}/output", task_result.task_id);
+                            let namespace = task.as_ref()
+                                .and_then(|t| t.goal_id.map(|g| format!("goal/{}", g)))
+                                .unwrap_or_else(|| "tasks".to_string());
+
+                            let content = format!(
+                                "Task: {}\nAgent: {}\nOutput:\n{}",
+                                task.as_ref().map(|t| t.title.as_str()).unwrap_or("Unknown"),
+                                session.agent_template,
+                                result_text
+                            );
+
+                            let memory = Memory::episodic(key, content)
+                                .with_namespace(namespace)
+                                .with_type(crate::domain::models::MemoryType::Context);
+
+                            if let Err(e) = memory_repo.store(&memory).await {
+                                tracing::warn!(
+                                    "Failed to persist task {} output to memory: {}",
+                                    task_result.task_id, e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Update goal status based on results
         if let Ok(Some(mut goal)) = self.goal_repo.get(goal_id).await {
@@ -1088,6 +1307,21 @@ where
                     format!("Failed to cache active goals: {}", e),
                 ),
             ).await;
+        }
+
+        // Register existing agent templates with A2A gateway for discovery
+        if self.config.mcp_servers.a2a_gateway.is_some() {
+            if let Err(e) = self.register_all_agent_templates().await {
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Warning,
+                        AuditCategory::System,
+                        AuditAction::SwarmStarted,
+                        AuditActor::System,
+                        format!("Failed to register agent templates with A2A gateway: {}", e),
+                    ),
+                ).await;
+            }
         }
 
         // Main orchestration loop
@@ -1869,11 +2103,11 @@ where
     /// Process specialist agent triggers.
     ///
     /// Checks for conditions that should spawn specialist agents:
+    /// - DAG restructuring for recoverable failures → New decomposition/alternative path
     /// - Merge conflicts → Merge Conflict Specialist
-    /// - Persistent failures (max retries exceeded) → Diagnostic Analyst
-    /// - Spawn limits exceeded → Limit Evaluation Specialist
+    /// - Persistent failures (max retries exceeded, restructuring exhausted) → Diagnostic Analyst
     async fn process_specialist_triggers(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
-        // Check for persistent failures that need diagnostic analysis
+        // Check for persistent failures that need restructuring or diagnostic analysis
         let failed_tasks = self.task_repo.list_by_status(TaskStatus::Failed).await?;
         let permanently_failed: Vec<_> = failed_tasks
             .iter()
@@ -1881,10 +2115,42 @@ where
             .collect();
 
         for task in permanently_failed {
-            // Skip tasks without a goal_id - can't create diagnostics without goal context
+            // Skip tasks without a goal_id - can't restructure or diagnose without goal context
             let Some(goal_id) = task.goal_id else {
                 continue;
             };
+
+            // Get the goal for context
+            let goal = match self.goal_repo.get(goal_id).await? {
+                Some(g) => g,
+                None => continue,
+            };
+
+            // First, try DAG restructuring before falling back to diagnostic analyst
+            let restructure_result = self.try_restructure_for_failure(task, &goal, event_tx).await;
+
+            match restructure_result {
+                Ok(true) => {
+                    // Restructuring was applied, skip diagnostic analyst
+                    continue;
+                }
+                Ok(false) => {
+                    // Restructuring not possible (exhausted or not eligible), fall through to diagnostic
+                }
+                Err(e) => {
+                    self.audit_log.log(
+                        AuditEntry::new(
+                            AuditLevel::Warning,
+                            AuditCategory::Task,
+                            AuditAction::TaskFailed,
+                            AuditActor::System,
+                            format!("Restructure attempt failed for task {}: {}", task.id, e),
+                        )
+                        .with_entity(task.id, "task"),
+                    ).await;
+                    // Fall through to diagnostic analyst
+                }
+            }
 
             // Check if we haven't already created a diagnostic task for this failure
             let diagnostic_exists = self.task_repo
@@ -1927,6 +2193,205 @@ where
         }
 
         Ok(())
+    }
+
+    /// Try to restructure the DAG for a permanently failed task.
+    /// Returns Ok(true) if restructuring was applied, Ok(false) if not possible/exhausted.
+    async fn try_restructure_for_failure(
+        &self,
+        failed_task: &Task,
+        goal: &Goal,
+        event_tx: &mpsc::Sender<SwarmEvent>,
+    ) -> DomainResult<bool> {
+        let trigger = RestructureTrigger::PermanentFailure {
+            task_id: failed_task.id,
+            retries_exhausted: failed_task.retry_count,
+        };
+
+        // Check if restructuring should be attempted
+        let mut restructure_svc = self.restructure_service.lock().await;
+
+        if !restructure_svc.should_restructure(&trigger) {
+            return Ok(false);
+        }
+
+        // Get related failures in the same goal
+        let goal_tasks = self.task_repo.list_by_goal(goal.id).await?;
+        let related_failures: Vec<Task> = goal_tasks
+            .into_iter()
+            .filter(|t| t.status == TaskStatus::Failed && t.id != failed_task.id)
+            .collect();
+
+        // Build restructure context
+        let context = RestructureContext {
+            goal: goal.clone(),
+            failed_task: failed_task.clone(),
+            failure_reason: format!("Task failed after {} retries", failed_task.retry_count),
+            previous_attempts: vec![], // Would need to track this in task metadata
+            related_failures,
+            available_approaches: vec![], // Could be populated from agent templates
+            attempt_number: restructure_svc.attempt_count(failed_task.id) + 1,
+            time_since_last: None,
+        };
+
+        // Get restructure decision
+        let decision = restructure_svc.analyze_and_decide(&context)?;
+
+        // Log the decision
+        self.audit_log.info(
+            AuditCategory::Task,
+            AuditAction::TaskCreated,
+            format!(
+                "DAG restructure decision for task {}: {:?}",
+                failed_task.id, decision
+            ),
+        ).await;
+
+        // Emit event
+        let _ = event_tx.send(SwarmEvent::RestructureTriggered {
+            task_id: failed_task.id,
+            decision: format!("{:?}", decision),
+        }).await;
+
+        // Apply the decision
+        match decision {
+            RestructureDecision::RetryDifferentApproach { new_approach, new_agent_type } => {
+                // Update the failed task to retry with different approach
+                let mut updated_task = failed_task.clone();
+                updated_task.description = format!(
+                    "{}\n\n## Restructure Note\nPrevious approach failed. Try: {}",
+                    updated_task.description, new_approach
+                );
+                if let Some(agent_type) = new_agent_type {
+                    updated_task.agent_type = Some(agent_type);
+                }
+                // Reset retry count and transition to Ready
+                updated_task.retry_count = 0;
+                let _ = updated_task.transition_to(TaskStatus::Ready);
+                self.task_repo.update(&updated_task).await?;
+                Ok(true)
+            }
+            RestructureDecision::DecomposeDifferently { new_subtasks, remove_original } => {
+                // Create new subtasks based on the restructure plan
+                for spec in &new_subtasks {
+                    let priority = match spec.priority {
+                        TaskPriorityModifier::Same => failed_task.priority.clone(),
+                        TaskPriorityModifier::Higher => crate::domain::models::TaskPriority::High,
+                        TaskPriorityModifier::Lower => crate::domain::models::TaskPriority::Low,
+                    };
+
+                    let new_task = Task::new(&spec.title, &spec.description)
+                        .with_goal(goal.id)
+                        .with_priority(priority);
+
+                    if let Some(ref agent_type) = spec.agent_type {
+                        let new_task = new_task.with_agent(agent_type);
+                        if new_task.validate().is_ok() {
+                            self.task_repo.create(&new_task).await?;
+                            let _ = event_tx.send(SwarmEvent::TaskSubmitted {
+                                task_id: new_task.id,
+                                task_title: new_task.title.clone(),
+                                goal_id: goal.id,
+                            }).await;
+                        }
+                    } else if new_task.validate().is_ok() {
+                        self.task_repo.create(&new_task).await?;
+                        let _ = event_tx.send(SwarmEvent::TaskSubmitted {
+                            task_id: new_task.id,
+                            task_title: new_task.title.clone(),
+                            goal_id: goal.id,
+                        }).await;
+                    }
+                }
+
+                // Cancel the original task if specified
+                if remove_original {
+                    let mut canceled_task = failed_task.clone();
+                    let _ = canceled_task.transition_to(TaskStatus::Canceled);
+                    self.task_repo.update(&canceled_task).await?;
+                }
+
+                Ok(true)
+            }
+            RestructureDecision::AlternativePath { description, new_tasks } => {
+                // Create alternative path tasks
+                for spec in &new_tasks {
+                    let priority = match spec.priority {
+                        TaskPriorityModifier::Same => failed_task.priority.clone(),
+                        TaskPriorityModifier::Higher => crate::domain::models::TaskPriority::High,
+                        TaskPriorityModifier::Lower => crate::domain::models::TaskPriority::Low,
+                    };
+
+                    let new_task = Task::new(&spec.title, &spec.description)
+                        .with_goal(goal.id)
+                        .with_priority(priority);
+
+                    if let Some(ref agent_type) = spec.agent_type {
+                        let new_task = new_task.with_agent(agent_type);
+                        if new_task.validate().is_ok() {
+                            self.task_repo.create(&new_task).await?;
+                            let _ = event_tx.send(SwarmEvent::TaskSubmitted {
+                                task_id: new_task.id,
+                                task_title: new_task.title.clone(),
+                                goal_id: goal.id,
+                            }).await;
+                        }
+                    } else if new_task.validate().is_ok() {
+                        self.task_repo.create(&new_task).await?;
+                        let _ = event_tx.send(SwarmEvent::TaskSubmitted {
+                            task_id: new_task.id,
+                            task_title: new_task.title.clone(),
+                            goal_id: goal.id,
+                        }).await;
+                    }
+                }
+
+                self.audit_log.info(
+                    AuditCategory::Task,
+                    AuditAction::TaskCreated,
+                    format!("Created alternative path: {}", description),
+                ).await;
+
+                Ok(true)
+            }
+            RestructureDecision::WaitAndRetry { delay, reason } => {
+                // For now, just log and return false - we don't have a scheduler
+                self.audit_log.info(
+                    AuditCategory::Task,
+                    AuditAction::TaskFailed,
+                    format!("Restructure suggests waiting {} seconds: {}", delay.as_secs(), reason),
+                ).await;
+                Ok(false)
+            }
+            RestructureDecision::Escalate { reason, context } => {
+                // Escalation means we should fall through to diagnostic analyst
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Warning,
+                        AuditCategory::Task,
+                        AuditAction::TaskFailed,
+                        AuditActor::System,
+                        format!("Task {} escalated: {} - {}", failed_task.id, reason, context),
+                    )
+                    .with_entity(failed_task.id, "task"),
+                ).await;
+                Ok(false)
+            }
+            RestructureDecision::AcceptFailure { reason } => {
+                // No recovery possible
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Error,
+                        AuditCategory::Task,
+                        AuditAction::TaskFailed,
+                        AuditActor::System,
+                        format!("Task {} failure accepted: {}", failed_task.id, reason),
+                    )
+                    .with_entity(failed_task.id, "task"),
+                ).await;
+                Ok(false)
+            }
+        }
     }
 
     /// Spawn a diagnostic analyst for a permanently failed task.
@@ -2123,19 +2588,42 @@ where
             }).await;
         }
 
-        // Ensure required agents exist
+        // Ensure required agents exist (capability-driven agent genesis)
         for agent_type in &plan.required_agents {
-            let purpose = format!("Execute tasks for goal: {}", goal.name);
-            if let Err(e) = meta_planner.ensure_agent(agent_type, &purpose).await {
-                self.audit_log.log(
-                    AuditEntry::new(
-                        AuditLevel::Warning,
-                        AuditCategory::Agent,
-                        AuditAction::TaskCreated,
-                        AuditActor::System,
-                        format!("Could not ensure agent '{}': {}", agent_type, e),
-                    ),
-                ).await;
+            // Check if agent already exists
+            let exists = meta_planner.agent_exists(agent_type).await.unwrap_or(false);
+
+            if !exists {
+                let purpose = format!("Execute tasks for goal: {}", goal.name);
+                match meta_planner.ensure_agent(agent_type, &purpose).await {
+                    Ok(agent) => {
+                        // Emit event for dynamically created agent
+                        let _ = event_tx.send(SwarmEvent::AgentCreated {
+                            agent_type: agent_type.clone(),
+                            tier: format!("{:?}", agent.tier),
+                        }).await;
+
+                        self.audit_log.info(
+                            AuditCategory::Agent,
+                            AuditAction::TemplateCreated,
+                            format!(
+                                "Dynamically created agent '{}' for goal '{}'",
+                                agent_type, goal.name
+                            ),
+                        ).await;
+                    }
+                    Err(e) => {
+                        self.audit_log.log(
+                            AuditEntry::new(
+                                AuditLevel::Warning,
+                                AuditCategory::Agent,
+                                AuditAction::TaskFailed,
+                                AuditActor::System,
+                                format!("Could not ensure agent '{}': {}", agent_type, e),
+                            ),
+                        ).await;
+                    }
+                }
             }
         }
 

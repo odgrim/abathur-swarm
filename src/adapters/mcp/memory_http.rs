@@ -125,6 +125,24 @@ pub struct MemoryStatsResponse {
     pub semantic: u64,
 }
 
+/// Response representing a detected memory conflict.
+#[derive(Debug, Serialize)]
+pub struct MemoryConflictResponse {
+    pub memory_a: Uuid,
+    pub memory_b: Uuid,
+    pub key: String,
+    pub similarity: f64,
+    pub resolved: bool,
+    pub resolution: Option<String>,
+}
+
+/// Response for search with conflict detection.
+#[derive(Debug, Serialize)]
+pub struct SearchWithConflictsResponse {
+    pub memories: Vec<MemoryResponse>,
+    pub conflicts: Vec<MemoryConflictResponse>,
+}
+
 /// Error response.
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
@@ -165,6 +183,8 @@ impl<M: MemoryRepository + Clone + Send + Sync + 'static> MemoryHttpServer<M> {
             .route("/api/v1/memory/key/{namespace}/{key}", get(get_by_key::<M>))
             // Search
             .route("/api/v1/memory/search", get(search_memories::<M>))
+            // Search with conflict detection
+            .route("/api/v1/memory/search/with-conflicts", get(search_with_conflicts::<M>))
             // Statistics
             .route("/api/v1/memory/stats", get(get_stats::<M>))
             // Health check
@@ -365,6 +385,40 @@ async fn search_memories<M: MemoryRepository + Clone + Send + Sync + 'static>(
         .await
     {
         Ok(memories) => Ok(Json(memories.into_iter().map(MemoryResponse::from).collect())),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+                code: "SEARCH_ERROR".to_string(),
+            }),
+        )),
+    }
+}
+
+/// Search with conflict detection - returns memories and any detected conflicts.
+async fn search_with_conflicts<M: MemoryRepository + Clone + Send + Sync + 'static>(
+    State(state): State<Arc<AppState<M>>>,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<SearchWithConflictsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    match state
+        .service
+        .search_with_conflict_detection(&params.q, params.namespace.as_deref(), params.limit)
+        .await
+    {
+        Ok(result) => {
+            let memories = result.memories.into_iter().map(MemoryResponse::from).collect();
+            let conflicts = result.conflicts.into_iter().map(|c| {
+                MemoryConflictResponse {
+                    memory_a: c.memory_a,
+                    memory_b: c.memory_b,
+                    key: c.key,
+                    similarity: c.similarity,
+                    resolved: c.resolved,
+                    resolution: c.resolution.map(|r| format!("{:?}", r)),
+                }
+            }).collect();
+            Ok(Json(SearchWithConflictsResponse { memories, conflicts }))
+        }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {

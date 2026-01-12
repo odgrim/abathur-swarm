@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    Goal, GoalConstraint, ConstraintType, SessionStatus, SubstrateConfig, SubstrateRequest, SubstrateSession, TaskDag, TaskStatus,
+    Goal, ConstraintType, SessionStatus, SubstrateConfig, SubstrateRequest, SubstrateSession, TaskDag, TaskStatus,
 };
 use crate::domain::ports::{AgentRepository, GoalRepository, Substrate, TaskRepository};
 use crate::services::guardrails::{GuardrailResult, Guardrails};
@@ -517,22 +517,40 @@ fn build_goal_context(goals: &[Goal], task_goal_id: Option<Uuid>) -> String {
 }
 
 /// Build MCP context for agent system prompt.
+/// Documents available HTTP REST APIs that agents can call via WebFetch.
 fn build_mcp_context(config: &ExecutorConfig) -> String {
     let mut context = String::new();
 
     if config.memory_server_url.is_some() || config.a2a_gateway_url.is_some() || config.tasks_server_url.is_some() {
-        context.push_str("\n\n## Available System Services\n\n");
+        context.push_str("\n\n## Available System Services (HTTP REST APIs)\n\n");
+        context.push_str("Use the WebFetch tool to interact with these services.\n\n");
 
         if let Some(ref url) = config.memory_server_url {
-            context.push_str(&format!("- **Memory Service** ({}): Query project knowledge, patterns, and past decisions\n", url));
+            context.push_str(&format!("### Memory Service ({})\n", url));
+            context.push_str("Query and store project knowledge, patterns, and decisions.\n\n");
+            context.push_str("**Endpoints:**\n");
+            context.push_str(&format!("- `GET {}/api/v1/memory?search=<query>` - Search memories\n", url));
+            context.push_str(&format!("- `GET {}/api/v1/memory?namespace=<ns>` - List memories in namespace\n", url));
+            context.push_str(&format!("- `POST {}/api/v1/memory` - Store new memory (JSON body: {{\"key\": \"...\", \"content\": \"...\", \"namespace\": \"...\"}})\n", url));
+            context.push_str(&format!("- `GET {}/api/v1/memory/key/<namespace>/<key>` - Get specific memory\n\n", url));
         }
         if let Some(ref url) = config.tasks_server_url {
-            context.push_str(&format!("- **Tasks Service** ({}): Query task dependencies and status\n", url));
+            context.push_str(&format!("### Tasks Service ({})\n", url));
+            context.push_str("Query task dependencies, status, and spawn subtasks.\n\n");
+            context.push_str("**Endpoints:**\n");
+            context.push_str(&format!("- `GET {}/api/v1/tasks/<id>` - Get task details\n", url));
+            context.push_str(&format!("- `GET {}/api/v1/tasks?status=<status>` - List tasks by status\n", url));
+            context.push_str(&format!("- `GET {}/api/v1/tasks/<id>/dependencies` - Get task dependencies\n", url));
+            context.push_str(&format!("- `POST {}/api/v1/tasks` - Create subtask (JSON body: {{\"title\": \"...\", \"description\": \"...\", \"parent_id\": \"...\"}})\n\n", url));
         }
         if let Some(ref url) = config.a2a_gateway_url {
-            context.push_str(&format!("- **A2A Gateway** ({}): Delegate work to specialized agents\n", url));
+            context.push_str(&format!("### A2A Gateway ({})\n", url));
+            context.push_str("Delegate work to specialized agents via JSON-RPC 2.0.\n\n");
+            context.push_str("**Endpoints:**\n");
+            context.push_str(&format!("- `GET {}/api/v1/agents` - List available agents and their capabilities\n", url));
+            context.push_str(&format!("- `POST {}` - Send JSON-RPC request (method: \"tasks/send\", params: {{\"message\": {{\"role\": \"user\", \"parts\": [{{\"type\": \"text\", \"text\": \"...\"}}]}}}})\n\n", url));
         }
-        context.push_str("\n---\n\n");
+        context.push_str("---\n\n");
     }
 
     context
