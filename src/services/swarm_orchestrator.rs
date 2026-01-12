@@ -31,6 +31,7 @@ use crate::services::{
     MetaPlanner, MetaPlannerConfig,
     WorktreeConfig, WorktreeService,
     dag_restructure::{DagRestructureService, RestructureContext, RestructureDecision, RestructureTrigger, TaskPriorityModifier},
+    guardrails::{Guardrails, GuardrailsConfig},
 };
 
 /// Configuration for the swarm orchestrator.
@@ -216,6 +217,8 @@ where
     active_goals_cache: Arc<RwLock<Vec<Goal>>>,
     // DAG restructure service for failure recovery
     restructure_service: Arc<tokio::sync::Mutex<DagRestructureService>>,
+    // Guardrails for safety limits (tokens, cost, concurrent tasks)
+    guardrails: Arc<Guardrails>,
 }
 
 impl<G, T, W, A, M> SwarmOrchestrator<G, T, W, A, M>
@@ -255,7 +258,19 @@ where
             goal_alignment,
             active_goals_cache: Arc::new(RwLock::new(Vec::new())),
             restructure_service: Arc::new(tokio::sync::Mutex::new(DagRestructureService::with_defaults())),
+            guardrails: Arc::new(Guardrails::with_defaults()),
         }
+    }
+
+    /// Create orchestrator with custom guardrails configuration.
+    pub fn with_guardrails(mut self, config: GuardrailsConfig) -> Self {
+        self.guardrails = Arc::new(Guardrails::new(config));
+        self
+    }
+
+    /// Get the guardrails service for external use.
+    pub fn guardrails(&self) -> &Arc<Guardrails> {
+        &self.guardrails
     }
 
     /// Create orchestrator with memory repository for cold start and decay daemon.
@@ -567,6 +582,35 @@ where
         // Build DAG from tasks
         let dag = TaskDag::from_tasks(tasks);
 
+        // Fetch project context from semantic memory if available
+        let project_context = if let Some(ref memory_repo) = self.memory_repo {
+            let memory_service = MemoryService::new(memory_repo.clone());
+            // Get goal-specific context and general project knowledge
+            let mut context_parts = Vec::new();
+
+            // Fetch goal-related memories
+            if let Ok(goal_memories) = memory_service.get_goal_context(goal_id).await {
+                for mem in goal_memories.iter().take(5) {
+                    context_parts.push(format!("- {}: {}", mem.key, mem.content));
+                }
+            }
+
+            // Fetch semantic memories (long-term project knowledge)
+            if let Ok(semantic_memories) = memory_service.search("architecture project", Some("semantic"), 5).await {
+                for mem in semantic_memories {
+                    context_parts.push(format!("- {}: {}", mem.key, mem.content));
+                }
+            }
+
+            if context_parts.is_empty() {
+                None
+            } else {
+                Some(format!("Relevant project knowledge:\n{}", context_parts.join("\n")))
+            }
+        } else {
+            None
+        };
+
         // Create DAG executor with MCP services and goal context
         let executor_config = ExecutorConfig {
             max_concurrency: self.config.max_agents,
@@ -577,6 +621,7 @@ where
             memory_server_url: self.config.mcp_servers.memory_server.clone(),
             a2a_gateway_url: self.config.mcp_servers.a2a_gateway.clone(),
             tasks_server_url: self.config.mcp_servers.tasks_server.clone(),
+            project_context,
         };
 
         // Create restructure service for failure recovery
@@ -590,7 +635,8 @@ where
         )
         .with_goal_repo(self.goal_repo.clone())
         .with_circuit_breaker(self.circuit_breaker.clone())
-        .with_restructure_service(restructure_service.clone());
+        .with_restructure_service(restructure_service.clone())
+        .with_guardrails(self.guardrails.clone());
 
         // Create execution event channel
         let (exec_event_tx, mut exec_event_rx) = mpsc::channel::<ExecutionEvent>(100);
@@ -1307,6 +1353,35 @@ where
                     format!("Failed to cache active goals: {}", e),
                 ),
             ).await;
+        }
+
+        // Seed baseline specialist templates if they don't exist
+        {
+            use crate::services::AgentService;
+            let agent_service = AgentService::new(self.agent_repo.clone());
+            match agent_service.seed_baseline_specialists().await {
+                Ok(seeded) if !seeded.is_empty() => {
+                    self.audit_log.info(
+                        AuditCategory::Agent,
+                        AuditAction::AgentSpawned,
+                        format!("Seeded {} baseline specialist templates: {}", seeded.len(), seeded.join(", ")),
+                    ).await;
+                }
+                Ok(_) => {
+                    // All specialists already exist
+                }
+                Err(e) => {
+                    self.audit_log.log(
+                        AuditEntry::new(
+                            AuditLevel::Warning,
+                            AuditCategory::Agent,
+                            AuditAction::AgentSpawned,
+                            AuditActor::System,
+                            format!("Failed to seed specialist templates (non-fatal): {}", e),
+                        ),
+                    ).await;
+                }
+            }
         }
 
         // Register existing agent templates with A2A gateway for discovery
@@ -2774,6 +2849,25 @@ where
         let tasks = self.task_repo.list_by_goal(goal_id).await?;
         let dag = TaskDag::from_tasks(tasks);
 
+        // Fetch project context from memory if available
+        let project_context = if let Some(ref memory_repo) = self.memory_repo {
+            let memory_service = MemoryService::new(memory_repo.clone());
+            if let Ok(memories) = memory_service.search("architecture project", Some("semantic"), 5).await {
+                if memories.is_empty() {
+                    None
+                } else {
+                    let context_parts: Vec<String> = memories.iter()
+                        .map(|m| format!("- {}: {}", m.key, m.content))
+                        .collect();
+                    Some(format!("Relevant project knowledge:\n{}", context_parts.join("\n")))
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let executor_config = ExecutorConfig {
             max_concurrency: self.config.max_agents,
             task_timeout_secs: self.config.goal_timeout_secs,
@@ -2783,6 +2877,7 @@ where
             memory_server_url: self.config.mcp_servers.memory_server.clone(),
             a2a_gateway_url: self.config.mcp_servers.a2a_gateway.clone(),
             tasks_server_url: self.config.mcp_servers.tasks_server.clone(),
+            project_context,
         };
 
         let executor = DagExecutor::new(

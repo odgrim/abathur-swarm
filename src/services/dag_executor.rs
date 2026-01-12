@@ -34,6 +34,8 @@ pub struct ExecutorConfig {
     pub a2a_gateway_url: Option<String>,
     /// Tasks MCP server URL for agents to query task state.
     pub tasks_server_url: Option<String>,
+    /// Pre-fetched project context from memory (injected into agent prompts).
+    pub project_context: Option<String>,
 }
 
 impl Default for ExecutorConfig {
@@ -47,6 +49,7 @@ impl Default for ExecutorConfig {
             memory_server_url: None,
             a2a_gateway_url: None,
             tasks_server_url: None,
+            project_context: None,
         }
     }
 }
@@ -639,25 +642,59 @@ where
         let _ = task_repo.update(&running_task).await;
     }
 
-    // Get system prompt from agent template
+    // Get system prompt, tools, and constraints from agent template
     let agent_type = task.agent_type.as_deref().unwrap_or("default");
-    let base_system_prompt = match agent_repo.get_template_by_name(agent_type).await {
-        Ok(Some(template)) => template.system_prompt,
-        _ => format!(
-            "You are a specialized agent for executing tasks.\n\
-            Follow the task description carefully and complete the work.\n\
-            Agent type: {}",
-            agent_type
+    let (base_system_prompt, agent_tools, agent_constraints) = match agent_repo.get_template_by_name(agent_type).await {
+        Ok(Some(template)) => {
+            let tools: Vec<String> = template.tools.iter().map(|t| t.name.clone()).collect();
+            let constraints = template.constraints.clone();
+            (template.system_prompt, tools, constraints)
+        }
+        _ => (
+            format!(
+                "You are a specialized agent for executing tasks.\n\
+                Follow the task description carefully and complete the work.\n\
+                Agent type: {}",
+                agent_type
+            ),
+            vec![], // Empty means use default tool set
+            vec![], // No constraints
         ),
     };
 
-    // Build enhanced system prompt with goal context and MCP services
+    // Build agent constraints section for system prompt
+    let constraints_context = if agent_constraints.is_empty() {
+        String::new()
+    } else {
+        let mut ctx = String::from("\n\n## Agent Constraints\n\n");
+        ctx.push_str("You MUST adhere to the following constraints:\n\n");
+        for constraint in &agent_constraints {
+            let enforcement = if constraint.enforced { "[ENFORCED]" } else { "[ADVISORY]" };
+            ctx.push_str(&format!("- **{}** {}: {}\n", constraint.name, enforcement, constraint.description));
+        }
+        ctx.push_str("\nViolating enforced constraints will result in task failure.\n");
+        ctx
+    };
+
+    // Build enhanced system prompt with goal context, project context, constraints, and MCP services
     let goal_context = build_goal_context(&active_goals, task.goal_id);
     let mcp_context = build_mcp_context(&config);
-    let system_prompt = format!("{}{}{}", base_system_prompt, goal_context, mcp_context);
+    let project_context = config.project_context.as_ref().map_or(String::new(), |ctx| {
+        format!("\n\n## Project Context\n\n{}", ctx)
+    });
+    let system_prompt = format!(
+        "{}{}{}{}{}",
+        base_system_prompt,
+        constraints_context,
+        project_context,
+        goal_context,
+        mcp_context
+    );
 
-    // Build substrate config with MCP servers if configured
-    let mut substrate_config = SubstrateConfig::default().with_max_turns(config.default_max_turns);
+    // Build substrate config with MCP servers and agent tools
+    let mut substrate_config = SubstrateConfig::default()
+        .with_max_turns(config.default_max_turns)
+        .with_allowed_tools(agent_tools);
     if let Some(ref url) = config.memory_server_url {
         substrate_config = substrate_config.with_mcp_server(url.clone());
     }

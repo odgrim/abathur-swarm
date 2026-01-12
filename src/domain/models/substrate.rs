@@ -64,6 +64,8 @@ pub struct SubstrateConfig {
     pub temperature: Option<f32>,
     /// Whether to allow tool use
     pub allow_tools: bool,
+    /// Specific tool names to allow (if empty, uses default full set)
+    pub allowed_tool_names: Vec<String>,
     /// Allowed file patterns (glob)
     pub allowed_files: Vec<String>,
     /// Denied file patterns (glob)
@@ -81,11 +83,18 @@ impl Default for SubstrateConfig {
             model: None,
             temperature: None,
             allow_tools: true,
+            allowed_tool_names: vec![],
             allowed_files: vec![],
             denied_files: vec![],
         }
     }
 }
+
+/// Default tools available to all agents.
+pub const DEFAULT_TOOLS: &[&str] = &[
+    "Edit", "Write", "Bash", "Glob", "Grep", "Read",
+    "TodoWrite", "WebFetch", "WebSearch", "Task", "MultiEdit",
+];
 
 impl SubstrateConfig {
     pub fn claude_code() -> Self {
@@ -120,6 +129,13 @@ impl SubstrateConfig {
 
     pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env_vars.push((key.into(), value.into()));
+        self
+    }
+
+    /// Set specific tools to allow for this invocation.
+    /// If not set, the default tool set will be used.
+    pub fn with_allowed_tools(mut self, tools: Vec<String>) -> Self {
+        self.allowed_tool_names = tools;
         self
     }
 }

@@ -150,6 +150,11 @@ impl Guardrails {
         }
     }
 
+    /// Create guardrails with default configuration.
+    pub fn with_defaults() -> Self {
+        Self::new(GuardrailsConfig::default())
+    }
+
     /// Check if we can start a new task.
     pub async fn check_task_start(&self, task_id: uuid::Uuid) -> GuardrailResult {
         let tasks = self.current_tasks.read().await;

@@ -108,10 +108,16 @@ impl ClaudeCodeSubstrate {
             args.push(server.clone());
         }
 
-        // Allowed tools - use full set by default
+        // Allowed tools - use agent-specific tools if provided, otherwise default set
         if request.config.allow_tools {
             args.push("--allowedTools".to_string());
-            args.push("Edit,Write,Bash,Glob,Grep,Read,TodoWrite,WebFetch,WebSearch,Task,MultiEdit".to_string());
+            if request.config.allowed_tool_names.is_empty() {
+                // Use default tool set
+                args.push(crate::domain::models::DEFAULT_TOOLS.join(","));
+            } else {
+                // Use agent-specific tools
+                args.push(request.config.allowed_tool_names.join(","));
+            }
         }
 
         // Allowed files patterns

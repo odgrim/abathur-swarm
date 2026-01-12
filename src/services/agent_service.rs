@@ -298,6 +298,45 @@ impl<R: AgentRepository> AgentService<R> {
 
         Ok(None)
     }
+
+    /// Seed all baseline specialist templates if they don't exist.
+    ///
+    /// This should be called during initialization to ensure core specialists
+    /// are available for the swarm to use.
+    pub async fn seed_baseline_specialists(&self) -> DomainResult<Vec<String>> {
+        let baseline = specialist_templates::create_baseline_specialists();
+        let mut seeded = Vec::new();
+
+        for template in baseline {
+            // Check if template already exists
+            if self.repository.get_template_by_name(&template.name).await?.is_none() {
+                // Create the template
+                self.repository.create_template(&template).await?;
+                seeded.push(template.name.clone());
+            }
+        }
+
+        Ok(seeded)
+    }
+
+    /// Ensure a specific specialist template exists, creating if needed.
+    pub async fn ensure_specialist(&self, name: &str) -> DomainResult<AgentTemplate> {
+        // Check if exists
+        if let Some(template) = self.repository.get_template_by_name(name).await? {
+            return Ok(template);
+        }
+
+        // Try to find in baseline specialists
+        let baseline = specialist_templates::create_baseline_specialists();
+        for template in baseline {
+            if template.name == name {
+                self.repository.create_template(&template).await?;
+                return Ok(template);
+            }
+        }
+
+        Err(DomainError::AgentNotFound(format!("Specialist '{}' not found in baseline", name)))
+    }
 }
 
 #[cfg(test)]
