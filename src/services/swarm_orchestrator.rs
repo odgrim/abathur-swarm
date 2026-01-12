@@ -68,6 +68,8 @@ pub struct SwarmConfig {
     /// MCP server addresses for agent access to system services.
     /// These get passed to substrate requests so agents can access memory, tasks, etc.
     pub mcp_servers: McpServerConfig,
+    /// Spawn limits for task creation (subtask depth, count, etc.).
+    pub spawn_limits: crate::services::config::SpawnLimitsConfig,
 }
 
 /// MCP server configuration for agent access to system services.
@@ -99,6 +101,7 @@ impl Default for SwarmConfig {
             use_merge_queue: true,
             track_evolution: true,
             mcp_servers: McpServerConfig::default(),
+            spawn_limits: crate::services::config::SpawnLimitsConfig::default(),
         }
     }
 }
@@ -157,6 +160,13 @@ pub enum SwarmEvent {
     GoalAlignmentEvaluated { task_id: Uuid, overall_score: f64, passes: bool },
     /// DAG restructure triggered for a permanently failed task.
     RestructureTriggered { task_id: Uuid, decision: String },
+    /// Spawn limit exceeded, specialist evaluation requested.
+    SpawnLimitExceeded {
+        parent_task_id: Uuid,
+        limit_type: String,
+        current_value: u32,
+        limit_value: u32,
+    },
     /// Goal completed.
     GoalCompleted { goal_id: Uuid },
     /// Goal failed.
@@ -2214,6 +2224,103 @@ where
         Ok(())
     }
 
+    /// Check spawn limits for a parent task and trigger limit evaluation specialist if exceeded.
+    ///
+    /// Returns Ok(true) if task creation should proceed, Ok(false) if limits exceeded and specialist triggered.
+    pub async fn check_spawn_limits_and_handle(
+        &self,
+        parent_id: Option<Uuid>,
+        goal_id: Uuid,
+        event_tx: &mpsc::Sender<SwarmEvent>,
+    ) -> DomainResult<bool> {
+        use crate::services::task_service::SpawnLimitConfig;
+
+        let Some(parent_id) = parent_id else {
+            // No parent = root task, spawn limits don't apply
+            return Ok(true);
+        };
+
+        // Get parent task
+        let parent_task = match self.task_repo.get(parent_id).await? {
+            Some(t) => t,
+            None => return Ok(true), // Parent not found, allow (validation will catch later)
+        };
+
+        // Create a temporary task service to check limits
+        let spawn_limits = SpawnLimitConfig {
+            max_subtask_depth: self.config.spawn_limits.max_subtask_depth,
+            max_subtasks_per_task: self.config.spawn_limits.max_subtasks_per_task,
+            max_total_descendants: self.config.spawn_limits.max_total_descendants,
+            allow_limit_extensions: self.config.spawn_limits.allow_limit_extensions,
+        };
+
+        // Check subtask depth by traversing up the tree
+        let mut depth = 0u32;
+        let mut current = parent_task.clone();
+        while let Some(pid) = current.parent_id {
+            depth += 1;
+            if depth > 100 { break; } // Safety limit
+            match self.task_repo.get(pid).await? {
+                Some(p) => current = p,
+                None => break,
+            }
+        }
+
+        if depth >= spawn_limits.max_subtask_depth {
+            if spawn_limits.allow_limit_extensions {
+                // Check if we haven't already spawned a specialist for this
+                let specialist_exists = self.task_repo
+                    .list_by_goal(goal_id)
+                    .await?
+                    .iter()
+                    .any(|t| t.title.contains("Limit Evaluation:") && t.title.contains(&parent_task.id.to_string()[..8]));
+
+                if !specialist_exists {
+                    self.spawn_limit_evaluation_specialist(
+                        &parent_task,
+                        "subtask_depth",
+                        depth,
+                        spawn_limits.max_subtask_depth,
+                        goal_id,
+                        event_tx,
+                    ).await?;
+                }
+            }
+            return Ok(false);
+        }
+
+        // Check direct subtasks count
+        let filter = crate::domain::ports::TaskFilter {
+            parent_id: Some(parent_id),
+            ..Default::default()
+        };
+        let direct_subtasks = self.task_repo.list(filter).await?.len() as u32;
+
+        if direct_subtasks >= spawn_limits.max_subtasks_per_task {
+            if spawn_limits.allow_limit_extensions {
+                let specialist_exists = self.task_repo
+                    .list_by_goal(goal_id)
+                    .await?
+                    .iter()
+                    .any(|t| t.title.contains("Limit Evaluation:") && t.title.contains(&parent_task.id.to_string()[..8]));
+
+                if !specialist_exists {
+                    self.spawn_limit_evaluation_specialist(
+                        &parent_task,
+                        "subtasks_per_task",
+                        direct_subtasks,
+                        spawn_limits.max_subtasks_per_task,
+                        goal_id,
+                        event_tx,
+                    ).await?;
+                }
+            }
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
     /// Process specialist agent triggers.
     ///
     /// Checks for conditions that should spawn specialist agents:
@@ -2551,6 +2658,70 @@ where
             format!(
                 "Spawned Diagnostic Analyst for permanently failed task {}",
                 failed_task.id
+            ),
+        ).await;
+
+        Ok(())
+    }
+
+    /// Spawn a limit evaluation specialist when spawn limits are exceeded.
+    async fn spawn_limit_evaluation_specialist(
+        &self,
+        parent_task: &Task,
+        limit_type: &str,
+        current_value: u32,
+        limit_value: u32,
+        goal_id: Uuid,
+        event_tx: &mpsc::Sender<SwarmEvent>,
+    ) -> DomainResult<()> {
+        // Create a limit evaluation task
+        let evaluation_task = Task::new(
+            &format!("Limit Evaluation: {} exceeded for task {}", limit_type, &parent_task.id.to_string()[..8]),
+            &format!(
+                "Spawn limit exceeded while creating subtasks:\n\n\
+                Parent Task: {}\n\
+                Limit Type: {}\n\
+                Current Value: {}\n\
+                Limit Value: {}\n\n\
+                Please evaluate whether:\n\
+                1. An extension should be granted (the decomposition is genuinely necessary)\n\
+                2. The task should be restructured (different approach needed)\n\
+                3. The agent is inefficient (template refinement needed)\n\n\
+                Your decision should include:\n\
+                - GRANT_EXTENSION: Allow additional subtasks with a new limit\n\
+                - RESTRUCTURE: Recommend a different decomposition approach\n\
+                - REJECT: Task tree is too complex, simplification required",
+                parent_task.title,
+                limit_type,
+                current_value,
+                limit_value
+            ),
+        )
+        .with_goal(goal_id)
+        .with_agent("limit-evaluation-specialist");
+
+        evaluation_task.validate().map_err(DomainError::ValidationFailed)?;
+        self.task_repo.create(&evaluation_task).await?;
+
+        let _ = event_tx.send(SwarmEvent::SpecialistSpawned {
+            specialist_type: "limit-evaluation-specialist".to_string(),
+            trigger: format!("{} limit exceeded ({}/{})", limit_type, current_value, limit_value),
+            task_id: Some(evaluation_task.id),
+        }).await;
+
+        let _ = event_tx.send(SwarmEvent::SpawnLimitExceeded {
+            parent_task_id: parent_task.id,
+            limit_type: limit_type.to_string(),
+            current_value,
+            limit_value,
+        }).await;
+
+        self.audit_log.info(
+            AuditCategory::Agent,
+            AuditAction::AgentSpawned,
+            format!(
+                "Spawned Limit Evaluation Specialist for task {} ({} limit: {}/{})",
+                parent_task.id, limit_type, current_value, limit_value
             ),
         ).await;
 

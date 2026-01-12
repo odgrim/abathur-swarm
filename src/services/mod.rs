@@ -39,5 +39,5 @@ pub use memory_service::{DecayConfig, MaintenanceReport, MemoryService, MemorySt
 pub use merge_queue::{MergeQueue, MergeQueueConfig, MergeQueueStats, MergeRequest, MergeResult, MergeStage, MergeStatus};
 pub use meta_planner::{AgentMetrics, AgentSpec, Complexity, DecompositionPlan, MetaPlanner, MetaPlannerConfig, TaskSpec};
 pub use swarm_orchestrator::{McpServerConfig, OrchestratorStatus, SwarmConfig, SwarmEvent, SwarmOrchestrator, SwarmStats};
-pub use task_service::TaskService;
+pub use task_service::{TaskService, SpawnLimitConfig, SpawnLimitResult, SpawnLimitType};
 pub use worktree_service::{WorktreeConfig, WorktreeService, WorktreeStats};

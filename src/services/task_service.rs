@@ -7,14 +7,216 @@ use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{Task, TaskContext, TaskPriority, TaskStatus};
 use crate::domain::ports::{GoalRepository, TaskFilter, TaskRepository};
 
+/// Configuration for spawn limits.
+#[derive(Debug, Clone)]
+pub struct SpawnLimitConfig {
+    /// Maximum depth of subtask nesting.
+    pub max_subtask_depth: u32,
+    /// Maximum number of direct subtasks per task.
+    pub max_subtasks_per_task: u32,
+    /// Maximum total descendants from a root task.
+    pub max_total_descendants: u32,
+    /// Whether to allow extension requests when limits are reached.
+    pub allow_limit_extensions: bool,
+}
+
+impl Default for SpawnLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_subtask_depth: 5,
+            max_subtasks_per_task: 10,
+            max_total_descendants: 100,
+            allow_limit_extensions: true,
+        }
+    }
+}
+
+/// Result of spawn limit checking.
+#[derive(Debug, Clone)]
+pub enum SpawnLimitResult {
+    /// Task creation is allowed.
+    Allowed,
+    /// Limit exceeded but extension may be granted.
+    LimitExceeded {
+        limit_type: SpawnLimitType,
+        current_value: u32,
+        limit_value: u32,
+        can_request_extension: bool,
+    },
+    /// Hard limit - cannot create task.
+    HardLimit {
+        limit_type: SpawnLimitType,
+        reason: String,
+    },
+}
+
+impl SpawnLimitResult {
+    pub fn is_allowed(&self) -> bool {
+        matches!(self, Self::Allowed)
+    }
+
+    pub fn requires_specialist(&self) -> bool {
+        matches!(self, Self::LimitExceeded { can_request_extension: true, .. })
+    }
+}
+
+/// Type of spawn limit that was exceeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnLimitType {
+    SubtaskDepth,
+    SubtasksPerTask,
+    TotalDescendants,
+}
+
+impl SpawnLimitType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SubtaskDepth => "subtask_depth",
+            Self::SubtasksPerTask => "subtasks_per_task",
+            Self::TotalDescendants => "total_descendants",
+        }
+    }
+}
+
 pub struct TaskService<T: TaskRepository, G: GoalRepository> {
     task_repo: Arc<T>,
     goal_repo: Arc<G>,
+    spawn_limits: SpawnLimitConfig,
 }
 
 impl<T: TaskRepository, G: GoalRepository> TaskService<T, G> {
     pub fn new(task_repo: Arc<T>, goal_repo: Arc<G>) -> Self {
-        Self { task_repo, goal_repo }
+        Self {
+            task_repo,
+            goal_repo,
+            spawn_limits: SpawnLimitConfig::default(),
+        }
+    }
+
+    /// Create with custom spawn limits.
+    pub fn with_spawn_limits(mut self, limits: SpawnLimitConfig) -> Self {
+        self.spawn_limits = limits;
+        self
+    }
+
+    /// Check spawn limits for creating a subtask under a parent.
+    ///
+    /// Returns `SpawnLimitResult` indicating whether the task can be created,
+    /// and if not, whether a limit evaluation specialist should be triggered.
+    pub async fn check_spawn_limits(&self, parent_id: Option<Uuid>) -> DomainResult<SpawnLimitResult> {
+        let Some(parent_id) = parent_id else {
+            // No parent = root task, no spawn limits apply
+            return Ok(SpawnLimitResult::Allowed);
+        };
+
+        let parent = self.task_repo.get(parent_id).await?
+            .ok_or(DomainError::TaskNotFound(parent_id))?;
+
+        // Check subtask depth
+        let depth = self.calculate_depth(&parent).await?;
+        if depth >= self.spawn_limits.max_subtask_depth {
+            return Ok(SpawnLimitResult::LimitExceeded {
+                limit_type: SpawnLimitType::SubtaskDepth,
+                current_value: depth,
+                limit_value: self.spawn_limits.max_subtask_depth,
+                can_request_extension: self.spawn_limits.allow_limit_extensions,
+            });
+        }
+
+        // Check direct subtasks count
+        let direct_subtasks = self.count_direct_subtasks(parent_id).await?;
+        if direct_subtasks >= self.spawn_limits.max_subtasks_per_task {
+            return Ok(SpawnLimitResult::LimitExceeded {
+                limit_type: SpawnLimitType::SubtasksPerTask,
+                current_value: direct_subtasks,
+                limit_value: self.spawn_limits.max_subtasks_per_task,
+                can_request_extension: self.spawn_limits.allow_limit_extensions,
+            });
+        }
+
+        // Check total descendants from root
+        let root_id = self.find_root_task(&parent).await?;
+        let total_descendants = self.count_all_descendants(root_id).await?;
+        if total_descendants >= self.spawn_limits.max_total_descendants {
+            return Ok(SpawnLimitResult::LimitExceeded {
+                limit_type: SpawnLimitType::TotalDescendants,
+                current_value: total_descendants,
+                limit_value: self.spawn_limits.max_total_descendants,
+                can_request_extension: self.spawn_limits.allow_limit_extensions,
+            });
+        }
+
+        Ok(SpawnLimitResult::Allowed)
+    }
+
+    /// Calculate the depth of a task in the hierarchy (0 = root).
+    async fn calculate_depth(&self, task: &Task) -> DomainResult<u32> {
+        let mut depth = 0;
+        let mut current = task.clone();
+
+        while let Some(parent_id) = current.parent_id {
+            depth += 1;
+            if depth > 100 {
+                // Safety limit to prevent infinite loops
+                break;
+            }
+            match self.task_repo.get(parent_id).await? {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+
+        Ok(depth)
+    }
+
+    /// Count direct subtasks of a task.
+    async fn count_direct_subtasks(&self, parent_id: Uuid) -> DomainResult<u32> {
+        let filter = TaskFilter {
+            parent_id: Some(parent_id),
+            ..Default::default()
+        };
+        let subtasks = self.task_repo.list(filter).await?;
+        Ok(subtasks.len() as u32)
+    }
+
+    /// Find the root task (task with no parent).
+    async fn find_root_task(&self, task: &Task) -> DomainResult<Uuid> {
+        let mut current = task.clone();
+
+        while let Some(parent_id) = current.parent_id {
+            match self.task_repo.get(parent_id).await? {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+
+        Ok(current.id)
+    }
+
+    /// Count all descendants of a task using iterative BFS.
+    async fn count_all_descendants(&self, task_id: Uuid) -> DomainResult<u32> {
+        let mut count = 0u32;
+        let mut queue = vec![task_id];
+
+        while let Some(current_id) = queue.pop() {
+            let filter = TaskFilter {
+                parent_id: Some(current_id),
+                ..Default::default()
+            };
+            let children = self.task_repo.list(filter).await?;
+
+            count += children.len() as u32;
+            for child in children {
+                queue.push(child.id);
+            }
+
+            // Safety limit
+            if count > 10000 {
+                break;
+            }
+        }
+
+        Ok(count)
     }
 
     /// Submit a new task.

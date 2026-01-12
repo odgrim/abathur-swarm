@@ -606,6 +606,12 @@ async fn run_swarm_foreground(
                         println!("  DAG restructure: {} - {}", task_id, decision);
                     }
                 }
+                SwarmEvent::SpawnLimitExceeded { parent_task_id, limit_type, current_value, limit_value } => {
+                    if !json_mode {
+                        println!("  Spawn limit exceeded: task {} - {} ({}/{})",
+                            parent_task_id, limit_type, current_value, limit_value);
+                    }
+                }
                 SwarmEvent::AgentCreated { agent_type, tier } => {
                     if !json_mode {
                         println!("  Agent created: {} (tier: {})", agent_type, tier);

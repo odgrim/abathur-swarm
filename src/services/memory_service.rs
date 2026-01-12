@@ -202,7 +202,7 @@ impl<R: MemoryRepository> MemoryService<R> {
         Ok(count)
     }
 
-    /// Run full maintenance: prune expired and decayed.
+    /// Run full maintenance: prune expired and decayed, resolve conflicts.
     pub async fn run_maintenance(&self) -> DomainResult<MaintenanceReport> {
         let expired = self.prune_expired().await?;
         let decayed = self.prune_decayed().await?;
@@ -210,11 +210,67 @@ impl<R: MemoryRepository> MemoryService<R> {
         // Check for promotion candidates
         let promoted = self.check_all_promotions().await?;
 
+        // Detect and auto-resolve conflicts
+        let conflicts_resolved = self.auto_resolve_conflicts().await?;
+
         Ok(MaintenanceReport {
             expired_pruned: expired,
             decayed_pruned: decayed,
             promoted,
+            conflicts_resolved,
         })
+    }
+
+    /// Automatically detect and resolve memory conflicts.
+    ///
+    /// This method scans all memories for conflicts and applies automatic
+    /// resolution strategies (soft merge, prefer newer/higher confidence).
+    /// Conflicts that cannot be automatically resolved are flagged for review.
+    pub async fn auto_resolve_conflicts(&self) -> DomainResult<u64> {
+        let mut resolved_count = 0;
+
+        // Get all namespaces by querying distinct values
+        // For efficiency, we'll scan working and episodic tiers (semantic is long-term stable)
+        let working_memories = self.repository.list_by_tier(MemoryTier::Working).await?;
+        let episodic_memories = self.repository.list_by_tier(MemoryTier::Episodic).await?;
+
+        let all_memories: Vec<Memory> = working_memories
+            .into_iter()
+            .chain(episodic_memories.into_iter())
+            .collect();
+
+        // Detect conflicts
+        let conflicts = self.detect_conflicts(&all_memories);
+
+        // Resolve each conflict that has an automatic resolution
+        for conflict in conflicts {
+            if matches!(
+                &conflict.resolution,
+                Some(ConflictResolution::PreferNewer { .. })
+                    | Some(ConflictResolution::PreferHigherConfidence { .. })
+                    | Some(ConflictResolution::SoftMerge { .. })
+            ) {
+                if self.resolve_conflict(&conflict).await.is_ok() {
+                    resolved_count += 1;
+                }
+            } else if matches!(&conflict.resolution, Some(ConflictResolution::FlaggedForReview)) {
+                // Just flag these for review, count as "processed"
+                if self.resolve_conflict(&conflict).await.is_ok() {
+                    // Don't count flagged as "resolved", but still process them
+                }
+            }
+        }
+
+        Ok(resolved_count)
+    }
+
+    /// Get all memories flagged for review due to unresolved conflicts.
+    pub async fn get_memories_needing_review(&self) -> DomainResult<Vec<Memory>> {
+        let query = MemoryQuery {
+            tags: vec!["needs-review".to_string()],
+            ..Default::default()
+        };
+        self.repository.query(query).await
     }
 
     /// Check if a memory should be promoted based on access patterns.
@@ -281,6 +337,7 @@ pub struct MaintenanceReport {
     pub expired_pruned: u64,
     pub decayed_pruned: u64,
     pub promoted: u64,
+    pub conflicts_resolved: u64,
 }
 
 /// Memory statistics.
@@ -477,7 +534,24 @@ impl<R: MemoryRepository> MemoryService<R> {
             });
         }
 
-        // Same tier - prefer newer memory
+        // Medium similarity (0.3-0.7) with same tier: try semantic merge
+        // This combines information from both memories when they're complementary
+        if similarity >= 0.3 && similarity < 0.7 {
+            let merged_content = self.create_merged_content(mem_a, mem_b);
+            // Use the newer memory as the base to merge into
+            let merged_id = if mem_a.created_at > mem_b.created_at {
+                mem_a.id
+            } else {
+                mem_b.id
+            };
+            return Some(ConflictResolution::SoftMerge {
+                merged_id,
+                merged_content,
+            });
+        }
+
+        // High similarity (0.7-0.9) with same tier - prefer newer memory
+        // (above 0.9 we don't report conflicts at all)
         let (newer, older) = if mem_a.created_at > mem_b.created_at {
             (mem_a.id, mem_b.id)
         } else {
@@ -488,6 +562,59 @@ impl<R: MemoryRepository> MemoryService<R> {
             kept_id: newer,
             deprecated_id: older,
         })
+    }
+
+    /// Create merged content from two memories using semantic synthesis.
+    ///
+    /// This method attempts to combine information from both memories,
+    /// preserving unique information from each while avoiding duplication.
+    fn create_merged_content(&self, mem_a: &Memory, mem_b: &Memory) -> String {
+        // Determine which memory is newer (will be the base)
+        let (newer, older) = if mem_a.created_at > mem_b.created_at {
+            (mem_a, mem_b)
+        } else {
+            (mem_b, mem_a)
+        };
+
+        // Extract sentences/paragraphs from each
+        let newer_parts: Vec<&str> = newer.content
+            .split(|c| c == '.' || c == '\n')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let older_parts: Vec<&str> = older.content
+            .split(|c| c == '.' || c == '\n')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // Find unique content from older memory not substantially covered in newer
+        let mut unique_from_older: Vec<&str> = Vec::new();
+        for old_part in &older_parts {
+            let is_covered = newer_parts.iter().any(|new_part| {
+                self.compute_content_similarity(old_part, new_part) > 0.6
+            });
+            if !is_covered && !old_part.is_empty() {
+                unique_from_older.push(old_part);
+            }
+        }
+
+        // Build merged content: newer content + unique older content
+        let mut merged = newer.content.clone();
+
+        if !unique_from_older.is_empty() {
+            merged.push_str("\n\n[Additional context from previous memory:]\n");
+            for part in unique_from_older {
+                merged.push_str(part);
+                if !part.ends_with('.') && !part.ends_with('!') && !part.ends_with('?') {
+                    merged.push('.');
+                }
+                merged.push(' ');
+            }
+        }
+
+        merged.trim().to_string()
     }
 
     /// Apply a conflict resolution.

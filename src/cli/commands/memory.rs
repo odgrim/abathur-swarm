@@ -233,14 +233,16 @@ pub struct PruneOutput {
     pub expired_pruned: u64,
     pub decayed_pruned: u64,
     pub promoted: u64,
+    pub conflicts_resolved: u64,
 }
 
 impl CommandOutput for PruneOutput {
     fn to_human(&self) -> String {
         let mut lines = vec!["Maintenance complete:".to_string()];
-        lines.push(format!("  Expired pruned: {}", self.expired_pruned));
-        lines.push(format!("  Decayed pruned: {}", self.decayed_pruned));
-        lines.push(format!("  Promoted:       {}", self.promoted));
+        lines.push(format!("  Expired pruned:      {}", self.expired_pruned));
+        lines.push(format!("  Decayed pruned:      {}", self.decayed_pruned));
+        lines.push(format!("  Promoted:            {}", self.promoted));
+        lines.push(format!("  Conflicts resolved:  {}", self.conflicts_resolved));
         lines.join("\n")
     }
 
@@ -358,6 +360,7 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
                     expired_pruned: expired,
                     decayed_pruned: 0,
                     promoted: 0,
+                    conflicts_resolved: 0,
                 }
             } else {
                 service.run_maintenance().await?
@@ -367,6 +370,7 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
                 expired_pruned: report.expired_pruned,
                 decayed_pruned: report.decayed_pruned,
                 promoted: report.promoted,
+                conflicts_resolved: report.conflicts_resolved,
             };
             output(&out, json_mode);
         }
