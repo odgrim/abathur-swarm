@@ -8,9 +8,9 @@ use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    SessionStatus, SubstrateConfig, SubstrateRequest, SubstrateSession, TaskDag, TaskStatus,
+    Goal, GoalConstraint, ConstraintType, SessionStatus, SubstrateConfig, SubstrateRequest, SubstrateSession, TaskDag, TaskStatus,
 };
-use crate::domain::ports::{AgentRepository, Substrate, TaskRepository};
+use crate::domain::ports::{AgentRepository, GoalRepository, Substrate, TaskRepository};
 use crate::services::guardrails::{GuardrailResult, Guardrails};
 use crate::services::circuit_breaker::{CircuitBreakerService, CircuitScope};
 use crate::services::dag_restructure::DagRestructureService;
@@ -28,6 +28,12 @@ pub struct ExecutorConfig {
     pub default_max_turns: u32,
     /// Whether to stop on first failure.
     pub fail_fast: bool,
+    /// Memory MCP server URL for agent access.
+    pub memory_server_url: Option<String>,
+    /// A2A gateway URL for agent-to-agent communication.
+    pub a2a_gateway_url: Option<String>,
+    /// Tasks MCP server URL for agents to query task state.
+    pub tasks_server_url: Option<String>,
 }
 
 impl Default for ExecutorConfig {
@@ -38,6 +44,9 @@ impl Default for ExecutorConfig {
             max_retries: 3,
             default_max_turns: 25,
             fail_fast: false,
+            memory_server_url: None,
+            a2a_gateway_url: None,
+            tasks_server_url: None,
         }
     }
 }
@@ -90,6 +99,8 @@ pub enum ExecutionEvent {
     WaveCompleted { wave_number: usize, succeeded: usize, failed: usize },
     /// Execution completed.
     Completed { status: ExecutionStatus, results: ExecutionResults },
+    /// DAG restructure decision made for a permanently failed task.
+    RestructureDecision { task_id: Uuid, decision: String },
 }
 
 /// Results of a DAG execution.
@@ -124,26 +135,31 @@ impl ExecutionResults {
 }
 
 /// DAG Executor for running task graphs.
-pub struct DagExecutor<T, A>
+pub struct DagExecutor<T, A, G>
 where
     T: TaskRepository + 'static,
     A: AgentRepository + 'static,
+    G: GoalRepository + 'static,
 {
     task_repo: Arc<T>,
     agent_repo: Arc<A>,
+    goal_repo: Option<Arc<G>>,
     substrate: Arc<dyn Substrate>,
     config: ExecutorConfig,
     guardrails: Option<Arc<Guardrails>>,
     circuit_breaker: Option<Arc<CircuitBreakerService>>,
     restructure_service: Option<Arc<DagRestructureService>>,
+    /// Active goals cache for injecting constraints into agent context.
+    active_goals_cache: Arc<RwLock<Vec<Goal>>>,
     status: Arc<RwLock<ExecutionStatus>>,
     results: Arc<RwLock<ExecutionResults>>,
 }
 
-impl<T, A> DagExecutor<T, A>
+impl<T, A, G> DagExecutor<T, A, G>
 where
     T: TaskRepository + 'static,
     A: AgentRepository + 'static,
+    G: GoalRepository + 'static,
 {
     pub fn new(
         task_repo: Arc<T>,
@@ -154,14 +170,22 @@ where
         Self {
             task_repo,
             agent_repo,
+            goal_repo: None,
             substrate,
             config,
             guardrails: None,
             circuit_breaker: None,
             restructure_service: None,
+            active_goals_cache: Arc::new(RwLock::new(Vec::new())),
             status: Arc::new(RwLock::new(ExecutionStatus::Pending)),
             results: Arc::new(RwLock::new(ExecutionResults::default())),
         }
+    }
+
+    /// Add goal repository for constraint injection into agent context.
+    pub fn with_goal_repo(mut self, goal_repo: Arc<G>) -> Self {
+        self.goal_repo = Some(goal_repo);
+        self
     }
 
     /// Add guardrails to the executor.
@@ -182,6 +206,23 @@ where
         self
     }
 
+    /// Refresh the active goals cache for constraint injection.
+    async fn refresh_active_goals_cache(&self) -> DomainResult<()> {
+        if let Some(ref goal_repo) = self.goal_repo {
+            use crate::domain::ports::GoalFilter;
+            use crate::domain::models::GoalStatus;
+
+            let filter = GoalFilter {
+                status: Some(GoalStatus::Active),
+                ..Default::default()
+            };
+            let goals = goal_repo.list(filter).await?;
+            let mut cache = self.active_goals_cache.write().await;
+            *cache = goals;
+        }
+        Ok(())
+    }
+
     /// Execute a DAG of tasks.
     pub async fn execute(&self, dag: &TaskDag) -> DomainResult<ExecutionResults> {
         let (tx, _rx) = mpsc::channel(100);
@@ -194,6 +235,9 @@ where
         dag: &TaskDag,
         event_tx: mpsc::Sender<ExecutionEvent>,
     ) -> DomainResult<ExecutionResults> {
+        // Refresh active goals cache for constraint injection
+        self.refresh_active_goals_cache().await?;
+
         // Validate and get execution waves
         let waves = dag.execution_waves()
             .map_err(|e| DomainError::ValidationFailed(e.to_string()))?;
@@ -269,6 +313,43 @@ where
                 succeeded: wave_succeeded,
                 failed: wave_failed,
             }).await;
+
+            // Check for permanent failures and signal for restructure if service is available
+            if wave_failed > 0 {
+                if let Some(ref restructure_svc) = self.restructure_service {
+                    // Get permanently failed task IDs from this wave
+                    let failed_tasks: Vec<(Uuid, u32)> = {
+                        let results = self.results.read().await;
+                        results.task_results.iter()
+                            .filter(|r| r.status == TaskStatus::Failed && r.retry_count >= self.config.max_retries)
+                            .map(|r| (r.task_id, r.retry_count))
+                            .collect()
+                    };
+
+                    for (task_id, retries) in failed_tasks {
+                        // Check if restructure should be attempted
+                        let trigger = crate::services::dag_restructure::RestructureTrigger::PermanentFailure {
+                            task_id,
+                            retries_exhausted: retries,
+                        };
+
+                        if restructure_svc.should_restructure(&trigger) {
+                            // Emit event to signal that restructure is needed
+                            // The actual restructure decision will be made by the orchestrator
+                            // which has access to goals and can build the full RestructureContext
+                            let _ = event_tx.send(ExecutionEvent::RestructureDecision {
+                                task_id,
+                                decision: format!("Restructure triggered: {:?}", trigger),
+                            }).await;
+
+                            tracing::info!(
+                                "DAG restructure triggered for task {}: {:?}",
+                                task_id, trigger
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // Finalize results
@@ -312,6 +393,9 @@ where
         let semaphore = Arc::new(Semaphore::new(self.config.max_concurrency));
         let mut handles = vec![];
 
+        // Snapshot goals for this wave
+        let active_goals: Vec<Goal> = self.active_goals_cache.read().await.clone();
+
         for &task_id in wave {
             let node = match dag.nodes.get(&task_id) {
                 Some(n) => n.clone(),
@@ -346,6 +430,7 @@ where
             let guardrails = guardrails.clone();
             let circuit_breaker = self.circuit_breaker.clone();
             let goal_id = node.goal_id;
+            let goals_for_task = active_goals.clone();
 
             let handle = tokio::spawn(async move {
                 let _permit = permit;
@@ -360,6 +445,7 @@ where
                     total_tokens,
                     guardrails,
                     circuit_breaker,
+                    goals_for_task,
                 ).await
             });
 
@@ -396,6 +482,62 @@ where
     }
 }
 
+/// Build goal context string for agent system prompt.
+fn build_goal_context(goals: &[Goal], task_goal_id: Option<Uuid>) -> String {
+    if goals.is_empty() {
+        return String::new();
+    }
+
+    let mut context = String::from("\n\n## Active Project Goals and Constraints\n\n");
+    context.push_str("Your work must align with these goals and respect their constraints:\n\n");
+
+    for goal in goals {
+        let is_primary = task_goal_id == Some(goal.id);
+        let marker = if is_primary { " [PRIMARY - This task's goal]" } else { "" };
+
+        context.push_str(&format!("### {}{}\n", goal.name, marker));
+        context.push_str(&format!("{}\n", goal.description));
+
+        if !goal.constraints.is_empty() {
+            context.push_str("\n**Constraints:**\n");
+            for constraint in &goal.constraints {
+                let severity = match constraint.constraint_type {
+                    ConstraintType::Invariant => "MUST",
+                    ConstraintType::Preference => "SHOULD",
+                    ConstraintType::Boundary => "WITHIN",
+                };
+                context.push_str(&format!("- {} [{}]: {}\n", constraint.name, severity, constraint.description));
+            }
+        }
+        context.push('\n');
+    }
+
+    context.push_str("---\n\n");
+    context
+}
+
+/// Build MCP context for agent system prompt.
+fn build_mcp_context(config: &ExecutorConfig) -> String {
+    let mut context = String::new();
+
+    if config.memory_server_url.is_some() || config.a2a_gateway_url.is_some() || config.tasks_server_url.is_some() {
+        context.push_str("\n\n## Available System Services\n\n");
+
+        if let Some(ref url) = config.memory_server_url {
+            context.push_str(&format!("- **Memory Service** ({}): Query project knowledge, patterns, and past decisions\n", url));
+        }
+        if let Some(ref url) = config.tasks_server_url {
+            context.push_str(&format!("- **Tasks Service** ({}): Query task dependencies and status\n", url));
+        }
+        if let Some(ref url) = config.a2a_gateway_url {
+            context.push_str(&format!("- **A2A Gateway** ({}): Delegate work to specialized agents\n", url));
+        }
+        context.push_str("\n---\n\n");
+    }
+
+    context
+}
+
 /// Execute a single task with retry logic and timeout.
 async fn execute_single_task<T, A>(
     task_id: Uuid,
@@ -408,6 +550,7 @@ async fn execute_single_task<T, A>(
     total_tokens: Arc<RwLock<u64>>,
     guardrails: Option<Arc<Guardrails>>,
     circuit_breaker: Option<Arc<CircuitBreakerService>>,
+    active_goals: Vec<Goal>,
 ) -> TaskResult
 where
     T: TaskRepository + 'static,
@@ -480,7 +623,7 @@ where
 
     // Get system prompt from agent template
     let agent_type = task.agent_type.as_deref().unwrap_or("default");
-    let system_prompt = match agent_repo.get_template_by_name(agent_type).await {
+    let base_system_prompt = match agent_repo.get_template_by_name(agent_type).await {
         Ok(Some(template)) => template.system_prompt,
         _ => format!(
             "You are a specialized agent for executing tasks.\n\
@@ -489,6 +632,23 @@ where
             agent_type
         ),
     };
+
+    // Build enhanced system prompt with goal context and MCP services
+    let goal_context = build_goal_context(&active_goals, task.goal_id);
+    let mcp_context = build_mcp_context(&config);
+    let system_prompt = format!("{}{}{}", base_system_prompt, goal_context, mcp_context);
+
+    // Build substrate config with MCP servers if configured
+    let mut substrate_config = SubstrateConfig::default().with_max_turns(config.default_max_turns);
+    if let Some(ref url) = config.memory_server_url {
+        substrate_config = substrate_config.with_mcp_server(url.clone());
+    }
+    if let Some(ref url) = config.tasks_server_url {
+        substrate_config = substrate_config.with_mcp_server(url.clone());
+    }
+    if let Some(ref url) = config.a2a_gateway_url {
+        substrate_config = substrate_config.with_mcp_server(url.clone());
+    }
 
     // Execute with retries
     let mut last_error = None;
@@ -510,13 +670,13 @@ where
             let _ = task_repo.update(&retry_task).await;
         }
 
-        // Build request
+        // Build request with enhanced context
         let request = SubstrateRequest::new(
             task_id,
             agent_type,
             &system_prompt,
             &task.description,
-        ).with_config(SubstrateConfig::default().with_max_turns(config.default_max_turns));
+        ).with_config(substrate_config.clone());
 
         // Execute with timeout
         let execution_result = timeout(
@@ -629,21 +789,23 @@ where
 mod tests {
     use super::*;
     use crate::adapters::sqlite::{
-        create_test_pool, SqliteAgentRepository, SqliteTaskRepository, Migrator, all_embedded_migrations,
+        create_test_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository, Migrator, all_embedded_migrations,
     };
     use crate::adapters::substrates::MockSubstrate;
 
-    async fn setup_executor() -> DagExecutor<SqliteTaskRepository, SqliteAgentRepository> {
+    async fn setup_executor() -> DagExecutor<SqliteTaskRepository, SqliteAgentRepository, SqliteGoalRepository> {
         let pool = create_test_pool().await.unwrap();
         let migrator = Migrator::new(pool.clone());
         migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
 
         let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let agent_repo = Arc::new(SqliteAgentRepository::new(pool));
+        let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+        let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
         let substrate: Arc<dyn Substrate> = Arc::new(MockSubstrate::new());
         let config = ExecutorConfig::default();
 
         DagExecutor::new(task_repo, agent_repo, substrate, config)
+            .with_goal_repo(goal_repo)
     }
 
     #[tokio::test]

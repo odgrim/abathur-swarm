@@ -4,7 +4,6 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 use tokio::sync::mpsc;
 
-use crate::domain::ports::NullMemoryRepository;
 use crate::services::{SwarmConfig, SwarmOrchestrator, SwarmEvent};
 
 #[derive(Args, Debug)]
@@ -36,6 +35,22 @@ pub enum SwarmCommand {
         /// Run in foreground (don't background)
         #[arg(long)]
         foreground: bool,
+
+        /// Memory MCP server address (e.g., "http://localhost:9100")
+        #[arg(long, env = "ABATHUR_MEMORY_SERVER")]
+        memory_server: Option<String>,
+
+        /// Tasks MCP server address (e.g., "http://localhost:9101")
+        #[arg(long, env = "ABATHUR_TASKS_SERVER")]
+        tasks_server: Option<String>,
+
+        /// A2A gateway address (e.g., "http://localhost:8080")
+        #[arg(long, env = "ABATHUR_A2A_GATEWAY")]
+        a2a_gateway: Option<String>,
+
+        /// Start MCP servers automatically (memory, tasks, a2a)
+        #[arg(long)]
+        with_mcp_servers: bool,
     },
     /// Stop the running swarm orchestrator
     Stop,
@@ -51,8 +66,29 @@ pub enum SwarmCommand {
 
 pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
     match args.command {
-        SwarmCommand::Start { max_agents, poll_interval_ms, dry_run, max_goals, foreground } => {
-            start_swarm(max_agents, poll_interval_ms, dry_run, max_goals, foreground, json_mode).await
+        SwarmCommand::Start {
+            max_agents,
+            poll_interval_ms,
+            dry_run,
+            max_goals,
+            foreground,
+            memory_server,
+            tasks_server,
+            a2a_gateway,
+            with_mcp_servers,
+        } => {
+            start_swarm(
+                max_agents,
+                poll_interval_ms,
+                dry_run,
+                max_goals,
+                foreground,
+                json_mode,
+                memory_server,
+                tasks_server,
+                a2a_gateway,
+                with_mcp_servers,
+            ).await
         }
         SwarmCommand::Stop => stop_swarm(json_mode).await,
         SwarmCommand::Status => show_status(json_mode).await,
@@ -127,6 +163,14 @@ fn check_existing_swarm() -> Option<u32> {
     })
 }
 
+/// MCP server configuration passed to orchestrator
+#[derive(Debug, Clone, Default)]
+struct McpServerUrls {
+    memory_server: Option<String>,
+    tasks_server: Option<String>,
+    a2a_gateway: Option<String>,
+}
+
 async fn start_swarm(
     max_agents: usize,
     poll_interval_ms: u64,
@@ -134,6 +178,10 @@ async fn start_swarm(
     _max_goals: Option<usize>,
     foreground: bool,
     json_mode: bool,
+    memory_server: Option<String>,
+    tasks_server: Option<String>,
+    a2a_gateway: Option<String>,
+    with_mcp_servers: bool,
 ) -> Result<()> {
     // Check if swarm is already running
     if let Some(pid) = check_existing_swarm() {
@@ -151,12 +199,27 @@ async fn start_swarm(
         return Ok(());
     }
 
+    // Determine MCP server URLs - use provided or defaults if with_mcp_servers is set
+    let mcp_urls = if with_mcp_servers {
+        McpServerUrls {
+            memory_server: memory_server.or_else(|| Some("http://127.0.0.1:9100".to_string())),
+            tasks_server: tasks_server.or_else(|| Some("http://127.0.0.1:9101".to_string())),
+            a2a_gateway: a2a_gateway.or_else(|| Some("http://127.0.0.1:8080".to_string())),
+        }
+    } else {
+        McpServerUrls {
+            memory_server,
+            tasks_server,
+            a2a_gateway,
+        }
+    };
+
     if foreground {
         // Run in foreground (original behavior)
-        run_swarm_foreground(max_agents, poll_interval_ms, dry_run, json_mode).await
+        run_swarm_foreground(max_agents, poll_interval_ms, dry_run, json_mode, mcp_urls, with_mcp_servers).await
     } else {
         // Background the swarm
-        start_swarm_background(max_agents, poll_interval_ms, dry_run, json_mode)
+        start_swarm_background(max_agents, poll_interval_ms, dry_run, json_mode, mcp_urls, with_mcp_servers)
     }
 }
 
@@ -165,6 +228,8 @@ fn start_swarm_background(
     poll_interval_ms: u64,
     dry_run: bool,
     json_mode: bool,
+    mcp_urls: McpServerUrls,
+    with_mcp_servers: bool,
 ) -> Result<()> {
     use std::process::{Command, Stdio};
 
@@ -181,6 +246,20 @@ fn start_swarm_background(
 
     if dry_run {
         cmd.arg("--dry-run");
+    }
+
+    // Pass MCP server URLs to background process
+    if let Some(ref url) = mcp_urls.memory_server {
+        cmd.arg("--memory-server").arg(url);
+    }
+    if let Some(ref url) = mcp_urls.tasks_server {
+        cmd.arg("--tasks-server").arg(url);
+    }
+    if let Some(ref url) = mcp_urls.a2a_gateway {
+        cmd.arg("--a2a-gateway").arg(url);
+    }
+    if with_mcp_servers {
+        cmd.arg("--with-mcp-servers");
     }
 
     // Ensure .abathur directory exists for log file
@@ -299,13 +378,16 @@ async fn run_swarm_foreground(
     poll_interval_ms: u64,
     dry_run: bool,
     json_mode: bool,
+    mcp_urls: McpServerUrls,
+    with_mcp_servers: bool,
 ) -> Result<()> {
     use crate::adapters::sqlite::{
-        create_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
+        create_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
         SqliteWorktreeRepository, Migrator, all_embedded_migrations,
     };
     use crate::adapters::substrates::SubstrateRegistry;
     use crate::domain::models::SubstrateType;
+    use crate::services::McpServerConfig;
     use std::sync::Arc;
 
     // Write PID file for foreground mode too (so status works)
@@ -325,6 +407,17 @@ async fn run_swarm_foreground(
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
     let worktree_repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
     let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
+
+    // Start MCP servers if requested
+    let mcp_server_handles = if with_mcp_servers {
+        if !json_mode {
+            println!("Starting MCP servers...");
+        }
+        Some(start_mcp_servers(pool.clone(), &mcp_urls, json_mode).await?)
+    } else {
+        None
+    };
 
     // Get substrate (use mock for dry-run)
     let registry = SubstrateRegistry::new();
@@ -334,20 +427,28 @@ async fn run_swarm_foreground(
         Arc::from(registry.default_substrate())
     };
 
+    // Build MCP server configuration for agents
+    let mcp_server_config = McpServerConfig {
+        memory_server: mcp_urls.memory_server.clone(),
+        tasks_server: mcp_urls.tasks_server.clone(),
+        a2a_gateway: mcp_urls.a2a_gateway.clone(),
+    };
+
     let config = SwarmConfig {
         max_agents,
         poll_interval_ms,
+        mcp_servers: mcp_server_config,
         ..Default::default()
     };
 
-    let orchestrator: SwarmOrchestrator<_, _, _, _, NullMemoryRepository> = SwarmOrchestrator::new(
+    let orchestrator = SwarmOrchestrator::new(
         goal_repo,
         task_repo,
         worktree_repo,
         agent_repo,
         substrate,
         config.clone(),
-    );
+    ).with_memory_repo(memory_repo);
 
     if !json_mode {
         println!("Starting Abathur Swarm Orchestrator");
@@ -356,7 +457,48 @@ async fn run_swarm_foreground(
         if dry_run {
             println!("   Mode: DRY RUN (using mock substrate)");
         }
+        if mcp_urls.memory_server.is_some() || mcp_urls.tasks_server.is_some() || mcp_urls.a2a_gateway.is_some() {
+            println!("   MCP Servers:");
+            if let Some(ref url) = mcp_urls.memory_server {
+                println!("      Memory: {}", url);
+            }
+            if let Some(ref url) = mcp_urls.tasks_server {
+                println!("      Tasks: {}", url);
+            }
+            if let Some(ref url) = mcp_urls.a2a_gateway {
+                println!("      A2A Gateway: {}", url);
+            }
+        }
         println!();
+    }
+
+    // Run cold start analysis if memory is empty
+    match orchestrator.cold_start().await {
+        Ok(Some(report)) => {
+            if !json_mode {
+                println!("Cold start complete: {} memories created", report.memories_created);
+                println!("   Project type: {}", report.project_type);
+            }
+        }
+        Ok(None) => {
+            if !json_mode {
+                println!("Existing memories found, skipping cold start");
+            }
+        }
+        Err(e) => {
+            if !json_mode {
+                println!("Warning: Cold start failed: {}", e);
+            }
+        }
+    }
+
+    // Start memory decay daemon for background maintenance
+    if let Err(e) = orchestrator.start_decay_daemon().await {
+        if !json_mode {
+            println!("Warning: Failed to start decay daemon: {}", e);
+        }
+    } else if !json_mode {
+        println!("Memory decay daemon started");
     }
 
     // Create event channel for monitoring
@@ -391,6 +533,11 @@ async fn run_swarm_foreground(
                         println!("Goal failed: {} - {}", goal_id, error);
                     }
                 }
+                SwarmEvent::TaskSubmitted { task_id, task_title, goal_id } => {
+                    if !json_mode {
+                        println!("  Task submitted: {} ({}) for goal {}", task_title, task_id, goal_id);
+                    }
+                }
                 SwarmEvent::TaskReady { task_id, task_title } => {
                     if !json_mode {
                         println!("  Task ready: {} ({})", task_title, task_id);
@@ -419,6 +566,44 @@ async fn run_swarm_foreground(
                 SwarmEvent::TaskRetrying { task_id, attempt, max_attempts } => {
                     if !json_mode {
                         println!("  Task retrying: {} (attempt {}/{})", task_id, attempt, max_attempts);
+                    }
+                }
+                SwarmEvent::TaskVerified { task_id, passed, checks_passed, checks_total } => {
+                    if !json_mode {
+                        let status = if *passed { "passed" } else { "failed" };
+                        println!("  Task verified: {} - {} ({}/{})", task_id, status, checks_passed, checks_total);
+                    }
+                }
+                SwarmEvent::TaskQueuedForMerge { task_id, stage } => {
+                    if !json_mode {
+                        println!("  Task queued for merge: {} (stage: {})", task_id, stage);
+                    }
+                }
+                SwarmEvent::TaskMerged { task_id, commit_sha } => {
+                    if !json_mode {
+                        println!("  Task merged: {} (commit: {})", task_id, commit_sha);
+                    }
+                }
+                SwarmEvent::EvolutionTriggered { template_name, trigger } => {
+                    if !json_mode {
+                        println!("  Evolution triggered: {} - {}", template_name, trigger);
+                    }
+                }
+                SwarmEvent::SpecialistSpawned { specialist_type, trigger, task_id } => {
+                    if !json_mode {
+                        let task_info = task_id.map(|id| format!(" (task: {})", id)).unwrap_or_default();
+                        println!("  Specialist spawned: {} - {}{}", specialist_type, trigger, task_info);
+                    }
+                }
+                SwarmEvent::GoalAlignmentEvaluated { task_id, overall_score, passes } => {
+                    if !json_mode {
+                        let status = if *passes { "aligned" } else { "misaligned" };
+                        println!("  Goal alignment: {} - {} ({:.0}%)", task_id, status, overall_score * 100.0);
+                    }
+                }
+                SwarmEvent::RestructureTriggered { task_id, decision } => {
+                    if !json_mode {
+                        println!("  DAG restructure: {} - {}", task_id, decision);
                     }
                 }
                 SwarmEvent::StatusUpdate(stats) => {
@@ -453,6 +638,14 @@ async fn run_swarm_foreground(
     // Wait for event handler to finish
     let _ = event_handler.await;
 
+    // Stop MCP servers if we started them
+    if let Some(handles) = mcp_server_handles {
+        if !json_mode {
+            println!("Stopping MCP servers...");
+        }
+        stop_mcp_servers(handles);
+    }
+
     match run_result {
         Ok(()) => {
             if !json_mode {
@@ -466,6 +659,119 @@ async fn run_swarm_foreground(
             }
             Err(e.into())
         }
+    }
+}
+
+/// Handles for running MCP servers
+struct McpServerHandles {
+    memory_handle: Option<tokio::task::JoinHandle<()>>,
+    tasks_handle: Option<tokio::task::JoinHandle<()>>,
+    a2a_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Start MCP servers in background tasks
+async fn start_mcp_servers(
+    pool: sqlx::SqlitePool,
+    urls: &McpServerUrls,
+    json_mode: bool,
+) -> Result<McpServerHandles> {
+    use crate::adapters::mcp::{MemoryHttpServer, MemoryHttpConfig, TasksHttpServer, TasksHttpConfig, A2AHttpGateway, A2AHttpConfig};
+    use crate::adapters::sqlite::{SqliteMemoryRepository, SqliteTaskRepository, SqliteGoalRepository};
+    use crate::services::{MemoryService, TaskService};
+    use std::sync::Arc;
+
+    let mut handles = McpServerHandles {
+        memory_handle: None,
+        tasks_handle: None,
+        a2a_handle: None,
+    };
+
+    // Start Memory HTTP server
+    if let Some(ref url) = urls.memory_server {
+        let port = extract_port(url).unwrap_or(9100);
+        let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
+        let memory_service = MemoryService::new(memory_repo);
+        let config = MemoryHttpConfig {
+            port,
+            ..Default::default()
+        };
+        let server = MemoryHttpServer::new(memory_service, config);
+
+        if !json_mode {
+            println!("   Starting Memory server on port {}", port);
+        }
+
+        handles.memory_handle = Some(tokio::spawn(async move {
+            if let Err(e) = server.serve().await {
+                tracing::error!("Memory server error: {}", e);
+            }
+        }));
+    }
+
+    // Start Tasks HTTP server
+    if let Some(ref url) = urls.tasks_server {
+        let port = extract_port(url).unwrap_or(9101);
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+        let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
+        let task_service = TaskService::new(task_repo, goal_repo);
+        let config = TasksHttpConfig {
+            port,
+            ..Default::default()
+        };
+        let server = TasksHttpServer::new(task_service, config);
+
+        if !json_mode {
+            println!("   Starting Tasks server on port {}", port);
+        }
+
+        handles.tasks_handle = Some(tokio::spawn(async move {
+            if let Err(e) = server.serve().await {
+                tracing::error!("Tasks server error: {}", e);
+            }
+        }));
+    }
+
+    // Start A2A HTTP gateway
+    if let Some(ref url) = urls.a2a_gateway {
+        let port = extract_port(url).unwrap_or(8080);
+        let config = A2AHttpConfig {
+            port,
+            ..Default::default()
+        };
+        let gateway = A2AHttpGateway::new(config);
+
+        if !json_mode {
+            println!("   Starting A2A gateway on port {}", port);
+        }
+
+        handles.a2a_handle = Some(tokio::spawn(async move {
+            if let Err(e) = gateway.serve().await {
+                tracing::error!("A2A gateway error: {}", e);
+            }
+        }));
+    }
+
+    // Give servers a moment to start
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    Ok(handles)
+}
+
+/// Extract port from URL like "http://localhost:9100"
+fn extract_port(url: &str) -> Option<u16> {
+    url.split(':').last()?.parse().ok()
+}
+
+/// Stop MCP servers
+fn stop_mcp_servers(handles: McpServerHandles) {
+    if let Some(h) = handles.memory_handle {
+        h.abort();
+    }
+    if let Some(h) = handles.tasks_handle {
+        h.abort();
+    }
+    if let Some(h) = handles.a2a_handle {
+        h.abort();
     }
 }
 
@@ -606,7 +912,7 @@ async fn show_config(json_mode: bool) -> Result<()> {
 
 async fn run_tick(json_mode: bool) -> Result<()> {
     use crate::adapters::sqlite::{
-        create_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
+        create_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
         SqliteWorktreeRepository, Migrator, all_embedded_migrations,
     };
     use crate::adapters::substrates::SubstrateRegistry;
@@ -620,6 +926,7 @@ async fn run_tick(json_mode: bool) -> Result<()> {
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
     let worktree_repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
     let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
 
     let substrate: std::sync::Arc<dyn crate::domain::ports::Substrate> =
         std::sync::Arc::from(SubstrateRegistry::mock_substrate());
@@ -627,14 +934,14 @@ async fn run_tick(json_mode: bool) -> Result<()> {
     let mut config = SwarmConfig::default();
     config.use_worktrees = false; // Disable worktrees for tick command
 
-    let orchestrator: SwarmOrchestrator<_, _, _, _, NullMemoryRepository> = SwarmOrchestrator::new(
+    let orchestrator = SwarmOrchestrator::new(
         goal_repo,
         task_repo,
         worktree_repo,
         agent_repo,
         substrate,
         config,
-    );
+    ).with_memory_repo(memory_repo);
 
     let stats = orchestrator.tick().await?;
 

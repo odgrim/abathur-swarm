@@ -141,6 +141,8 @@ pub struct MergeQueueConfig {
     pub auto_retry: bool,
     /// Maximum retry attempts.
     pub max_retries: u32,
+    /// Whether to route conflicts to specialist agents.
+    pub route_conflicts_to_specialist: bool,
 }
 
 impl Default for MergeQueueConfig {
@@ -151,8 +153,30 @@ impl Default for MergeQueueConfig {
             require_verification: true,
             auto_retry: true,
             max_retries: 3,
+            route_conflicts_to_specialist: true,
         }
     }
+}
+
+/// Information about a merge conflict that needs specialist resolution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConflictResolutionRequest {
+    /// The merge request that has conflicts.
+    pub merge_request_id: Uuid,
+    /// Associated task ID.
+    pub task_id: Uuid,
+    /// Source branch.
+    pub source_branch: String,
+    /// Target branch.
+    pub target_branch: String,
+    /// Working directory.
+    pub workdir: String,
+    /// Files with conflicts.
+    pub conflict_files: Vec<String>,
+    /// When the conflict was detected.
+    pub detected_at: DateTime<Utc>,
+    /// Number of resolution attempts so far.
+    pub attempts: u32,
 }
 
 /// Stats about the merge queue.
@@ -630,6 +654,120 @@ where
         }
 
         Ok(None)
+    }
+
+    /// Get all merge requests that have conflicts and need specialist resolution.
+    ///
+    /// Returns requests that:
+    /// - Have status = Conflict
+    /// - Are configured to route to specialists
+    /// - Haven't exceeded max retry attempts
+    pub async fn get_conflicts_needing_resolution(&self) -> Vec<ConflictResolutionRequest> {
+        if !self.config.route_conflicts_to_specialist {
+            return vec![];
+        }
+
+        let queue = self.queue.read().await;
+        let history = self.history.read().await;
+
+        let mut conflicts = Vec::new();
+
+        // Check queue for conflicts
+        for req in queue.iter() {
+            if req.status == MergeStatus::Conflict {
+                if let Some(ref error) = req.error {
+                    // Parse conflict files from error message
+                    let conflict_files = if error.contains("Merge conflicts in:") {
+                        error
+                            .replace("Merge conflicts in:", "")
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .collect()
+                    } else {
+                        vec![]
+                    };
+
+                    conflicts.push(ConflictResolutionRequest {
+                        merge_request_id: req.id,
+                        task_id: req.task_id,
+                        source_branch: req.source_branch.clone(),
+                        target_branch: req.target_branch.clone(),
+                        workdir: req.workdir.clone(),
+                        conflict_files,
+                        detected_at: req.updated_at,
+                        attempts: 0,
+                    });
+                }
+            }
+        }
+
+        // Also check history for recent conflicts (might be retryable)
+        for req in history.iter().rev().take(10) {
+            if req.status == MergeStatus::Conflict {
+                if let Some(ref error) = req.error {
+                    let conflict_files = if error.contains("Merge conflicts in:") {
+                        error
+                            .replace("Merge conflicts in:", "")
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .collect()
+                    } else {
+                        vec![]
+                    };
+
+                    conflicts.push(ConflictResolutionRequest {
+                        merge_request_id: req.id,
+                        task_id: req.task_id,
+                        source_branch: req.source_branch.clone(),
+                        target_branch: req.target_branch.clone(),
+                        workdir: req.workdir.clone(),
+                        conflict_files,
+                        detected_at: req.updated_at,
+                        attempts: 0,
+                    });
+                }
+            }
+        }
+
+        conflicts
+    }
+
+    /// Mark a conflict as resolved and retry the merge.
+    ///
+    /// Should be called after a specialist agent has resolved the conflicts
+    /// in the working directory.
+    pub async fn retry_after_conflict_resolution(&self, merge_request_id: Uuid) -> DomainResult<bool> {
+        // Check queue for the request
+        {
+            let mut queue = self.queue.write().await;
+            if let Some(req) = queue.iter_mut().find(|r| r.id == merge_request_id) {
+                if req.status == MergeStatus::Conflict {
+                    req.status = MergeStatus::Queued;
+                    req.error = None;
+                    req.updated_at = Utc::now();
+                    return Ok(true);
+                }
+            }
+        }
+
+        // Check history and re-queue if found
+        {
+            let history = self.history.read().await;
+            if let Some(req) = history.iter().find(|r| r.id == merge_request_id) {
+                if req.status == MergeStatus::Conflict {
+                    let mut new_req = req.clone();
+                    new_req.status = MergeStatus::Queued;
+                    new_req.error = None;
+                    new_req.updated_at = Utc::now();
+
+                    drop(history);
+                    self.queue.write().await.push_back(new_req);
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
     }
 }
 

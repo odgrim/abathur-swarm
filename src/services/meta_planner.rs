@@ -13,7 +13,7 @@ use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
     AgentTemplate, AgentTier, Task, TaskPriority, ToolCapability,
 };
-use crate::domain::ports::{AgentRepository, GoalRepository, TaskRepository};
+use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository};
 use crate::services::llm_planner::{LlmPlanner, LlmPlannerConfig, PlanningContext};
 
 /// Configuration for the meta-planner.
@@ -150,6 +150,7 @@ where
     goal_repo: Arc<G>,
     task_repo: Arc<T>,
     agent_repo: Arc<A>,
+    memory_repo: Option<Arc<dyn MemoryRepository>>,
     config: MetaPlannerConfig,
 }
 
@@ -169,8 +170,53 @@ where
             goal_repo,
             task_repo,
             agent_repo,
+            memory_repo: None,
             config,
         }
+    }
+
+    /// Set the memory repository for pattern queries.
+    pub fn with_memory_repo(mut self, memory_repo: Arc<dyn MemoryRepository>) -> Self {
+        self.memory_repo = Some(memory_repo);
+        self
+    }
+
+    /// Query memory for relevant patterns to assist goal decomposition.
+    ///
+    /// Searches for:
+    /// - Previous successful decomposition patterns
+    /// - Agent performance data for similar tasks
+    /// - Common task patterns for the goal type
+    pub async fn query_decomposition_patterns(&self, goal_description: &str) -> DomainResult<Vec<String>> {
+        let Some(ref memory_repo) = self.memory_repo else {
+            return Ok(Vec::new());
+        };
+
+        // Search memory for patterns related to this goal
+        let patterns = memory_repo
+            .search(goal_description, Some("decomposition_patterns"), 10)
+            .await?;
+
+        let pattern_hints: Vec<String> = patterns
+            .into_iter()
+            .map(|m| m.content)
+            .collect();
+
+        Ok(pattern_hints)
+    }
+
+    /// Query memory for agent performance patterns.
+    pub async fn query_agent_patterns(&self, agent_type: &str) -> DomainResult<Vec<String>> {
+        let Some(ref memory_repo) = self.memory_repo else {
+            return Ok(Vec::new());
+        };
+
+        // Search for agent-specific patterns
+        let memories = memory_repo
+            .search(agent_type, Some("agent_performance"), 5)
+            .await?;
+
+        Ok(memories.into_iter().map(|m| m.content).collect())
     }
 
     /// Decompose a goal into tasks.
@@ -215,7 +261,12 @@ where
             let agents = self.agent_repo.list_templates(AgentFilter::default()).await?;
             let agent_names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
 
-            PlanningContext::new().with_agents(agent_names)
+            // Query memory for relevant patterns
+            let memory_patterns = self.query_decomposition_patterns(&goal.description).await?;
+
+            PlanningContext::new()
+                .with_agents(agent_names)
+                .with_memory_patterns(memory_patterns)
         };
 
         // Get LLM decomposition

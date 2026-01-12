@@ -22,8 +22,13 @@ use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, AuditLogConfig, AuditLogService,
     CircuitBreakerConfig, CircuitBreakerService, CircuitScope,
     ColdStartConfig, ColdStartService, ColdStartReport,
-    DagExecutor, DecayDaemonConfig, DaemonHandle, ExecutionResults, ExecutionStatus, ExecutorConfig,
+    DagExecutor, DecayDaemonConfig, DaemonHandle, ExecutionEvent, ExecutionResults, ExecutionStatus, ExecutorConfig,
+    EvolutionLoop, TaskExecution, TaskOutcome,
+    GoalAlignmentService, HolisticEvaluation,
+    IntegrationVerifierService, VerificationResult, VerifierConfig,
     MemoryDecayDaemon, MemoryService,
+    MergeQueue, MergeQueueConfig,
+    MetaPlanner, MetaPlannerConfig,
     WorktreeConfig, WorktreeService,
 };
 
@@ -50,6 +55,28 @@ pub struct SwarmConfig {
     pub repo_path: PathBuf,
     /// Default base ref for worktrees.
     pub default_base_ref: String,
+    /// Whether to use LLM for task decomposition.
+    pub use_llm_decomposition: bool,
+    /// Whether to run integration verification on task completion.
+    pub verify_on_completion: bool,
+    /// Whether to use merge queue for controlled merging.
+    pub use_merge_queue: bool,
+    /// Whether to track agent evolution metrics.
+    pub track_evolution: bool,
+    /// MCP server addresses for agent access to system services.
+    /// These get passed to substrate requests so agents can access memory, tasks, etc.
+    pub mcp_servers: McpServerConfig,
+}
+
+/// MCP server configuration for agent access to system services.
+#[derive(Debug, Clone, Default)]
+pub struct McpServerConfig {
+    /// Memory MCP server address (e.g., "http://localhost:8081/mcp")
+    pub memory_server: Option<String>,
+    /// Tasks MCP server address (e.g., "http://localhost:8082/mcp")
+    pub tasks_server: Option<String>,
+    /// A2A gateway address (e.g., "http://localhost:8083/a2a")
+    pub a2a_gateway: Option<String>,
 }
 
 impl Default for SwarmConfig {
@@ -65,6 +92,11 @@ impl Default for SwarmConfig {
             worktree_base_path: PathBuf::from(".abathur/worktrees"),
             repo_path: PathBuf::from("."),
             default_base_ref: "main".to_string(),
+            use_llm_decomposition: false,
+            verify_on_completion: true,
+            use_merge_queue: true,
+            track_evolution: true,
+            mcp_servers: McpServerConfig::default(),
         }
     }
 }
@@ -93,6 +125,8 @@ pub enum SwarmEvent {
     GoalStarted { goal_id: Uuid, goal_name: String },
     /// Goal decomposed into tasks.
     GoalDecomposed { goal_id: Uuid, task_count: usize },
+    /// Task submitted (created and added to the system).
+    TaskSubmitted { task_id: Uuid, task_title: String, goal_id: Uuid },
     /// Task readiness updated.
     TaskReady { task_id: Uuid, task_title: String },
     /// Task spawned.
@@ -105,6 +139,20 @@ pub enum SwarmEvent {
     TaskFailed { task_id: Uuid, error: String, retry_count: u32 },
     /// Task retrying.
     TaskRetrying { task_id: Uuid, attempt: u32, max_attempts: u32 },
+    /// Task verified.
+    TaskVerified { task_id: Uuid, passed: bool, checks_passed: usize, checks_total: usize },
+    /// Task queued for merge.
+    TaskQueuedForMerge { task_id: Uuid, stage: String },
+    /// Task merged successfully.
+    TaskMerged { task_id: Uuid, commit_sha: String },
+    /// Evolution event triggered.
+    EvolutionTriggered { template_name: String, trigger: String },
+    /// Specialist agent spawned for special handling.
+    SpecialistSpawned { specialist_type: String, trigger: String, task_id: Option<Uuid> },
+    /// Goal alignment evaluated.
+    GoalAlignmentEvaluated { task_id: Uuid, overall_score: f64, passes: bool },
+    /// DAG restructure triggered for a permanently failed task.
+    RestructureTriggered { task_id: Uuid, decision: String },
     /// Goal completed.
     GoalCompleted { goal_id: Uuid },
     /// Goal failed.
@@ -157,6 +205,12 @@ where
     audit_log: Arc<AuditLogService>,
     circuit_breaker: Arc<CircuitBreakerService>,
     decay_daemon_handle: Arc<RwLock<Option<DaemonHandle>>>,
+    // Evolution tracking for agent template improvement
+    evolution_loop: Arc<EvolutionLoop>,
+    // Goal alignment service for holistic evaluation
+    goal_alignment: Option<Arc<GoalAlignmentService<G>>>,
+    // Active goals cache for agent context
+    active_goals_cache: Arc<RwLock<Vec<Goal>>>,
 }
 
 impl<G, T, W, A, M> SwarmOrchestrator<G, T, W, A, M>
@@ -176,6 +230,7 @@ where
         config: SwarmConfig,
     ) -> Self {
         let max_agents = config.max_agents;
+        let goal_alignment = Some(Arc::new(GoalAlignmentService::with_defaults(goal_repo.clone())));
         Self {
             goal_repo,
             task_repo,
@@ -191,6 +246,9 @@ where
             audit_log: Arc::new(AuditLogService::with_defaults()),
             circuit_breaker: Arc::new(CircuitBreakerService::with_defaults()),
             decay_daemon_handle: Arc::new(RwLock::new(None)),
+            evolution_loop: Arc::new(EvolutionLoop::with_default_config()),
+            goal_alignment,
+            active_goals_cache: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -220,6 +278,623 @@ where
     /// Get the circuit breaker service for external use.
     pub fn circuit_breaker(&self) -> &Arc<CircuitBreakerService> {
         &self.circuit_breaker
+    }
+
+    /// Get the evolution loop service for external use.
+    pub fn evolution_loop(&self) -> &Arc<EvolutionLoop> {
+        &self.evolution_loop
+    }
+
+    /// Verify a completed task using the IntegrationVerifier.
+    ///
+    /// Returns the verification result if verification is enabled and passes.
+    pub async fn verify_task(&self, task_id: Uuid) -> DomainResult<Option<VerificationResult>> {
+        if !self.config.verify_on_completion {
+            return Ok(None);
+        }
+
+        let verifier = IntegrationVerifierService::new(
+            self.task_repo.clone(),
+            self.goal_repo.clone(),
+            self.worktree_repo.clone(),
+            VerifierConfig::default(),
+        );
+
+        let result = verifier.verify_task(task_id).await?;
+
+        // Compute check statistics
+        let checks_total = result.checks.len();
+        let checks_passed = result.checks.iter().filter(|c| c.passed).count();
+
+        // Log verification result
+        if result.passed {
+            self.audit_log.info(
+                AuditCategory::Task,
+                AuditAction::TaskCompleted,
+                format!(
+                    "Task {} passed verification: {}/{} checks",
+                    task_id, checks_passed, checks_total
+                ),
+            ).await;
+        } else {
+            self.audit_log.log(
+                AuditEntry::new(
+                    AuditLevel::Warning,
+                    AuditCategory::Task,
+                    AuditAction::TaskFailed,
+                    AuditActor::System,
+                    format!(
+                        "Task {} failed verification: {}",
+                        task_id, result.failures_summary.clone().unwrap_or_default()
+                    ),
+                )
+                .with_entity(task_id, "task"),
+            ).await;
+        }
+
+        Ok(Some(result))
+    }
+
+    /// Send a message to another agent via A2A protocol.
+    ///
+    /// This allows agents to communicate and coordinate work.
+    pub async fn send_a2a_message(
+        &self,
+        from_agent: &str,
+        to_agent: &str,
+        message_type: crate::domain::models::a2a::MessageType,
+        subject: &str,
+        content: &str,
+    ) -> DomainResult<()> {
+        use crate::domain::models::a2a::A2AMessage;
+
+        let message = A2AMessage::new(message_type, from_agent, to_agent, subject, content);
+
+        // Log the A2A message
+        self.audit_log.info(
+            AuditCategory::Agent,
+            AuditAction::AgentSpawned, // Could add A2AMessageSent action
+            format!(
+                "A2A message from '{}' to '{}': {} ({})",
+                from_agent, to_agent, message_type.as_str(), message.id
+            ),
+        ).await;
+
+        // If A2A gateway is configured, route the message via HTTP
+        if let Some(ref gateway_url) = self.config.mcp_servers.a2a_gateway {
+            // Build JSON-RPC request for tasks/send
+            let request_id = Uuid::new_v4().to_string();
+            let json_rpc_request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tasks/send",
+                "params": {
+                    "id": message.id.to_string(),
+                    "message": {
+                        "role": "user",
+                        "parts": [{
+                            "type": "text",
+                            "text": format!(
+                                "[A2A Message]\nFrom: {}\nTo: {}\nType: {}\nSubject: {}\n\n{}",
+                                from_agent, to_agent, message_type.as_str(), subject, content
+                            )
+                        }]
+                    },
+                    "metadata": {
+                        "from_agent": from_agent,
+                        "to_agent": to_agent,
+                        "message_type": message_type.as_str(),
+                        "subject": subject,
+                        "message_id": message.id.to_string(),
+                        "task_id": message.task_id.as_ref().map(|t| t.to_string()),
+                        "goal_id": message.goal_id.as_ref().map(|g| g.to_string()),
+                    }
+                }
+            });
+
+            // Send HTTP POST to A2A gateway
+            let client = reqwest::Client::new();
+            let rpc_url = format!("{}/rpc", gateway_url.trim_end_matches('/'));
+
+            match client.post(&rpc_url)
+                .json(&json_rpc_request)
+                .timeout(std::time::Duration::from_secs(30))
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        tracing::debug!(
+                            "A2A message {} routed successfully via gateway: {} -> {}",
+                            message.id, from_agent, to_agent
+                        );
+                    } else {
+                        tracing::warn!(
+                            "A2A gateway returned error status {} for message {}",
+                            response.status(), message.id
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to route A2A message {} via gateway: {}",
+                        message.id, e
+                    );
+                    // Don't fail the operation - message routing is best-effort
+                }
+            }
+        } else {
+            tracing::debug!(
+                "A2A message {} not routed (no gateway configured): {} -> {}",
+                message.id, from_agent, to_agent
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Register an agent's capabilities with the A2A registry.
+    ///
+    /// This allows other agents to discover and communicate with this agent.
+    pub async fn register_agent_capabilities(
+        &self,
+        agent_name: &str,
+        capabilities: Vec<String>,
+    ) -> DomainResult<()> {
+        use crate::domain::models::a2a::A2AAgentCard;
+
+        let mut card = A2AAgentCard::new(agent_name);
+        for cap in capabilities {
+            card = card.with_capability(cap);
+        }
+
+        // Log the registration
+        self.audit_log.info(
+            AuditCategory::Agent,
+            AuditAction::AgentSpawned,
+            format!(
+                "Agent '{}' registered with {} capabilities",
+                agent_name, card.capabilities.len()
+            ),
+        ).await;
+
+        // If A2A gateway is configured, register the agent card
+        if let Some(ref gateway_url) = self.config.mcp_servers.a2a_gateway {
+            let register_url = format!("{}/agents", gateway_url.trim_end_matches('/'));
+
+            let client = reqwest::Client::new();
+            match client.post(&register_url)
+                .json(&card)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        tracing::debug!(
+                            "Agent '{}' card registered with A2A gateway",
+                            agent_name
+                        );
+                    } else {
+                        tracing::warn!(
+                            "A2A gateway returned error status {} when registering agent '{}'",
+                            response.status(), agent_name
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to register agent '{}' with A2A gateway: {}",
+                        agent_name, e
+                    );
+                    // Don't fail the operation - registration is best-effort
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Execute a goal's tasks using the DagExecutor for wave-based parallel execution.
+    ///
+    /// This provides structured execution with waves, guardrails, and circuit breakers.
+    pub async fn execute_goal_with_dag(
+        &self,
+        goal_id: Uuid,
+        event_tx: &mpsc::Sender<SwarmEvent>,
+    ) -> DomainResult<ExecutionResults> {
+        // Get tasks for this goal
+        let tasks = self.task_repo.list_by_goal(goal_id).await?;
+        if tasks.is_empty() {
+            return Ok(ExecutionResults::default());
+        }
+
+        // Build DAG from tasks
+        let dag = TaskDag::from_tasks(tasks);
+
+        // Create DAG executor with MCP services and goal context
+        let executor_config = ExecutorConfig {
+            max_concurrency: self.config.max_agents,
+            task_timeout_secs: self.config.goal_timeout_secs,
+            max_retries: self.config.max_task_retries,
+            default_max_turns: self.config.default_max_turns,
+            fail_fast: false,
+            memory_server_url: self.config.mcp_servers.memory_server.clone(),
+            a2a_gateway_url: self.config.mcp_servers.a2a_gateway.clone(),
+            tasks_server_url: self.config.mcp_servers.tasks_server.clone(),
+        };
+
+        let executor = DagExecutor::new(
+            self.task_repo.clone(),
+            self.agent_repo.clone(),
+            self.substrate.clone(),
+            executor_config,
+        )
+        .with_goal_repo(self.goal_repo.clone())
+        .with_circuit_breaker(self.circuit_breaker.clone());
+
+        // Create execution event channel
+        let (exec_event_tx, mut exec_event_rx) = mpsc::channel::<ExecutionEvent>(100);
+
+        // Forward execution events to swarm events
+        let audit_log = self.audit_log.clone();
+        let evolution_loop = self.evolution_loop.clone();
+        let track_evolution = self.config.track_evolution;
+        let swarm_event_tx = event_tx.clone();
+
+        let event_forwarder = tokio::spawn(async move {
+            while let Some(event) = exec_event_rx.recv().await {
+                match event {
+                    ExecutionEvent::Started { total_tasks, wave_count } => {
+                        audit_log.info(
+                            AuditCategory::Execution,
+                            AuditAction::WaveStarted,
+                            format!("DAG execution started: {} tasks in {} waves", total_tasks, wave_count),
+                        ).await;
+                    }
+                    ExecutionEvent::WaveStarted { wave_number, task_count } => {
+                        audit_log.info(
+                            AuditCategory::Execution,
+                            AuditAction::WaveStarted,
+                            format!("Wave {} started: {} tasks", wave_number, task_count),
+                        ).await;
+                    }
+                    ExecutionEvent::TaskStarted { task_id, task_title } => {
+                        let _ = swarm_event_tx.send(SwarmEvent::TaskSpawned {
+                            task_id,
+                            task_title,
+                            agent_type: None,
+                        }).await;
+                    }
+                    ExecutionEvent::TaskCompleted { task_id, result } => {
+                        let tokens = result.session.as_ref().map(|s| s.total_tokens()).unwrap_or(0);
+                        let _ = swarm_event_tx.send(SwarmEvent::TaskCompleted {
+                            task_id,
+                            tokens_used: tokens,
+                        }).await;
+
+                        // Record in evolution loop
+                        if track_evolution {
+                            let turns = result.session.as_ref().map(|s| s.turns_completed).unwrap_or(0);
+                            let execution = TaskExecution {
+                                task_id,
+                                template_name: "dag_executor".to_string(),
+                                template_version: 1,
+                                outcome: TaskOutcome::Success,
+                                executed_at: chrono::Utc::now(),
+                                turns_used: turns,
+                                tokens_used: tokens,
+                                downstream_tasks: vec![],
+                            };
+                            evolution_loop.record_execution(execution).await;
+                        }
+                    }
+                    ExecutionEvent::TaskFailed { task_id, error, retry_count } => {
+                        let _ = swarm_event_tx.send(SwarmEvent::TaskFailed {
+                            task_id,
+                            error,
+                            retry_count,
+                        }).await;
+                    }
+                    ExecutionEvent::TaskRetrying { task_id, attempt, max_attempts } => {
+                        let _ = swarm_event_tx.send(SwarmEvent::TaskRetrying {
+                            task_id,
+                            attempt,
+                            max_attempts,
+                        }).await;
+                    }
+                    ExecutionEvent::WaveCompleted { wave_number, succeeded, failed } => {
+                        audit_log.info(
+                            AuditCategory::Execution,
+                            AuditAction::WaveCompleted,
+                            format!("Wave {} completed: {} succeeded, {} failed", wave_number, succeeded, failed),
+                        ).await;
+                    }
+                    ExecutionEvent::Completed { status, results } => {
+                        audit_log.info(
+                            AuditCategory::Execution,
+                            AuditAction::WaveCompleted,
+                            format!(
+                                "DAG execution completed: {:?}, {}/{} tasks succeeded",
+                                status, results.completed_tasks, results.total_tasks
+                            ),
+                        ).await;
+                    }
+                    ExecutionEvent::RestructureDecision { task_id, decision } => {
+                        audit_log.log(
+                            AuditEntry::new(
+                                AuditLevel::Info,
+                                AuditCategory::Task,
+                                AuditAction::TaskFailed,
+                                AuditActor::System,
+                                format!("DAG restructure triggered for task {}: {}", task_id, decision),
+                            )
+                            .with_entity(task_id, "task"),
+                        ).await;
+
+                        // Emit swarm event for restructure
+                        let _ = swarm_event_tx.send(SwarmEvent::RestructureTriggered {
+                            task_id,
+                            decision,
+                        }).await;
+                    }
+                }
+            }
+        });
+
+        // Execute the DAG
+        let results = executor.execute_with_events(&dag, exec_event_tx).await?;
+
+        // Wait for event forwarder to finish
+        let _ = event_forwarder.await;
+
+        // Update goal status based on results
+        if let Ok(Some(mut goal)) = self.goal_repo.get(goal_id).await {
+            if results.failed_tasks == 0 {
+                goal.complete();
+                let _ = self.goal_repo.update(&goal).await;
+                let _ = event_tx.send(SwarmEvent::GoalCompleted { goal_id }).await;
+            } else if results.completed_tasks == 0 {
+                let error_msg = format!("{} tasks failed", results.failed_tasks);
+                goal.fail(&error_msg);
+                let _ = self.goal_repo.update(&goal).await;
+                let _ = event_tx.send(SwarmEvent::GoalFailed {
+                    goal_id,
+                    error: error_msg,
+                }).await;
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Queue a completed task for merge via the two-stage merge queue.
+    ///
+    /// Stage 1: Agent worktree -> task integration branch
+    /// Stage 2: Task integration branch -> main (with verification)
+    pub async fn queue_task_for_merge(
+        &self,
+        task_id: Uuid,
+        event_tx: &mpsc::Sender<SwarmEvent>,
+    ) -> DomainResult<()> {
+        if !self.config.use_merge_queue {
+            return Ok(());
+        }
+
+        // Get the worktree for this task
+        let worktree = self.worktree_repo.get_by_task(task_id).await?
+            .ok_or(DomainError::TaskNotFound(task_id))?;
+
+        // Create the verifier needed by MergeQueue
+        let verifier = IntegrationVerifierService::new(
+            self.task_repo.clone(),
+            self.goal_repo.clone(),
+            self.worktree_repo.clone(),
+            VerifierConfig::default(),
+        );
+
+        // Create merge queue with config
+        let merge_config = MergeQueueConfig {
+            repo_path: self.config.repo_path.to_str().unwrap_or(".").to_string(),
+            main_branch: self.config.default_base_ref.clone(),
+            require_verification: self.config.verify_on_completion,
+            ..Default::default()
+        };
+
+        let merge_queue = MergeQueue::new(
+            self.task_repo.clone(),
+            self.worktree_repo.clone(),
+            Arc::new(verifier),
+            merge_config,
+        );
+
+        // Queue Stage 1: Agent worktree -> task branch
+        let _ = event_tx.send(SwarmEvent::TaskQueuedForMerge {
+            task_id,
+            stage: "AgentToTask".to_string(),
+        }).await;
+
+        match merge_queue.queue_stage1(
+            task_id,
+            &worktree.branch,
+            &format!("task/{}", task_id),
+        ).await {
+            Ok(_) => {
+                self.audit_log.info(
+                    AuditCategory::Task,
+                    AuditAction::TaskCompleted,
+                    format!("Task {} queued for stage 1 merge", task_id),
+                ).await;
+            }
+            Err(e) => {
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Error,
+                        AuditCategory::Task,
+                        AuditAction::TaskFailed,
+                        AuditActor::System,
+                        format!("Task {} failed to queue for stage 1: {}", task_id, e),
+                    )
+                    .with_entity(task_id, "task"),
+                ).await;
+                return Err(e);
+            }
+        }
+
+        // Process the queued merge
+        match merge_queue.process_next().await {
+            Ok(Some(result)) if result.success => {
+                self.audit_log.info(
+                    AuditCategory::Task,
+                    AuditAction::TaskCompleted,
+                    format!(
+                        "Task {} stage 1 merge completed: {}",
+                        task_id, result.commit_sha.clone().unwrap_or_default()
+                    ),
+                ).await;
+
+                // Queue stage 2
+                let _ = event_tx.send(SwarmEvent::TaskQueuedForMerge {
+                    task_id,
+                    stage: "TaskToMain".to_string(),
+                }).await;
+
+                if let Ok(_) = merge_queue.queue_stage2(task_id).await {
+                    // Process stage 2
+                    if let Ok(Some(result2)) = merge_queue.process_next().await {
+                        if result2.success {
+                            let _ = event_tx.send(SwarmEvent::TaskMerged {
+                                task_id,
+                                commit_sha: result2.commit_sha.clone().unwrap_or_default(),
+                            }).await;
+
+                            self.audit_log.info(
+                                AuditCategory::Task,
+                                AuditAction::TaskCompleted,
+                                format!(
+                                    "Task {} stage 2 merge completed: {}",
+                                    task_id, result2.commit_sha.unwrap_or_default()
+                                ),
+                            ).await;
+                        }
+                    }
+                }
+            }
+            Ok(Some(result)) => {
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Warning,
+                        AuditCategory::Task,
+                        AuditAction::TaskFailed,
+                        AuditActor::System,
+                        format!(
+                            "Task {} stage 1 merge failed: {}",
+                            task_id, result.error.unwrap_or_default()
+                        ),
+                    )
+                    .with_entity(task_id, "task"),
+                ).await;
+            }
+            Ok(None) => {
+                // No queued merge to process
+            }
+            Err(e) => {
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Error,
+                        AuditCategory::Task,
+                        AuditAction::TaskFailed,
+                        AuditActor::System,
+                        format!("Task {} merge error: {}", task_id, e),
+                    )
+                    .with_entity(task_id, "task"),
+                ).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Evaluate goal alignment for a completed task.
+    ///
+    /// Returns the evaluation result if goal alignment service is configured.
+    pub async fn evaluate_goal_alignment(&self, task_id: Uuid) -> DomainResult<Option<HolisticEvaluation>> {
+        let Some(ref alignment_service) = self.goal_alignment else {
+            return Ok(None);
+        };
+
+        let task = self.task_repo.get(task_id).await?
+            .ok_or(DomainError::TaskNotFound(task_id))?;
+
+        let evaluation = alignment_service.evaluate_task(&task).await?;
+
+        // Log alignment result
+        if evaluation.passes {
+            self.audit_log.info(
+                AuditCategory::Goal,
+                AuditAction::GoalEvaluated,
+                format!(
+                    "Task {} aligned with goals: {:.0}% ({}/{} goals satisfied)",
+                    task_id, evaluation.overall_score * 100.0,
+                    evaluation.goals_satisfied, evaluation.goal_alignments.len()
+                ),
+            ).await;
+        } else {
+            self.audit_log.log(
+                AuditEntry::new(
+                    AuditLevel::Warning,
+                    AuditCategory::Goal,
+                    AuditAction::GoalEvaluated,
+                    AuditActor::System,
+                    format!(
+                        "Task {} misaligned with goals: {:.0}% - {}",
+                        task_id, evaluation.overall_score * 100.0, evaluation.summary
+                    ),
+                )
+                .with_entity(task_id, "task"),
+            ).await;
+        }
+
+        Ok(Some(evaluation))
+    }
+
+    /// Refresh the cache of active goals for context injection.
+    async fn refresh_active_goals_cache(&self) -> DomainResult<()> {
+        use crate::domain::ports::GoalFilter;
+        let goals = self.goal_repo.list(GoalFilter {
+            status: Some(GoalStatus::Active),
+            ..Default::default()
+        }).await?;
+        let mut cache = self.active_goals_cache.write().await;
+        *cache = goals;
+        Ok(())
+    }
+
+    /// Build goal context string for agent prompts.
+    async fn build_goal_context(&self) -> String {
+        let goals = self.active_goals_cache.read().await;
+        if goals.is_empty() {
+            return String::new();
+        }
+
+        let mut context = String::from("\n## Active Goals Context\n\n");
+        context.push_str("Your work must align with these active goals:\n\n");
+
+        for goal in goals.iter() {
+            context.push_str(&format!("### {} (Priority: {:?})\n", goal.name, goal.priority));
+            context.push_str(&format!("{}\n", goal.description));
+
+            if !goal.constraints.is_empty() {
+                context.push_str("\n**Constraints:**\n");
+                for constraint in &goal.constraints {
+                    context.push_str(&format!("- {}: {}\n", constraint.name, constraint.description));
+                }
+            }
+            context.push('\n');
+        }
+
+        context.push_str("Ensure your implementation satisfies all constraints and contributes to these goals.\n");
+        context
     }
 
     /// Run cold start analysis if memory is empty.
@@ -357,6 +1032,64 @@ where
             format!("Swarm orchestrator started with max {} agents", self.config.max_agents),
         ).await;
 
+        // Run cold start if memory is empty (populates initial project context)
+        if self.memory_repo.is_some() {
+            match self.cold_start().await {
+                Ok(Some(report)) => {
+                    self.audit_log.info(
+                        AuditCategory::Memory,
+                        AuditAction::MemoryStored,
+                        format!(
+                            "Cold start completed: {} memories created, project type: {}",
+                            report.memories_created, report.project_type
+                        ),
+                    ).await;
+                }
+                Ok(None) => {
+                    // Memory already populated, skip cold start
+                }
+                Err(e) => {
+                    self.audit_log.log(
+                        AuditEntry::new(
+                            AuditLevel::Warning,
+                            AuditCategory::System,
+                            AuditAction::SwarmStarted,
+                            AuditActor::System,
+                            format!("Cold start failed (non-fatal): {}", e),
+                        ),
+                    ).await;
+                }
+            }
+        }
+
+        // Start memory decay daemon if memory repo is available
+        if self.memory_repo.is_some() {
+            if let Err(e) = self.start_decay_daemon().await {
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Warning,
+                        AuditCategory::System,
+                        AuditAction::SwarmStarted,
+                        AuditActor::System,
+                        format!("Failed to start decay daemon (non-fatal): {}", e),
+                    ),
+                ).await;
+            }
+        }
+
+        // Refresh active goals cache for agent context
+        if let Err(e) = self.refresh_active_goals_cache().await {
+            self.audit_log.log(
+                AuditEntry::new(
+                    AuditLevel::Warning,
+                    AuditCategory::System,
+                    AuditAction::SwarmStarted,
+                    AuditActor::System,
+                    format!("Failed to cache active goals: {}", e),
+                ),
+            ).await;
+        }
+
         // Main orchestration loop
         loop {
             let current_status = self.status.read().await.clone();
@@ -382,6 +1115,14 @@ where
             if self.config.auto_retry {
                 self.process_retries(&event_tx).await?;
             }
+
+            // Process pending evolution refinements
+            if self.config.track_evolution {
+                self.process_evolution_refinements(&event_tx).await?;
+            }
+
+            // Process specialist agent triggers (conflicts, persistent failures, etc.)
+            self.process_specialist_triggers(&event_tx).await?;
 
             // Update stats
             self.update_stats(&event_tx).await?;
@@ -410,7 +1151,19 @@ where
         let pending_tasks = self.task_repo.list_by_status(TaskStatus::Pending).await?;
 
         for task in pending_tasks {
-            if self.are_dependencies_met(&task).await? {
+            // Check if any dependencies have permanently failed
+            if self.has_failed_dependencies(&task).await? {
+                // Transition to Blocked since upstream failed
+                let mut updated_task = task.clone();
+                if updated_task.transition_to(TaskStatus::Blocked).is_ok() {
+                    self.task_repo.update(&updated_task).await?;
+                    let _ = event_tx.send(SwarmEvent::TaskFailed {
+                        task_id: task.id,
+                        error: "Upstream dependency failed".to_string(),
+                        retry_count: 0,
+                    }).await;
+                }
+            } else if self.are_dependencies_met(&task).await? {
                 // Transition to Ready
                 let mut updated_task = task.clone();
                 if updated_task.transition_to(TaskStatus::Ready).is_ok() {
@@ -427,6 +1180,11 @@ where
         let blocked_tasks = self.task_repo.list_by_status(TaskStatus::Blocked).await?;
 
         for task in blocked_tasks {
+            // Skip if dependencies still failing
+            if self.has_failed_dependencies(&task).await? {
+                continue;
+            }
+
             if self.are_dependencies_met(&task).await? {
                 let mut updated_task = task.clone();
                 if updated_task.transition_to(TaskStatus::Ready).is_ok() {
@@ -434,6 +1192,23 @@ where
                     let _ = event_tx.send(SwarmEvent::TaskReady {
                         task_id: task.id,
                         task_title: task.title.clone(),
+                    }).await;
+                }
+            }
+        }
+
+        // Also check Ready tasks - they may need to be blocked if a dependency failed
+        let ready_tasks = self.task_repo.list_by_status(TaskStatus::Ready).await?;
+
+        for task in ready_tasks {
+            if self.has_failed_dependencies(&task).await? {
+                let mut updated_task = task.clone();
+                if updated_task.transition_to(TaskStatus::Blocked).is_ok() {
+                    self.task_repo.update(&updated_task).await?;
+                    let _ = event_tx.send(SwarmEvent::TaskFailed {
+                        task_id: task.id,
+                        error: "Upstream dependency failed".to_string(),
+                        retry_count: 0,
                     }).await;
                 }
             }
@@ -491,9 +1266,13 @@ where
                 goal_name: goal.name.clone(),
             }).await;
 
-            // Use meta-planner to decompose goal (basic implementation)
-            // In a full implementation, this would use the MetaPlanner service with LLM
-            self.decompose_goal_basic(goal, event_tx).await?;
+            // Use MetaPlanner to decompose goal into tasks
+            let task_count = self.decompose_goal_with_meta_planner(goal, event_tx).await?;
+
+            let _ = event_tx.send(SwarmEvent::GoalDecomposed {
+                goal_id: goal.id,
+                task_count,
+            }).await;
             return Ok(());
         }
 
@@ -522,11 +1301,79 @@ where
                 continue;
             }
 
+            // Pre-execution constraint validation
+            if let Some(ref alignment_service) = self.goal_alignment {
+                match alignment_service.evaluate_task(task).await {
+                    Ok(evaluation) => {
+                        // Check for constraint violations before execution
+                        for alignment in &evaluation.goal_alignments {
+                            if !alignment.constraints_satisfied {
+                                for violation in &alignment.violations {
+                                    self.audit_log.log(
+                                        AuditEntry::new(
+                                            AuditLevel::Warning,
+                                            AuditCategory::Goal,
+                                            AuditAction::GoalEvaluated,
+                                            AuditActor::System,
+                                            format!(
+                                                "Task {} may violate constraint '{}': {} (severity: {:.0}%)",
+                                                task.id,
+                                                violation.constraint_name,
+                                                violation.description,
+                                                violation.severity * 100.0
+                                            ),
+                                        )
+                                        .with_entity(task.id, "task"),
+                                    ).await;
+                                }
+                            }
+                        }
+
+                        // Emit alignment evaluation event
+                        let _ = event_tx.send(SwarmEvent::GoalAlignmentEvaluated {
+                            task_id: task.id,
+                            overall_score: evaluation.overall_score,
+                            passes: evaluation.passes,
+                        }).await;
+                    }
+                    Err(e) => {
+                        // Log but don't block execution on evaluation failure
+                        self.audit_log.log(
+                            AuditEntry::new(
+                                AuditLevel::Warning,
+                                AuditCategory::Goal,
+                                AuditAction::GoalEvaluated,
+                                AuditActor::System,
+                                format!("Failed to evaluate task {} alignment: {}", task.id, e),
+                            )
+                            .with_entity(task.id, "task"),
+                        ).await;
+                    }
+                }
+            }
+
             // Try to acquire agent permit
             if let Ok(permit) = self.agent_semaphore.clone().try_acquire_owned() {
                 // Get agent template for system prompt
                 let agent_type = task.agent_type.clone().unwrap_or_else(|| "default".to_string());
                 let system_prompt = self.get_agent_system_prompt(&agent_type).await;
+
+                // Register agent capabilities with A2A gateway if configured
+                if self.config.mcp_servers.a2a_gateway.is_some() {
+                    // Get capabilities from agent template
+                    let capabilities = match self.agent_repo.get_template_by_name(&agent_type).await {
+                        Ok(Some(template)) => {
+                            template.tools.iter()
+                                .map(|t| t.name.clone())
+                                .collect()
+                        }
+                        _ => vec!["task-execution".to_string()],
+                    };
+
+                    if let Err(e) = self.register_agent_capabilities(&agent_type, capabilities).await {
+                        tracing::warn!("Failed to register agent '{}' capabilities: {}", agent_type, e);
+                    }
+                }
 
                 let _ = event_tx.send(SwarmEvent::TaskSpawned {
                     task_id: task.id,
@@ -553,6 +1400,7 @@ where
                 let task_description = task.description.clone();
                 let substrate = self.substrate.clone();
                 let task_repo = self.task_repo.clone();
+                let goal_repo = self.goal_repo.clone();
                 let worktree_repo = self.worktree_repo.clone();
                 let event_tx = event_tx.clone();
                 let max_turns = self.config.default_max_turns;
@@ -560,6 +1408,15 @@ where
                 let use_worktrees = self.config.use_worktrees;
                 let circuit_breaker = self.circuit_breaker.clone();
                 let audit_log = self.audit_log.clone();
+                let evolution_loop = self.evolution_loop.clone();
+                let track_evolution = self.config.track_evolution;
+                let agent_type_for_evolution = agent_type.clone();
+                let mcp_servers = self.config.mcp_servers.clone();
+                // Configuration for post-completion workflow
+                let verify_on_completion = self.config.verify_on_completion;
+                let use_merge_queue = self.config.use_merge_queue;
+                let repo_path = self.config.repo_path.clone();
+                let default_base_ref = self.config.default_base_ref.clone();
 
                 tokio::spawn(async move {
                     let _permit = permit;
@@ -570,10 +1427,21 @@ where
                         let _ = task_repo.update(&running_task).await;
                     }
 
-                    // Build substrate request
+                    // Build substrate request with MCP servers for agent access to system services
                     let mut config = SubstrateConfig::default().with_max_turns(max_turns);
                     if let Some(ref wt_path) = worktree_path {
                         config = config.with_working_dir(wt_path);
+                    }
+
+                    // Add MCP servers so agents can access memory, tasks, and A2A
+                    if let Some(ref memory_server) = mcp_servers.memory_server {
+                        config = config.with_mcp_server(memory_server);
+                    }
+                    if let Some(ref tasks_server) = mcp_servers.tasks_server {
+                        config = config.with_mcp_server(tasks_server);
+                    }
+                    if let Some(ref a2a_gateway) = mcp_servers.a2a_gateway {
+                        config = config.with_mcp_server(a2a_gateway);
                     }
 
                     let request = SubstrateRequest::new(
@@ -590,6 +1458,7 @@ where
                         match result {
                             Ok(session) if session.status == SessionStatus::Completed => {
                                 let tokens = session.total_tokens();
+                                let turns = session.turns_completed;
                                 total_tokens.fetch_add(tokens, Ordering::Relaxed);
 
                                 let _ = completed_task.transition_to(TaskStatus::Complete);
@@ -598,6 +1467,21 @@ where
                                 // Record success with circuit breaker
                                 circuit_breaker.record_success(CircuitScope::task_chain(goal_id)).await;
 
+                                // Record success in evolution loop for template improvement
+                                if track_evolution {
+                                    let execution = TaskExecution {
+                                        task_id,
+                                        template_name: agent_type_for_evolution.clone(),
+                                        template_version: 1, // Would come from agent repo
+                                        outcome: TaskOutcome::Success,
+                                        executed_at: chrono::Utc::now(),
+                                        turns_used: turns,
+                                        tokens_used: tokens,
+                                        downstream_tasks: vec![],
+                                    };
+                                    evolution_loop.record_execution(execution).await;
+                                }
+
                                 // Log task completion
                                 audit_log.log(
                                     AuditEntry::new(
@@ -605,7 +1489,7 @@ where
                                         AuditCategory::Task,
                                         AuditAction::TaskCompleted,
                                         AuditActor::System,
-                                        format!("Task completed: {} tokens used", tokens),
+                                        format!("Task completed: {} tokens used, {} turns", tokens, turns),
                                     )
                                     .with_entity(task_id, "task"),
                                 ).await;
@@ -622,9 +1506,68 @@ where
                                     task_id,
                                     tokens_used: tokens,
                                 }).await;
+
+                                // Run post-completion workflow: verify and merge
+                                if verify_on_completion || use_merge_queue {
+                                    let workflow_result = run_post_completion_workflow(
+                                        task_id,
+                                        task_repo.clone(),
+                                        goal_repo.clone(),
+                                        worktree_repo.clone(),
+                                        &event_tx,
+                                        &audit_log,
+                                        verify_on_completion,
+                                        use_merge_queue,
+                                        &repo_path,
+                                        &default_base_ref,
+                                    ).await;
+
+                                    if let Err(e) = workflow_result {
+                                        audit_log.log(
+                                            AuditEntry::new(
+                                                AuditLevel::Warning,
+                                                AuditCategory::Task,
+                                                AuditAction::TaskFailed,
+                                                AuditActor::System,
+                                                format!("Post-completion workflow error for task {}: {}", task_id, e),
+                                            )
+                                            .with_entity(task_id, "task"),
+                                        ).await;
+                                    }
+                                }
+
+                                // Evaluate evolution loop for potential refinements
+                                if track_evolution {
+                                    let events = evolution_loop.evaluate().await;
+                                    for event in events {
+                                        // Check if this event is for our agent type
+                                        if event.template_name == agent_type_for_evolution {
+                                            audit_log.log(
+                                                AuditEntry::new(
+                                                    AuditLevel::Info,
+                                                    AuditCategory::Agent,
+                                                    AuditAction::AgentSpawned,
+                                                    AuditActor::System,
+                                                    format!(
+                                                        "Evolution triggered for '{}': {:?} (success rate: {:.0}%)",
+                                                        event.template_name,
+                                                        event.trigger,
+                                                        event.stats_at_trigger.success_rate * 100.0
+                                                    ),
+                                                ),
+                                            ).await;
+
+                                            let _ = event_tx.send(SwarmEvent::EvolutionTriggered {
+                                                template_name: event.template_name.clone(),
+                                                trigger: format!("{:?}", event.trigger),
+                                            }).await;
+                                        }
+                                    }
+                                }
                             }
                             Ok(session) => {
                                 let tokens = session.total_tokens();
+                                let turns = session.turns_completed;
                                 total_tokens.fetch_add(tokens, Ordering::Relaxed);
 
                                 let error_msg = session.error.clone().unwrap_or_else(|| "Unknown error".to_string());
@@ -638,6 +1581,21 @@ where
                                     CircuitScope::task_chain(goal_id),
                                     &error_msg,
                                 ).await;
+
+                                // Record failure in evolution loop for template improvement
+                                if track_evolution {
+                                    let execution = TaskExecution {
+                                        task_id,
+                                        template_name: agent_type_for_evolution.clone(),
+                                        template_version: 1,
+                                        outcome: TaskOutcome::Failure,
+                                        executed_at: chrono::Utc::now(),
+                                        turns_used: turns,
+                                        tokens_used: tokens,
+                                        downstream_tasks: vec![],
+                                    };
+                                    evolution_loop.record_execution(execution).await;
+                                }
 
                                 // Log task failure
                                 audit_log.log(
@@ -677,6 +1635,21 @@ where
                                     CircuitScope::task_chain(goal_id),
                                     &error_msg,
                                 ).await;
+
+                                // Record failure in evolution loop for template improvement
+                                if track_evolution {
+                                    let execution = TaskExecution {
+                                        task_id,
+                                        template_name: agent_type_for_evolution.clone(),
+                                        template_version: 1,
+                                        outcome: TaskOutcome::Failure,
+                                        executed_at: chrono::Utc::now(),
+                                        turns_used: 0,
+                                        tokens_used: 0,
+                                        downstream_tasks: vec![],
+                                    };
+                                    evolution_loop.record_execution(execution).await;
+                                }
 
                                 // Log task failure
                                 audit_log.log(
@@ -768,9 +1741,411 @@ where
         Ok(())
     }
 
+    /// Process pending evolution refinement requests.
+    ///
+    /// Checks for agent templates that need refinement and uses MetaPlanner
+    /// to create improved versions based on failure patterns.
+    async fn process_evolution_refinements(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
+        // First, evaluate all templates to detect any that need refinement
+        // This checks success rates, goal violations, and regression patterns
+        let evolution_events = self.evolution_loop.evaluate().await;
+
+        // Emit events for any evolution triggers detected
+        for event in evolution_events {
+            let _ = event_tx.send(SwarmEvent::EvolutionTriggered {
+                template_name: event.template_name.clone(),
+                trigger: format!("{:?}", event.trigger),
+            }).await;
+
+            self.audit_log.info(
+                AuditCategory::Agent,
+                AuditAction::AgentSpawned,
+                format!(
+                    "Evolution triggered for '{}': {:?} (success rate: {:.0}%)",
+                    event.template_name,
+                    event.trigger,
+                    event.stats_at_trigger.success_rate * 100.0
+                ),
+            ).await;
+        }
+
+        // Get pending refinement requests from evolution loop
+        let pending_refinements = self.evolution_loop.get_pending_refinements().await;
+
+        for request in pending_refinements {
+            // Mark as in progress
+            if !self.evolution_loop.start_refinement(request.id).await {
+                continue; // Already being processed
+            }
+
+            // Log the refinement attempt
+            self.audit_log.info(
+                AuditCategory::Agent,
+                AuditAction::AgentSpawned,
+                format!(
+                    "Processing evolution refinement for '{}': {:?}",
+                    request.template_name, request.severity
+                ),
+            ).await;
+
+            // Get the current agent template
+            let template = match self.agent_repo.get_template_by_name(&request.template_name).await {
+                Ok(Some(t)) => t,
+                _ => {
+                    self.evolution_loop.complete_refinement(request.id, false).await;
+                    continue;
+                }
+            };
+
+            // Create a refined version based on the failure patterns
+            let refined_prompt = format!(
+                "{}\n\n## Refinement Notes (v{})\n\n\
+                Based on {} recent executions with {:.0}% success rate.\n\
+                Trigger: {:?}\n\
+                {} failed tasks tracked.\n\n\
+                Please pay special attention to:\n\
+                - Careful validation of inputs and outputs\n\
+                - Handling edge cases gracefully\n\
+                - Clear error reporting for debugging",
+                template.system_prompt,
+                template.version + 1,
+                request.stats.total_tasks,
+                request.stats.success_rate * 100.0,
+                request.trigger,
+                request.failed_task_ids.len()
+            );
+
+            // Create new version of the template
+            let mut new_template = template.clone();
+            new_template.version += 1;
+            new_template.system_prompt = refined_prompt;
+
+            match self.agent_repo.update_template(&new_template).await {
+                Ok(_) => {
+                    // Record version change for regression detection
+                    self.evolution_loop.record_version_change(
+                        &request.template_name,
+                        new_template.version,
+                    ).await;
+
+                    // Complete the refinement
+                    self.evolution_loop.complete_refinement(request.id, true).await;
+
+                    let _ = event_tx.send(SwarmEvent::EvolutionTriggered {
+                        template_name: request.template_name.clone(),
+                        trigger: format!("Refined to v{}", new_template.version),
+                    }).await;
+
+                    self.audit_log.info(
+                        AuditCategory::Agent,
+                        AuditAction::AgentSpawned,
+                        format!(
+                            "Agent '{}' refined to version {}",
+                            request.template_name, new_template.version
+                        ),
+                    ).await;
+                }
+                Err(e) => {
+                    self.evolution_loop.complete_refinement(request.id, false).await;
+                    self.audit_log.log(
+                        AuditEntry::new(
+                            AuditLevel::Warning,
+                            AuditCategory::Agent,
+                            AuditAction::AgentSpawned,
+                            AuditActor::System,
+                            format!(
+                                "Failed to refine agent '{}': {}",
+                                request.template_name, e
+                            ),
+                        ),
+                    ).await;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Process specialist agent triggers.
+    ///
+    /// Checks for conditions that should spawn specialist agents:
+    /// - Merge conflicts → Merge Conflict Specialist
+    /// - Persistent failures (max retries exceeded) → Diagnostic Analyst
+    /// - Spawn limits exceeded → Limit Evaluation Specialist
+    async fn process_specialist_triggers(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
+        // Check for persistent failures that need diagnostic analysis
+        let failed_tasks = self.task_repo.list_by_status(TaskStatus::Failed).await?;
+        let permanently_failed: Vec<_> = failed_tasks
+            .iter()
+            .filter(|t| t.retry_count >= self.config.max_task_retries)
+            .collect();
+
+        for task in permanently_failed {
+            // Skip tasks without a goal_id - can't create diagnostics without goal context
+            let Some(goal_id) = task.goal_id else {
+                continue;
+            };
+
+            // Check if we haven't already created a diagnostic task for this failure
+            let diagnostic_exists = self.task_repo
+                .list_by_goal(goal_id)
+                .await?
+                .iter()
+                .any(|t| t.title.contains("Diagnostic:") && t.title.contains(&task.id.to_string()[..8]));
+
+            if !diagnostic_exists {
+                // Spawn Diagnostic Analyst specialist
+                if let Err(e) = self.spawn_specialist_for_failure(task, goal_id, event_tx).await {
+                    self.audit_log.log(
+                        AuditEntry::new(
+                            AuditLevel::Warning,
+                            AuditCategory::Agent,
+                            AuditAction::AgentSpawned,
+                            AuditActor::System,
+                            format!("Failed to spawn diagnostic specialist for task {}: {}", task.id, e),
+                        )
+                        .with_entity(task.id, "task"),
+                    ).await;
+                }
+            }
+        }
+
+        // Check for merge conflicts needing specialist resolution
+        // This is done via the merge queue's conflict detection
+        if self.config.use_merge_queue {
+            if let Err(e) = self.process_merge_conflict_specialists(event_tx).await {
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Warning,
+                        AuditCategory::Agent,
+                        AuditAction::AgentSpawned,
+                        AuditActor::System,
+                        format!("Failed to process merge conflict specialists: {}", e),
+                    ),
+                ).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Spawn a diagnostic analyst for a permanently failed task.
+    async fn spawn_specialist_for_failure(
+        &self,
+        failed_task: &Task,
+        goal_id: Uuid,
+        event_tx: &mpsc::Sender<SwarmEvent>,
+    ) -> DomainResult<()> {
+        // Create a diagnostic task that will be handled by the Diagnostic Analyst
+        let diagnostic_task = Task::new(
+            &format!("Diagnostic: Investigate failure of task {}", &failed_task.id.to_string()[..8]),
+            &format!(
+                "The following task has permanently failed after {} retries:\n\n\
+                Title: {}\n\
+                Description: {}\n\n\
+                Please investigate the root cause of failure and suggest remediation.\n\
+                Consider:\n\
+                - Are the task requirements achievable?\n\
+                - Are there missing dependencies or prerequisites?\n\
+                - Is the agent type appropriate for this task?\n\
+                - Are there external blockers (permissions, resources, etc.)?",
+                failed_task.retry_count,
+                failed_task.title,
+                failed_task.description
+            ),
+        )
+        .with_goal(goal_id)
+        .with_agent("diagnostic-analyst");
+
+        diagnostic_task.validate().map_err(DomainError::ValidationFailed)?;
+        self.task_repo.create(&diagnostic_task).await?;
+
+        let _ = event_tx.send(SwarmEvent::SpecialistSpawned {
+            specialist_type: "diagnostic-analyst".to_string(),
+            trigger: format!("Task {} permanently failed", failed_task.id),
+            task_id: Some(diagnostic_task.id),
+        }).await;
+
+        self.audit_log.info(
+            AuditCategory::Agent,
+            AuditAction::AgentSpawned,
+            format!(
+                "Spawned Diagnostic Analyst for permanently failed task {}",
+                failed_task.id
+            ),
+        ).await;
+
+        Ok(())
+    }
+
+    /// Process merge conflicts and spawn conflict resolution specialists.
+    async fn process_merge_conflict_specialists(
+        &self,
+        event_tx: &mpsc::Sender<SwarmEvent>,
+    ) -> DomainResult<()> {
+        // Create a temporary verifier for the merge queue
+        let verifier = IntegrationVerifierService::new(
+            self.task_repo.clone(),
+            self.goal_repo.clone(),
+            self.worktree_repo.clone(),
+            VerifierConfig::default(),
+        );
+
+        let merge_config = MergeQueueConfig {
+            repo_path: self.config.repo_path.to_str().unwrap_or(".").to_string(),
+            main_branch: self.config.default_base_ref.clone(),
+            require_verification: self.config.verify_on_completion,
+            route_conflicts_to_specialist: true,
+            ..Default::default()
+        };
+
+        let merge_queue = MergeQueue::new(
+            self.task_repo.clone(),
+            self.worktree_repo.clone(),
+            Arc::new(verifier),
+            merge_config,
+        );
+
+        // Get conflicts needing resolution
+        let conflicts = merge_queue.get_conflicts_needing_resolution().await;
+
+        for conflict in conflicts {
+            // Check if we haven't already created a resolution task for this conflict
+            let resolution_exists = self.task_repo
+                .list_by_goal(conflict.task_id)
+                .await
+                .map(|tasks| {
+                    tasks.iter().any(|t| {
+                        t.title.contains("Resolve merge conflict") &&
+                        t.title.contains(&conflict.source_branch)
+                    })
+                })
+                .unwrap_or(false);
+
+            if !resolution_exists {
+                // Get the goal_id for this task - skip if task has no goal
+                if let Ok(Some(task)) = self.task_repo.get(conflict.task_id).await {
+                    let Some(goal_id) = task.goal_id else {
+                        continue;
+                    };
+
+                    let resolution_task = Task::new(
+                        &format!("Resolve merge conflict: {} → {}", conflict.source_branch, conflict.target_branch),
+                        &format!(
+                            "A merge conflict was detected when trying to merge branch '{}' into '{}'.\n\n\
+                            Conflicting files:\n{}\n\n\
+                            Working directory: {}\n\n\
+                            Please resolve the conflicts by:\n\
+                            1. Analyzing the conflicting changes\n\
+                            2. Understanding the intent of each change\n\
+                            3. Merging the changes in a way that preserves both intents\n\
+                            4. Testing the merged result\n\
+                            5. Completing the merge commit",
+                            conflict.source_branch,
+                            conflict.target_branch,
+                            conflict.conflict_files.iter()
+                                .map(|f| format!("  - {}", f))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            conflict.workdir
+                        ),
+                    )
+                    .with_goal(goal_id)
+                    .with_agent("merge-conflict-specialist");
+
+                    if resolution_task.validate().is_ok() {
+                        if let Ok(()) = self.task_repo.create(&resolution_task).await {
+                            let _ = event_tx.send(SwarmEvent::SpecialistSpawned {
+                                specialist_type: "merge-conflict-specialist".to_string(),
+                                trigger: format!("Merge conflict in {} files", conflict.conflict_files.len()),
+                                task_id: Some(resolution_task.id),
+                            }).await;
+
+                            self.audit_log.info(
+                                AuditCategory::Agent,
+                                AuditAction::AgentSpawned,
+                                format!(
+                                    "Spawned Merge Conflict Specialist for {} → {}",
+                                    conflict.source_branch, conflict.target_branch
+                                ),
+                            ).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Decompose a goal into tasks using MetaPlanner.
+    ///
+    /// Uses LLM decomposition if configured, otherwise falls back to heuristic decomposition.
+    async fn decompose_goal_with_meta_planner(&self, goal: &Goal, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<usize> {
+        // Create MetaPlanner with current configuration
+        let meta_planner_config = MetaPlannerConfig {
+            use_llm_decomposition: self.config.use_llm_decomposition,
+            max_tasks_per_decomposition: 10,
+            auto_generate_agents: true,
+            ..Default::default()
+        };
+
+        let meta_planner = MetaPlanner::new(
+            self.goal_repo.clone(),
+            self.task_repo.clone(),
+            self.agent_repo.clone(),
+            meta_planner_config,
+        );
+
+        // Decompose the goal into tasks
+        let plan = meta_planner.decompose_goal(goal.id).await?;
+
+        // Log the decomposition
+        self.audit_log.info(
+            AuditCategory::Task,
+            AuditAction::TaskCreated,
+            format!(
+                "Goal '{}' decomposed into {} tasks (complexity: {:?})",
+                goal.name, plan.tasks.len(), plan.estimated_complexity
+            ),
+        ).await;
+
+        // Execute the plan - create the tasks
+        let created_tasks = meta_planner.execute_plan(&plan).await?;
+        let task_count = created_tasks.len();
+
+        // Emit TaskSubmitted events for each created task
+        for task in &created_tasks {
+            let _ = event_tx.send(SwarmEvent::TaskSubmitted {
+                task_id: task.id,
+                task_title: task.title.clone(),
+                goal_id: goal.id,
+            }).await;
+        }
+
+        // Ensure required agents exist
+        for agent_type in &plan.required_agents {
+            let purpose = format!("Execute tasks for goal: {}", goal.name);
+            if let Err(e) = meta_planner.ensure_agent(agent_type, &purpose).await {
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Warning,
+                        AuditCategory::Agent,
+                        AuditAction::TaskCreated,
+                        AuditActor::System,
+                        format!("Could not ensure agent '{}': {}", agent_type, e),
+                    ),
+                ).await;
+            }
+        }
+
+        Ok(task_count)
+    }
+
     /// Basic goal decomposition (creates a single task).
-    /// In a full implementation, this would use the MetaPlanner with LLM.
-    async fn decompose_goal_basic(&self, goal: &Goal, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
+    /// Fallback when MetaPlanner is unavailable.
+    #[allow(dead_code)]
+    async fn decompose_goal_basic(&self, goal: &Goal) -> DomainResult<usize> {
         // Create a single task for the goal
         let task = Task::new(
             &format!("Implement: {}", goal.name),
@@ -787,17 +2162,12 @@ where
         task.validate().map_err(DomainError::ValidationFailed)?;
         self.task_repo.create(&task).await?;
 
-        let _ = event_tx.send(SwarmEvent::GoalDecomposed {
-            goal_id: goal.id,
-            task_count: 1,
-        }).await;
-
-        Ok(())
+        Ok(1)
     }
 
-    /// Get the system prompt for an agent type.
+    /// Get the system prompt for an agent type, including goal context.
     async fn get_agent_system_prompt(&self, agent_type: &str) -> String {
-        match self.agent_repo.get_template_by_name(agent_type).await {
+        let base_prompt = match self.agent_repo.get_template_by_name(agent_type).await {
             Ok(Some(template)) => template.system_prompt.clone(),
             _ => {
                 // Default system prompt if agent template not found
@@ -808,6 +2178,14 @@ where
                     agent_type
                 )
             }
+        };
+
+        // Append goal context to the system prompt
+        let goal_context = self.build_goal_context().await;
+        if goal_context.is_empty() {
+            base_prompt
+        } else {
+            format!("{}\n\n{}", base_prompt, goal_context)
         }
     }
 
@@ -914,6 +2292,9 @@ where
             max_retries: self.config.max_task_retries,
             default_max_turns: self.config.default_max_turns,
             fail_fast: false,
+            memory_server_url: self.config.mcp_servers.memory_server.clone(),
+            a2a_gateway_url: self.config.mcp_servers.a2a_gateway.clone(),
+            tasks_server_url: self.config.mcp_servers.tasks_server.clone(),
         };
 
         let executor = DagExecutor::new(
@@ -921,7 +2302,7 @@ where
             self.agent_repo.clone(),
             self.substrate.clone(),
             executor_config,
-        );
+        ).with_goal_repo(self.goal_repo.clone());
 
         let results = executor.execute(&dag).await?;
 
@@ -969,6 +2350,187 @@ where
     pub fn total_tokens(&self) -> u64 {
         self.total_tokens.load(Ordering::Relaxed)
     }
+}
+
+/// Helper function to run post-completion workflow (verification and merging).
+/// This is called from spawned tasks after successful task completion.
+async fn run_post_completion_workflow<G, T, W>(
+    task_id: Uuid,
+    task_repo: Arc<T>,
+    goal_repo: Arc<G>,
+    worktree_repo: Arc<W>,
+    event_tx: &mpsc::Sender<SwarmEvent>,
+    audit_log: &Arc<AuditLogService>,
+    verify_on_completion: bool,
+    use_merge_queue: bool,
+    repo_path: &std::path::Path,
+    default_base_ref: &str,
+) -> DomainResult<()>
+where
+    G: GoalRepository + 'static,
+    T: TaskRepository + 'static,
+    W: WorktreeRepository + 'static,
+{
+    // Step 1: Run integration verification if enabled
+    let verification_passed = if verify_on_completion {
+        let verifier = IntegrationVerifierService::new(
+            task_repo.clone(),
+            goal_repo.clone(),
+            worktree_repo.clone(),
+            VerifierConfig::default(),
+        );
+
+        match verifier.verify_task(task_id).await {
+            Ok(result) => {
+                let checks_total = result.checks.len();
+                let checks_passed = result.checks.iter().filter(|c| c.passed).count();
+
+                let _ = event_tx.send(SwarmEvent::TaskVerified {
+                    task_id,
+                    passed: result.passed,
+                    checks_passed,
+                    checks_total,
+                }).await;
+
+                if result.passed {
+                    audit_log.info(
+                        AuditCategory::Task,
+                        AuditAction::TaskCompleted,
+                        format!(
+                            "Task {} passed verification: {}/{} checks",
+                            task_id, checks_passed, checks_total
+                        ),
+                    ).await;
+                } else {
+                    audit_log.log(
+                        AuditEntry::new(
+                            AuditLevel::Warning,
+                            AuditCategory::Task,
+                            AuditAction::TaskFailed,
+                            AuditActor::System,
+                            format!(
+                                "Task {} failed verification: {}",
+                                task_id, result.failures_summary.clone().unwrap_or_default()
+                            ),
+                        )
+                        .with_entity(task_id, "task"),
+                    ).await;
+                }
+
+                result.passed
+            }
+            Err(e) => {
+                audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Warning,
+                        AuditCategory::Task,
+                        AuditAction::TaskFailed,
+                        AuditActor::System,
+                        format!("Task {} verification error: {}", task_id, e),
+                    )
+                    .with_entity(task_id, "task"),
+                ).await;
+                false
+            }
+        }
+    } else {
+        true // Skip verification, assume passed
+    };
+
+    // Step 2: Queue for merge if verification passed and merge queue is enabled
+    if verification_passed && use_merge_queue {
+        // Get the worktree for this task
+        if let Ok(Some(worktree)) = worktree_repo.get_by_task(task_id).await {
+            let verifier = IntegrationVerifierService::new(
+                task_repo.clone(),
+                goal_repo.clone(),
+                worktree_repo.clone(),
+                VerifierConfig::default(),
+            );
+
+            let merge_config = MergeQueueConfig {
+                repo_path: repo_path.to_str().unwrap_or(".").to_string(),
+                main_branch: default_base_ref.to_string(),
+                require_verification: verify_on_completion,
+                ..Default::default()
+            };
+
+            let merge_queue = MergeQueue::new(
+                task_repo.clone(),
+                worktree_repo.clone(),
+                Arc::new(verifier),
+                merge_config,
+            );
+
+            // Queue Stage 1: Agent worktree -> task branch
+            let _ = event_tx.send(SwarmEvent::TaskQueuedForMerge {
+                task_id,
+                stage: "AgentToTask".to_string(),
+            }).await;
+
+            match merge_queue.queue_stage1(
+                task_id,
+                &worktree.branch,
+                &format!("task/{}", task_id),
+            ).await {
+                Ok(_) => {
+                    audit_log.info(
+                        AuditCategory::Task,
+                        AuditAction::TaskCompleted,
+                        format!("Task {} queued for stage 1 merge", task_id),
+                    ).await;
+
+                    // Process the queued merge
+                    if let Ok(Some(result)) = merge_queue.process_next().await {
+                        if result.success {
+                            // Queue stage 2
+                            let _ = event_tx.send(SwarmEvent::TaskQueuedForMerge {
+                                task_id,
+                                stage: "TaskToMain".to_string(),
+                            }).await;
+
+                            if let Ok(_) = merge_queue.queue_stage2(task_id).await {
+                                if let Ok(Some(result2)) = merge_queue.process_next().await {
+                                    if result2.success {
+                                        let _ = event_tx.send(SwarmEvent::TaskMerged {
+                                            task_id,
+                                            commit_sha: result2.commit_sha.clone().unwrap_or_default(),
+                                        }).await;
+
+                                        audit_log.info(
+                                            AuditCategory::Task,
+                                            AuditAction::TaskCompleted,
+                                            format!(
+                                                "Task {} merged to main: {}",
+                                                task_id, result2.commit_sha.unwrap_or_default()
+                                            ),
+                                        ).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    audit_log.log(
+                        AuditEntry::new(
+                            AuditLevel::Warning,
+                            AuditCategory::Task,
+                            AuditAction::TaskFailed,
+                            AuditActor::System,
+                            format!("Task {} failed to queue for merge: {}", task_id, e),
+                        )
+                        .with_entity(task_id, "task"),
+                    ).await;
+                }
+            }
+        }
+    }
+
+    // Step 3: Evaluate goal alignment
+    // This is handled separately in the orchestrator's goal completion check
+
+    Ok(())
 }
 
 #[cfg(test)]

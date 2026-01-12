@@ -134,6 +134,7 @@ pub enum AuditAction {
     GoalUpdated,
     GoalCompleted,
     GoalFailed,
+    GoalEvaluated,
 
     // Agent actions
     AgentSpawned,
@@ -187,6 +188,7 @@ impl AuditAction {
             Self::GoalUpdated => "goal_updated",
             Self::GoalCompleted => "goal_completed",
             Self::GoalFailed => "goal_failed",
+            Self::GoalEvaluated => "goal_evaluated",
             Self::AgentSpawned => "agent_spawned",
             Self::AgentCompleted => "agent_completed",
             Self::AgentFailed => "agent_failed",

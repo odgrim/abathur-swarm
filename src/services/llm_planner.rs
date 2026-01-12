@@ -155,6 +155,17 @@ impl LlmPlanner {
             context.existing_agents.join(", ")
         };
 
+        let memory_patterns_text = if context.memory_patterns.is_empty() {
+            "No historical patterns available".to_string()
+        } else {
+            context.memory_patterns
+                .iter()
+                .enumerate()
+                .map(|(i, p)| format!("{}. {}", i + 1, p))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
         format!(
             r#"You are a task decomposition assistant for a multi-agent swarm system.
 
@@ -173,6 +184,9 @@ Priority: {:?}
 ## Project Context
 {}
 
+## Historical Patterns (from memory)
+{}
+
 ## Instructions
 Analyze this goal and decompose it into a set of executable tasks. Consider:
 
@@ -181,6 +195,7 @@ Analyze this goal and decompose it into a set of executable tasks. Consider:
 3. **Agent Selection**: Choose appropriate agent types for each task.
 4. **Parallelization**: Maximize opportunities for parallel execution where safe.
 5. **Verification**: Include verification tasks where appropriate.
+6. **Historical Patterns**: Learn from the patterns above when applicable.
 
 ## Required Output Format (JSON)
 Respond with a JSON object containing:
@@ -211,7 +226,8 @@ IMPORTANT: Output ONLY the JSON object, no other text."#,
             goal.priority,
             constraints_text,
             existing_agents_text,
-            context.project_context.as_deref().unwrap_or("No additional context")
+            context.project_context.as_deref().unwrap_or("No additional context"),
+            memory_patterns_text
         )
     }
 
@@ -326,6 +342,8 @@ pub struct PlanningContext {
     pub related_goals: Vec<Uuid>,
     /// Codebase structure summary.
     pub codebase_summary: Option<String>,
+    /// Patterns from memory that may help with decomposition.
+    pub memory_patterns: Vec<String>,
 }
 
 impl PlanningContext {
@@ -350,6 +368,11 @@ impl PlanningContext {
 
     pub fn with_related_goals(mut self, goals: Vec<Uuid>) -> Self {
         self.related_goals = goals;
+        self
+    }
+
+    pub fn with_memory_patterns(mut self, patterns: Vec<String>) -> Self {
+        self.memory_patterns = patterns;
         self
     }
 }
