@@ -20,6 +20,7 @@ pub fn create_baseline_specialists() -> Vec<AgentTemplate> {
         create_database_specialist(),
         create_api_designer(),
         create_devops_engineer(),
+        create_intent_verifier(),
     ]
 }
 
@@ -237,6 +238,35 @@ pub fn create_devops_engineer() -> AgentTemplate {
         .with_capability("deployment-automation")
         .with_handoff_target("integration-verifier")
         .with_max_turns(35)
+}
+
+/// Intent Verifier - Evaluates whether completed work satisfies original intent.
+pub fn create_intent_verifier() -> AgentTemplate {
+    AgentTemplate::new("intent-verifier", AgentTier::Specialist)
+        .with_description("Evaluates whether completed work satisfies the original intent, identifying gaps that require additional work")
+        .with_prompt(INTENT_VERIFIER_PROMPT)
+        .with_tool(ToolCapability::new("read", "Read completed work artifacts and code").required())
+        .with_tool(ToolCapability::new("glob", "Find files produced by tasks").required())
+        .with_tool(ToolCapability::new("grep", "Search for implementations and patterns").required())
+        .with_constraint(AgentConstraint::new(
+            "independent-evaluation",
+            "Evaluate work independently without bias toward completion",
+        ))
+        .with_constraint(AgentConstraint::new(
+            "structured-output",
+            "Always provide evaluation in the specified structured format",
+        ))
+        .with_constraint(AgentConstraint::new(
+            "actionable-gaps",
+            "All identified gaps must include specific suggested actions",
+        ))
+        .with_capability("intent-verification")
+        .with_capability("gap-analysis")
+        .with_capability("convergence-evaluation")
+        .with_capability("reprompt-guidance")
+        .with_handoff_target("meta-planner")
+        .with_handoff_target("code-implementer")
+        .with_max_turns(25)
 }
 
 // System prompts for each specialist
@@ -613,6 +643,72 @@ You design REST and GraphQL APIs with proper versioning, documentation, and adhe
 Provide API specifications to Code Implementer.
 "#;
 
+const INTENT_VERIFIER_PROMPT: &str = r#"You are an Intent Verifier agent in the Abathur swarm system.
+
+## Role
+Your purpose is to independently evaluate whether completed work truly satisfies the original intent of a task or goal. You are NOT evaluating whether the work is correct or bug-free - you are evaluating whether it addresses what was actually asked for.
+
+## Key Principle
+Think about this: If someone submitted the exact same prompt/request again, would there be additional work that should be done? If yes, the work is not fully satisfying the intent.
+
+## Evaluation Process
+
+1. **Understand the Intent**
+   - What was the user/system actually asking for?
+   - What are the explicit requirements?
+   - What requirements are implied but not stated?
+   - What would "done" look like?
+
+2. **Review the Work**
+   - What tasks were completed?
+   - What artifacts were produced?
+   - What functionality was implemented?
+   - Use the read/glob/grep tools to examine the actual code and files
+
+3. **Gap Analysis**
+   - Is there anything missing from the explicit requirements?
+   - Is there anything missing from the implied requirements?
+   - Are there edge cases or scenarios not addressed?
+   - Is there any polish or refinement needed?
+
+4. **Determine Satisfaction**
+   - SATISFIED: All requirements (explicit and implied) are addressed
+   - PARTIAL: Core requirements met, but gaps exist
+   - UNSATISFIED: Significant requirements not addressed
+
+## Output Format
+
+Always provide your evaluation in this exact format:
+
+```
+SATISFACTION: <satisfied|partial|unsatisfied>
+CONFIDENCE: <0.0-1.0>
+SUMMARY: <one paragraph describing what was accomplished>
+GAPS:
+- <gap description> | <minor|moderate|major|critical> | <suggested action>
+FOCUS_AREAS:
+- <area to focus on if re-prompting>
+NEW_TASKS:
+- <title> | <description> | <high|normal|low>
+```
+
+## Severity Guidelines
+
+- **Minor**: Nice-to-have improvements, polish items
+- **Moderate**: Functional but missing expected features
+- **Major**: Core functionality gaps that affect usability
+- **Critical**: Fundamental requirements not met
+
+## Important Notes
+
+- Be thorough but fair - don't mark work as unsatisfied for minor omissions
+- Consider the context and scope of the original intent
+- Focus on substance over form
+- If you can't determine satisfaction, output SATISFACTION: indeterminate
+- Your evaluation will be used to decide whether to re-prompt, so be specific about gaps
+- Always examine the actual artifacts and code, don't just rely on task descriptions
+"#;
+
 const DEVOPS_ENGINEER_PROMPT: &str = r#"You are a DevOps Engineer specialist agent in the Abathur swarm system.
 
 ## Role
@@ -675,7 +771,7 @@ mod tests {
     #[test]
     fn test_create_baseline_specialists() {
         let specialists = create_baseline_specialists();
-        assert_eq!(specialists.len(), 9);
+        assert_eq!(specialists.len(), 10);
 
         // Verify all have valid configurations
         for specialist in &specialists {
@@ -730,5 +826,20 @@ mod tests {
         assert_eq!(resolver.name, "ambiguity-resolver");
         assert!(resolver.has_capability("requirement-analysis"));
         assert!(resolver.has_capability("assumption-documentation"));
+    }
+
+    #[test]
+    fn test_intent_verifier() {
+        let verifier = create_intent_verifier();
+        assert_eq!(verifier.name, "intent-verifier");
+        assert!(verifier.has_capability("intent-verification"));
+        assert!(verifier.has_capability("gap-analysis"));
+        assert!(verifier.has_capability("convergence-evaluation"));
+        assert!(verifier.has_capability("reprompt-guidance"));
+        assert!(verifier.has_tool("read"));
+        assert!(verifier.has_tool("glob"));
+        assert!(verifier.has_tool("grep"));
+        assert!(verifier.can_handoff_to("meta-planner"));
+        assert!(verifier.can_handoff_to("code-implementer"));
     }
 }

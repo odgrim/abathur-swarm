@@ -35,6 +35,9 @@ pub enum DomainError {
 
     #[error("Concurrency conflict: {entity} {id} was modified")]
     ConcurrencyConflict { entity: String, id: String },
+
+    #[error("Execution failed: {0}")]
+    ExecutionFailed(String),
 }
 
 pub type DomainResult<T> = Result<T, DomainError>;

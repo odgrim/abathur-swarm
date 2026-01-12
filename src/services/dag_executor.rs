@@ -36,6 +36,10 @@ pub struct ExecutorConfig {
     pub tasks_server_url: Option<String>,
     /// Pre-fetched project context from memory (injected into agent prompts).
     pub project_context: Option<String>,
+    /// Whether to enable wave-level verification.
+    pub enable_wave_verification: bool,
+    /// Iteration context for convergence loops (injected into agent prompts).
+    pub iteration_context: Option<crate::domain::models::IterationContext>,
 }
 
 impl Default for ExecutorConfig {
@@ -50,6 +54,8 @@ impl Default for ExecutorConfig {
             a2a_gateway_url: None,
             tasks_server_url: None,
             project_context: None,
+            enable_wave_verification: false,
+            iteration_context: None,
         }
     }
 }
@@ -104,6 +110,53 @@ pub enum ExecutionEvent {
     Completed { status: ExecutionStatus, results: ExecutionResults },
     /// DAG restructure decision made for a permanently failed task.
     RestructureDecision { task_id: Uuid, decision: String },
+    /// Intent verification requested (emitted when DAG completes for orchestrator to handle).
+    IntentVerificationRequested {
+        goal_id: Option<Uuid>,
+        completed_task_ids: Vec<Uuid>,
+    },
+    /// Intent verification result (emitted by orchestrator after verification).
+    IntentVerificationResult {
+        satisfaction: String,
+        confidence: f64,
+        gaps_count: usize,
+        iteration: u32,
+        should_continue: bool,
+    },
+    /// Wave verification requested (emitted after wave completes if enabled).
+    WaveVerificationRequested {
+        wave_number: usize,
+        completed_task_ids: Vec<Uuid>,
+        goal_id: Option<Uuid>,
+    },
+    /// Wave verification result.
+    WaveVerificationResult {
+        wave_number: usize,
+        satisfaction: String,
+        confidence: f64,
+        gaps_count: usize,
+    },
+    /// Branch verification requested (before dependent tasks run).
+    BranchVerificationRequested {
+        branch_task_ids: Vec<Uuid>,
+        waiting_task_ids: Vec<Uuid>,
+        branch_objective: String,
+    },
+    /// Branch verification result.
+    BranchVerificationResult {
+        branch_satisfied: bool,
+        confidence: f64,
+        gaps_count: usize,
+        dependents_can_proceed: bool,
+    },
+    /// Human escalation needed.
+    HumanEscalationNeeded {
+        goal_id: Option<Uuid>,
+        task_id: Option<Uuid>,
+        reason: String,
+        urgency: String,
+        is_blocking: bool,
+    },
 }
 
 /// Results of a DAG execution.
@@ -316,6 +369,28 @@ where
                 succeeded: wave_succeeded,
                 failed: wave_failed,
             }).await;
+
+            // Emit wave verification request if enabled
+            if self.config.enable_wave_verification && wave_succeeded > 0 {
+                let wave_completed_ids: Vec<Uuid> = {
+                    let results = self.results.read().await;
+                    results.task_results.iter()
+                        .filter(|r| r.status == TaskStatus::Complete && wave.contains(&r.task_id))
+                        .map(|r| r.task_id)
+                        .collect()
+                };
+
+                // Determine goal_id from completed tasks
+                let wave_goal_id = wave_completed_ids.first().and_then(|tid| {
+                    dag.nodes.get(tid).and_then(|n| n.goal_id)
+                });
+
+                let _ = event_tx.send(ExecutionEvent::WaveVerificationRequested {
+                    wave_number: wave_idx + 1,
+                    completed_task_ids: wave_completed_ids,
+                    goal_id: wave_goal_id,
+                }).await;
+            }
 
             // Check for permanent failures and signal for restructure if service is available
             if wave_failed > 0 {
@@ -728,20 +803,23 @@ where
         ctx
     };
 
-    // Build enhanced system prompt with goal context, project context, constraints, artifacts, and MCP services
+    // Build enhanced system prompt with goal context, project context, constraints, artifacts, MCP services, and iteration context
     let goal_context = build_goal_context(&active_goals, task.goal_id);
     let mcp_context = build_mcp_context(&config);
     let project_context = config.project_context.as_ref().map_or(String::new(), |ctx| {
         format!("\n\n## Project Context\n\n{}", ctx)
     });
+    let iteration_context = config.iteration_context.as_ref()
+        .map_or(String::new(), |ctx| ctx.format_for_prompt());
     let system_prompt = format!(
-        "{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}",
         base_system_prompt,
         constraints_context,
         project_context,
         goal_context,
         upstream_artifacts_context,
-        mcp_context
+        mcp_context,
+        iteration_context
     );
 
     // Build substrate config with MCP servers and agent tools

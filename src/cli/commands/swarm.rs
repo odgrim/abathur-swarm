@@ -526,14 +526,14 @@ async fn run_swarm_foreground(
                         println!("  Goal decomposed into {} tasks ({})", task_count, goal_id);
                     }
                 }
-                SwarmEvent::GoalCompleted { goal_id } => {
+                SwarmEvent::GoalIterationCompleted { goal_id, tasks_completed } => {
                     if !json_mode {
-                        println!("Goal completed: {}", goal_id);
+                        println!("Goal iteration completed: {} ({} tasks done)", goal_id, tasks_completed);
                     }
                 }
-                SwarmEvent::GoalFailed { goal_id, error } => {
+                SwarmEvent::GoalSuspended { goal_id, reason } => {
                     if !json_mode {
-                        println!("Goal failed: {} - {}", goal_id, error);
+                        println!("Goal suspended: {} - {}", goal_id, reason);
                     }
                 }
                 SwarmEvent::TaskSubmitted { task_id, task_title, goal_id } => {
@@ -641,6 +641,120 @@ async fn run_swarm_foreground(
                         println!("Orchestrator stopped");
                     }
                     break;
+                }
+                SwarmEvent::IntentVerificationStarted { goal_id, iteration } => {
+                    if !json_mode {
+                        println!("  Intent verification started: goal {} (iteration {})", goal_id, iteration);
+                    }
+                }
+                SwarmEvent::IntentVerificationCompleted {
+                    goal_id,
+                    satisfaction,
+                    confidence,
+                    gaps_count,
+                    iteration,
+                    will_retry,
+                } => {
+                    if !json_mode {
+                        let retry_status = if *will_retry { "will retry" } else { "final" };
+                        println!(
+                            "  Intent verification: goal {} - {} (confidence: {:.0}%, {} gaps, iteration {}) [{}]",
+                            goal_id, satisfaction, confidence * 100.0, gaps_count, iteration, retry_status
+                        );
+                    }
+                }
+                SwarmEvent::ConvergenceCompleted {
+                    goal_id,
+                    converged,
+                    iterations,
+                    final_satisfaction,
+                } => {
+                    if !json_mode {
+                        let status = if *converged { "CONVERGED" } else { "NOT CONVERGED" };
+                        println!(
+                            "  Convergence loop completed: goal {} - {} after {} iterations ({})",
+                            goal_id, status, iterations, final_satisfaction
+                        );
+                    }
+                }
+                SwarmEvent::HumanEscalationRequired {
+                    goal_id,
+                    task_id,
+                    reason,
+                    urgency,
+                    questions,
+                    is_blocking,
+                } => {
+                    if !json_mode {
+                        let blocking_str = if *is_blocking { " [BLOCKING]" } else { "" };
+                        println!(
+                            "  ⚠️  HUMAN ESCALATION REQUIRED{} ({}): {}",
+                            blocking_str, urgency, reason
+                        );
+                        if let Some(gid) = goal_id {
+                            println!("      Goal: {}", gid);
+                        }
+                        if let Some(tid) = task_id {
+                            println!("      Task: {}", tid);
+                        }
+                        for q in questions {
+                            println!("      ? {}", q);
+                        }
+                    }
+                }
+                SwarmEvent::HumanResponseReceived {
+                    escalation_id,
+                    decision,
+                    allows_continuation,
+                } => {
+                    if !json_mode {
+                        let cont_str = if *allows_continuation { "continuing" } else { "halted" };
+                        println!(
+                            "  Human response received for {}: {} - {}",
+                            escalation_id, decision, cont_str
+                        );
+                    }
+                }
+                SwarmEvent::BranchVerificationStarted {
+                    branch_task_ids,
+                    waiting_task_ids,
+                } => {
+                    if !json_mode {
+                        println!(
+                            "  Branch verification started: {} branch tasks, {} waiting",
+                            branch_task_ids.len(), waiting_task_ids.len()
+                        );
+                    }
+                }
+                SwarmEvent::BranchVerificationCompleted {
+                    branch_satisfied,
+                    dependents_can_proceed,
+                    gaps_count,
+                } => {
+                    if !json_mode {
+                        let status = if *branch_satisfied { "✓ satisfied" } else { "✗ not satisfied" };
+                        let proceed = if *dependents_can_proceed { "proceeding" } else { "blocked" };
+                        println!(
+                            "  Branch verification completed: {} ({} gaps) - dependents {}",
+                            status, gaps_count, proceed
+                        );
+                    }
+                }
+                SwarmEvent::SemanticDriftDetected {
+                    goal_id,
+                    recurring_gaps,
+                    iterations,
+                } => {
+                    if !json_mode {
+                        println!(
+                            "  ⚠️  SEMANTIC DRIFT detected for goal {} after {} iterations",
+                            goal_id, iterations
+                        );
+                        println!("      Recurring gaps that haven't been resolved:");
+                        for gap in recurring_gaps {
+                            println!("        - {}", gap);
+                        }
+                    }
                 }
             }
         }

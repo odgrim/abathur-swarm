@@ -68,13 +68,14 @@ async fn test_goal_lifecycle() {
     assert_eq!(retrieved.name, "Implement feature X");
     assert_eq!(retrieved.status, GoalStatus::Active);
 
-    // Update goal status
-    goal_service.transition_status(goal.id, GoalStatus::Completed)
-        .await.expect("Failed to complete goal");
+    // Update goal status - goals can be retired when no longer relevant
+    // Note: Goals are never "completed" - they are convergent attractors
+    goal_service.transition_status(goal.id, GoalStatus::Retired)
+        .await.expect("Failed to retire goal");
 
     let updated = goal_service.get_goal(goal.id).await.expect("Failed to get goal");
     assert!(updated.is_some());
-    assert_eq!(updated.unwrap().status, GoalStatus::Completed);
+    assert_eq!(updated.unwrap().status, GoalStatus::Retired);
 }
 
 /// Test the complete task lifecycle with dependencies.
@@ -362,14 +363,14 @@ async fn test_full_workflow() {
         task_service.complete_task(task.id).await.expect("Failed to complete task");
     }
 
-    // 4. Complete the goal
-    goal_service.transition_status(goal.id, GoalStatus::Completed)
-        .await.expect("Failed to complete goal");
+    // 4. Retire the goal (goals are never "completed" - they can be retired when no longer relevant)
+    goal_service.transition_status(goal.id, GoalStatus::Retired)
+        .await.expect("Failed to retire goal");
 
     // 5. Verify final state
     let final_goal = goal_service.get_goal(goal.id).await.expect("Failed to get goal");
     assert!(final_goal.is_some());
-    assert_eq!(final_goal.unwrap().status, GoalStatus::Completed);
+    assert_eq!(final_goal.unwrap().status, GoalStatus::Retired);
 }
 
 /// Test DAG execution with mock substrate.

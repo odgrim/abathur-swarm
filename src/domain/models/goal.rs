@@ -8,17 +8,22 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Status of a goal in the system.
+///
+/// Goals are convergent attractors - they guide work but are never "completed."
+/// A goal can be:
+/// - Active: Currently guiding work toward it
+/// - Paused: Temporarily not guiding work
+/// - Suspended: Blocked due to failures, awaiting intervention
+/// - Retired: No longer relevant, permanently stopped
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalStatus {
     /// Goal is actively guiding work
     Active,
-    /// Goal is temporarily paused
+    /// Goal is temporarily paused (can be resumed)
     Paused,
-    /// Goal has been completed (all work done)
-    Completed,
-    /// Goal has failed
-    Failed,
+    /// Goal is suspended due to failures (needs intervention)
+    Suspended,
     /// Goal has been retired (no longer guides work)
     Retired,
 }
@@ -34,8 +39,7 @@ impl GoalStatus {
         match self {
             Self::Active => "active",
             Self::Paused => "paused",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
+            Self::Suspended => "suspended",
             Self::Retired => "retired",
         }
     }
@@ -45,30 +49,49 @@ impl GoalStatus {
         match s.to_lowercase().as_str() {
             "active" => Some(Self::Active),
             "paused" => Some(Self::Paused),
-            "completed" => Some(Self::Completed),
-            "failed" => Some(Self::Failed),
+            "suspended" => Some(Self::Suspended),
             "retired" => Some(Self::Retired),
+            // Legacy compatibility
+            "completed" => Some(Self::Retired),
+            "failed" => Some(Self::Suspended),
             _ => None,
         }
     }
 
     /// Check if this status can transition to another status.
+    ///
+    /// Goals can never be "completed" - only retired when no longer relevant.
     pub fn can_transition_to(&self, new_status: Self) -> bool {
         matches!(
             (self, new_status),
+            // Active can pause, suspend (on failure), or retire
             (Self::Active, Self::Paused)
-                | (Self::Active, Self::Completed)
-                | (Self::Active, Self::Failed)
+                | (Self::Active, Self::Suspended)
                 | (Self::Active, Self::Retired)
+                // Paused can resume or retire
                 | (Self::Paused, Self::Active)
                 | (Self::Paused, Self::Retired)
-                | (Self::Failed, Self::Active) // Allow retry
+                // Suspended can be resumed (after intervention) or retired
+                | (Self::Suspended, Self::Active)
+                | (Self::Suspended, Self::Retired)
         )
     }
 
     /// Returns true if this is a terminal state.
+    ///
+    /// Only Retired is terminal - goals are never "completed."
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Retired)
+        matches!(self, Self::Retired)
+    }
+
+    /// Returns true if this goal is actively guiding work.
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Active)
+    }
+
+    /// Returns true if this goal needs intervention.
+    pub fn needs_intervention(&self) -> bool {
+        matches!(self, Self::Suspended)
     }
 }
 
@@ -272,19 +295,13 @@ impl Goal {
         Ok(())
     }
 
-    /// Mark this goal as completed.
-    pub fn complete(&mut self) {
-        if self.can_transition_to(GoalStatus::Completed) {
-            self.status = GoalStatus::Completed;
-            self.updated_at = Utc::now();
-            self.version += 1;
-        }
-    }
-
-    /// Mark this goal as failed.
-    pub fn fail(&mut self, _reason: &str) {
-        if self.can_transition_to(GoalStatus::Failed) {
-            self.status = GoalStatus::Failed;
+    /// Suspend this goal due to failures or issues.
+    ///
+    /// Suspended goals need intervention before they can resume.
+    /// Goals are never "completed" - they can only be retired when no longer relevant.
+    pub fn suspend(&mut self, _reason: &str) {
+        if self.can_transition_to(GoalStatus::Suspended) {
+            self.status = GoalStatus::Suspended;
             self.updated_at = Utc::now();
             self.version += 1;
         }
@@ -299,7 +316,7 @@ impl Goal {
         }
     }
 
-    /// Resume this goal (from paused or failed state).
+    /// Resume this goal (from paused or suspended state).
     pub fn resume(&mut self) {
         if self.can_transition_to(GoalStatus::Active) {
             self.status = GoalStatus::Active;
@@ -404,14 +421,48 @@ mod tests {
     fn test_goal_state_transitions() {
         let mut goal = Goal::new("Test", "Description");
 
+        // Active goal can transition to Paused, Suspended, or Retired
         assert!(goal.can_transition_to(GoalStatus::Paused));
+        assert!(goal.can_transition_to(GoalStatus::Suspended));
         assert!(goal.can_transition_to(GoalStatus::Retired));
 
         goal.transition_to(GoalStatus::Paused).unwrap();
         assert_eq!(goal.status, GoalStatus::Paused);
 
+        // Paused can resume (Active) or retire
         assert!(goal.can_transition_to(GoalStatus::Active));
         assert!(goal.can_transition_to(GoalStatus::Retired));
+    }
+
+    #[test]
+    fn test_goal_suspend_and_resume() {
+        let mut goal = Goal::new("Test", "Description");
+
+        // Suspend the goal
+        goal.suspend("Task failures");
+        assert_eq!(goal.status, GoalStatus::Suspended);
+        assert!(goal.status.needs_intervention());
+
+        // Suspended can resume or retire
+        assert!(goal.can_transition_to(GoalStatus::Active));
+        assert!(goal.can_transition_to(GoalStatus::Retired));
+
+        // Resume the goal
+        goal.resume();
+        assert_eq!(goal.status, GoalStatus::Active);
+    }
+
+    #[test]
+    fn test_goals_never_complete() {
+        // Goals are convergent attractors - they are never "completed"
+        // Only Retired is a terminal state
+        assert!(!GoalStatus::Active.is_terminal());
+        assert!(!GoalStatus::Paused.is_terminal());
+        assert!(!GoalStatus::Suspended.is_terminal());
+        assert!(GoalStatus::Retired.is_terminal());
+
+        // Verify there is no "Completed" status
+        assert!(GoalStatus::from_str("completed").unwrap() == GoalStatus::Retired);
     }
 
     #[test]

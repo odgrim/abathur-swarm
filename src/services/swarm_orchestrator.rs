@@ -26,6 +26,7 @@ use crate::services::{
     EvolutionLoop, TaskExecution, TaskOutcome,
     GoalAlignmentService, HolisticEvaluation,
     IntegrationVerifierService, VerificationResult, VerifierConfig,
+    IntentVerifierConfig, IntentVerifierService,
     MemoryDecayDaemon, MemoryService,
     MergeQueue, MergeQueueConfig,
     MetaPlanner, MetaPlannerConfig,
@@ -70,6 +71,62 @@ pub struct SwarmConfig {
     pub mcp_servers: McpServerConfig,
     /// Spawn limits for task creation (subtask depth, count, etc.).
     pub spawn_limits: crate::services::config::SpawnLimitsConfig,
+    /// Whether to enable intent verification and convergence loops.
+    pub enable_intent_verification: bool,
+    /// Configuration for convergence behavior.
+    pub convergence: ConvergenceLoopConfig,
+}
+
+/// Configuration for the convergence loop behavior.
+#[derive(Debug, Clone)]
+pub struct ConvergenceLoopConfig {
+    /// Maximum iterations before giving up.
+    pub max_iterations: u32,
+    /// Minimum confidence to accept partial satisfaction.
+    pub min_confidence_threshold: f64,
+    /// Whether to require full satisfaction (vs. partial).
+    pub require_full_satisfaction: bool,
+    /// Whether to automatically retry on partial satisfaction.
+    pub auto_retry_partial: bool,
+    /// Timeout for the entire convergence loop (seconds).
+    pub convergence_timeout_secs: u64,
+    /// Verification level: "goal" for goal-level, "wave" for per-wave, "task" for per-task.
+    pub verification_level: VerificationLevel,
+}
+
+/// Level at which intent verification is performed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VerificationLevel {
+    /// Verify only at goal completion (default).
+    #[default]
+    Goal,
+    /// Verify after each wave of parallel tasks completes.
+    Wave,
+    /// Verify each task individually after completion.
+    Task,
+}
+
+impl VerificationLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Goal => "goal",
+            Self::Wave => "wave",
+            Self::Task => "task",
+        }
+    }
+}
+
+impl Default for ConvergenceLoopConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 3,
+            min_confidence_threshold: 0.7,
+            require_full_satisfaction: false,
+            auto_retry_partial: true,
+            convergence_timeout_secs: 7200, // 2 hours
+            verification_level: VerificationLevel::default(),
+        }
+    }
 }
 
 /// MCP server configuration for agent access to system services.
@@ -123,6 +180,8 @@ impl Default for SwarmConfig {
             track_evolution: true,
             mcp_servers: McpServerConfig::default(),
             spawn_limits: crate::services::config::SpawnLimitsConfig::default(),
+            enable_intent_verification: false,
+            convergence: ConvergenceLoopConfig::default(),
         }
     }
 }
@@ -188,10 +247,63 @@ pub enum SwarmEvent {
         current_value: u32,
         limit_value: u32,
     },
-    /// Goal completed.
-    GoalCompleted { goal_id: Uuid },
-    /// Goal failed.
-    GoalFailed { goal_id: Uuid, error: String },
+    /// Goal iteration completed (all current tasks done, goal remains active).
+    ///
+    /// Goals are never "completed" - they are convergent attractors.
+    /// This event indicates a successful iteration of work toward the goal.
+    GoalIterationCompleted { goal_id: Uuid, tasks_completed: usize },
+    /// Goal suspended due to failures (needs intervention).
+    GoalSuspended { goal_id: Uuid, reason: String },
+    /// Intent verification started.
+    IntentVerificationStarted { goal_id: Uuid, iteration: u32 },
+    /// Intent verification completed.
+    IntentVerificationCompleted {
+        goal_id: Uuid,
+        satisfaction: String,
+        confidence: f64,
+        gaps_count: usize,
+        iteration: u32,
+        will_retry: bool,
+    },
+    /// Convergence loop completed.
+    ConvergenceCompleted {
+        goal_id: Uuid,
+        converged: bool,
+        iterations: u32,
+        final_satisfaction: String,
+    },
+    /// Human escalation required.
+    HumanEscalationRequired {
+        goal_id: Option<Uuid>,
+        task_id: Option<Uuid>,
+        reason: String,
+        urgency: String,
+        questions: Vec<String>,
+        is_blocking: bool,
+    },
+    /// Human response received to escalation.
+    HumanResponseReceived {
+        escalation_id: Uuid,
+        decision: String,
+        allows_continuation: bool,
+    },
+    /// Branch verification started.
+    BranchVerificationStarted {
+        branch_task_ids: Vec<Uuid>,
+        waiting_task_ids: Vec<Uuid>,
+    },
+    /// Branch verification completed.
+    BranchVerificationCompleted {
+        branch_satisfied: bool,
+        dependents_can_proceed: bool,
+        gaps_count: usize,
+    },
+    /// Semantic drift detected in convergence loop.
+    SemanticDriftDetected {
+        goal_id: Uuid,
+        recurring_gaps: Vec<String>,
+        iterations: u32,
+    },
     /// Orchestrator paused.
     Paused,
     /// Orchestrator resumed.
@@ -252,6 +364,8 @@ where
     guardrails: Arc<Guardrails>,
     // Embedded MCP server shutdown handles
     mcp_shutdown_tx: Arc<RwLock<Option<tokio::sync::broadcast::Sender<()>>>>,
+    // Intent verifier for convergence loops
+    intent_verifier: Option<Arc<IntentVerifierService<G, T>>>,
 }
 
 impl<G, T, W, A, M> SwarmOrchestrator<G, T, W, A, M>
@@ -293,7 +407,32 @@ where
             restructure_service: Arc::new(tokio::sync::Mutex::new(DagRestructureService::with_defaults())),
             guardrails: Arc::new(Guardrails::with_defaults()),
             mcp_shutdown_tx: Arc::new(RwLock::new(None)),
+            intent_verifier: None,
         }
+    }
+
+    /// Create orchestrator with intent verification enabled.
+    pub fn with_intent_verifier(mut self, substrate: Arc<dyn Substrate>) -> Self {
+        let config = IntentVerifierConfig {
+            max_turns: self.config.default_max_turns,
+            convergence: crate::domain::models::ConvergenceConfig {
+                max_iterations: self.config.convergence.max_iterations,
+                min_confidence_threshold: self.config.convergence.min_confidence_threshold,
+                require_full_satisfaction: self.config.convergence.require_full_satisfaction,
+                auto_retry_partial: self.config.convergence.auto_retry_partial,
+                convergence_timeout_secs: self.config.convergence.convergence_timeout_secs,
+            },
+            include_artifacts: true,
+            include_task_output: true,
+            verifier_agent_type: "intent-verifier".to_string(),
+        };
+        self.intent_verifier = Some(Arc::new(IntentVerifierService::new(
+            self.goal_repo.clone(),
+            self.task_repo.clone(),
+            substrate,
+            config,
+        )));
+        self
     }
 
     /// Create orchestrator with custom guardrails configuration.
@@ -714,6 +853,8 @@ where
             a2a_gateway_url: self.config.mcp_servers.a2a_gateway.clone(),
             tasks_server_url: self.config.mcp_servers.tasks_server.clone(),
             project_context,
+            enable_wave_verification: false,
+            iteration_context: None,
         };
 
         // Create restructure service for failure recovery
@@ -846,6 +987,129 @@ where
                             decision,
                         }).await;
                     }
+                    ExecutionEvent::IntentVerificationRequested { goal_id, completed_task_ids } => {
+                        audit_log.info(
+                            AuditCategory::Goal,
+                            AuditAction::GoalEvaluated,
+                            format!(
+                                "Intent verification requested for goal {:?} with {} completed tasks",
+                                goal_id, completed_task_ids.len()
+                            ),
+                        ).await;
+                    }
+                    ExecutionEvent::IntentVerificationResult {
+                        satisfaction,
+                        confidence,
+                        gaps_count,
+                        iteration,
+                        should_continue,
+                    } => {
+                        audit_log.info(
+                            AuditCategory::Goal,
+                            AuditAction::GoalEvaluated,
+                            format!(
+                                "Intent verification result: {} (confidence: {:.2}, {} gaps, iteration {}, continue: {})",
+                                satisfaction, confidence, gaps_count, iteration, should_continue
+                            ),
+                        ).await;
+                    }
+                    ExecutionEvent::WaveVerificationRequested {
+                        wave_number,
+                        completed_task_ids,
+                        goal_id,
+                    } => {
+                        audit_log.info(
+                            AuditCategory::Execution,
+                            AuditAction::WaveCompleted,
+                            format!(
+                                "Wave {} verification requested: {} completed tasks, goal {:?}",
+                                wave_number, completed_task_ids.len(), goal_id
+                            ),
+                        ).await;
+                    }
+                    ExecutionEvent::WaveVerificationResult {
+                        wave_number,
+                        satisfaction,
+                        confidence,
+                        gaps_count,
+                    } => {
+                        audit_log.info(
+                            AuditCategory::Execution,
+                            AuditAction::WaveCompleted,
+                            format!(
+                                "Wave {} verification result: {} (confidence: {:.2}, {} gaps)",
+                                wave_number, satisfaction, confidence, gaps_count
+                            ),
+                        ).await;
+                    }
+                    ExecutionEvent::BranchVerificationRequested {
+                        branch_task_ids,
+                        waiting_task_ids,
+                        branch_objective,
+                    } => {
+                        let branch_count = branch_task_ids.len();
+                        let waiting_count = waiting_task_ids.len();
+                        let _ = swarm_event_tx.send(SwarmEvent::BranchVerificationStarted {
+                            branch_task_ids,
+                            waiting_task_ids,
+                        }).await;
+                        audit_log.info(
+                            AuditCategory::Execution,
+                            AuditAction::WaveStarted,
+                            format!(
+                                "Branch verification requested for {} tasks, {} waiting. Objective: {}",
+                                branch_count, waiting_count, branch_objective
+                            ),
+                        ).await;
+                    }
+                    ExecutionEvent::BranchVerificationResult {
+                        branch_satisfied,
+                        confidence,
+                        gaps_count,
+                        dependents_can_proceed,
+                    } => {
+                        let _ = swarm_event_tx.send(SwarmEvent::BranchVerificationCompleted {
+                            branch_satisfied,
+                            dependents_can_proceed,
+                            gaps_count,
+                        }).await;
+                        audit_log.info(
+                            AuditCategory::Execution,
+                            AuditAction::TaskCompleted,
+                            format!(
+                                "Branch verification result: satisfied={}, confidence={:.2}, gaps={}, proceed={}",
+                                branch_satisfied, confidence, gaps_count, dependents_can_proceed
+                            ),
+                        ).await;
+                    }
+                    ExecutionEvent::HumanEscalationNeeded {
+                        goal_id,
+                        task_id,
+                        reason,
+                        urgency,
+                        is_blocking,
+                    } => {
+                        let _ = swarm_event_tx.send(SwarmEvent::HumanEscalationRequired {
+                            goal_id,
+                            task_id,
+                            reason: reason.clone(),
+                            urgency: urgency.clone(),
+                            questions: vec![],
+                            is_blocking,
+                        }).await;
+                        audit_log.log(
+                            AuditEntry::new(
+                                if is_blocking { AuditLevel::Warning } else { AuditLevel::Info },
+                                AuditCategory::Goal,
+                                AuditAction::GoalSuspended,
+                                AuditActor::System,
+                                format!(
+                                    "Human escalation needed ({}): {} - blocking={}",
+                                    urgency, reason, is_blocking
+                                ),
+                            ),
+                        ).await;
+                    }
                 }
             }
         });
@@ -956,7 +1220,7 @@ where
                                         AuditEntry::new(
                                             AuditLevel::Warning,
                                             AuditCategory::Goal,
-                                            AuditAction::GoalFailed,
+                                            AuditAction::GoalSuspended,
                                             AuditActor::System,
                                             format!(
                                                 "Task {} has low goal alignment: {:.0}% ({}/{}). {}",
@@ -1025,20 +1289,26 @@ where
         }
 
         // Update goal status based on results
+        // Note: Goals are never "completed" - they remain Active and can spawn more work
         if let Ok(Some(mut goal)) = self.goal_repo.get(goal_id).await {
             if results.failed_tasks == 0 {
-                goal.complete();
-                let _ = self.goal_repo.update(&goal).await;
-                let _ = event_tx.send(SwarmEvent::GoalCompleted { goal_id }).await;
-            } else if results.completed_tasks == 0 {
-                let error_msg = format!("{} tasks failed", results.failed_tasks);
-                goal.fail(&error_msg);
-                let _ = self.goal_repo.update(&goal).await;
-                let _ = event_tx.send(SwarmEvent::GoalFailed {
+                // Successful iteration - goal remains Active, emit iteration completed
+                let _ = event_tx.send(SwarmEvent::GoalIterationCompleted {
                     goal_id,
-                    error: error_msg,
+                    tasks_completed: results.completed_tasks,
+                }).await;
+            } else if results.completed_tasks == 0 {
+                // All tasks failed - suspend the goal for intervention
+                let reason = format!("{} tasks failed", results.failed_tasks);
+                goal.suspend(&reason);
+                let _ = self.goal_repo.update(&goal).await;
+                let _ = event_tx.send(SwarmEvent::GoalSuspended {
+                    goal_id,
+                    reason,
                 }).await;
             }
+            // Mixed results: some tasks completed, some failed - goal stays Active
+            // Failed tasks will be retried via the retry mechanism
         }
 
         Ok(results)
@@ -1189,6 +1459,494 @@ where
         }
 
         Ok(())
+    }
+
+    /// Execute a goal's tasks with iteration context for convergence loops.
+    ///
+    /// This is like `execute_goal_with_dag` but accepts additional context from
+    /// previous convergence iterations to help agents understand what was tried before.
+    async fn execute_goal_with_dag_and_context(
+        &self,
+        goal_id: Uuid,
+        event_tx: &mpsc::Sender<SwarmEvent>,
+        iteration_context: Option<crate::domain::models::IterationContext>,
+        enable_wave_verification: bool,
+    ) -> DomainResult<ExecutionResults> {
+        // Get tasks for this goal
+        let tasks = self.task_repo.list_by_goal(goal_id).await?;
+        if tasks.is_empty() {
+            return Ok(ExecutionResults::default());
+        }
+
+        // Build DAG from tasks
+        let dag = TaskDag::from_tasks(tasks.clone());
+
+        // Create worktrees for all tasks if worktrees are enabled
+        if self.config.use_worktrees {
+            let worktree_config = WorktreeConfig {
+                base_path: self.config.worktree_base_path.clone(),
+                repo_path: self.config.repo_path.clone(),
+                default_base_ref: self.config.default_base_ref.clone(),
+                auto_cleanup: true,
+            };
+            let worktree_service = WorktreeService::new(
+                self.worktree_repo.clone(),
+                worktree_config,
+            );
+
+            for task in &tasks {
+                // Skip tasks that already have worktrees or are complete
+                if task.worktree_path.is_some() || task.status == TaskStatus::Complete {
+                    continue;
+                }
+
+                // Create worktree for this task
+                match worktree_service.create_worktree(task.id, None).await {
+                    Ok(worktree) => {
+                        // Update task with worktree path
+                        let mut updated_task = task.clone();
+                        updated_task.worktree_path = Some(worktree.path.clone());
+                        if let Err(e) = self.task_repo.update(&updated_task).await {
+                            tracing::warn!("Failed to update task {} with worktree path: {}", task.id, e);
+                        }
+
+                        let _ = event_tx.send(SwarmEvent::WorktreeCreated {
+                            task_id: task.id,
+                            path: worktree.path,
+                        }).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to create worktree for task {}: {}", task.id, e);
+                    }
+                }
+            }
+        }
+
+        // Fetch project context from semantic memory if available
+        let project_context = if let Some(ref memory_repo) = self.memory_repo {
+            let memory_service = MemoryService::new(memory_repo.clone());
+            let mut context_parts = Vec::new();
+
+            if let Ok(goal_memories) = memory_service.get_goal_context(goal_id).await {
+                for mem in goal_memories.iter().take(5) {
+                    context_parts.push(format!("- {}: {}", mem.key, mem.content));
+                }
+            }
+
+            if let Ok(semantic_memories) = memory_service.search("architecture project", Some("semantic"), 5).await {
+                for mem in semantic_memories {
+                    context_parts.push(format!("- {}: {}", mem.key, mem.content));
+                }
+            }
+
+            if context_parts.is_empty() {
+                None
+            } else {
+                Some(format!("Relevant project knowledge:\n{}", context_parts.join("\n")))
+            }
+        } else {
+            None
+        };
+
+        // Create DAG executor with iteration context
+        let executor_config = ExecutorConfig {
+            max_concurrency: self.config.max_agents,
+            task_timeout_secs: self.config.goal_timeout_secs,
+            max_retries: self.config.max_task_retries,
+            default_max_turns: self.config.default_max_turns,
+            fail_fast: false,
+            memory_server_url: self.config.mcp_servers.memory_server.clone(),
+            a2a_gateway_url: self.config.mcp_servers.a2a_gateway.clone(),
+            tasks_server_url: self.config.mcp_servers.tasks_server.clone(),
+            project_context,
+            enable_wave_verification,
+            iteration_context,
+        };
+
+        let restructure_service = Arc::new(crate::services::dag_restructure::DagRestructureService::with_defaults());
+
+        let executor = DagExecutor::new(
+            self.task_repo.clone(),
+            self.agent_repo.clone(),
+            self.substrate.clone(),
+            executor_config,
+        )
+        .with_goal_repo(self.goal_repo.clone())
+        .with_circuit_breaker(self.circuit_breaker.clone())
+        .with_restructure_service(restructure_service)
+        .with_guardrails(self.guardrails.clone());
+
+        // Execute the DAG
+        let results = executor.execute(&dag).await?;
+
+        // Track tokens
+        for task_result in &results.task_results {
+            if let Some(ref session) = task_result.session {
+                self.total_tokens.fetch_add(session.total_tokens(), std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Get pending task IDs for a goal.
+    async fn get_pending_task_ids_for_goal(&self, goal_id: Uuid) -> DomainResult<Vec<Uuid>> {
+        let tasks = self.task_repo.list_by_goal(goal_id).await?;
+        Ok(tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Pending || t.status == TaskStatus::Ready)
+            .map(|t| t.id)
+            .collect())
+    }
+
+    /// Apply a task augmentation by updating the task's description.
+    async fn apply_task_augmentation(
+        &self,
+        augmentation: &crate::domain::models::TaskAugmentation,
+    ) -> DomainResult<()> {
+        let mut task = self.task_repo.get(augmentation.task_id).await?
+            .ok_or(DomainError::TaskNotFound(augmentation.task_id))?;
+
+        // Only augment pending/ready tasks
+        if task.status != TaskStatus::Pending && task.status != TaskStatus::Ready {
+            return Ok(());
+        }
+
+        // Build the augmented description
+        let prefix = augmentation.format_as_description_prefix();
+        if !prefix.is_empty() {
+            // Store original description in evaluated_constraints for reference
+            if !task.description.starts_with("**RETRY ATTEMPT**") &&
+               !task.description.starts_with("**Gaps to Address:**") {
+                task.evaluated_constraints.push(format!("Original description: {}", task.description));
+            }
+
+            task.description = format!("{}{}", prefix, task.description);
+            self.task_repo.update(&task).await?;
+
+            tracing::info!(
+                "Augmented task {} with {} gaps and {} focus areas",
+                augmentation.task_id,
+                augmentation.gaps_to_address.len(),
+                augmentation.focus_areas.len()
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Execute a goal with intent verification and convergence loop.
+    ///
+    /// This wraps `execute_goal` with a convergence loop that:
+    /// 1. Executes the goal's tasks
+    /// 2. Verifies intent satisfaction
+    /// 3. Re-prompts/adds tasks if not converged
+    /// 4. Repeats until converged or max iterations reached
+    pub async fn execute_goal_with_convergence(
+        &self,
+        goal_id: Uuid,
+        event_tx: mpsc::Sender<SwarmEvent>,
+    ) -> DomainResult<ExecutionResults> {
+        // If intent verification is not enabled or not configured, fall back to regular execution
+        if !self.config.enable_intent_verification {
+            return self.execute_goal_with_dag(goal_id, &event_tx).await;
+        }
+
+        let Some(ref intent_verifier) = self.intent_verifier else {
+            tracing::warn!("Intent verification enabled but no verifier configured, falling back to regular execution");
+            return self.execute_goal_with_dag(goal_id, &event_tx).await;
+        };
+
+        // Capture the original intent
+        let intent = intent_verifier.extract_guiding_intent(goal_id).await?;
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(self.config.convergence.convergence_timeout_secs);
+        let max_iterations = self.config.convergence.max_iterations;
+
+        // Initialize convergence state for drift detection
+        let mut convergence_state = crate::domain::models::ConvergenceState::new(intent.clone());
+        let mut final_results: Option<ExecutionResults> = None;
+        let mut final_satisfaction = "indeterminate".to_string();
+
+        self.audit_log.info(
+            AuditCategory::Goal,
+            AuditAction::GoalCreated,
+            format!(
+                "Starting convergence loop for goal {} (max {} iterations)",
+                goal_id, max_iterations
+            ),
+        ).await;
+
+        while convergence_state.current_iteration < max_iterations {
+            // Check timeout
+            if start.elapsed() > timeout {
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Warning,
+                        AuditCategory::Goal,
+                        AuditAction::GoalSuspended,
+                        AuditActor::System,
+                        format!(
+                            "Convergence loop timed out for goal {} after {} iterations",
+                            goal_id, convergence_state.current_iteration
+                        ),
+                    )
+                    .with_entity(goal_id, "goal"),
+                ).await;
+                convergence_state.end();
+                break;
+            }
+
+            // Check for semantic drift (same gaps recurring)
+            if convergence_state.drift_detected {
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Warning,
+                        AuditCategory::Goal,
+                        AuditAction::GoalSuspended,
+                        AuditActor::System,
+                        format!(
+                            "Semantic drift detected for goal {}: same gaps recurring across iterations",
+                            goal_id
+                        ),
+                    )
+                    .with_entity(goal_id, "goal"),
+                ).await;
+
+                // Log recurring gaps
+                for gap in convergence_state.recurring_gaps() {
+                    tracing::warn!(
+                        "Recurring gap (seen {} times): {}",
+                        gap.occurrence_count, gap.normalized_description
+                    );
+                }
+                convergence_state.end();
+                break;
+            }
+
+            let iteration = convergence_state.current_iteration + 1;
+
+            // Build iteration context for agent prompts
+            let iteration_context = if convergence_state.current_iteration > 0 {
+                Some(convergence_state.build_iteration_context())
+            } else {
+                None
+            };
+
+            // Execute the goal with iteration context
+            let results = self.execute_goal_with_dag_and_context(
+                goal_id,
+                &event_tx,
+                iteration_context,
+                self.config.convergence.verification_level == VerificationLevel::Wave,
+            ).await?;
+            final_results = Some(results.clone());
+
+            // Collect completed tasks
+            let completed_task_ids: Vec<Uuid> = results
+                .task_results
+                .iter()
+                .filter(|r| r.status == TaskStatus::Complete)
+                .map(|r| r.task_id)
+                .collect();
+
+            if completed_task_ids.is_empty() {
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Warning,
+                        AuditCategory::Goal,
+                        AuditAction::GoalSuspended,
+                        AuditActor::System,
+                        format!("No completed tasks for goal {} in iteration {}", goal_id, iteration),
+                    )
+                    .with_entity(goal_id, "goal"),
+                ).await;
+                convergence_state.end();
+                break;
+            }
+
+            // Get the full task objects for verification
+            let mut completed_tasks = Vec::new();
+            for task_id in &completed_task_ids {
+                if let Ok(Some(task)) = self.task_repo.get(*task_id).await {
+                    completed_tasks.push(task);
+                }
+            }
+
+            // Emit verification started event
+            let _ = event_tx.send(SwarmEvent::IntentVerificationStarted {
+                goal_id,
+                iteration,
+            }).await;
+
+            // Verify intent satisfaction
+            let verification_result = intent_verifier
+                .verify_intent(&intent, &completed_tasks, iteration)
+                .await?;
+
+            // Record result in convergence state (updates drift detection)
+            convergence_state.record_verification(verification_result.clone());
+
+            let satisfaction_str = verification_result.satisfaction.as_str().to_string();
+            let should_continue = self.should_continue_convergence(&verification_result)
+                && convergence_state.is_making_progress();
+
+            // Emit verification completed event
+            let _ = event_tx.send(SwarmEvent::IntentVerificationCompleted {
+                goal_id,
+                satisfaction: satisfaction_str.clone(),
+                confidence: verification_result.confidence,
+                gaps_count: verification_result.gaps.len(),
+                iteration,
+                will_retry: should_continue,
+            }).await;
+
+            self.audit_log.info(
+                AuditCategory::Goal,
+                AuditAction::GoalEvaluated,
+                format!(
+                    "Intent verification for goal {} iteration {}: {} (confidence: {:.2}, {} gaps, drift: {})",
+                    goal_id, iteration, satisfaction_str,
+                    verification_result.confidence, verification_result.gaps.len(),
+                    convergence_state.drift_detected
+                ),
+            ).await;
+
+            final_satisfaction = satisfaction_str.clone();
+
+            // Check if converged
+            if convergence_state.converged {
+                break;
+            }
+
+            // Check if we should continue
+            if !should_continue {
+                convergence_state.end();
+                break;
+            }
+
+            // Apply reprompt guidance if available
+            if let Some(guidance) = &verification_result.reprompt_guidance {
+                self.audit_log.info(
+                    AuditCategory::Goal,
+                    AuditAction::GoalUpdated,
+                    format!(
+                        "Applying reprompt guidance for goal {}: {:?} approach, {} focus areas, {} new tasks",
+                        goal_id, guidance.approach,
+                        guidance.focus_areas.len(), guidance.tasks_to_add.len()
+                    ),
+                ).await;
+
+                // Get pending tasks for augmentation
+                let pending_tasks = self.get_pending_task_ids_for_goal(goal_id).await?;
+
+                // Build and apply task augmentations
+                let augmentations = crate::domain::models::build_task_augmentations(
+                    &verification_result,
+                    &pending_tasks,
+                );
+
+                for augmentation in augmentations {
+                    self.apply_task_augmentation(&augmentation).await?;
+                }
+
+                // Create new tasks from guidance
+                for task_guidance in &guidance.tasks_to_add {
+                    let priority = match task_guidance.priority {
+                        crate::domain::models::TaskGuidancePriority::High => crate::domain::models::TaskPriority::High,
+                        crate::domain::models::TaskGuidancePriority::Normal => crate::domain::models::TaskPriority::Normal,
+                        crate::domain::models::TaskGuidancePriority::Low => crate::domain::models::TaskPriority::Low,
+                    };
+
+                    let new_task = Task::new(&task_guidance.title, &task_guidance.description)
+                        .with_goal(goal_id)
+                        .with_priority(priority);
+
+                    if let Err(e) = self.task_repo.create(&new_task).await {
+                        tracing::warn!("Failed to create reprompt task: {}", e);
+                    } else {
+                        let _ = event_tx.send(SwarmEvent::TaskSubmitted {
+                            task_id: new_task.id,
+                            task_title: new_task.title.clone(),
+                            goal_id,
+                        }).await;
+                    }
+                }
+
+                // Reset failed tasks for retry
+                for task_id in &guidance.tasks_to_retry {
+                    if let Ok(Some(mut task)) = self.task_repo.get(*task_id).await {
+                        if task.status == TaskStatus::Failed && task.can_retry() {
+                            if task.retry().is_ok() {
+                                let _ = self.task_repo.update(&task).await;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // No guidance, can't continue meaningfully
+                convergence_state.end();
+                break;
+            }
+        }
+
+        // Emit convergence completed event
+        let _ = event_tx.send(SwarmEvent::ConvergenceCompleted {
+            goal_id,
+            converged: convergence_state.converged,
+            iterations: convergence_state.current_iteration,
+            final_satisfaction: final_satisfaction.clone(),
+        }).await;
+
+        self.audit_log.info(
+            AuditCategory::Goal,
+            if convergence_state.converged { AuditAction::GoalIterationCompleted } else { AuditAction::GoalSuspended },
+            format!(
+                "Convergence loop for goal {} finished: {} after {} iterations ({}, drift: {})",
+                goal_id,
+                if convergence_state.converged { "CONVERGED" } else { "NOT CONVERGED" },
+                convergence_state.current_iteration, final_satisfaction,
+                convergence_state.drift_detected
+            ),
+        ).await;
+
+        final_results.ok_or_else(|| DomainError::ExecutionFailed(
+            "No execution results available".to_string()
+        ))
+    }
+
+    /// Determine if the convergence loop should continue based on verification result.
+    fn should_continue_convergence(
+        &self,
+        result: &crate::domain::models::IntentVerificationResult,
+    ) -> bool {
+        use crate::domain::models::IntentSatisfaction;
+
+        // Don't continue if fully satisfied
+        if result.satisfaction == IntentSatisfaction::Satisfied {
+            return false;
+        }
+
+        // Don't continue if indeterminate (needs human)
+        if result.satisfaction == IntentSatisfaction::Indeterminate {
+            return false;
+        }
+
+        // For partial satisfaction, check config
+        if result.satisfaction == IntentSatisfaction::Partial {
+            if self.config.convergence.require_full_satisfaction {
+                return true;
+            }
+            // Accept partial if confidence is high enough
+            if result.confidence >= self.config.convergence.min_confidence_threshold {
+                return false;
+            }
+            return self.config.convergence.auto_retry_partial;
+        }
+
+        // Unsatisfied - continue if we have guidance
+        result.should_iterate()
     }
 
     /// Evaluate goal alignment for a completed task.
@@ -2143,24 +2901,29 @@ where
             }
         }
 
-        // Check if goal is complete
+        // Check goal iteration status
+        // Note: Goals are never "completed" - they remain Active and can spawn more work
         let all_complete = tasks.iter().all(|t| t.status == TaskStatus::Complete);
         let permanently_failed = tasks.iter().any(|t| {
             t.status == TaskStatus::Failed && t.retry_count >= self.config.max_task_retries
         });
 
         if all_complete {
-            let mut updated_goal = goal.clone();
-            updated_goal.complete();
-            self.goal_repo.update(&updated_goal).await?;
-            let _ = event_tx.send(SwarmEvent::GoalCompleted { goal_id: goal.id }).await;
-        } else if permanently_failed {
-            let mut updated_goal = goal.clone();
-            updated_goal.fail("One or more tasks permanently failed");
-            self.goal_repo.update(&updated_goal).await?;
-            let _ = event_tx.send(SwarmEvent::GoalFailed {
+            // Successful iteration - goal remains Active
+            let completed_count = tasks.iter().filter(|t| t.status == TaskStatus::Complete).count();
+            let _ = event_tx.send(SwarmEvent::GoalIterationCompleted {
                 goal_id: goal.id,
-                error: "Task failures exceeded retry limit".to_string(),
+                tasks_completed: completed_count,
+            }).await;
+        } else if permanently_failed {
+            // Permanent failure - suspend the goal for intervention
+            let mut updated_goal = goal.clone();
+            let reason = "One or more tasks permanently failed".to_string();
+            updated_goal.suspend(&reason);
+            self.goal_repo.update(&updated_goal).await?;
+            let _ = event_tx.send(SwarmEvent::GoalSuspended {
+                goal_id: goal.id,
+                reason,
             }).await;
         }
 
@@ -3299,6 +4062,8 @@ where
             a2a_gateway_url: self.config.mcp_servers.a2a_gateway.clone(),
             tasks_server_url: self.config.mcp_servers.tasks_server.clone(),
             project_context,
+            enable_wave_verification: false,
+            iteration_context: None,
         };
 
         let executor = DagExecutor::new(
@@ -3318,13 +4083,14 @@ where
         }
 
         // Update goal status based on results
+        // Note: Goals are never "completed" - they remain Active
         let mut updated_goal = goal;
-        if results.status() == ExecutionStatus::Completed {
-            updated_goal.complete();
-        } else if results.failed_tasks > 0 {
-            updated_goal.fail("Some tasks failed");
+        if results.status() != ExecutionStatus::Completed && results.failed_tasks > 0 {
+            // Suspend goal if tasks failed
+            updated_goal.suspend("Some tasks failed");
+            self.goal_repo.update(&updated_goal).await?;
         }
-        self.goal_repo.update(&updated_goal).await?;
+        // If completed or partial success, goal remains Active - no update needed
 
         Ok(results)
     }

@@ -132,8 +132,10 @@ pub enum AuditAction {
     // Goal actions
     GoalCreated,
     GoalUpdated,
-    GoalCompleted,
-    GoalFailed,
+    GoalIterationCompleted,
+    GoalSuspended,
+    GoalResumed,
+    GoalRetired,
     GoalEvaluated,
 
     // Agent actions
@@ -186,8 +188,10 @@ impl AuditAction {
             Self::TaskRetried => "task_retried",
             Self::GoalCreated => "goal_created",
             Self::GoalUpdated => "goal_updated",
-            Self::GoalCompleted => "goal_completed",
-            Self::GoalFailed => "goal_failed",
+            Self::GoalIterationCompleted => "goal_iteration_completed",
+            Self::GoalSuspended => "goal_suspended",
+            Self::GoalResumed => "goal_resumed",
+            Self::GoalRetired => "goal_retired",
             Self::GoalEvaluated => "goal_evaluated",
             Self::AgentSpawned => "agent_spawned",
             Self::AgentCompleted => "agent_completed",
