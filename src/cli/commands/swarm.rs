@@ -432,6 +432,9 @@ async fn run_swarm_foreground(
         memory_server: mcp_urls.memory_server.clone(),
         tasks_server: mcp_urls.tasks_server.clone(),
         a2a_gateway: mcp_urls.a2a_gateway.clone(),
+        auto_start_servers: with_mcp_servers,
+        bind_host: "127.0.0.1".to_string(),
+        base_port: 9100,
     };
 
     let config = SwarmConfig {

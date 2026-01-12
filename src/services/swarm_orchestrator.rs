@@ -75,12 +75,33 @@ pub struct SwarmConfig {
 /// MCP server configuration for agent access to system services.
 #[derive(Debug, Clone, Default)]
 pub struct McpServerConfig {
-    /// Memory MCP server address (e.g., "http://localhost:8081/mcp")
+    /// Memory MCP server address (e.g., "http://localhost:9100")
     pub memory_server: Option<String>,
-    /// Tasks MCP server address (e.g., "http://localhost:8082/mcp")
+    /// Tasks MCP server address (e.g., "http://localhost:9101")
     pub tasks_server: Option<String>,
-    /// A2A gateway address (e.g., "http://localhost:8083/a2a")
+    /// A2A gateway address (e.g., "http://localhost:8080")
     pub a2a_gateway: Option<String>,
+    /// Whether to auto-start embedded MCP servers.
+    /// When true, the orchestrator will start MCP servers in-process before goal processing.
+    pub auto_start_servers: bool,
+    /// Host to bind embedded servers to.
+    pub bind_host: String,
+    /// Base port for embedded servers (memory=base, tasks=base+1, a2a=base+2).
+    pub base_port: u16,
+}
+
+impl McpServerConfig {
+    /// Create a new config with auto-start enabled on default ports.
+    pub fn auto_start() -> Self {
+        Self {
+            memory_server: Some("http://127.0.0.1:9100".to_string()),
+            tasks_server: Some("http://127.0.0.1:9101".to_string()),
+            a2a_gateway: Some("http://127.0.0.1:8080".to_string()),
+            auto_start_servers: true,
+            bind_host: "127.0.0.1".to_string(),
+            base_port: 9100,
+        }
+    }
 }
 
 impl Default for SwarmConfig {
@@ -229,6 +250,8 @@ where
     restructure_service: Arc<tokio::sync::Mutex<DagRestructureService>>,
     // Guardrails for safety limits (tokens, cost, concurrent tasks)
     guardrails: Arc<Guardrails>,
+    // Embedded MCP server shutdown handles
+    mcp_shutdown_tx: Arc<RwLock<Option<tokio::sync::broadcast::Sender<()>>>>,
 }
 
 impl<G, T, W, A, M> SwarmOrchestrator<G, T, W, A, M>
@@ -269,6 +292,7 @@ where
             active_goals_cache: Arc::new(RwLock::new(Vec::new())),
             restructure_service: Arc::new(tokio::sync::Mutex::new(DagRestructureService::with_defaults())),
             guardrails: Arc::new(Guardrails::with_defaults()),
+            mcp_shutdown_tx: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -590,7 +614,65 @@ where
         }
 
         // Build DAG from tasks
-        let dag = TaskDag::from_tasks(tasks);
+        let dag = TaskDag::from_tasks(tasks.clone());
+
+        // Create worktrees for all tasks if worktrees are enabled
+        if self.config.use_worktrees {
+            let worktree_config = WorktreeConfig {
+                base_path: self.config.worktree_base_path.clone(),
+                repo_path: self.config.repo_path.clone(),
+                default_base_ref: self.config.default_base_ref.clone(),
+                auto_cleanup: true,
+            };
+            let worktree_service = WorktreeService::new(
+                self.worktree_repo.clone(),
+                worktree_config,
+            );
+
+            for task in &tasks {
+                // Skip tasks that already have worktrees or are complete
+                if task.worktree_path.is_some() || task.status == TaskStatus::Complete {
+                    continue;
+                }
+
+                // Create worktree for this task
+                match worktree_service.create_worktree(task.id, None).await {
+                    Ok(worktree) => {
+                        // Update task with worktree path
+                        let mut updated_task = task.clone();
+                        updated_task.worktree_path = Some(worktree.path.clone());
+                        if let Err(e) = self.task_repo.update(&updated_task).await {
+                            tracing::warn!("Failed to update task {} with worktree path: {}", task.id, e);
+                        }
+
+                        let _ = event_tx.send(SwarmEvent::WorktreeCreated {
+                            task_id: task.id,
+                            path: worktree.path,
+                        }).await;
+
+                        self.audit_log.info(
+                            AuditCategory::Task,
+                            AuditAction::TaskCreated,
+                            format!("Created worktree for task {} in DAG execution", task.id),
+                        ).await;
+                    }
+                    Err(e) => {
+                        // Log but don't fail - worktree creation is non-critical
+                        tracing::warn!("Failed to create worktree for task {}: {}", task.id, e);
+                        self.audit_log.log(
+                            AuditEntry::new(
+                                AuditLevel::Warning,
+                                AuditCategory::Task,
+                                AuditAction::TaskFailed,
+                                AuditActor::System,
+                                format!("Failed to create worktree for task {}: {}", task.id, e),
+                            )
+                            .with_entity(task.id, "task"),
+                        ).await;
+                    }
+                }
+            }
+        }
 
         // Fetch project context from semantic memory if available
         let project_context = if let Some(ref memory_repo) = self.memory_repo {
@@ -1244,6 +1326,23 @@ where
         Ok(Some(report))
     }
 
+    /// Store MCP server shutdown handle for external management.
+    ///
+    /// This is called by the CLI when starting embedded MCP servers,
+    /// allowing the orchestrator to shut them down on stop.
+    pub async fn set_mcp_shutdown_handle(&self, tx: tokio::sync::broadcast::Sender<()>) {
+        let mut handle = self.mcp_shutdown_tx.write().await;
+        *handle = Some(tx);
+    }
+
+    /// Stop embedded MCP servers if a shutdown handle was set.
+    pub async fn stop_embedded_mcp_servers(&self) {
+        let handle = self.mcp_shutdown_tx.read().await;
+        if let Some(ref tx) = *handle {
+            let _ = tx.send(());
+        }
+    }
+
     /// Start the memory decay daemon.
     pub async fn start_decay_daemon(&self) -> DomainResult<()>
     where
@@ -1483,6 +1582,9 @@ where
 
         // Stop decay daemon if running
         self.stop_decay_daemon().await;
+
+        // Stop embedded MCP servers if running
+        self.stop_embedded_mcp_servers().await;
 
         let _ = event_tx.send(SwarmEvent::Stopped).await;
         Ok(())

@@ -758,6 +758,11 @@ where
         substrate_config = substrate_config.with_mcp_server(url.clone());
     }
 
+    // Set working directory to task's worktree path if available
+    if let Some(ref wt_path) = task.worktree_path {
+        substrate_config = substrate_config.with_working_dir(wt_path.clone());
+    }
+
     // Execute with retries
     let mut last_error = None;
     let mut last_session = None;
