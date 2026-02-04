@@ -412,7 +412,7 @@ async fn run_swarm_foreground(
     });
 
     // Initialize database
-    let pool = create_pool("abathur.db", None).await?;
+    let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
     let migrator = Migrator::new(pool.clone());
     migrator.run_embedded_migrations(all_embedded_migrations()).await?;
 
@@ -957,7 +957,7 @@ async fn show_status(json_mode: bool) -> Result<()> {
         None => (false, None),
     };
 
-    let pool = create_pool("abathur.db", None).await?;
+    let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
 
     let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
@@ -1008,7 +1008,7 @@ async fn show_active(json_mode: bool) -> Result<()> {
     use crate::domain::models::{GoalStatus, TaskStatus};
     use crate::domain::ports::{GoalRepository, GoalFilter, TaskRepository};
 
-    let pool = create_pool("abathur.db", None).await?;
+    let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
 
     let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
@@ -1086,7 +1086,7 @@ async fn run_tick(json_mode: bool) -> Result<()> {
     use crate::adapters::substrates::SubstrateRegistry;
     use std::sync::Arc;
 
-    let pool = create_pool("abathur.db", None).await?;
+    let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
     let migrator = Migrator::new(pool.clone());
     migrator.run_embedded_migrations(all_embedded_migrations()).await?;
 
