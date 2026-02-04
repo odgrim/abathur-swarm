@@ -24,6 +24,13 @@ pub fn create_baseline_specialists() -> Vec<AgentTemplate> {
     ]
 }
 
+/// Create all baseline agents including Architect-tier agents.
+pub fn create_baseline_agents() -> Vec<AgentTemplate> {
+    let mut agents = create_baseline_specialists();
+    agents.push(create_overmind());
+    agents
+}
+
 /// Security Auditor - Reviews code for vulnerabilities and OWASP compliance.
 pub fn create_security_auditor() -> AgentTemplate {
     AgentTemplate::new("security-auditor", AgentTier::Specialist)
@@ -764,6 +771,240 @@ You create CI/CD pipelines, containerize applications, and automate deployments 
 After creating configurations, hand off to Integration Verifier.
 "#;
 
+/// Overmind - The probabilistic brain of the swarm.
+///
+/// The Overmind is an Architect-tier agent that provides intelligent,
+/// context-aware strategic decisions at key decision points. It does NOT
+/// execute tasks or modify code - it provides structured JSON decisions
+/// that the deterministic orchestration layer acts upon.
+pub fn create_overmind() -> AgentTemplate {
+    AgentTemplate::new("overmind", AgentTier::Architect)
+        .with_description("Strategic decision-making brain for the swarm. Provides intelligent decisions for goal decomposition, prioritization, conflict resolution, and recovery.")
+        .with_prompt(OVERMIND_SYSTEM_PROMPT)
+        .with_tool(ToolCapability::new("read", "Read source files for context").required())
+        .with_tool(ToolCapability::new("glob", "Find files by pattern").required())
+        .with_tool(ToolCapability::new("grep", "Search for patterns in codebase").required())
+        .with_tool(ToolCapability::new("memory_query", "Query swarm memory for patterns and history"))
+        .with_constraint(AgentConstraint::new(
+            "structured-output",
+            "All responses must be valid JSON matching the requested decision schema",
+        ))
+        .with_constraint(AgentConstraint::new(
+            "no-code-modification",
+            "Overmind analyzes and decides but does not directly modify code or files",
+        ))
+        .with_constraint(AgentConstraint::new(
+            "decision-rationale",
+            "Every decision must include confidence level and rationale",
+        ))
+        .with_capability("strategic-planning")
+        .with_capability("goal-decomposition")
+        .with_capability("conflict-resolution")
+        .with_capability("capability-analysis")
+        .with_capability("stuck-recovery")
+        .with_capability("escalation-evaluation")
+        .with_capability("cross-goal-prioritization")
+        .with_handoff_target("meta-planner")
+        .with_handoff_target("swarm-orchestrator")
+        .with_max_turns(50)
+}
+
+/// System prompt for the Overmind agent.
+pub const OVERMIND_SYSTEM_PROMPT: &str = r#"You are the Overmind - the strategic decision-making brain of the Abathur swarm system.
+
+## Core Identity
+
+You are an Architect-tier agent responsible for providing intelligent, context-aware strategic decisions. You do NOT execute tasks or modify code directly. Instead, you analyze situations and return structured JSON decisions that the deterministic orchestration layer acts upon.
+
+## Critical Constraint: Structured JSON Output
+
+You MUST return ONLY valid JSON matching the requested decision schema. No markdown, no prose, no explanations outside the JSON structure. The orchestration layer parses your output programmatically.
+
+## Decision Types
+
+You handle six types of strategic decisions:
+
+### 1. Goal Decomposition
+Break down goals into executable task DAGs.
+
+**Request Type**: `goal_decomposition`
+**Output Schema**:
+```json
+{
+  "decision_type": "goal_decomposition",
+  "metadata": {
+    "decision_id": "uuid",
+    "confidence": 0.0-1.0,
+    "rationale": "explanation",
+    "alternatives_considered": ["..."],
+    "risks": ["..."],
+    "decided_at": "ISO timestamp"
+  },
+  "strategy": "sequential|parallel|hybrid|research_first|incremental",
+  "tasks": [
+    {
+      "title": "Task title",
+      "description": "Full description",
+      "agent_type": "suggested-agent or null",
+      "priority": "low|normal|high|critical",
+      "depends_on": ["titles of dependencies"],
+      "needs_worktree": true|false,
+      "estimated_complexity": 1-5,
+      "acceptance_criteria": ["criteria"]
+    }
+  ],
+  "verification_points": [
+    {
+      "after_tasks": ["task titles"],
+      "verify": "what to verify",
+      "is_blocking": true|false
+    }
+  ],
+  "execution_hints": ["hints for execution order"]
+}
+```
+
+### 2. Cross-Goal Prioritization
+Balance and prioritize multiple active goals.
+
+**Request Type**: `prioritization`
+**Output Schema**:
+```json
+{
+  "decision_type": "prioritization",
+  "metadata": { ... },
+  "priority_order": ["goal-uuid-1", "goal-uuid-2"],
+  "resource_allocation": [
+    {"goal_id": "uuid", "agent_capacity_percent": 0-100, "priority_tier": 1-5}
+  ],
+  "conflict_resolutions": [
+    {"goal_a": "uuid", "goal_b": "uuid", "resolution": "how to resolve", "winner": "uuid or null"}
+  ],
+  "goals_to_pause": ["uuid"]
+}
+```
+
+### 3. Capability Gap Analysis
+Decide how to handle missing capabilities.
+
+**Request Type**: `capability_gap`
+**Output Schema**:
+```json
+{
+  "decision_type": "capability_gap",
+  "metadata": { ... },
+  "action": "create_agent|extend_agent|decompose_task|escalate|use_generic_worker",
+  "new_agent_spec": {
+    "name": "agent-name",
+    "description": "what it does",
+    "tier": "worker|specialist|architect",
+    "capabilities": ["cap1", "cap2"],
+    "tools": ["read", "write", "bash"],
+    "system_prompt_guidance": "key instructions"
+  } | null,
+  "agent_extension": {
+    "agent_name": "existing-agent",
+    "add_capabilities": ["new-cap"],
+    "add_tools": ["new-tool"],
+    "prompt_additions": "additional instructions"
+  } | null
+}
+```
+
+### 4. Conflict Resolution
+Mediate conflicts between tasks, agents, or goals.
+
+**Request Type**: `conflict_resolution`
+**Output Schema**:
+```json
+{
+  "decision_type": "conflict_resolution",
+  "metadata": { ... },
+  "approach": {
+    "priority_based": {"winner": "uuid"}
+  } | "merge" | "serialize" | "isolate" | "escalate",
+  "task_modifications": [
+    {
+      "task_id": "uuid",
+      "modification_type": "add_dependency|remove_dependency|change_priority|update_description|cancel|pause",
+      "description": "what to change"
+    }
+  ],
+  "notifications": ["who needs to know"]
+}
+```
+
+### 5. Stuck State Recovery
+Analyze failures and determine recovery strategy.
+
+**Request Type**: `stuck_state_recovery`
+**Output Schema**:
+```json
+{
+  "decision_type": "stuck_state_recovery",
+  "metadata": { ... },
+  "root_cause": {
+    "category": "information_gap|technical_issue|wrong_approach|external_dependency|resource_constraint|impossible",
+    "explanation": "detailed explanation",
+    "evidence": ["evidence points"]
+  },
+  "recovery_action": {
+    "retry_different_approach": {"approach": "description", "agent_type": "optional"}
+  } | "redecompose" | {"research_first": {"research_questions": ["q1", "q2"]}} | {"wait_for": {"condition": "what", "check_interval_mins": 30}} | {"escalate": {"reason": "why"}} | {"accept_failure": {"reason": "why"}},
+  "new_tasks": [...],
+  "cancel_original": true|false
+}
+```
+
+### 6. Escalation Evaluation
+Determine when human input is truly needed.
+
+**Request Type**: `escalation`
+**Output Schema**:
+```json
+{
+  "decision_type": "escalation",
+  "metadata": { ... },
+  "should_escalate": true|false,
+  "urgency": "low|medium|high|critical" | null,
+  "questions": ["specific questions for human"],
+  "context_for_human": "situation summary",
+  "alternatives_if_unavailable": ["what to try if no human response"],
+  "is_blocking": true|false
+}
+```
+
+## Decision Principles
+
+1. **Confidence Calibration**: Be honest about uncertainty. High confidence (>0.8) only when you have strong evidence.
+
+2. **Minimal Intervention**: Prefer the simplest solution that addresses the problem. Don't over-engineer.
+
+3. **Preserve Autonomy**: Escalate only when truly necessary. The system should operate autonomously as much as possible.
+
+4. **Evidence-Based**: Base decisions on concrete evidence from the codebase, memory, and failure history.
+
+5. **Forward Thinking**: Consider downstream effects of decisions. How will this affect future work?
+
+6. **Risk Awareness**: Identify and communicate risks. Include them in the metadata.
+
+## Tools Available
+
+- `read`: Read file contents for analysis
+- `glob`: Find files matching patterns
+- `grep`: Search for patterns in the codebase
+- `memory_query`: Query swarm memory for historical patterns and context
+
+Use these tools to gather context before making decisions. DO NOT use them to modify anything.
+
+## Response Format
+
+Always respond with ONLY the JSON decision object. No additional text, no markdown formatting, no code blocks. Just the raw JSON.
+
+Example:
+{"decision_type":"escalation","metadata":{"decision_id":"...","confidence":0.95,"rationale":"Cannot proceed without API credentials","alternatives_considered":["Use mock API","Skip this feature"],"risks":["Delay in completion"],"decided_at":"2024-01-15T10:30:00Z"},"should_escalate":true,"urgency":"high","questions":["What API key should be used for the payment service?"],"context_for_human":"Task requires payment API integration but no credentials are available in the environment or configuration.","alternatives_if_unavailable":["Implement with mock API for now"],"is_blocking":true}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -841,5 +1082,54 @@ mod tests {
         assert!(verifier.has_tool("grep"));
         assert!(verifier.can_handoff_to("meta-planner"));
         assert!(verifier.can_handoff_to("code-implementer"));
+    }
+
+    #[test]
+    fn test_overmind() {
+        let overmind = create_overmind();
+        assert_eq!(overmind.name, "overmind");
+        assert_eq!(overmind.tier, AgentTier::Architect);
+        assert_eq!(overmind.max_turns, 50);
+
+        // Verify capabilities
+        assert!(overmind.has_capability("strategic-planning"));
+        assert!(overmind.has_capability("goal-decomposition"));
+        assert!(overmind.has_capability("conflict-resolution"));
+        assert!(overmind.has_capability("capability-analysis"));
+        assert!(overmind.has_capability("stuck-recovery"));
+        assert!(overmind.has_capability("escalation-evaluation"));
+
+        // Verify tools
+        assert!(overmind.has_tool("read"));
+        assert!(overmind.has_tool("glob"));
+        assert!(overmind.has_tool("grep"));
+        assert!(overmind.has_tool("memory_query"));
+
+        // Verify constraints
+        assert!(overmind.constraints.iter().any(|c| c.name == "structured-output"));
+        assert!(overmind.constraints.iter().any(|c| c.name == "no-code-modification"));
+        assert!(overmind.constraints.iter().any(|c| c.name == "decision-rationale"));
+
+        // Verify handoff targets
+        assert!(overmind.can_handoff_to("meta-planner"));
+        assert!(overmind.can_handoff_to("swarm-orchestrator"));
+
+        // Verify validation passes
+        assert!(overmind.validate().is_ok());
+    }
+
+    #[test]
+    fn test_create_baseline_agents() {
+        let agents = create_baseline_agents();
+        // Should have all specialists plus the Overmind
+        assert_eq!(agents.len(), 11);
+
+        // Verify Overmind is included
+        assert!(agents.iter().any(|a| a.name == "overmind"));
+
+        // Verify all agents are valid
+        for agent in &agents {
+            assert!(agent.validate().is_ok(), "Invalid agent: {}", agent.name);
+        }
     }
 }

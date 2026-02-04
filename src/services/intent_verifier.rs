@@ -752,6 +752,94 @@ where
 
         Ok(branch_result)
     }
+
+    /// Handle an indeterminate verification result using the Overmind.
+    ///
+    /// When intent verification produces an indeterminate result (e.g., due to
+    /// ambiguous requirements or unclear success criteria), this method invokes
+    /// the Overmind to make an escalation decision.
+    pub async fn handle_indeterminate_with_overmind(
+        &self,
+        result: &IntentVerificationResult,
+        overmind: &crate::services::OvermindService,
+    ) -> DomainResult<crate::domain::models::overmind::OvermindEscalationDecision> {
+        use crate::domain::models::overmind::{
+            EscalationRequest, EscalationContext, EscalationTrigger,
+            EscalationPreferences, OvermindEscalationDecision, OvermindEscalationUrgency,
+            DecisionMetadata,
+        };
+
+        // Only handle indeterminate results
+        if result.satisfaction != IntentSatisfaction::Indeterminate {
+            // Not indeterminate - return a "don't escalate" decision
+            return Ok(OvermindEscalationDecision {
+                metadata: DecisionMetadata::new(
+                    1.0,
+                    "Result is not indeterminate, no escalation needed",
+                ),
+                should_escalate: false,
+                urgency: None,
+                questions: vec![],
+                context_for_human: String::new(),
+                alternatives_if_unavailable: vec![],
+                is_blocking: false,
+            });
+        }
+
+        // Build the escalation context
+        let attempts_made: Vec<String> = result.gaps
+            .iter()
+            .filter_map(|g| g.suggested_action.clone())
+            .collect();
+
+        let context = EscalationContext {
+            goal_id: None, // We don't have direct goal access here
+            task_id: result.evaluated_tasks.first().copied(),
+            situation: format!(
+                "Intent verification returned indeterminate result (confidence: {:.2}). Summary: {}",
+                result.confidence,
+                result.accomplishment_summary
+            ),
+            attempts_made,
+            time_spent_minutes: 0, // We don't track this
+        };
+
+        let request = EscalationRequest {
+            context,
+            trigger: EscalationTrigger::IndeterminateVerification,
+            previous_escalations: vec![],
+            escalation_preferences: EscalationPreferences::default(),
+        };
+
+        // Try Overmind
+        match overmind.evaluate_escalation(request).await {
+            Ok(decision) => Ok(decision),
+            Err(e) => {
+                tracing::warn!(
+                    "Overmind escalation evaluation failed for indeterminate result: {}",
+                    e
+                );
+                // Fallback: conservative escalation for indeterminate results
+                Ok(OvermindEscalationDecision {
+                    metadata: DecisionMetadata::new(
+                        0.5,
+                        "Fallback: escalating indeterminate result (Overmind unavailable)",
+                    ),
+                    should_escalate: true,
+                    urgency: Some(OvermindEscalationUrgency::Medium),
+                    questions: vec![
+                        "Please review the verification result and clarify requirements".to_string(),
+                    ],
+                    context_for_human: result.accomplishment_summary.clone(),
+                    alternatives_if_unavailable: vec![
+                        "Retry verification with more context".to_string(),
+                        "Proceed with best-effort interpretation".to_string(),
+                    ],
+                    is_blocking: false,
+                })
+            }
+        }
+    }
 }
 
 /// System prompt for the intent verifier agent.

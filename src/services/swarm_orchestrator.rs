@@ -366,6 +366,8 @@ where
     mcp_shutdown_tx: Arc<RwLock<Option<tokio::sync::broadcast::Sender<()>>>>,
     // Intent verifier for convergence loops
     intent_verifier: Option<Arc<IntentVerifierService<G, T>>>,
+    // Overmind service for strategic decision-making
+    overmind: Option<Arc<crate::services::OvermindService>>,
 }
 
 impl<G, T, W, A, M> SwarmOrchestrator<G, T, W, A, M>
@@ -408,6 +410,7 @@ where
             guardrails: Arc::new(Guardrails::with_defaults()),
             mcp_shutdown_tx: Arc::new(RwLock::new(None)),
             intent_verifier: None,
+            overmind: None,
         }
     }
 
@@ -462,6 +465,21 @@ where
     pub fn with_circuit_breaker(mut self, config: CircuitBreakerConfig) -> Self {
         self.circuit_breaker = Arc::new(CircuitBreakerService::new(config));
         self
+    }
+
+    /// Create orchestrator with Overmind for strategic decision-making.
+    ///
+    /// The Overmind is an Architect-tier agent that provides intelligent decisions
+    /// for goal decomposition, conflict resolution, stuck state recovery, and
+    /// escalation evaluation.
+    pub fn with_overmind(mut self, overmind: Arc<crate::services::OvermindService>) -> Self {
+        self.overmind = Some(overmind);
+        self
+    }
+
+    /// Get the Overmind service if configured.
+    pub fn overmind(&self) -> Option<&Arc<crate::services::OvermindService>> {
+        self.overmind.as_ref()
     }
 
     /// Get the audit log service for external use.
@@ -2082,6 +2100,123 @@ where
         ).await;
 
         Ok(Some(report))
+    }
+
+    /// Resolve a conflict using the Overmind for intelligent decision-making.
+    ///
+    /// Falls back to priority-based heuristics if Overmind is not available.
+    pub async fn resolve_conflict_with_overmind(
+        &self,
+        conflict_type: crate::domain::models::overmind::ConflictType,
+        parties: Vec<crate::domain::models::overmind::ConflictParty>,
+        context: &str,
+    ) -> DomainResult<crate::domain::models::overmind::ConflictResolutionDecision> {
+        use crate::domain::models::overmind::{
+            ConflictResolutionRequest, ConflictResolutionDecision, ConflictResolutionApproach,
+            DecisionMetadata,
+        };
+
+        // Get the first party's ID for fallback before moving parties
+        let fallback_winner = parties.first().map(|p| p.id);
+
+        // If Overmind is available, use it
+        if let Some(ref overmind) = self.overmind {
+            let request = ConflictResolutionRequest {
+                conflict_type,
+                parties,
+                context: context.to_string(),
+                previous_attempts: vec![],
+            };
+
+            match overmind.resolve_conflict(request).await {
+                Ok(decision) => {
+                    self.audit_log.info(
+                        AuditCategory::System,
+                        AuditAction::TaskCompleted,
+                        format!(
+                            "Overmind resolved conflict with approach: {:?} (confidence: {:.2})",
+                            decision.approach, decision.metadata.confidence
+                        ),
+                    ).await;
+                    return Ok(decision);
+                }
+                Err(e) => {
+                    tracing::warn!("Overmind conflict resolution failed, using fallback: {}", e);
+                }
+            }
+        }
+
+        // Fallback: priority-based resolution - first party wins
+        Ok(ConflictResolutionDecision {
+            metadata: DecisionMetadata::new(
+                0.5,
+                "Fallback: priority-based resolution (Overmind unavailable)",
+            ),
+            approach: match fallback_winner {
+                Some(w) => ConflictResolutionApproach::PriorityBased { winner: w },
+                None => ConflictResolutionApproach::Escalate,
+            },
+            task_modifications: vec![],
+            notifications: vec!["Conflict resolved using priority-based fallback".to_string()],
+        })
+    }
+
+    /// Evaluate whether to escalate to human using the Overmind.
+    ///
+    /// Falls back to conservative escalation if Overmind is not available.
+    pub async fn evaluate_escalation_with_overmind(
+        &self,
+        context: crate::domain::models::overmind::EscalationContext,
+        trigger: crate::domain::models::overmind::EscalationTrigger,
+    ) -> DomainResult<crate::domain::models::overmind::OvermindEscalationDecision> {
+        use crate::domain::models::overmind::{
+            EscalationRequest, OvermindEscalationDecision, EscalationPreferences, OvermindEscalationUrgency,
+            DecisionMetadata,
+        };
+
+        // If Overmind is available, use it
+        if let Some(ref overmind) = self.overmind {
+            let request = EscalationRequest {
+                context: context.clone(),
+                trigger: trigger.clone(),
+                previous_escalations: vec![],
+                escalation_preferences: EscalationPreferences::default(),
+            };
+
+            match overmind.evaluate_escalation(request).await {
+                Ok(decision) => {
+                    self.audit_log.info(
+                        AuditCategory::System,
+                        AuditAction::TaskCompleted,
+                        format!(
+                            "Overmind escalation decision: should_escalate={} (confidence: {:.2})",
+                            decision.should_escalate, decision.metadata.confidence
+                        ),
+                    ).await;
+                    return Ok(decision);
+                }
+                Err(e) => {
+                    tracing::warn!("Overmind escalation evaluation failed, using fallback: {}", e);
+                }
+            }
+        }
+
+        // Fallback: conservative escalation
+        Ok(OvermindEscalationDecision {
+            metadata: DecisionMetadata::new(
+                0.6,
+                "Fallback: conservative escalation (Overmind unavailable)",
+            ),
+            should_escalate: true, // Conservative: always escalate when uncertain
+            urgency: Some(OvermindEscalationUrgency::Medium),
+            questions: vec![context.situation.clone()],
+            context_for_human: format!(
+                "Trigger: {:?}\nSituation: {}\nAttempts: {:?}",
+                trigger, context.situation, context.attempts_made
+            ),
+            alternatives_if_unavailable: vec!["Wait and retry later".to_string()],
+            is_blocking: true,
+        })
     }
 
     /// Store MCP server shutdown handle for external management.

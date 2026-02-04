@@ -471,6 +471,114 @@ where
             )))
         }
     }
+
+    /// Decompose a goal using the Overmind for intelligent strategic planning.
+    ///
+    /// This method invokes the Overmind agent to analyze the goal and create
+    /// a strategically planned task DAG with proper dependencies, verification
+    /// points, and execution hints.
+    pub async fn decompose_goal_with_overmind(
+        &self,
+        goal_id: Uuid,
+        overmind: &crate::services::OvermindService,
+    ) -> DomainResult<DecompositionPlan> {
+        use crate::domain::models::overmind::{GoalDecompositionRequest, ExistingTaskSummary};
+
+        let goal = self.goal_repo.get(goal_id).await?
+            .ok_or(DomainError::GoalNotFound(goal_id))?;
+
+        // Get existing tasks for this goal
+        let existing_tasks = self.task_repo.list_by_goal(goal_id).await?;
+        let existing_task_summaries: Vec<ExistingTaskSummary> = existing_tasks
+            .iter()
+            .map(|t| ExistingTaskSummary {
+                id: t.id,
+                title: t.title.clone(),
+                status: t.status.as_str().to_string(),
+                agent_type: t.agent_type.clone(),
+            })
+            .collect();
+
+        // Get available agent types
+        use crate::domain::ports::AgentFilter;
+        let agents = self.agent_repo.list_templates(AgentFilter::default()).await?;
+        let agent_names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
+
+        // Query memory for decomposition patterns
+        let memory_patterns = self.query_decomposition_patterns(&goal.description).await?;
+
+        // Extract constraints
+        let constraints: Vec<String> = goal.constraints
+            .iter()
+            .map(|c| format!("{}: {}", c.name, c.description))
+            .collect();
+
+        // Build the request
+        let request = GoalDecompositionRequest {
+            goal_id,
+            goal_name: goal.name.clone(),
+            goal_description: goal.description.clone(),
+            constraints,
+            available_agents: agent_names,
+            existing_tasks: existing_task_summaries,
+            memory_patterns,
+            max_tasks: self.config.max_tasks_per_decomposition,
+        };
+
+        // Invoke Overmind
+        let decision = overmind.decompose_goal(request).await?;
+
+        // Build a title-to-index map for dependency resolution (using owned strings)
+        let title_to_idx: std::collections::HashMap<String, usize> = decision.tasks
+            .iter()
+            .enumerate()
+            .map(|(idx, t)| (t.title.clone(), idx))
+            .collect();
+
+        // Convert Overmind decision to DecompositionPlan
+        let tasks: Vec<TaskSpec> = decision.tasks
+            .into_iter()
+            .enumerate()
+            .map(|(idx, task_def)| {
+                // Find dependency indices using the pre-built map
+                let depends_on_indices: Vec<usize> = task_def.depends_on
+                    .iter()
+                    .filter_map(|dep_title| {
+                        title_to_idx.get(dep_title)
+                            .copied()
+                            .filter(|&pos| pos < idx) // Only depend on earlier tasks
+                    })
+                    .collect();
+
+                TaskSpec {
+                    title: task_def.title,
+                    description: task_def.description,
+                    priority: task_def.priority,
+                    agent_type: task_def.agent_type,
+                    depends_on_indices,
+                    needs_worktree: task_def.needs_worktree,
+                }
+            })
+            .collect();
+
+        // Determine complexity from task count
+        let complexity = Complexity::from_task_count(tasks.len());
+
+        // Extract required agents
+        let required_agents: Vec<String> = tasks
+            .iter()
+            .filter_map(|t| t.agent_type.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        Ok(DecompositionPlan {
+            goal_id,
+            tasks,
+            required_agents,
+            estimated_complexity: complexity,
+        })
+    }
 }
 
 #[cfg(test)]

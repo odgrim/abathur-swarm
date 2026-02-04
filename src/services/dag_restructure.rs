@@ -369,6 +369,169 @@ impl DagRestructureService {
     pub fn config(&self) -> &RestructureConfig {
         &self.config
     }
+
+    /// Analyze the failure and decide on restructuring using the Overmind.
+    ///
+    /// This method uses the Overmind agent for intelligent stuck state recovery,
+    /// falling back to heuristic-based decisions if Overmind is unavailable.
+    pub async fn analyze_with_overmind(
+        &mut self,
+        context: &RestructureContext,
+        overmind: &crate::services::OvermindService,
+    ) -> DomainResult<RestructureDecision> {
+        use crate::domain::models::overmind::{
+            StuckStateRecoveryRequest, GoalContext, FailureRecord, RecoveryAttempt,
+            RecoveryAction,
+        };
+
+        let task_id = context.failed_task.id;
+
+        // Check if we've hit the limit
+        let current_attempts = self.state
+            .get(&task_id)
+            .map(|s| s.attempts)
+            .unwrap_or(0);
+
+        let new_attempts = current_attempts + 1;
+        if new_attempts > self.config.max_restructure_attempts {
+            return Ok(RestructureDecision::AcceptFailure {
+                reason: format!(
+                    "Maximum restructure attempts ({}) exceeded",
+                    self.config.max_restructure_attempts
+                ),
+            });
+        }
+
+        // Build the Overmind request
+        let failure_history: Vec<FailureRecord> = context.previous_attempts
+            .iter()
+            .enumerate()
+            .map(|(i, attempt)| FailureRecord {
+                attempt: i as u32 + 1,
+                timestamp: attempt.timestamp,
+                error: attempt.error.clone(),
+                agent_type: attempt.agent_type.clone(),
+                turns_used: attempt.turns_used,
+            })
+            .collect();
+
+        let previous_recovery_attempts: Vec<RecoveryAttempt> = self.state
+            .get(&task_id)
+            .map(|s| {
+                s.decisions.iter().enumerate().map(|(i, d)| RecoveryAttempt {
+                    attempt: i as u32 + 1,
+                    strategy: format!("{:?}", d),
+                    outcome: "Applied".to_string(),
+                }).collect()
+            })
+            .unwrap_or_default();
+
+        let request = StuckStateRecoveryRequest {
+            task_id,
+            task_title: context.failed_task.title.clone(),
+            task_description: context.failed_task.description.clone(),
+            goal_context: GoalContext {
+                goal_id: context.goal.id,
+                goal_name: context.goal.name.clone(),
+                goal_description: context.goal.description.clone(),
+                other_tasks_status: format!(
+                    "{} related failures",
+                    context.related_failures.len()
+                ),
+            },
+            failure_history,
+            previous_recovery_attempts,
+            available_approaches: context.available_approaches.clone(),
+        };
+
+        // Try Overmind first
+        match overmind.recover_from_stuck(request).await {
+            Ok(decision) => {
+                // Convert Overmind decision to RestructureDecision
+                let restructure_decision = match decision.recovery_action {
+                    RecoveryAction::RetryDifferentApproach { approach, agent_type } => {
+                        RestructureDecision::RetryDifferentApproach {
+                            new_approach: approach,
+                            new_agent_type: agent_type,
+                        }
+                    }
+                    RecoveryAction::Redecompose => {
+                        // Convert new tasks from Overmind to NewTaskSpec
+                        let new_subtasks = decision.new_tasks.into_iter().map(|t| {
+                            NewTaskSpec {
+                                title: t.title,
+                                description: t.description,
+                                agent_type: t.agent_type,
+                                depends_on: t.depends_on,
+                                priority: TaskPriorityModifier::Same,
+                            }
+                        }).collect();
+
+                        RestructureDecision::DecomposeDifferently {
+                            new_subtasks,
+                            remove_original: decision.cancel_original,
+                        }
+                    }
+                    RecoveryAction::ResearchFirst { research_questions } => {
+                        RestructureDecision::DecomposeDifferently {
+                            new_subtasks: vec![
+                                NewTaskSpec {
+                                    title: format!("Research: {}", context.failed_task.title),
+                                    description: format!(
+                                        "Research the following questions:\n{}",
+                                        research_questions.join("\n- ")
+                                    ),
+                                    agent_type: Some("researcher".to_string()),
+                                    depends_on: vec![],
+                                    priority: TaskPriorityModifier::Higher,
+                                },
+                                NewTaskSpec {
+                                    title: context.failed_task.title.clone(),
+                                    description: context.failed_task.description.clone(),
+                                    agent_type: context.failed_task.agent_type.clone(),
+                                    depends_on: vec![format!("Research: {}", context.failed_task.title)],
+                                    priority: TaskPriorityModifier::Same,
+                                },
+                            ],
+                            remove_original: true,
+                        }
+                    }
+                    RecoveryAction::WaitFor { condition, check_interval_mins } => {
+                        RestructureDecision::WaitAndRetry {
+                            delay: std::time::Duration::from_secs(check_interval_mins as u64 * 60),
+                            reason: condition,
+                        }
+                    }
+                    RecoveryAction::Escalate { reason } => {
+                        RestructureDecision::Escalate {
+                            reason,
+                            context: decision.root_cause.explanation,
+                        }
+                    }
+                    RecoveryAction::AcceptFailure { reason } => {
+                        RestructureDecision::AcceptFailure { reason }
+                    }
+                };
+
+                // Record this attempt
+                let state = self.state.entry(task_id).or_insert_with(|| RestructureState {
+                    attempts: 0,
+                    last_attempt: None,
+                    decisions: Vec::new(),
+                });
+                state.attempts = new_attempts;
+                state.last_attempt = Some(std::time::Instant::now());
+                state.decisions.push(restructure_decision.clone());
+
+                Ok(restructure_decision)
+            }
+            Err(e) => {
+                tracing::warn!("Overmind stuck recovery failed, using heuristic fallback: {}", e);
+                // Fall back to heuristic decision
+                self.analyze_and_decide(context)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
