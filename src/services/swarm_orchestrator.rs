@@ -368,6 +368,8 @@ where
     intent_verifier: Option<Arc<IntentVerifierService<G, T>>>,
     // Overmind service for strategic decision-making
     overmind: Option<Arc<crate::services::OvermindService>>,
+    // EventBus for unified event streaming
+    event_bus: Option<Arc<crate::services::event_bus::EventBus>>,
 }
 
 impl<G, T, W, A, M> SwarmOrchestrator<G, T, W, A, M>
@@ -411,6 +413,26 @@ where
             mcp_shutdown_tx: Arc::new(RwLock::new(None)),
             intent_verifier: None,
             overmind: None,
+            event_bus: None,
+        }
+    }
+
+    /// Create orchestrator with an EventBus for unified event streaming.
+    pub fn with_event_bus(mut self, event_bus: Arc<crate::services::event_bus::EventBus>) -> Self {
+        self.event_bus = Some(event_bus);
+        self
+    }
+
+    /// Get the EventBus if configured.
+    pub fn event_bus(&self) -> Option<&Arc<crate::services::event_bus::EventBus>> {
+        self.event_bus.as_ref()
+    }
+
+    /// Emit an event to the EventBus if configured.
+    /// This is a helper for publishing events without needing the mpsc channel.
+    pub async fn emit_to_event_bus(&self, event: SwarmEvent) {
+        if let Some(ref bus) = self.event_bus {
+            bus.publish_swarm_event(event).await;
         }
     }
 
@@ -2310,6 +2332,7 @@ where
             *status = OrchestratorStatus::Running;
         }
         let _ = event_tx.send(SwarmEvent::Started).await;
+        self.emit_to_event_bus(SwarmEvent::Started).await;
 
         // Log swarm startup
         self.audit_log.info(
@@ -2480,6 +2503,7 @@ where
         self.stop_embedded_mcp_servers().await;
 
         let _ = event_tx.send(SwarmEvent::Stopped).await;
+        self.emit_to_event_bus(SwarmEvent::Stopped).await;
         Ok(())
     }
 

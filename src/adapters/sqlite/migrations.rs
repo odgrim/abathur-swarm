@@ -106,11 +106,20 @@ pub fn fix_worktrees_fk_migration() -> Migration {
     }
 }
 
+pub fn add_events_table_migration() -> Migration {
+    Migration {
+        version: 5,
+        description: "Add events table".to_string(),
+        sql: include_str!("../../../migrations/005_add_events_table.sql").to_string(),
+    }
+}
+
 pub fn all_embedded_migrations() -> Vec<Migration> {
     vec![
         initial_schema_migration(),
         update_memories_migration(),
         add_agent_instances_migration(),
         fix_worktrees_fk_migration(),
+        add_events_table_migration(),
     ]
 }

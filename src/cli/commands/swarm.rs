@@ -48,7 +48,11 @@ pub enum SwarmCommand {
         #[arg(long, env = "ABATHUR_A2A_GATEWAY")]
         a2a_gateway: Option<String>,
 
-        /// Start MCP servers automatically (memory, tasks, a2a)
+        /// Events server address (e.g., "http://localhost:9102")
+        #[arg(long, env = "ABATHUR_EVENTS_SERVER")]
+        events_server: Option<String>,
+
+        /// Start MCP servers automatically (memory, tasks, a2a, events)
         #[arg(long)]
         with_mcp_servers: bool,
     },
@@ -75,6 +79,7 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
             memory_server,
             tasks_server,
             a2a_gateway,
+            events_server,
             with_mcp_servers,
         } => {
             start_swarm(
@@ -87,6 +92,7 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
                 memory_server,
                 tasks_server,
                 a2a_gateway,
+                events_server,
                 with_mcp_servers,
             ).await
         }
@@ -169,6 +175,7 @@ struct McpServerUrls {
     memory_server: Option<String>,
     tasks_server: Option<String>,
     a2a_gateway: Option<String>,
+    events_server: Option<String>,
 }
 
 async fn start_swarm(
@@ -181,6 +188,7 @@ async fn start_swarm(
     memory_server: Option<String>,
     tasks_server: Option<String>,
     a2a_gateway: Option<String>,
+    events_server: Option<String>,
     with_mcp_servers: bool,
 ) -> Result<()> {
     // Check if swarm is already running
@@ -205,12 +213,14 @@ async fn start_swarm(
             memory_server: memory_server.or_else(|| Some("http://127.0.0.1:9100".to_string())),
             tasks_server: tasks_server.or_else(|| Some("http://127.0.0.1:9101".to_string())),
             a2a_gateway: a2a_gateway.or_else(|| Some("http://127.0.0.1:8080".to_string())),
+            events_server: events_server.or_else(|| Some("http://127.0.0.1:9102".to_string())),
         }
     } else {
         McpServerUrls {
             memory_server,
             tasks_server,
             a2a_gateway,
+            events_server,
         }
     };
 
@@ -257,6 +267,9 @@ fn start_swarm_background(
     }
     if let Some(ref url) = mcp_urls.a2a_gateway {
         cmd.arg("--a2a-gateway").arg(url);
+    }
+    if let Some(ref url) = mcp_urls.events_server {
+        cmd.arg("--events-server").arg(url);
     }
     if with_mcp_servers {
         cmd.arg("--with-mcp-servers");
@@ -795,6 +808,7 @@ struct McpServerHandles {
     memory_handle: Option<tokio::task::JoinHandle<()>>,
     tasks_handle: Option<tokio::task::JoinHandle<()>>,
     a2a_handle: Option<tokio::task::JoinHandle<()>>,
+    events_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Start MCP servers in background tasks
@@ -803,15 +817,16 @@ async fn start_mcp_servers(
     urls: &McpServerUrls,
     json_mode: bool,
 ) -> Result<McpServerHandles> {
-    use crate::adapters::mcp::{MemoryHttpServer, MemoryHttpConfig, TasksHttpServer, TasksHttpConfig, A2AHttpGateway, A2AHttpConfig};
-    use crate::adapters::sqlite::{SqliteMemoryRepository, SqliteTaskRepository, SqliteGoalRepository};
-    use crate::services::{MemoryService, TaskService};
+    use crate::adapters::mcp::{MemoryHttpServer, MemoryHttpConfig, TasksHttpServer, TasksHttpConfig, A2AHttpGateway, A2AHttpConfig, EventsHttpServer, EventsHttpConfig};
+    use crate::adapters::sqlite::{SqliteMemoryRepository, SqliteTaskRepository, SqliteGoalRepository, SqliteEventRepository};
+    use crate::services::{MemoryService, TaskService, EventBus, EventBusConfig};
     use std::sync::Arc;
 
     let mut handles = McpServerHandles {
         memory_handle: None,
         tasks_handle: None,
         a2a_handle: None,
+        events_handle: None,
     };
 
     // Start Memory HTTP server
@@ -879,6 +894,28 @@ async fn start_mcp_servers(
         }));
     }
 
+    // Start Events HTTP server
+    if let Some(ref url) = urls.events_server {
+        let port = extract_port(url).unwrap_or(9102);
+        let event_store = Arc::new(SqliteEventRepository::new(pool.clone()));
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()).with_store(event_store.clone()));
+        let config = EventsHttpConfig {
+            port,
+            ..Default::default()
+        };
+        let server = EventsHttpServer::new(event_bus, Some(event_store), config);
+
+        if !json_mode {
+            println!("   Starting Events server on port {}", port);
+        }
+
+        handles.events_handle = Some(tokio::spawn(async move {
+            if let Err(e) = server.serve().await {
+                tracing::error!("Events server error: {}", e);
+            }
+        }));
+    }
+
     // Give servers a moment to start
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -899,6 +936,9 @@ fn stop_mcp_servers(handles: McpServerHandles) {
         h.abort();
     }
     if let Some(h) = handles.a2a_handle {
+        h.abort();
+    }
+    if let Some(h) = handles.events_handle {
         h.abort();
     }
 }
