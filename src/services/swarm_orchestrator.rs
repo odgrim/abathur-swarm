@@ -3729,7 +3729,10 @@ where
 
             match restructure_result {
                 Ok(true) => {
-                    // Restructuring was applied, skip diagnostic analyst
+                    // Restructuring created new tasks - reactivate the goal so they get picked up
+                    let mut updated_goal = goal.clone();
+                    updated_goal.resume();
+                    let _ = self.goal_repo.update(&updated_goal).await;
                     continue;
                 }
                 Ok(false) => {
@@ -3870,7 +3873,8 @@ where
                 Ok(true)
             }
             RestructureDecision::DecomposeDifferently { new_subtasks, remove_original } => {
-                // Create new subtasks based on the restructure plan
+                // First pass: create tasks and collect title → id mapping
+                let mut title_to_id: Vec<(String, Uuid)> = Vec::new();
                 for spec in &new_subtasks {
                     let priority = match spec.priority {
                         TaskPriorityModifier::Same => failed_task.priority.clone(),
@@ -3878,21 +3882,23 @@ where
                         TaskPriorityModifier::Lower => crate::domain::models::TaskPriority::Low,
                     };
 
-                    let new_task = Task::new(&spec.title, &spec.description)
+                    let mut new_task = Task::new(&spec.title, &spec.description)
                         .with_goal(goal.id)
                         .with_priority(priority);
 
                     if let Some(ref agent_type) = spec.agent_type {
-                        let new_task = new_task.with_agent(agent_type);
-                        if new_task.validate().is_ok() {
-                            self.task_repo.create(&new_task).await?;
-                            let _ = event_tx.send(SwarmEvent::TaskSubmitted {
-                                task_id: new_task.id,
-                                task_title: new_task.title.clone(),
-                                goal_id: goal.id,
-                            }).await;
+                        new_task = new_task.with_agent(agent_type);
+                    }
+
+                    // Resolve depends_on titles to UUIDs from already-created tasks
+                    for dep_title in &spec.depends_on {
+                        if let Some((_, dep_id)) = title_to_id.iter().find(|(t, _)| t == dep_title) {
+                            new_task = new_task.with_dependency(*dep_id);
                         }
-                    } else if new_task.validate().is_ok() {
+                    }
+
+                    if new_task.validate().is_ok() {
+                        title_to_id.push((spec.title.clone(), new_task.id));
                         self.task_repo.create(&new_task).await?;
                         let _ = event_tx.send(SwarmEvent::TaskSubmitted {
                             task_id: new_task.id,
@@ -3912,7 +3918,8 @@ where
                 Ok(true)
             }
             RestructureDecision::AlternativePath { description, new_tasks } => {
-                // Create alternative path tasks
+                // Create alternative path tasks with dependency resolution
+                let mut title_to_id: Vec<(String, Uuid)> = Vec::new();
                 for spec in &new_tasks {
                     let priority = match spec.priority {
                         TaskPriorityModifier::Same => failed_task.priority.clone(),
@@ -3920,21 +3927,23 @@ where
                         TaskPriorityModifier::Lower => crate::domain::models::TaskPriority::Low,
                     };
 
-                    let new_task = Task::new(&spec.title, &spec.description)
+                    let mut new_task = Task::new(&spec.title, &spec.description)
                         .with_goal(goal.id)
                         .with_priority(priority);
 
                     if let Some(ref agent_type) = spec.agent_type {
-                        let new_task = new_task.with_agent(agent_type);
-                        if new_task.validate().is_ok() {
-                            self.task_repo.create(&new_task).await?;
-                            let _ = event_tx.send(SwarmEvent::TaskSubmitted {
-                                task_id: new_task.id,
-                                task_title: new_task.title.clone(),
-                                goal_id: goal.id,
-                            }).await;
+                        new_task = new_task.with_agent(agent_type);
+                    }
+
+                    // Resolve depends_on titles to UUIDs from already-created tasks
+                    for dep_title in &spec.depends_on {
+                        if let Some((_, dep_id)) = title_to_id.iter().find(|(t, _)| t == dep_title) {
+                            new_task = new_task.with_dependency(*dep_id);
                         }
-                    } else if new_task.validate().is_ok() {
+                    }
+
+                    if new_task.validate().is_ok() {
+                        title_to_id.push((spec.title.clone(), new_task.id));
                         self.task_repo.create(&new_task).await?;
                         let _ = event_tx.send(SwarmEvent::TaskSubmitted {
                             task_id: new_task.id,

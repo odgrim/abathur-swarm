@@ -77,6 +77,9 @@ impl ClaudeCodeSubstrate {
             // Output format for structured output
             args.push("--output-format".to_string());
             args.push(self.config.output_format.clone());
+            if self.config.output_format == "stream-json" {
+                args.push("--verbose".to_string());
+            }
         }
 
         // Max turns
@@ -712,6 +715,7 @@ mod tests {
         assert!(args.contains(&"10".to_string()));
         assert!(args.contains(&"-p".to_string()));
         assert!(args.contains(&"--output-format".to_string()));
+        assert!(args.contains(&"--verbose".to_string()));
     }
 
     #[test]
