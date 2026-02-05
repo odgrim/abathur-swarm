@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
     Goal, GoalStatus, SessionStatus, SubstrateConfig, SubstrateRequest,
-    Task, TaskStatus,
+    Task, TaskStatus, TickConvergenceState, IntentSatisfaction, GapFingerprint,
 };
 use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, Substrate, TaskRepository, WorktreeRepository};
 use crate::services::{
@@ -172,18 +172,244 @@ where
             self.spawn_task_agent(task, goal, event_tx).await?;
         }
 
-        // Check goal iteration status
-        // Note: Goals are never "completed" - they remain Active and can spawn more work
+        // Check if all tasks are complete and none are still active
         let all_complete = tasks.iter().all(|t| t.status == TaskStatus::Complete);
+        let any_active = tasks.iter().any(|t| {
+            matches!(t.status, TaskStatus::Running | TaskStatus::Ready | TaskStatus::Pending)
+        });
 
-        if all_complete {
-            // Successful iteration - goal remains Active
-            let completed_count = tasks.iter().filter(|t| t.status == TaskStatus::Complete).count();
-            let _ = event_tx.send(SwarmEvent::GoalIterationCompleted {
-                goal_id: goal.id,
-                tasks_completed: completed_count,
-            }).await;
+        if all_complete && !any_active {
+            // Check if convergence already terminated for this goal
+            if let Some(state) = goal.convergence_state() {
+                if state.is_terminal() {
+                    return Ok(());
+                }
+            }
+
+            if self.config.enable_intent_verification && self.intent_verifier.is_some() {
+                self.run_tick_convergence(goal, &tasks, event_tx).await?;
+            } else {
+                // No verifier: emit iteration completed once, pause goal
+                let completed_count = tasks.len();
+                let _ = event_tx.send(SwarmEvent::GoalIterationCompleted {
+                    goal_id: goal.id,
+                    tasks_completed: completed_count,
+                }).await;
+
+                let mut updated_goal = goal.clone();
+                let terminal_state = TickConvergenceState {
+                    converged: true,
+                    ended_at: Some(chrono::Utc::now()),
+                    last_verified_task_count: completed_count,
+                    ..Default::default()
+                };
+                updated_goal.set_convergence_state(&terminal_state);
+                updated_goal.pause();
+                let _ = self.goal_repo.update(&updated_goal).await;
+
+                let _ = event_tx.send(SwarmEvent::GoalPaused {
+                    goal_id: goal.id,
+                    reason: "All tasks complete (no intent verifier configured)".to_string(),
+                }).await;
+            }
         }
+
+        Ok(())
+    }
+
+    /// Run a single step of tick-based convergence verification.
+    ///
+    /// Called each tick when all tasks for a goal are complete. Loads or creates
+    /// a `TickConvergenceState` from goal metadata, runs intent verification,
+    /// and either creates new tasks (picked up next tick) or pauses the goal.
+    async fn run_tick_convergence(
+        &self,
+        goal: &Goal,
+        completed_tasks: &[Task],
+        event_tx: &mpsc::Sender<SwarmEvent>,
+    ) -> DomainResult<()> {
+        let intent_verifier = self.intent_verifier.as_ref().unwrap();
+
+        // Load or create convergence state
+        let mut state = goal.convergence_state().unwrap_or_default();
+
+        // Guard: already terminal
+        if state.is_terminal() {
+            return Ok(());
+        }
+
+        // Guard: no new completions since last check
+        let completed_count = completed_tasks.len();
+        if completed_count == state.last_verified_task_count && state.iteration > 0 {
+            return Ok(());
+        }
+
+        // Check max iterations
+        let max_iterations = self.config.convergence.max_iterations;
+        if state.iteration >= max_iterations {
+            state.ended_at = Some(chrono::Utc::now());
+            self.pause_goal_with_convergence(goal, &state, event_tx,
+                &format!("Max convergence iterations ({}) reached", max_iterations),
+                "max_iterations",
+            ).await?;
+            return Ok(());
+        }
+
+        // Check timeout
+        let timeout = std::time::Duration::from_secs(self.config.convergence.convergence_timeout_secs);
+        let elapsed = chrono::Utc::now().signed_duration_since(state.started_at);
+        if elapsed.to_std().unwrap_or_default() > timeout {
+            state.ended_at = Some(chrono::Utc::now());
+            self.pause_goal_with_convergence(goal, &state, event_tx,
+                "Convergence timeout exceeded",
+                "timeout",
+            ).await?;
+            return Ok(());
+        }
+
+        // Check drift
+        if state.drift_detected {
+            state.ended_at = Some(chrono::Utc::now());
+            let recurring: Vec<String> = state.gap_fingerprints.iter()
+                .filter(|fp| fp.occurrence_count >= 3)
+                .map(|fp| fp.normalized_description.clone())
+                .collect();
+            let _ = event_tx.send(SwarmEvent::SemanticDriftDetected {
+                goal_id: goal.id,
+                recurring_gaps: recurring,
+                iterations: state.iteration,
+            }).await;
+            self.pause_goal_with_convergence(goal, &state, event_tx,
+                "Semantic drift detected",
+                "drift",
+            ).await?;
+            return Ok(());
+        }
+
+        // Advance iteration
+        state.iteration += 1;
+        let iteration = state.iteration;
+
+        // Extract guiding intent
+        let intent = intent_verifier.extract_guiding_intent(goal.id).await?;
+
+        // Emit verification started
+        let _ = event_tx.send(SwarmEvent::IntentVerificationStarted {
+            goal_id: goal.id,
+            iteration,
+        }).await;
+
+        // Verify intent
+        let verification_result = intent_verifier
+            .verify_intent(&intent, completed_tasks, iteration)
+            .await?;
+
+        // Update gap fingerprints for drift detection
+        update_tick_gap_fingerprints(&mut state, &verification_result);
+        state.last_verified_task_count = completed_count;
+
+        let satisfaction_str = verification_result.satisfaction.as_str().to_string();
+        let should_continue = self.should_continue_convergence(&verification_result);
+
+        // Emit verification completed
+        let _ = event_tx.send(SwarmEvent::IntentVerificationCompleted {
+            goal_id: goal.id,
+            satisfaction: satisfaction_str.clone(),
+            confidence: verification_result.confidence,
+            gaps_count: verification_result.gaps.len(),
+            iteration,
+            will_retry: should_continue,
+        }).await;
+
+        self.audit_log.info(
+            AuditCategory::Goal,
+            AuditAction::GoalEvaluated,
+            format!(
+                "Tick convergence for goal {} iteration {}: {} (confidence: {:.2}, {} gaps, drift: {})",
+                goal.id, iteration, satisfaction_str,
+                verification_result.confidence, verification_result.gaps.len(),
+                state.drift_detected
+            ),
+        ).await;
+
+        // Check if converged
+        if verification_result.satisfaction == IntentSatisfaction::Satisfied {
+            state.converged = true;
+            state.ended_at = Some(chrono::Utc::now());
+            self.pause_goal_with_convergence(goal, &state, event_tx,
+                "Intent satisfied",
+                "converged",
+            ).await?;
+            return Ok(());
+        }
+
+        // Should we continue?
+        if should_continue {
+            if let Some(guidance) = &verification_result.reprompt_guidance {
+                // Create new tasks via convergence guidance (picked up next tick)
+                self.apply_convergence_guidance(goal.id, &verification_result, guidance, event_tx).await?;
+
+                // Save state for next tick
+                let mut updated_goal = goal.clone();
+                updated_goal.set_convergence_state(&state);
+                updated_goal.updated_at = chrono::Utc::now();
+                let _ = self.goal_repo.update(&updated_goal).await;
+            } else {
+                // No guidance available, can't continue meaningfully
+                state.ended_at = Some(chrono::Utc::now());
+                self.pause_goal_with_convergence(goal, &state, event_tx,
+                    "No reprompt guidance available",
+                    "no_guidance",
+                ).await?;
+            }
+        } else {
+            // Verification says don't continue
+            state.ended_at = Some(chrono::Utc::now());
+            self.pause_goal_with_convergence(goal, &state, event_tx,
+                &format!("Convergence stopped: {}", satisfaction_str),
+                &satisfaction_str,
+            ).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Pause a goal and persist terminal convergence state, emitting events.
+    async fn pause_goal_with_convergence(
+        &self,
+        goal: &Goal,
+        state: &TickConvergenceState,
+        event_tx: &mpsc::Sender<SwarmEvent>,
+        reason: &str,
+        final_satisfaction: &str,
+    ) -> DomainResult<()> {
+        let mut updated_goal = goal.clone();
+        updated_goal.set_convergence_state(state);
+        updated_goal.pause();
+        self.goal_repo.update(&updated_goal).await?;
+
+        let _ = event_tx.send(SwarmEvent::ConvergenceCompleted {
+            goal_id: goal.id,
+            converged: state.converged,
+            iterations: state.iteration,
+            final_satisfaction: final_satisfaction.to_string(),
+        }).await;
+
+        let _ = event_tx.send(SwarmEvent::GoalPaused {
+            goal_id: goal.id,
+            reason: reason.to_string(),
+        }).await;
+
+        self.audit_log.info(
+            AuditCategory::Goal,
+            if state.converged { AuditAction::GoalIterationCompleted } else { AuditAction::GoalPaused },
+            format!(
+                "Tick convergence for goal {} finished: {} after {} iterations ({})",
+                goal.id,
+                if state.converged { "CONVERGED" } else { "NOT CONVERGED" },
+                state.iteration, reason
+            ),
+        ).await;
 
         Ok(())
     }
@@ -766,4 +992,60 @@ where
 
         Ok(1)
     }
+}
+
+/// Update gap fingerprints in a `TickConvergenceState` from a verification result.
+///
+/// Mirrors the drift detection logic in `ConvergenceState::update_gap_fingerprints`:
+/// normalizes gap descriptions, checks Jaccard similarity > 0.5, and sets
+/// `drift_detected = true` when a gap recurs 3+ times.
+fn update_tick_gap_fingerprints(
+    state: &mut TickConvergenceState,
+    result: &crate::domain::models::IntentVerificationResult,
+) {
+    for gap in &result.gaps {
+        let normalized = normalize_gap_description(&gap.description);
+
+        let existing = state.gap_fingerprints.iter_mut().find(|fp| {
+            gaps_are_similar(&fp.normalized_description, &normalized)
+        });
+
+        if let Some(fingerprint) = existing {
+            fingerprint.occurrence_count += 1;
+            if fingerprint.occurrence_count >= 3 {
+                state.drift_detected = true;
+            }
+        } else {
+            state.gap_fingerprints.push(GapFingerprint {
+                normalized_description: normalized,
+                severity: gap.severity,
+                first_seen_iteration: state.iteration,
+                occurrence_count: 1,
+            });
+        }
+    }
+}
+
+/// Normalize a gap description for comparison.
+fn normalize_gap_description(description: &str) -> String {
+    description
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Check if two gap descriptions are semantically similar using Jaccard similarity.
+fn gaps_are_similar(a: &str, b: &str) -> bool {
+    let words_a: std::collections::HashSet<_> = a.split_whitespace().collect();
+    let words_b: std::collections::HashSet<_> = b.split_whitespace().collect();
+
+    if words_a.is_empty() || words_b.is_empty() {
+        return false;
+    }
+
+    let intersection = words_a.intersection(&words_b).count();
+    let union = words_a.union(&words_b).count();
+
+    (intersection as f64 / union as f64) > 0.5
 }

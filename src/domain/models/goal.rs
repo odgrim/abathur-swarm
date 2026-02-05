@@ -176,6 +176,49 @@ pub struct GoalMetadata {
     pub custom: std::collections::HashMap<String, serde_json::Value>,
 }
 
+/// Lightweight convergence state stored in goal metadata between ticks.
+///
+/// Tracks just enough to detect drift, guard against re-verification of
+/// the same task set, and enforce iteration/timeout limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TickConvergenceState {
+    /// Current iteration of tick-based convergence.
+    pub iteration: u32,
+    /// Whether convergence has been achieved.
+    pub converged: bool,
+    /// Whether semantic drift has been detected.
+    pub drift_detected: bool,
+    /// Number of completed tasks at last verification.
+    pub last_verified_task_count: usize,
+    /// Gap fingerprints for drift detection across ticks.
+    pub gap_fingerprints: Vec<super::intent_verification::GapFingerprint>,
+    /// When tick convergence started.
+    pub started_at: DateTime<Utc>,
+    /// When tick convergence ended (if terminal).
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+impl Default for TickConvergenceState {
+    fn default() -> Self {
+        Self {
+            iteration: 0,
+            converged: false,
+            drift_detected: false,
+            last_verified_task_count: 0,
+            gap_fingerprints: Vec::new(),
+            started_at: Utc::now(),
+            ended_at: None,
+        }
+    }
+}
+
+impl TickConvergenceState {
+    /// Returns true if convergence is terminal (converged or explicitly ended).
+    pub fn is_terminal(&self) -> bool {
+        self.converged || self.ended_at.is_some()
+    }
+}
+
 /// A convergent goal that guides the swarm.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Goal {
@@ -292,12 +335,33 @@ impl Goal {
     }
 
     /// Resume this goal (from paused state).
+    ///
+    /// Clears any tick convergence state so a fresh convergence cycle begins.
     pub fn resume(&mut self) {
         if self.can_transition_to(GoalStatus::Active) {
+            self.clear_convergence_state();
             self.status = GoalStatus::Active;
             self.updated_at = Utc::now();
             self.version += 1;
         }
+    }
+
+    /// Read the tick convergence state from goal metadata, if present.
+    pub fn convergence_state(&self) -> Option<TickConvergenceState> {
+        self.metadata.custom.get("convergence_state")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// Persist a tick convergence state into goal metadata.
+    pub fn set_convergence_state(&mut self, state: &TickConvergenceState) {
+        if let Ok(value) = serde_json::to_value(state) {
+            self.metadata.custom.insert("convergence_state".to_string(), value);
+        }
+    }
+
+    /// Remove the tick convergence state from goal metadata.
+    pub fn clear_convergence_state(&mut self) {
+        self.metadata.custom.remove("convergence_state");
     }
 
     /// Retire this goal.

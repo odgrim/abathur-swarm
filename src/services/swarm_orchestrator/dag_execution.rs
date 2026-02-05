@@ -1139,7 +1139,7 @@ where
     }
 
     /// Handle semantic drift detection in convergence loop.
-    async fn handle_semantic_drift(
+    pub(super) async fn handle_semantic_drift(
         &self,
         goal_id: Uuid,
         convergence_state: &crate::domain::models::ConvergenceState,
@@ -1188,7 +1188,7 @@ where
     }
 
     /// Apply convergence guidance: augment tasks, create new tasks, retry failed tasks.
-    async fn apply_convergence_guidance(
+    pub(super) async fn apply_convergence_guidance(
         &self,
         goal_id: Uuid,
         verification_result: &crate::domain::models::IntentVerificationResult,
