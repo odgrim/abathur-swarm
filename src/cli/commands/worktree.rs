@@ -6,6 +6,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::adapters::sqlite::{SqliteWorktreeRepository, initialize_database};
+use crate::cli::id_resolver::resolve_worktree_id;
 use crate::cli::output::{output, CommandOutput};
 use crate::domain::models::WorktreeStatus;
 use crate::services::{WorktreeConfig, WorktreeService, WorktreeStats};
@@ -254,7 +255,7 @@ pub async fn execute(args: WorktreeArgs, json_mode: bool) -> Result<()> {
         .await
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
-    let repo = Arc::new(SqliteWorktreeRepository::new(pool));
+    let repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
     let config = WorktreeConfig::default();
     let service = WorktreeService::new(repo, config);
 
@@ -292,13 +293,9 @@ pub async fn execute(args: WorktreeArgs, json_mode: bool) -> Result<()> {
         }
 
         WorktreeCommands::Show { id } => {
-            // Try as task ID first, then as worktree ID
-            let worktree = if let Ok(uuid) = Uuid::parse_str(&id) {
-                service.get_worktree_for_task(uuid).await?
-                    .or(service.get_worktree(uuid).await?)
-            } else {
-                None
-            };
+            let uuid = resolve_worktree_id(&pool, &id).await?;
+            let worktree = service.get_worktree_for_task(uuid).await?
+                .or(service.get_worktree(uuid).await?);
 
             match worktree {
                 Some(wt) => {

@@ -1,6 +1,7 @@
 //! Command-line interface module for Abathur.
 
 pub mod commands;
+pub mod id_resolver;
 mod output;
 
 use clap::{Parser, Subcommand};

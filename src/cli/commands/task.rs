@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::adapters::sqlite::{
     SqliteGoalRepository, SqliteTaskRepository, initialize_database
 };
+use crate::cli::id_resolver::resolve_task_id;
 use crate::cli::output::{output, CommandOutput};
 use crate::domain::models::{Task, TaskContext, TaskPriority, TaskStatus};
 use crate::domain::ports::TaskFilter;
@@ -271,7 +272,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
+    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
     let service = TaskService::new(task_repo, goal_repo);
 
     match args.command {
@@ -352,7 +353,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
         }
 
         TaskCommands::Show { id } => {
-            let uuid = Uuid::parse_str(&id).context("Invalid task ID")?;
+            let uuid = resolve_task_id(&pool, &id).await?;
             let task = service.get_task(uuid).await?
                 .ok_or_else(|| anyhow::anyhow!("Task not found: {}", id))?;
 

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::adapters::sqlite::{goal_repository::SqliteGoalRepository, initialize_database};
+use crate::cli::id_resolver::resolve_goal_id;
 use crate::cli::output::{output, CommandOutput};
 use crate::domain::models::{Goal, GoalConstraint, GoalPriority, GoalStatus};
 use crate::domain::ports::GoalFilter;
@@ -186,7 +187,7 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
         .await
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
-    let repo = Arc::new(SqliteGoalRepository::new(pool));
+    let repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
     let service = GoalService::new(repo);
 
     match args.command {
@@ -243,7 +244,7 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
         }
 
         GoalCommands::Show { id } => {
-            let uuid = Uuid::parse_str(&id).context("Invalid goal ID")?;
+            let uuid = resolve_goal_id(&pool, &id).await?;
             let goal = service.get_goal(uuid).await?
                 .ok_or_else(|| anyhow::anyhow!("Goal not found: {}", id))?;
 
