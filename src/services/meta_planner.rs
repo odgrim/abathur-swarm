@@ -15,6 +15,7 @@ use crate::domain::models::{
 };
 use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository};
 use crate::services::llm_planner::{LlmPlanner, LlmPlannerConfig, PlanningContext};
+use crate::services::EvolutionLoop;
 
 /// Configuration for the meta-planner.
 #[derive(Debug, Clone)]
@@ -40,7 +41,7 @@ impl Default for MetaPlannerConfig {
             default_agent_tier: AgentTier::Worker,
             auto_generate_agents: false,
             max_tasks_per_decomposition: 10,
-            use_llm_decomposition: false,
+            use_llm_decomposition: true,
             llm_config: None,
         }
     }
@@ -152,6 +153,10 @@ where
     agent_repo: Arc<A>,
     memory_repo: Option<Arc<dyn MemoryRepository>>,
     config: MetaPlannerConfig,
+    /// Optional Overmind service for Substrate-compatible LLM decomposition.
+    overmind: Option<Arc<crate::services::OvermindService>>,
+    /// Optional Evolution Loop for real agent performance metrics.
+    evolution_loop: Option<Arc<EvolutionLoop>>,
 }
 
 impl<G, T, A> MetaPlanner<G, T, A>
@@ -172,12 +177,26 @@ where
             agent_repo,
             memory_repo: None,
             config,
+            overmind: None,
+            evolution_loop: None,
         }
     }
 
     /// Set the memory repository for pattern queries.
     pub fn with_memory_repo(mut self, memory_repo: Arc<dyn MemoryRepository>) -> Self {
         self.memory_repo = Some(memory_repo);
+        self
+    }
+
+    /// Set the Overmind service for Substrate-compatible LLM decomposition.
+    pub fn with_overmind(mut self, overmind: Arc<crate::services::OvermindService>) -> Self {
+        self.overmind = Some(overmind);
+        self
+    }
+
+    /// Set the Evolution Loop for real agent performance metrics.
+    pub fn with_evolution_loop(mut self, evolution_loop: Arc<EvolutionLoop>) -> Self {
+        self.evolution_loop = Some(evolution_loop);
         self
     }
 
@@ -221,13 +240,29 @@ where
 
     /// Decompose a goal into tasks.
     ///
-    /// If LLM decomposition is enabled, uses Claude to intelligently
-    /// analyze the goal and create a detailed task DAG. Otherwise,
-    /// falls back to simple heuristic decomposition.
+    /// Routing priority:
+    /// 1. If `use_llm_decomposition` AND Overmind available → Substrate-compatible Overmind path
+    /// 2. If `use_llm_decomposition` AND no Overmind → CLI-based LLM path (production only)
+    /// 3. Otherwise → heuristic decomposition
     pub async fn decompose_goal(&self, goal_id: Uuid) -> DomainResult<DecompositionPlan> {
         if self.config.use_llm_decomposition {
-            // Use LLM-based decomposition
-            self.decompose_goal_with_llm(goal_id, None).await
+            // Prefer Overmind (Substrate-compatible, works with MockSubstrate)
+            if let Some(ref overmind) = self.overmind {
+                match self.decompose_goal_with_overmind(goal_id, overmind).await {
+                    Ok(plan) => return Ok(plan),
+                    Err(e) => {
+                        tracing::warn!("Overmind decomposition failed, trying LLM fallback: {}", e);
+                    }
+                }
+            }
+            // Fall back to CLI-based LLM decomposition
+            match self.decompose_goal_with_llm(goal_id, None).await {
+                Ok(plan) => Ok(plan),
+                Err(e) => {
+                    tracing::warn!("LLM decomposition failed, falling back to heuristic: {}", e);
+                    self.decompose_goal_heuristic(goal_id).await
+                }
+            }
         } else {
             // Use heuristic decomposition
             self.decompose_goal_heuristic(goal_id).await
@@ -439,13 +474,27 @@ where
     }
 
     /// Analyze agent performance and suggest improvements.
+    ///
+    /// Queries the EvolutionLoop for real execution statistics if available,
+    /// falling back to default metrics when no evolution loop is configured.
     pub async fn analyze_agent_performance(&self, agent_name: &str) -> DomainResult<AgentMetrics> {
-        // In a real system, this would query execution history
-        // For now, return placeholder metrics
         let _agent = self.agent_repo.get_template_by_name(agent_name).await?
             .ok_or_else(|| DomainError::ValidationFailed(format!("Agent not found: {}", agent_name)))?;
 
-        // Placeholder - would need execution history tracking
+        // Query real metrics from EvolutionLoop if available
+        if let Some(ref evo) = self.evolution_loop {
+            if let Some(stats) = evo.get_stats(agent_name).await {
+                return Ok(AgentMetrics {
+                    total_tasks: stats.total_tasks as u64,
+                    successful_tasks: stats.successful_tasks as u64,
+                    failed_tasks: stats.failed_tasks as u64,
+                    avg_turns_per_task: stats.avg_turns,
+                    avg_tokens_per_task: stats.avg_tokens,
+                    success_rate: stats.success_rate,
+                });
+            }
+        }
+
         Ok(AgentMetrics::default())
     }
 

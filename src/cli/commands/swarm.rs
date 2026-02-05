@@ -66,6 +66,20 @@ pub enum SwarmCommand {
     Config,
     /// Run a single tick (process one cycle)
     Tick,
+    /// List pending human escalations
+    Escalations,
+    /// Respond to a human escalation
+    Respond {
+        /// Escalation event ID to respond to
+        #[arg(long)]
+        id: String,
+        /// Decision: accept, reject, clarify, abort, defer
+        #[arg(long)]
+        decision: String,
+        /// Optional message/clarification text
+        #[arg(long)]
+        message: Option<String>,
+    },
 }
 
 pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
@@ -101,6 +115,10 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
         SwarmCommand::Active => show_active(json_mode).await,
         SwarmCommand::Config => show_config(json_mode).await,
         SwarmCommand::Tick => run_tick(json_mode).await,
+        SwarmCommand::Escalations => show_escalations(json_mode).await,
+        SwarmCommand::Respond { id, decision, message } => {
+            respond_to_escalation(&id, &decision, message.as_deref(), json_mode).await
+        }
     }
 }
 
@@ -303,8 +321,9 @@ fn start_swarm_background(
     let child = cmd.spawn()?;
     let pid = child.id();
 
-    // Write PID file
-    write_pid_file(pid)?;
+    // Note: PID file is written by the child process in run_swarm_foreground()
+    // Writing it here would cause the child to see its own PID and think the
+    // swarm is already running, preventing it from starting.
 
     if json_mode {
         let output = serde_json::json!({
@@ -1073,6 +1092,159 @@ async fn show_config(json_mode: bool) -> Result<()> {
         println!("Goal timeout (s):   {}", config.goal_timeout_secs);
         println!("Auto-retry:         {}", config.auto_retry);
         println!("Max task retries:   {}", config.max_task_retries);
+    }
+
+    Ok(())
+}
+
+async fn show_escalations(json_mode: bool) -> Result<()> {
+    use crate::adapters::sqlite::{
+        create_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
+        SqliteWorktreeRepository, Migrator, all_embedded_migrations,
+    };
+    use crate::adapters::substrates::SubstrateRegistry;
+    use std::sync::Arc;
+
+    let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
+    let migrator = Migrator::new(pool.clone());
+    migrator.run_embedded_migrations(all_embedded_migrations()).await?;
+
+    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
+    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+    let worktree_repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
+    let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
+
+    let substrate: std::sync::Arc<dyn crate::domain::ports::Substrate> =
+        std::sync::Arc::from(SubstrateRegistry::mock_substrate());
+
+    let config = SwarmConfig::default();
+    let orchestrator = SwarmOrchestrator::new(
+        goal_repo, task_repo, worktree_repo, agent_repo, substrate, config,
+    ).with_memory_repo(memory_repo);
+
+    let escalations = orchestrator.list_pending_escalations().await;
+
+    if json_mode {
+        let output: Vec<serde_json::Value> = escalations.iter().map(|e| {
+            serde_json::json!({
+                "id": e.id.to_string(),
+                "goal_id": e.goal_id.map(|id| id.to_string()),
+                "task_id": e.task_id.map(|id| id.to_string()),
+                "reason": e.escalation.reason,
+                "urgency": e.escalation.urgency.as_str(),
+                "questions": e.escalation.questions,
+                "is_blocking": e.is_blocking(),
+                "created_at": e.created_at.to_rfc3339(),
+            })
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        if escalations.is_empty() {
+            println!("No pending escalations.");
+        } else {
+            println!("Pending Escalations ({}):", escalations.len());
+            println!("{}", "=".repeat(60));
+            for e in &escalations {
+                println!("\nID:       {}", e.id);
+                println!("Urgency:  {}", e.escalation.urgency.as_str());
+                println!("Reason:   {}", e.escalation.reason);
+                if let Some(gid) = e.goal_id {
+                    println!("Goal:     {}", gid);
+                }
+                if let Some(tid) = e.task_id {
+                    println!("Task:     {}", tid);
+                }
+                if !e.escalation.questions.is_empty() {
+                    println!("Questions:");
+                    for q in &e.escalation.questions {
+                        println!("  - {}", q);
+                    }
+                }
+                println!("Blocking: {}", e.is_blocking());
+                println!("Created:  {}", e.created_at.to_rfc3339());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn respond_to_escalation(id: &str, decision: &str, message: Option<&str>, json_mode: bool) -> Result<()> {
+    use crate::adapters::sqlite::{
+        create_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
+        SqliteWorktreeRepository, Migrator, all_embedded_migrations,
+    };
+    use crate::adapters::substrates::SubstrateRegistry;
+    use crate::domain::models::{EscalationDecision, HumanEscalationResponse};
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    let event_id: Uuid = id.parse()
+        .map_err(|e| anyhow::anyhow!("Invalid escalation ID: {}", e))?;
+
+    let escalation_decision = match decision {
+        "accept" => EscalationDecision::Accept,
+        "reject" => EscalationDecision::Reject,
+        "abort" => EscalationDecision::Abort,
+        "clarify" => {
+            let clarification = message.unwrap_or("").to_string();
+            EscalationDecision::Clarify { clarification }
+        }
+        "defer" => EscalationDecision::Defer { revisit_after: None },
+        other => return Err(anyhow::anyhow!(
+            "Unknown decision '{}'. Valid options: accept, reject, clarify, abort, defer", other
+        )),
+    };
+
+    let response = HumanEscalationResponse {
+        event_id,
+        decision: escalation_decision,
+        response_text: message.map(|m| m.to_string()),
+        additional_context: None,
+        responded_at: chrono::Utc::now(),
+    };
+
+    let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
+    let migrator = Migrator::new(pool.clone());
+    migrator.run_embedded_migrations(all_embedded_migrations()).await?;
+
+    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
+    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+    let worktree_repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
+    let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
+
+    let substrate: std::sync::Arc<dyn crate::domain::ports::Substrate> =
+        std::sync::Arc::from(SubstrateRegistry::mock_substrate());
+
+    let config = SwarmConfig::default();
+    let orchestrator = SwarmOrchestrator::new(
+        goal_repo, task_repo, worktree_repo, agent_repo, substrate, config,
+    ).with_memory_repo(memory_repo);
+
+    match orchestrator.respond_to_escalation(response, None).await {
+        Ok(()) => {
+            if json_mode {
+                println!("{}", serde_json::json!({
+                    "status": "ok",
+                    "escalation_id": id,
+                    "decision": decision,
+                }));
+            } else {
+                println!("Response recorded for escalation {}.", id);
+            }
+        }
+        Err(e) => {
+            if json_mode {
+                println!("{}", serde_json::json!({
+                    "status": "error",
+                    "error": e.to_string(),
+                }));
+            } else {
+                eprintln!("Error: {}", e);
+            }
+        }
     }
 
     Ok(())

@@ -15,7 +15,9 @@ use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    Goal, GoalStatus, SessionStatus, SubstrateConfig, SubstrateRequest, Task, TaskDag, TaskStatus,
+    EscalationDecision, EscalationUrgency, Goal, GoalStatus,
+    HumanEscalation, HumanEscalationEvent, HumanEscalationResponse,
+    SessionStatus, SubstrateConfig, SubstrateRequest, Task, TaskDag, TaskStatus,
 };
 use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, NullMemoryRepository, Substrate, TaskRepository, WorktreeRepository};
 use crate::services::{
@@ -23,7 +25,7 @@ use crate::services::{
     CircuitBreakerConfig, CircuitBreakerService, CircuitScope,
     ColdStartConfig, ColdStartService, ColdStartReport,
     DagExecutor, DecayDaemonConfig, DaemonHandle, ExecutionEvent, ExecutionResults, ExecutionStatus, ExecutorConfig,
-    EvolutionLoop, TaskExecution, TaskOutcome,
+    EvolutionAction, EvolutionLoop, RefinementRequest, TaskExecution, TaskOutcome,
     GoalAlignmentService, HolisticEvaluation,
     IntegrationVerifierService, VerificationResult, VerifierConfig,
     IntentVerifierConfig, IntentVerifierService,
@@ -174,13 +176,13 @@ impl Default for SwarmConfig {
             worktree_base_path: PathBuf::from(".abathur/worktrees"),
             repo_path: PathBuf::from("."),
             default_base_ref: "main".to_string(),
-            use_llm_decomposition: false,
+            use_llm_decomposition: true,
             verify_on_completion: true,
             use_merge_queue: true,
             track_evolution: true,
             mcp_servers: McpServerConfig::default(),
             spawn_limits: crate::services::config::SpawnLimitsConfig::default(),
-            enable_intent_verification: false,
+            enable_intent_verification: true,
             convergence: ConvergenceLoopConfig::default(),
         }
     }
@@ -370,6 +372,10 @@ where
     overmind: Option<Arc<crate::services::OvermindService>>,
     // EventBus for unified event streaming
     event_bus: Option<Arc<crate::services::event_bus::EventBus>>,
+    // Store for human escalation events pending response
+    escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>,
+    // Federation client for cross-swarm task delegation
+    federation_client: Option<Arc<crate::adapters::mcp::FederationClient>>,
 }
 
 impl<G, T, W, A, M> SwarmOrchestrator<G, T, W, A, M>
@@ -414,7 +420,15 @@ where
             intent_verifier: None,
             overmind: None,
             event_bus: None,
+            escalation_store: Arc::new(RwLock::new(Vec::new())),
+            federation_client: None,
         }
+    }
+
+    /// Create orchestrator with a federation client for cross-swarm task delegation.
+    pub fn with_federation(mut self, federation_client: Arc<crate::adapters::mcp::FederationClient>) -> Self {
+        self.federation_client = Some(federation_client);
+        self
     }
 
     /// Create orchestrator with an EventBus for unified event streaming.
@@ -434,6 +448,196 @@ where
         if let Some(ref bus) = self.event_bus {
             bus.publish_swarm_event(event).await;
         }
+    }
+
+    // ========================================================================
+    // Human Escalation Management
+    // ========================================================================
+
+    /// List pending (unresponded) escalation events.
+    pub async fn list_pending_escalations(&self) -> Vec<HumanEscalationEvent> {
+        self.escalation_store.read().await.clone()
+    }
+
+    /// Respond to a human escalation event.
+    pub async fn respond_to_escalation(
+        &self,
+        response: HumanEscalationResponse,
+        event_tx: Option<&mpsc::Sender<SwarmEvent>>,
+    ) -> DomainResult<()> {
+        // Find and remove the escalation from the store
+        let escalation = {
+            let mut store = self.escalation_store.write().await;
+            let idx = store.iter().position(|e| e.id == response.event_id);
+            match idx {
+                Some(i) => store.remove(i),
+                None => {
+                    return Err(DomainError::ValidationFailed(format!(
+                        "Escalation {} not found",
+                        response.event_id
+                    )));
+                }
+            }
+        };
+
+        match &response.decision {
+            EscalationDecision::Accept => {
+                // Unblock associated task if it was blocked
+                if let Some(task_id) = escalation.task_id {
+                    if let Ok(Some(task)) = self.task_repo.get(task_id).await {
+                        if task.status == TaskStatus::Blocked {
+                            let mut unblocked = task.clone();
+                            if unblocked.transition_to(TaskStatus::Ready).is_ok() {
+                                self.task_repo.update(&unblocked).await?;
+                            }
+                        }
+                    }
+                }
+            }
+            EscalationDecision::Reject => {
+                // Fail the associated task
+                if let Some(task_id) = escalation.task_id {
+                    if let Ok(Some(task)) = self.task_repo.get(task_id).await {
+                        let mut failed = task.clone();
+                        let _ = failed.transition_to(TaskStatus::Failed);
+                        self.task_repo.update(&failed).await?;
+                    }
+                }
+            }
+            EscalationDecision::Clarify { clarification } => {
+                // Append clarification to task description and unblock
+                if let Some(task_id) = escalation.task_id {
+                    if let Ok(Some(task)) = self.task_repo.get(task_id).await {
+                        let mut updated = task.clone();
+                        updated.description = format!(
+                            "{}\n\n## Human Clarification\n\n{}",
+                            updated.description, clarification
+                        );
+                        if updated.status == TaskStatus::Blocked {
+                            let _ = updated.transition_to(TaskStatus::Ready);
+                        }
+                        self.task_repo.update(&updated).await?;
+                    }
+                }
+            }
+            EscalationDecision::ModifyIntent { new_requirements, removed_requirements } => {
+                // Update goal constraints
+                if let Some(goal_id) = escalation.goal_id {
+                    if let Ok(Some(mut goal)) = self.goal_repo.get(goal_id).await {
+                        for req in new_requirements {
+                            goal.description = format!("{}\n- {}", goal.description, req);
+                        }
+                        if !removed_requirements.is_empty() {
+                            goal.description = format!(
+                                "{}\n\n## Removed requirements:\n{}",
+                                goal.description,
+                                removed_requirements.iter()
+                                    .map(|r| format!("- {}", r))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            );
+                        }
+                        self.goal_repo.update(&goal).await?;
+                    }
+                }
+                // Unblock associated task
+                if let Some(task_id) = escalation.task_id {
+                    if let Ok(Some(task)) = self.task_repo.get(task_id).await {
+                        if task.status == TaskStatus::Blocked {
+                            let mut unblocked = task.clone();
+                            if unblocked.transition_to(TaskStatus::Ready).is_ok() {
+                                self.task_repo.update(&unblocked).await?;
+                            }
+                        }
+                    }
+                }
+            }
+            EscalationDecision::Abort => {
+                // Suspend the goal
+                if let Some(goal_id) = escalation.goal_id {
+                    if let Ok(Some(mut goal)) = self.goal_repo.get(goal_id).await {
+                        let _ = goal.transition_to(GoalStatus::Suspended);
+                        self.goal_repo.update(&goal).await?;
+                    }
+                }
+            }
+            EscalationDecision::Defer { revisit_after } => {
+                // Put the escalation back with a deadline
+                let mut deferred = escalation.clone();
+                if let Some(deadline) = revisit_after {
+                    deferred.escalation.deadline = Some(*deadline);
+                }
+                self.escalation_store.write().await.push(deferred);
+            }
+        }
+
+        // Emit response event
+        let allows_continuation = response.decision.allows_continuation();
+        let decision_str = response.decision.as_str().to_string();
+
+        if let Some(tx) = event_tx {
+            let _ = tx.send(SwarmEvent::HumanResponseReceived {
+                escalation_id: response.event_id,
+                decision: decision_str.clone(),
+                allows_continuation,
+            }).await;
+        }
+
+        self.emit_to_event_bus(SwarmEvent::HumanResponseReceived {
+            escalation_id: response.event_id,
+            decision: decision_str,
+            allows_continuation,
+        }).await;
+
+        self.audit_log.info(
+            AuditCategory::Goal,
+            AuditAction::GoalEvaluated,
+            format!(
+                "Human response to escalation {}: {} (continue={})",
+                response.event_id,
+                response.decision.as_str(),
+                allows_continuation,
+            ),
+        ).await;
+
+        Ok(())
+    }
+
+    /// Check escalation deadlines and apply default actions for timed-out escalations.
+    pub async fn check_escalation_deadlines(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
+        let now = chrono::Utc::now();
+        let timed_out: Vec<HumanEscalationEvent> = {
+            let store = self.escalation_store.read().await;
+            store.iter()
+                .filter(|e| {
+                    e.escalation.deadline.map_or(false, |d| now > d)
+                })
+                .cloned()
+                .collect()
+        };
+
+        for escalation in timed_out {
+            // Apply default action or accept
+            let decision = if escalation.escalation.default_action.is_some() {
+                EscalationDecision::Accept
+            } else {
+                EscalationDecision::Defer { revisit_after: None }
+            };
+
+            let response = HumanEscalationResponse {
+                event_id: escalation.id,
+                decision,
+                response_text: Some("Auto-response: escalation deadline exceeded".to_string()),
+                additional_context: None,
+                responded_at: now,
+            };
+
+            if let Err(e) = self.respond_to_escalation(response, Some(event_tx)).await {
+                tracing::warn!("Failed to auto-respond to timed-out escalation {}: {}", escalation.id, e);
+            }
+        }
+
+        Ok(())
     }
 
     /// Create orchestrator with intent verification enabled.
@@ -495,6 +699,11 @@ where
     /// for goal decomposition, conflict resolution, stuck state recovery, and
     /// escalation evaluation.
     pub fn with_overmind(mut self, overmind: Arc<crate::services::OvermindService>) -> Self {
+        // Propagate Overmind to restructure service for LLM-powered recovery
+        let overmind_clone = overmind.clone();
+        if let Ok(mut svc) = self.restructure_service.try_lock() {
+            svc.set_overmind(overmind_clone);
+        }
         self.overmind = Some(overmind);
         self
     }
@@ -920,6 +1129,8 @@ where
         let track_evolution = self.config.track_evolution;
         let swarm_event_tx = event_tx.clone();
         let agent_repo_for_events = self.agent_repo.clone();
+        let task_repo_for_events = self.task_repo.clone();
+        let escalation_store_for_events = self.escalation_store.clone();
 
         let event_forwarder = tokio::spawn(async move {
             while let Some(event) = exec_event_rx.recv().await {
@@ -1129,6 +1340,38 @@ where
                         urgency,
                         is_blocking,
                     } => {
+                        // Build and store escalation event
+                        let parsed_urgency = match urgency.as_str() {
+                            "low" => EscalationUrgency::Low,
+                            "high" => EscalationUrgency::High,
+                            "blocking" => EscalationUrgency::Blocking,
+                            _ => EscalationUrgency::Normal,
+                        };
+                        let escalation = HumanEscalation::new(reason.clone())
+                            .with_urgency(parsed_urgency);
+                        let mut escalation_event = HumanEscalationEvent::new(escalation);
+                        if let Some(gid) = goal_id {
+                            escalation_event = escalation_event.for_goal(gid);
+                        }
+                        if let Some(tid) = task_id {
+                            escalation_event = escalation_event.for_task(tid);
+                        }
+
+                        // Store for later retrieval
+                        escalation_store_for_events.write().await.push(escalation_event);
+
+                        // If blocking, transition task to Blocked
+                        if is_blocking {
+                            if let Some(tid) = task_id {
+                                if let Ok(Some(task)) = task_repo_for_events.get(tid).await {
+                                    let mut blocked_task = task.clone();
+                                    if blocked_task.transition_to(TaskStatus::Blocked).is_ok() {
+                                        let _ = task_repo_for_events.update(&blocked_task).await;
+                                    }
+                                }
+                            }
+                        }
+
                         let _ = swarm_event_tx.send(SwarmEvent::HumanEscalationRequired {
                             goal_id,
                             task_id,
@@ -1761,6 +2004,26 @@ where
                         gap.occurrence_count, gap.normalized_description
                     );
                 }
+
+                // Emit SemanticDriftDetected event
+                let recurring_gap_descriptions: Vec<String> = convergence_state
+                    .recurring_gaps()
+                    .iter()
+                    .map(|g| g.normalized_description.clone())
+                    .collect();
+                let _ = event_tx.send(SwarmEvent::SemanticDriftDetected {
+                    goal_id,
+                    recurring_gaps: recurring_gap_descriptions.clone(),
+                    iterations: convergence_state.current_iteration,
+                }).await;
+
+                // Also emit to EventBus if configured
+                self.emit_to_event_bus(SwarmEvent::SemanticDriftDetected {
+                    goal_id,
+                    recurring_gaps: recurring_gap_descriptions,
+                    iterations: convergence_state.current_iteration,
+                }).await;
+
                 convergence_state.end();
                 break;
             }
@@ -2102,13 +2365,20 @@ where
             "Running cold start analysis...",
         ).await;
 
+        let cold_start_config = ColdStartConfig {
+            project_root: self.config.repo_path.clone(),
+            use_llm_analysis: self.overmind.is_some(),
+            ..Default::default()
+        };
         let cold_start_service = ColdStartService::new(
             memory_service,
-            ColdStartConfig {
-                project_root: self.config.repo_path.clone(),
-                ..Default::default()
-            },
+            cold_start_config,
         );
+        let cold_start_service = if self.overmind.is_some() {
+            cold_start_service.with_substrate(self.substrate.clone())
+        } else {
+            cold_start_service
+        };
 
         let report = cold_start_service.gather_context().await?;
 
@@ -3133,7 +3403,7 @@ where
         let evolution_events = self.evolution_loop.evaluate().await;
 
         // Emit events for any evolution triggers detected
-        for event in evolution_events {
+        for event in &evolution_events {
             let _ = event_tx.send(SwarmEvent::EvolutionTriggered {
                 template_name: event.template_name.clone(),
                 trigger: format!("{:?}", event.trigger),
@@ -3149,6 +3419,40 @@ where
                     event.stats_at_trigger.success_rate * 100.0
                 ),
             ).await;
+        }
+
+        // Handle revert events — rollback template version
+        for event in &evolution_events {
+            if let EvolutionAction::Reverted { from_version, to_version } = &event.action_taken {
+                if let Ok(Some(mut template)) = self.agent_repo.get_template_by_name(&event.template_name).await {
+                    template.version = *to_version;
+                    template.system_prompt = format!(
+                        "{}\n\n## Reverted (v{} → v{})\n\nReverted due to regression detected after version upgrade.",
+                        template.system_prompt, from_version, to_version
+                    );
+
+                    if let Ok(_) = self.agent_repo.update_template(&template).await {
+                        self.evolution_loop.record_version_change(
+                            &event.template_name,
+                            *to_version,
+                        ).await;
+
+                        let _ = event_tx.send(SwarmEvent::EvolutionTriggered {
+                            template_name: event.template_name.clone(),
+                            trigger: format!("Reverted from v{} to v{}", from_version, to_version),
+                        }).await;
+
+                        self.audit_log.info(
+                            AuditCategory::Agent,
+                            AuditAction::AgentSpawned,
+                            format!(
+                                "Agent '{}' reverted from v{} to v{} due to regression",
+                                event.template_name, from_version, to_version
+                            ),
+                        ).await;
+                    }
+                }
+            }
         }
 
         // Get pending refinement requests from evolution loop
@@ -3180,22 +3484,51 @@ where
             };
 
             // Create a refined version based on the failure patterns
-            let refined_prompt = format!(
-                "{}\n\n## Refinement Notes (v{})\n\n\
-                Based on {} recent executions with {:.0}% success rate.\n\
-                Trigger: {:?}\n\
-                {} failed tasks tracked.\n\n\
-                Please pay special attention to:\n\
-                - Careful validation of inputs and outputs\n\
-                - Handling edge cases gracefully\n\
-                - Clear error reporting for debugging",
-                template.system_prompt,
-                template.version + 1,
-                request.stats.total_tasks,
-                request.stats.success_rate * 100.0,
-                request.trigger,
-                request.failed_task_ids.len()
-            );
+            // Try LLM-powered refinement via Substrate, fall back to heuristic string-append
+            let refined_prompt = if self.overmind.is_some() {
+                let refinement_request = SubstrateRequest::new(
+                    Uuid::new_v4(),
+                    "overmind",
+                    "You are an expert prompt engineer. Your task is to improve an agent's system prompt based on its performance data.",
+                    format!(
+                        "The following agent template has been underperforming and needs refinement.\n\n\
+                        ## Current System Prompt\n\n{}\n\n\
+                        ## Performance Data\n\n\
+                        - Template: {} (v{})\n\
+                        - Total tasks: {}\n\
+                        - Success rate: {:.0}%\n\
+                        - Failed tasks: {}\n\
+                        - Trigger: {:?}\n\n\
+                        ## Instructions\n\n\
+                        Please produce an improved version of the system prompt that addresses the failure patterns. \
+                        Return ONLY the improved system prompt text, nothing else. \
+                        Keep the core purpose and capabilities intact, but add guidance to prevent the observed failures.",
+                        template.system_prompt,
+                        request.template_name,
+                        template.version,
+                        request.stats.total_tasks,
+                        request.stats.success_rate * 100.0,
+                        request.failed_task_ids.len(),
+                        request.trigger,
+                    ),
+                );
+
+                match self.substrate.execute(refinement_request).await {
+                    Ok(session) if session.result.is_some() => {
+                        session.result.unwrap()
+                    }
+                    Ok(_) => {
+                        tracing::warn!("LLM refinement returned no result for '{}', falling back to heuristic", request.template_name);
+                        Self::heuristic_refinement_prompt(&template.system_prompt, &request)
+                    }
+                    Err(e) => {
+                        tracing::warn!("LLM refinement failed for '{}': {}, falling back to heuristic", request.template_name, e);
+                        Self::heuristic_refinement_prompt(&template.system_prompt, &request)
+                    }
+                }
+            } else {
+                Self::heuristic_refinement_prompt(&template.system_prompt, &request)
+            };
 
             // Create new version of the template
             let mut new_template = template.clone();
@@ -3246,6 +3579,26 @@ where
         }
 
         Ok(())
+    }
+
+    /// Generate a heuristic-based refined prompt by appending failure context notes.
+    fn heuristic_refinement_prompt(current_prompt: &str, request: &RefinementRequest) -> String {
+        format!(
+            "{}\n\n## Refinement Notes (v{})\n\n\
+            Based on {} recent executions with {:.0}% success rate.\n\
+            Trigger: {:?}\n\
+            {} failed tasks tracked.\n\n\
+            Please pay special attention to:\n\
+            - Careful validation of inputs and outputs\n\
+            - Handling edge cases gracefully\n\
+            - Clear error reporting for debugging",
+            current_prompt,
+            request.template_version + 1,
+            request.stats.total_tasks,
+            request.stats.success_rate * 100.0,
+            request.trigger,
+            request.failed_task_ids.len()
+        )
     }
 
     /// Check spawn limits for a parent task and trigger limit evaluation specialist if exceeded.
@@ -3480,7 +3833,7 @@ where
         };
 
         // Get restructure decision
-        let decision = restructure_svc.analyze_and_decide(&context)?;
+        let decision = restructure_svc.analyze_and_decide(&context).await?;
 
         // Log the decision
         self.audit_log.info(
@@ -3609,6 +3962,33 @@ where
                 Ok(false)
             }
             RestructureDecision::Escalate { reason, context } => {
+                // Try federation delegation before falling through
+                if let Some(ref federation) = self.federation_client {
+                    let peers = federation.list_available_peers();
+                    for peer in peers {
+                        let task_desc = format!(
+                            "Delegated task: {}\nReason: {}\nContext: {}",
+                            failed_task.title, reason, context
+                        );
+                        match federation.delegate_task(&peer.id, &task_desc).await {
+                            Ok(a2a_task) => {
+                                self.audit_log.info(
+                                    AuditCategory::Task,
+                                    AuditAction::TaskCompleted,
+                                    format!(
+                                        "Task {} delegated to peer '{}' as A2A task {}",
+                                        failed_task.id, peer.name, a2a_task.id
+                                    ),
+                                ).await;
+                                return Ok(true);
+                            }
+                            Err(e) => {
+                                tracing::warn!("Federation delegation to '{}' failed: {}", peer.name, e);
+                            }
+                        }
+                    }
+                }
+
                 // Escalation means we should fall through to diagnostic analyst
                 self.audit_log.log(
                     AuditEntry::new(
@@ -3979,6 +4359,14 @@ where
         if let Some(ref memory_repo) = self.memory_repo {
             meta_planner = meta_planner.with_memory_repo(memory_repo.clone() as Arc<dyn MemoryRepository>);
         }
+
+        // Wire Overmind for Substrate-compatible LLM decomposition
+        if let Some(ref overmind) = self.overmind {
+            meta_planner = meta_planner.with_overmind(overmind.clone());
+        }
+
+        // Wire EvolutionLoop for real agent performance metrics
+        meta_planner = meta_planner.with_evolution_loop(self.evolution_loop.clone());
 
         // Decompose the goal into tasks
         let plan = meta_planner.decompose_goal(goal.id).await?;

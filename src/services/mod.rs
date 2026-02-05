@@ -32,7 +32,7 @@ pub use cold_start::{ColdStartConfig, ColdStartReport, ColdStartService, Convent
 pub use config::{Config, ConfigError, A2AFederationConfig, TrustedSwarmConfig, TrustLevel, FederationAuthMethod, SwarmIdentityConfig};
 pub use dag_executor::{DagExecutor, ExecutorConfig, ExecutionEvent, ExecutionResults, ExecutionStatus, TaskResult};
 pub use dag_restructure::{DagRestructureService, FailedAttempt, NewTaskSpec, RestructureConfig, RestructureContext, RestructureDecision, RestructureTrigger, TaskPriorityModifier};
-pub use evolution_loop::{EvolutionConfig, EvolutionEvent, EvolutionLoop, EvolutionTrigger, RefinementRequest, RefinementSeverity, TaskExecution, TaskOutcome, TemplateStats};
+pub use evolution_loop::{EvolutionAction, EvolutionConfig, EvolutionEvent, EvolutionLoop, EvolutionTrigger, RefinementRequest, RefinementSeverity, TaskExecution, TaskOutcome, TemplateStats};
 pub use goal_alignment::{AlignmentConfig, ConstraintViolation, GoalAlignmentResult, GoalAlignmentService, HolisticEvaluation, WorkArtifact};
 pub use goal_service::GoalService;
 pub use guardrails::{GuardrailResult, Guardrails, GuardrailsConfig, RuntimeMetrics};

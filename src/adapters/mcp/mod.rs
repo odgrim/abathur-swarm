@@ -11,7 +11,7 @@ pub mod events_http;
 pub mod memory_http;
 pub mod tasks_http;
 
-pub use a2a_http::{A2AHttpConfig, A2AHttpGateway, A2AState, A2ATaskState};
+pub use a2a_http::{A2AHttpConfig, A2AHttpGateway, A2AState, A2ATaskState, FederationClient};
 pub use events_http::{EventsHttpConfig, EventsHttpServer, EventsState};
 pub use memory_http::{MemoryHttpConfig, MemoryHttpServer};
 pub use tasks_http::{TasksHttpConfig, TasksHttpServer};

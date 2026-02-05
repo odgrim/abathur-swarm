@@ -5,9 +5,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::fs;
+use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
+use crate::domain::models::SubstrateRequest;
+use crate::domain::ports::Substrate;
 use crate::services::MemoryService;
 
 /// Configuration for cold start context gathering.
@@ -25,6 +29,8 @@ pub struct ColdStartConfig {
     pub analyze_dependencies: bool,
     /// Whether to detect conventions.
     pub detect_conventions: bool,
+    /// Whether to use LLM analysis for deeper project understanding.
+    pub use_llm_analysis: bool,
 }
 
 impl Default for ColdStartConfig {
@@ -60,6 +66,7 @@ impl Default for ColdStartConfig {
             ],
             analyze_dependencies: true,
             detect_conventions: true,
+            use_llm_analysis: false,
         }
     }
 }
@@ -162,6 +169,7 @@ where
 {
     memory_service: MemoryService<M>,
     config: ColdStartConfig,
+    substrate: Option<Arc<dyn Substrate>>,
 }
 
 impl<M> ColdStartService<M>
@@ -172,7 +180,14 @@ where
         Self {
             memory_service,
             config,
+            substrate: None,
         }
+    }
+
+    /// Set the substrate for LLM-powered analysis.
+    pub fn with_substrate(mut self, substrate: Arc<dyn Substrate>) -> Self {
+        self.substrate = Some(substrate);
+        self
     }
 
     /// Check if cold start is needed (memory is empty).
@@ -215,8 +230,29 @@ where
             report.dependencies = self.analyze_dependencies(&report.project_type).await?;
         }
 
+        // Run LLM analysis if configured and substrate available
+        if self.config.use_llm_analysis {
+            if let Some(ref substrate) = self.substrate {
+                match self.analyze_with_llm(&report, substrate.as_ref()).await {
+                    Ok(insights) => {
+                        for (i, insight) in insights.iter().enumerate() {
+                            self.memory_service.learn(
+                                format!("project.llm_analysis.{}", i),
+                                insight.clone(),
+                                "project.llm_analysis",
+                            ).await?;
+                            report.memories_created += 1;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("LLM analysis during cold start failed, continuing without it: {}", e);
+                    }
+                }
+            }
+        }
+
         // Store memories
-        report.memories_created = self.store_memories(&report).await?;
+        report.memories_created += self.store_memories(&report).await?;
 
         Ok(report)
     }
@@ -621,6 +657,74 @@ where
         }
 
         Ok(dependencies)
+    }
+
+    /// Analyze the cold start report using an LLM for deeper architectural insights.
+    async fn analyze_with_llm(&self, report: &ColdStartReport, substrate: &dyn Substrate) -> DomainResult<Vec<String>> {
+        let conventions_summary = report.conventions.iter()
+            .map(|c| format!("- {} (confidence: {:.0}%)", c.description, c.confidence * 100.0))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let deps_summary = report.dependencies.iter()
+            .filter(|d| !d.is_dev)
+            .take(15)
+            .map(|d| {
+                if let Some(ref v) = d.version {
+                    format!("- {} v{}", d.name, v)
+                } else {
+                    format!("- {}", d.name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let prompt = format!(
+            "Analyze the following project and provide architectural insights.\n\n\
+            ## Project Structure\n\n{}\n\n\
+            ## Detected Conventions\n\n{}\n\n\
+            ## Key Dependencies\n\n{}\n\n\
+            ## Instructions\n\n\
+            Provide 3-5 concise architectural insights about this project. \
+            Each insight should be on its own line, prefixed with a number (1. 2. 3. etc). \
+            Focus on: architecture patterns, key design decisions, potential areas of complexity, \
+            and recommendations for agents working in this codebase.",
+            report.structure_summary,
+            if conventions_summary.is_empty() { "None detected".to_string() } else { conventions_summary },
+            if deps_summary.is_empty() { "None detected".to_string() } else { deps_summary },
+        );
+
+        let request = SubstrateRequest::new(
+            Uuid::new_v4(),
+            "overmind",
+            "You are a software architecture analyst. Analyze codebases and provide concise, actionable insights.",
+            prompt,
+        );
+
+        let session = substrate.execute(request).await?;
+        let result = session.result.ok_or_else(|| {
+            DomainError::ExecutionFailed("LLM analysis returned no result".to_string())
+        })?;
+
+        // Parse numbered insights from the response
+        let insights: Vec<String> = result.lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .filter(|l| l.starts_with(|c: char| c.is_ascii_digit()))
+            .map(|l| {
+                // Strip leading number and punctuation (e.g., "1. " or "1) ")
+                l.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')' || c == ' ')
+                    .to_string()
+            })
+            .filter(|l| !l.is_empty())
+            .collect();
+
+        if insights.is_empty() {
+            // If parsing failed, store the whole response as a single insight
+            Ok(vec![result])
+        } else {
+            Ok(insights)
+        }
     }
 
     /// Store gathered context as memories.

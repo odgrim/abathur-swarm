@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+use std::sync::Arc;
+
 use crate::domain::errors::DomainResult;
 use crate::domain::models::{Goal, Task, TaskStatus};
 
@@ -172,6 +174,8 @@ pub struct DagRestructureService {
     config: RestructureConfig,
     /// Track restructure state per task subtree.
     state: HashMap<Uuid, RestructureState>,
+    /// Optional Overmind service for LLM-powered restructure decisions.
+    overmind: Option<Arc<crate::services::OvermindService>>,
 }
 
 impl DagRestructureService {
@@ -179,11 +183,23 @@ impl DagRestructureService {
         Self {
             config,
             state: HashMap::new(),
+            overmind: None,
         }
     }
 
     pub fn with_defaults() -> Self {
         Self::new(RestructureConfig::default())
+    }
+
+    /// Set the Overmind service for LLM-powered restructure decisions.
+    pub fn with_overmind(mut self, overmind: Arc<crate::services::OvermindService>) -> Self {
+        self.overmind = Some(overmind);
+        self
+    }
+
+    /// Set the Overmind service (mutable reference variant for post-construction wiring).
+    pub fn set_overmind(&mut self, overmind: Arc<crate::services::OvermindService>) {
+        self.overmind = Some(overmind);
     }
 
     /// Check if restructuring should be triggered.
@@ -211,7 +227,31 @@ impl DagRestructureService {
     }
 
     /// Analyze the failure and decide on restructuring action.
-    pub fn analyze_and_decide(
+    ///
+    /// If `use_llm_restructure` is enabled and an Overmind is configured,
+    /// delegates to `analyze_with_overmind()` for LLM-powered decisions,
+    /// falling back to heuristic on error. Otherwise uses heuristic directly.
+    pub async fn analyze_and_decide(
+        &mut self,
+        context: &RestructureContext,
+    ) -> DomainResult<RestructureDecision> {
+        // Try LLM path if configured
+        if self.config.use_llm_restructure {
+            if let Some(overmind) = self.overmind.clone() {
+                match self.analyze_with_overmind(context, &overmind).await {
+                    Ok(decision) => return Ok(decision),
+                    Err(e) => {
+                        tracing::warn!("LLM restructure failed, falling back to heuristic: {}", e);
+                    }
+                }
+            }
+        }
+
+        self.analyze_and_decide_heuristic(context)
+    }
+
+    /// Heuristic-only path for analyze_and_decide (sync logic).
+    fn analyze_and_decide_heuristic(
         &mut self,
         context: &RestructureContext,
     ) -> DomainResult<RestructureDecision> {
@@ -235,7 +275,7 @@ impl DagRestructureService {
             });
         }
 
-        // Use heuristic decision making (LLM integration would go here)
+        // Use heuristic decision making
         let decision = self.heuristic_decision(context, new_attempts);
 
         // Record this attempt
@@ -528,7 +568,7 @@ impl DagRestructureService {
             Err(e) => {
                 tracing::warn!("Overmind stuck recovery failed, using heuristic fallback: {}", e);
                 // Fall back to heuristic decision
-                self.analyze_and_decide(context)
+                self.analyze_and_decide_heuristic(context)
             }
         }
     }
@@ -615,8 +655,8 @@ mod tests {
         assert!(!service.should_restructure(&trigger));
     }
 
-    #[test]
-    fn test_analyze_first_attempt_decompose() {
+    #[tokio::test]
+    async fn test_analyze_first_attempt_decompose() {
         let mut service = DagRestructureService::with_defaults();
 
         let context = RestructureContext {
@@ -630,7 +670,7 @@ mod tests {
             time_since_last: None,
         };
 
-        let decision = service.analyze_and_decide(&context).unwrap();
+        let decision = service.analyze_and_decide(&context).await.unwrap();
 
         match decision {
             RestructureDecision::DecomposeDifferently { new_subtasks, remove_original } => {
@@ -641,8 +681,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_analyze_with_available_approaches() {
+    #[tokio::test]
+    async fn test_analyze_with_available_approaches() {
         let mut service = DagRestructureService::with_defaults();
 
         let context = RestructureContext {
@@ -656,7 +696,7 @@ mod tests {
             time_since_last: None,
         };
 
-        let decision = service.analyze_and_decide(&context).unwrap();
+        let decision = service.analyze_and_decide(&context).await.unwrap();
 
         match decision {
             RestructureDecision::RetryDifferentApproach { new_approach, .. } => {
@@ -679,8 +719,8 @@ mod tests {
         assert!(!service.is_eligible(&pending_task));
     }
 
-    #[test]
-    fn test_attempt_count() {
+    #[tokio::test]
+    async fn test_attempt_count() {
         let mut service = DagRestructureService::with_defaults();
         let task_id = Uuid::new_v4();
 
@@ -701,7 +741,7 @@ mod tests {
             time_since_last: None,
         };
 
-        let _ = service.analyze_and_decide(&context);
+        let _ = service.analyze_and_decide(&context).await;
         assert_eq!(service.attempt_count(task_id), 1);
     }
 
