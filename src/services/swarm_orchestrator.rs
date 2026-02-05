@@ -24,7 +24,7 @@ use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, AuditLogConfig, AuditLogService,
     CircuitBreakerConfig, CircuitBreakerService, CircuitScope,
     ColdStartConfig, ColdStartService, ColdStartReport,
-    DagExecutor, DecayDaemonConfig, DaemonHandle, ExecutionEvent, ExecutionResults, ExecutionStatus, ExecutorConfig,
+    DagExecutor, DecayDaemonConfig, DaemonHandle, ExecutionEvent, ExecutionResults, ExecutorConfig,
     EvolutionAction, EvolutionLoop, RefinementRequest, TaskExecution, TaskOutcome,
     GoalAlignmentService, HolisticEvaluation,
     IntegrationVerifierService, VerificationResult, VerifierConfig,
@@ -254,8 +254,8 @@ pub enum SwarmEvent {
     /// Goals are never "completed" - they are convergent attractors.
     /// This event indicates a successful iteration of work toward the goal.
     GoalIterationCompleted { goal_id: Uuid, tasks_completed: usize },
-    /// Goal suspended due to failures (needs intervention).
-    GoalSuspended { goal_id: Uuid, reason: String },
+    /// Goal paused (human-initiated).
+    GoalPaused { goal_id: Uuid, reason: String },
     /// Intent verification started.
     IntentVerificationStarted { goal_id: Uuid, iteration: u32 },
     /// Intent verification completed.
@@ -556,7 +556,7 @@ where
                 // Suspend the goal
                 if let Some(goal_id) = escalation.goal_id {
                     if let Ok(Some(mut goal)) = self.goal_repo.get(goal_id).await {
-                        let _ = goal.transition_to(GoalStatus::Suspended);
+                        let _ = goal.transition_to(GoalStatus::Paused);
                         self.goal_repo.update(&goal).await?;
                     }
                 }
@@ -731,6 +731,7 @@ where
     /// Verify a completed task using the IntegrationVerifier.
     ///
     /// Returns the verification result if verification is enabled and passes.
+    /// Uses lightweight config (no code checks) — code quality is verified at merge time.
     pub async fn verify_task(&self, task_id: Uuid) -> DomainResult<Option<VerificationResult>> {
         if !self.config.verify_on_completion {
             return Ok(None);
@@ -740,7 +741,12 @@ where
             self.task_repo.clone(),
             self.goal_repo.clone(),
             self.worktree_repo.clone(),
-            VerifierConfig::default(),
+            VerifierConfig {
+                run_tests: false,
+                run_lint: false,
+                check_format: false,
+                ..VerifierConfig::default()
+            },
         );
 
         let result = verifier.verify_task(task_id).await?;
@@ -1384,7 +1390,7 @@ where
                             AuditEntry::new(
                                 if is_blocking { AuditLevel::Warning } else { AuditLevel::Info },
                                 AuditCategory::Goal,
-                                AuditAction::GoalSuspended,
+                                AuditAction::GoalPaused,
                                 AuditActor::System,
                                 format!(
                                     "Human escalation needed ({}): {} - blocking={}",
@@ -1503,7 +1509,7 @@ where
                                         AuditEntry::new(
                                             AuditLevel::Warning,
                                             AuditCategory::Goal,
-                                            AuditAction::GoalSuspended,
+                                            AuditAction::GoalPaused,
                                             AuditActor::System,
                                             format!(
                                                 "Task {} has low goal alignment: {:.0}% ({}/{}). {}",
@@ -1571,28 +1577,13 @@ where
             }
         }
 
-        // Update goal status based on results
-        // Note: Goals are never "completed" - they remain Active and can spawn more work
-        if let Ok(Some(mut goal)) = self.goal_repo.get(goal_id).await {
-            if results.failed_tasks == 0 {
-                // Successful iteration - goal remains Active, emit iteration completed
-                let _ = event_tx.send(SwarmEvent::GoalIterationCompleted {
-                    goal_id,
-                    tasks_completed: results.completed_tasks,
-                }).await;
-            } else if results.completed_tasks == 0 {
-                // All tasks failed - suspend the goal for intervention
-                let reason = format!("{} tasks failed", results.failed_tasks);
-                goal.suspend(&reason);
-                let _ = self.goal_repo.update(&goal).await;
-                let _ = event_tx.send(SwarmEvent::GoalSuspended {
-                    goal_id,
-                    reason,
-                }).await;
-            }
-            // Mixed results: some tasks completed, some failed - goal stays Active
-            // Failed tasks will be retried via the retry mechanism
-        }
+        // Goal always remains Active regardless of task outcomes.
+        // Goals are aspirations that guide evaluation, not units of work.
+        // Failed tasks will be retried via the retry mechanism.
+        let _ = event_tx.send(SwarmEvent::GoalIterationCompleted {
+            goal_id,
+            tasks_completed: results.completed_tasks,
+        }).await;
 
         Ok(results)
     }
@@ -1968,7 +1959,7 @@ where
                     AuditEntry::new(
                         AuditLevel::Warning,
                         AuditCategory::Goal,
-                        AuditAction::GoalSuspended,
+                        AuditAction::GoalPaused,
                         AuditActor::System,
                         format!(
                             "Convergence loop timed out for goal {} after {} iterations",
@@ -1987,7 +1978,7 @@ where
                     AuditEntry::new(
                         AuditLevel::Warning,
                         AuditCategory::Goal,
-                        AuditAction::GoalSuspended,
+                        AuditAction::GoalPaused,
                         AuditActor::System,
                         format!(
                             "Semantic drift detected for goal {}: same gaps recurring across iterations",
@@ -2059,7 +2050,7 @@ where
                     AuditEntry::new(
                         AuditLevel::Warning,
                         AuditCategory::Goal,
-                        AuditAction::GoalSuspended,
+                        AuditAction::GoalPaused,
                         AuditActor::System,
                         format!("No completed tasks for goal {} in iteration {}", goal_id, iteration),
                     )
@@ -2204,7 +2195,7 @@ where
 
         self.audit_log.info(
             AuditCategory::Goal,
-            if convergence_state.converged { AuditAction::GoalIterationCompleted } else { AuditAction::GoalSuspended },
+            if convergence_state.converged { AuditAction::GoalIterationCompleted } else { AuditAction::GoalPaused },
             format!(
                 "Convergence loop for goal {} finished: {} after {} iterations ({}, drift: {})",
                 goal_id,
@@ -3087,6 +3078,11 @@ where
 
                     let result = substrate.execute(request).await;
 
+                    // Auto-commit safety net: capture any uncommitted work
+                    if let Some(ref wt_path) = worktree_path {
+                        let _ = auto_commit_worktree(wt_path, task_id).await;
+                    }
+
                     // Update task based on result
                     if let Ok(Some(mut completed_task)) = task_repo.get(task_id).await {
                         match result {
@@ -3333,9 +3329,6 @@ where
         // Check goal iteration status
         // Note: Goals are never "completed" - they remain Active and can spawn more work
         let all_complete = tasks.iter().all(|t| t.status == TaskStatus::Complete);
-        let permanently_failed = tasks.iter().any(|t| {
-            t.status == TaskStatus::Failed && t.retry_count >= self.config.max_task_retries
-        });
 
         if all_complete {
             // Successful iteration - goal remains Active
@@ -3344,17 +3337,9 @@ where
                 goal_id: goal.id,
                 tasks_completed: completed_count,
             }).await;
-        } else if permanently_failed {
-            // Permanent failure - suspend the goal for intervention
-            let mut updated_goal = goal.clone();
-            let reason = "One or more tasks permanently failed".to_string();
-            updated_goal.suspend(&reason);
-            self.goal_repo.update(&updated_goal).await?;
-            let _ = event_tx.send(SwarmEvent::GoalSuspended {
-                goal_id: goal.id,
-                reason,
-            }).await;
         }
+        // Task failures don't affect goal status — goals are aspirations, not work units.
+        // Permanently failed tasks are handled by the retry/restructure mechanism.
 
         Ok(())
     }
@@ -4483,12 +4468,23 @@ where
             }
         };
 
+        // Append git workflow instructions
+        let git_instructions = "\n\n## Git Workflow\n\
+            You are working in a git worktree. When you have completed your work:\n\
+            1. Stage all changed files with `git add` (be specific about which files you changed)\n\
+            2. Create a commit with a descriptive message summarizing what you did and why\n\
+            3. Do NOT push to any remote\n\
+            \n\
+            Your work will not be preserved unless it is committed. Always commit before finishing.";
+
+        let with_git = format!("{}{}", base_prompt, git_instructions);
+
         // Append goal context to the system prompt
         let goal_context = self.build_goal_context().await;
         if goal_context.is_empty() {
-            base_prompt
+            with_git
         } else {
-            format!("{}\n\n{}", base_prompt, goal_context)
+            format!("{}\n\n{}", with_git, goal_context)
         }
     }
 
@@ -4583,7 +4579,7 @@ where
 
     /// Execute a specific goal with its task DAG.
     pub async fn execute_goal(&self, goal_id: Uuid) -> DomainResult<ExecutionResults> {
-        let goal = self.goal_repo.get(goal_id).await?
+        let _goal = self.goal_repo.get(goal_id).await?
             .ok_or(DomainError::GoalNotFound(goal_id))?;
 
         let tasks = self.task_repo.list_by_goal(goal_id).await?;
@@ -4638,15 +4634,8 @@ where
             }
         }
 
-        // Update goal status based on results
-        // Note: Goals are never "completed" - they remain Active
-        let mut updated_goal = goal;
-        if results.status() != ExecutionStatus::Completed && results.failed_tasks > 0 {
-            // Suspend goal if tasks failed
-            updated_goal.suspend("Some tasks failed");
-            self.goal_repo.update(&updated_goal).await?;
-        }
-        // If completed or partial success, goal remains Active - no update needed
+        // Goals always remain Active regardless of task outcomes.
+        // Goals are aspirations that guide evaluation, not units of work.
 
         Ok(results)
     }
@@ -4678,6 +4667,57 @@ where
     }
 }
 
+/// Auto-commit any uncommitted changes in a worktree as a safety net.
+/// Returns true if a commit was made, false if the worktree was clean.
+async fn auto_commit_worktree(worktree_path: &str, task_id: Uuid) -> bool {
+    use tokio::process::Command;
+
+    // Check if there are any uncommitted changes
+    let status = match Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(worktree_path)
+        .output()
+        .await
+    {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).to_string(),
+        Err(_) => return false,
+    };
+
+    if status.trim().is_empty() {
+        return false;
+    }
+
+    // Stage all changes
+    let add = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(worktree_path)
+        .output()
+        .await;
+
+    if add.is_err() || !add.unwrap().status.success() {
+        return false;
+    }
+
+    // Commit with a descriptive message
+    let msg = format!(
+        "auto-commit: captured uncommitted work from task {}\n\n\
+         The agent did not commit before ending its session.\n\
+         This auto-commit preserves the work for review and merge.",
+        &task_id.to_string()[..8]
+    );
+
+    let commit = Command::new("git")
+        .args(["commit", "-m", &msg])
+        .current_dir(worktree_path)
+        .output()
+        .await;
+
+    match commit {
+        Ok(output) => output.status.success(),
+        Err(_) => false,
+    }
+}
+
 /// Helper function to run post-completion workflow (verification and merging).
 /// This is called from spawned tasks after successful task completion.
 async fn run_post_completion_workflow<G, T, W>(
@@ -4697,13 +4737,18 @@ where
     T: TaskRepository + 'static,
     W: WorktreeRepository + 'static,
 {
-    // Step 1: Run integration verification if enabled
+    // Step 1: Run lightweight verification if enabled (no code checks — those happen at merge time)
     let verification_passed = if verify_on_completion {
         let verifier = IntegrationVerifierService::new(
             task_repo.clone(),
             goal_repo.clone(),
             worktree_repo.clone(),
-            VerifierConfig::default(),
+            VerifierConfig {
+                run_tests: false,
+                run_lint: false,
+                check_format: false,
+                ..VerifierConfig::default()
+            },
         );
 
         match verifier.verify_task(task_id).await {

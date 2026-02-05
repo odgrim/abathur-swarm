@@ -563,9 +563,9 @@ async fn run_swarm_foreground(
                         println!("Goal iteration completed: {} ({} tasks done)", goal_id, tasks_completed);
                     }
                 }
-                SwarmEvent::GoalSuspended { goal_id, reason } => {
+                SwarmEvent::GoalPaused { goal_id, reason } => {
                     if !json_mode {
-                        println!("Goal suspended: {} - {}", goal_id, reason);
+                        println!("Goal paused: {} - {}", goal_id, reason);
                     }
                 }
                 SwarmEvent::TaskSubmitted { task_id, task_title, goal_id } => {

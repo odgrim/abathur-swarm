@@ -140,7 +140,7 @@ pub enum EventPayload {
         goal_id: Uuid,
         tasks_completed: usize,
     },
-    GoalSuspended {
+    GoalPaused {
         goal_id: Uuid,
         reason: String,
     },
@@ -507,12 +507,12 @@ impl From<SwarmEvent> for UnifiedEvent {
                 None,
                 EventPayload::GoalIterationCompleted { goal_id, tasks_completed },
             ),
-            SwarmEvent::GoalSuspended { goal_id, reason } => (
+            SwarmEvent::GoalPaused { goal_id, reason } => (
                 EventSeverity::Warning,
                 EventCategory::Goal,
                 Some(goal_id),
                 None,
-                EventPayload::GoalSuspended { goal_id, reason },
+                EventPayload::GoalPaused { goal_id, reason },
             ),
             SwarmEvent::ConvergenceCompleted { goal_id, converged, iterations, final_satisfaction } => (
                 EventSeverity::Info,

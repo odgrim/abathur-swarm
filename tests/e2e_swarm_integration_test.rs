@@ -153,7 +153,7 @@ async fn test_goal_lifecycle_with_constraints() {
     assert_eq!(constraints.len(), 3);
 
     // Test goal status transitions
-    // Goals are NEVER completed - only Paused, Suspended, or Retired
+    // Goals are NEVER completed - only Paused or Retired
     goal_service
         .transition_status(goal.id, GoalStatus::Paused)
         .await

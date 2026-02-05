@@ -173,9 +173,13 @@ where
         let alignment_check = self.check_holistic_alignment(&task).await?;
         checks.push(alignment_check);
 
-        // 4. Get worktree path and run code checks
+        // 5. Get worktree and check for commits / run code checks
         let worktree = self.worktree_repo.get_by_task(task_id).await?;
         if let Some(wt) = worktree {
+            // Check that the agent actually produced commits
+            let commits_check = self.check_has_commits(&wt.path, &wt.base_ref).await;
+            checks.push(commits_check);
+
             // Run integration tests
             if self.config.run_tests {
                 let test_check = self.run_integration_tests(&wt.path).await;
@@ -340,6 +344,59 @@ where
                     "recommendations": evaluation.recommendations
                 })),
             })
+        }
+    }
+
+    /// Check that the worktree branch has commits ahead of its base ref.
+    async fn check_has_commits(&self, worktree_path: &str, base_ref: &str) -> VerificationCheck {
+        let output = Command::new("git")
+            .args(["rev-list", "--count", &format!("{}..HEAD", base_ref)])
+            .current_dir(worktree_path)
+            .output()
+            .await;
+
+        match output {
+            Ok(output) if output.status.success() => {
+                let count_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let count: u64 = count_str.parse().unwrap_or(0);
+
+                if count > 0 {
+                    VerificationCheck {
+                        name: "has_commits".to_string(),
+                        passed: true,
+                        message: format!("{} commit(s) ahead of {}", count, base_ref),
+                        details: Some(serde_json::json!({
+                            "commits_ahead": count,
+                            "base_ref": base_ref
+                        })),
+                    }
+                } else {
+                    VerificationCheck {
+                        name: "has_commits".to_string(),
+                        passed: false,
+                        message: format!("No commits ahead of {} — agent produced no changes", base_ref),
+                        details: Some(serde_json::json!({
+                            "commits_ahead": 0,
+                            "base_ref": base_ref
+                        })),
+                    }
+                }
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                VerificationCheck {
+                    name: "has_commits".to_string(),
+                    passed: false,
+                    message: format!("Failed to check commits: {}", stderr.trim()),
+                    details: None,
+                }
+            }
+            Err(e) => VerificationCheck {
+                name: "has_commits".to_string(),
+                passed: false,
+                message: format!("Failed to run git: {}", e),
+                details: None,
+            },
         }
     }
 
