@@ -171,7 +171,7 @@ pub struct AgentCard {
 pub struct AgentTemplate {
     /// Unique identifier
     pub id: Uuid,
-    /// Agent name/type (e.g., "rust-architect", "test-engineer")
+    /// Agent name/type (e.g., "overmind", "code-writer", "test-runner")
     pub name: String,
     /// Human-readable description
     pub description: String,

@@ -835,7 +835,7 @@ async fn test_full_end_to_end_workflow() {
 
     println!("Created goal: {} ({})", goal.name, goal.id);
 
-    // 3. Use meta-planner to decompose the goal
+    // 3. Use meta-planner service to decompose the goal
     let meta_config = MetaPlannerConfig {
         max_decomposition_depth: 3,
         default_agent_tier: AgentTier::Worker,
@@ -1357,7 +1357,7 @@ async fn claude_cli_available() -> bool {
 /// This test uses the actual Claude CLI with a trivial task to verify
 /// the substrate integration works end-to-end.
 #[tokio::test]
-#[ignore = "Requires Claude CLI - run with ABATHUR_REAL_E2E=1"]
+#[ignore = "Requires Claude CLI - run with --include-ignored"]
 async fn test_real_agent_simple_task_execution() {
     if !claude_cli_available().await {
         println!("⚠ Skipping: Claude CLI not available");
@@ -1428,7 +1428,7 @@ async fn test_real_agent_simple_task_execution() {
 /// Creates a 2-task DAG where task2 depends on task1, and verifies
 /// both execute successfully in the correct order.
 #[tokio::test]
-#[ignore = "Requires Claude CLI - run with ABATHUR_REAL_E2E=1"]
+#[ignore = "Requires Claude CLI - run with --include-ignored"]
 async fn test_real_agent_dag_execution() {
     if !claude_cli_available().await {
         println!("⚠ Skipping: Claude CLI not available");
@@ -1554,7 +1554,7 @@ async fn test_real_agent_dag_execution() {
 /// Executes multiple tasks with a mix of successes and failures,
 /// then verifies the evolution loop correctly tracks outcomes.
 #[tokio::test]
-#[ignore = "Requires Claude CLI - run with ABATHUR_REAL_E2E=1"]
+#[ignore = "Requires Claude CLI - run with --include-ignored"]
 async fn test_real_agent_evolution_tracking() {
     if !claude_cli_available().await {
         println!("⚠ Skipping: Claude CLI not available");
@@ -1670,7 +1670,7 @@ async fn test_real_agent_evolution_tracking() {
 /// This is the comprehensive real E2E test that exercises the full workflow
 /// with actual Claude Code CLI invocations.
 #[tokio::test]
-#[ignore = "Requires Claude CLI - run with ABATHUR_REAL_E2E=1"]
+#[ignore = "Requires Claude CLI - run with --include-ignored"]
 async fn test_real_e2e_full_workflow() {
     if !claude_cli_available().await {
         println!("⚠ Skipping: Claude CLI not available");

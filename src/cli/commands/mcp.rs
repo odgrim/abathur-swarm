@@ -8,15 +8,15 @@ use clap::{Args, Subcommand};
 use std::sync::Arc;
 
 use crate::adapters::mcp::{
-    A2AHttpConfig, A2AHttpGateway, MemoryHttpConfig, MemoryHttpServer, TasksHttpConfig,
-    TasksHttpServer,
+    A2AHttpConfig, A2AHttpGateway, AgentsHttpConfig, AgentsHttpServer, MemoryHttpConfig,
+    MemoryHttpServer, TasksHttpConfig, TasksHttpServer,
 };
 use crate::adapters::sqlite::{
-    all_embedded_migrations, create_pool, Migrator, SqliteMemoryRepository,
+    all_embedded_migrations, create_pool, Migrator, SqliteAgentRepository, SqliteMemoryRepository,
     SqliteTaskRepository,
 };
 use crate::domain::models::a2a::A2AAgentCard;
-use crate::services::{MemoryService, TaskService};
+use crate::services::{AgentService, MemoryService, TaskService};
 
 #[derive(Args, Debug)]
 pub struct McpArgs {
@@ -48,6 +48,20 @@ pub enum McpCommand {
 
         /// Port to listen on
         #[arg(long, default_value = "9101")]
+        port: u16,
+
+        /// Disable CORS
+        #[arg(long)]
+        no_cors: bool,
+    },
+    /// Start the Agents HTTP server
+    AgentsHttp {
+        /// Host to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Port to listen on
+        #[arg(long, default_value = "9102")]
         port: u16,
 
         /// Disable CORS
@@ -94,6 +108,10 @@ pub enum McpCommand {
         #[arg(long, default_value = "9101")]
         tasks_port: u16,
 
+        /// Agents HTTP server port
+        #[arg(long, default_value = "9102")]
+        agents_port: u16,
+
         /// A2A HTTP gateway port
         #[arg(long, default_value = "8080")]
         a2a_port: u16,
@@ -118,6 +136,11 @@ pub async fn execute(args: McpArgs, json_mode: bool) -> Result<()> {
             port,
             no_cors,
         } => start_tasks_http(host, port, !no_cors, json_mode).await,
+        McpCommand::AgentsHttp {
+            host,
+            port,
+            no_cors,
+        } => start_agents_http(host, port, !no_cors, json_mode).await,
         McpCommand::A2aHttp {
             host,
             port,
@@ -142,9 +165,10 @@ pub async fn execute(args: McpArgs, json_mode: bool) -> Result<()> {
         McpCommand::All {
             memory_port,
             tasks_port,
+            agents_port,
             a2a_port,
             host,
-        } => start_all(host, memory_port, tasks_port, a2a_port, json_mode).await,
+        } => start_all(host, memory_port, tasks_port, agents_port, a2a_port, json_mode).await,
         McpCommand::Status => show_status(json_mode).await,
     }
 }
@@ -229,6 +253,46 @@ async fn start_tasks_http(host: String, port: u16, enable_cors: bool, json_mode:
     Ok(())
 }
 
+async fn start_agents_http(host: String, port: u16, enable_cors: bool, json_mode: bool) -> Result<()> {
+    // Initialize database
+    let pool = create_pool("abathur.db", None).await?;
+    let migrator = Migrator::new(pool.clone());
+    migrator
+        .run_embedded_migrations(all_embedded_migrations())
+        .await?;
+
+    let agent_repo = Arc::new(SqliteAgentRepository::new(pool));
+    let service = AgentService::new(agent_repo);
+
+    let config = AgentsHttpConfig {
+        host: host.clone(),
+        port,
+        enable_cors,
+    };
+
+    if json_mode {
+        let output = serde_json::json!({
+            "server": "agents-http",
+            "status": "starting",
+            "host": host,
+            "port": port,
+            "cors": enable_cors
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Starting MCP Agents HTTP Server");
+        println!("   Host: {}", host);
+        println!("   Port: {}", port);
+        println!("   CORS: {}", if enable_cors { "enabled" } else { "disabled" });
+        println!();
+    }
+
+    let server = AgentsHttpServer::new(service, config);
+    server.serve().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn start_a2a_http(
     host: String,
@@ -291,6 +355,7 @@ async fn start_all(
     host: String,
     memory_port: u16,
     tasks_port: u16,
+    agents_port: u16,
     a2a_port: u16,
     json_mode: bool,
 ) -> Result<()> {
@@ -303,11 +368,12 @@ async fn start_all(
 
     if json_mode {
         let output = serde_json::json!({
-            "servers": ["memory-http", "tasks-http", "a2a-http"],
+            "servers": ["memory-http", "tasks-http", "agents-http", "a2a-http"],
             "status": "starting",
             "endpoints": {
                 "memory": format!("http://{}:{}", host, memory_port),
                 "tasks": format!("http://{}:{}", host, tasks_port),
+                "agents": format!("http://{}:{}", host, agents_port),
                 "a2a": format!("http://{}:{}", host, a2a_port)
             }
         });
@@ -317,6 +383,7 @@ async fn start_all(
         println!("========================");
         println!("   Memory HTTP: http://{}:{}", host, memory_port);
         println!("   Tasks HTTP:  http://{}:{}", host, tasks_port);
+        println!("   Agents HTTP: http://{}:{}", host, agents_port);
         println!("   A2A HTTP:    http://{}:{}", host, a2a_port);
         println!();
     }
@@ -325,8 +392,11 @@ async fn start_all(
     let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
     let memory_service = MemoryService::new(memory_repo);
 
-    let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
     let task_service = TaskService::new(task_repo);
+
+    let agent_repo = Arc::new(SqliteAgentRepository::new(pool));
+    let agent_service = AgentService::new(agent_repo);
 
     // Create servers
     let memory_config = MemoryHttpConfig {
@@ -342,6 +412,13 @@ async fn start_all(
         enable_cors: true,
     };
     let tasks_server = TasksHttpServer::new(task_service, tasks_config);
+
+    let agents_config = AgentsHttpConfig {
+        host: host.clone(),
+        port: agents_port,
+        enable_cors: true,
+    };
+    let agents_server = AgentsHttpServer::new(agent_service, agents_config);
 
     let a2a_config = A2AHttpConfig {
         host: host.clone(),
@@ -359,6 +436,7 @@ async fn start_all(
     let (shutdown_tx, shutdown_rx1) = tokio::sync::broadcast::channel::<()>(1);
     let shutdown_rx2 = shutdown_tx.subscribe();
     let shutdown_rx3 = shutdown_tx.subscribe();
+    let shutdown_rx4 = shutdown_tx.subscribe();
 
     // Spawn all servers
     let memory_handle = tokio::spawn(async move {
@@ -377,10 +455,18 @@ async fn start_all(
             .await
     });
 
+    let agents_handle = tokio::spawn(async move {
+        agents_server
+            .serve_with_shutdown(async move {
+                let _ = shutdown_rx3.resubscribe().recv().await;
+            })
+            .await
+    });
+
     let a2a_handle = tokio::spawn(async move {
         a2a_gateway
             .serve_with_shutdown(async move {
-                let _ = shutdown_rx3.resubscribe().recv().await;
+                let _ = shutdown_rx4.resubscribe().recv().await;
             })
             .await
     });
@@ -403,6 +489,11 @@ async fn start_all(
                 eprintln!("Tasks server error: {}", e);
             }
         }
+        res = agents_handle => {
+            if let Err(e) = res {
+                eprintln!("Agents server error: {}", e);
+            }
+        }
         res = a2a_handle => {
             if let Err(e) = res {
                 eprintln!("A2A server error: {}", e);
@@ -420,6 +511,7 @@ async fn show_status(json_mode: bool) -> Result<()> {
     let servers = [
         ("memory-http", "127.0.0.1", 9100),
         ("tasks-http", "127.0.0.1", 9101),
+        ("agents-http", "127.0.0.1", 9102),
         ("a2a-http", "127.0.0.1", 8080),
     ];
 
@@ -459,65 +551,19 @@ async fn show_status(json_mode: bool) -> Result<()> {
 async fn register_default_agents(gateway: &A2AHttpGateway) {
     use crate::domain::models::a2a::MessageType;
 
-    // Meta-planner agent
-    let meta_planner = A2AAgentCard::new("abathur.meta-planner")
-        .with_display_name("Meta Planner")
-        .with_description("Decomposes high-level goals into executable task DAGs")
+    // Overmind - the sole pre-packaged agent
+    let overmind = A2AAgentCard::new("abathur.overmind")
+        .with_display_name("Overmind")
+        .with_description("Agentic orchestrator that analyzes tasks, dynamically creates agents, and delegates work")
+        .with_capability("agent-creation")
+        .with_capability("task-delegation")
+        .with_capability("task-decomposition")
         .with_capability("goal-decomposition")
-        .with_capability("task-planning")
-        .with_capability("agent-selection")
-        .with_handoff_target("code-implementer")
-        .with_handoff_target("test-writer")
-        .accepts_message_type(MessageType::DelegateTask);
-
-    // Code implementer agent
-    let code_implementer = A2AAgentCard::new("abathur.code-implementer")
-        .with_display_name("Code Implementer")
-        .with_description("Writes production code following architectural decisions")
-        .with_capability("coding")
-        .with_capability("implementation")
-        .with_capability("rust")
-        .with_capability("typescript")
-        .with_handoff_target("test-writer")
-        .with_handoff_target("documentation-writer")
+        .with_capability("strategic-planning")
         .accepts_message_type(MessageType::DelegateTask)
         .accepts_message_type(MessageType::HandoffRequest);
-
-    // Test writer agent
-    let test_writer = A2AAgentCard::new("abathur.test-writer")
-        .with_display_name("Test Writer")
-        .with_description("Creates comprehensive test suites for code")
-        .with_capability("testing")
-        .with_capability("unit-tests")
-        .with_capability("integration-tests")
-        .with_handoff_target("code-implementer")
-        .accepts_message_type(MessageType::DelegateTask)
-        .accepts_message_type(MessageType::HandoffRequest);
-
-    // Documentation writer agent
-    let doc_writer = A2AAgentCard::new("abathur.documentation-writer")
-        .with_display_name("Documentation Writer")
-        .with_description("Produces clear, accurate documentation")
-        .with_capability("documentation")
-        .with_capability("technical-writing")
-        .accepts_message_type(MessageType::DelegateTask);
-
-    // Integration verifier agent
-    let verifier = A2AAgentCard::new("abathur.integration-verifier")
-        .with_display_name("Integration Verifier")
-        .with_description("Validates task completion and goal alignment")
-        .with_capability("verification")
-        .with_capability("testing")
-        .with_capability("linting")
-        .accepts_message_type(MessageType::DelegateTask);
 
     gateway
-        .register_agents(vec![
-            meta_planner,
-            code_implementer,
-            test_writer,
-            doc_writer,
-            verifier,
-        ])
+        .register_agents(vec![overmind])
         .await;
 }

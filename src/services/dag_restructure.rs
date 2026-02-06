@@ -1,7 +1,7 @@
 //! DAG restructuring service.
 //!
 //! Handles intelligent re-planning when tasks permanently fail by invoking
-//! the Meta-Planner with failure context to find alternative approaches.
+//! the Overmind with failure context to find alternative approaches.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

@@ -14,7 +14,7 @@ use crate::domain::models::{
     SessionStatus, SubstrateConfig, SubstrateRequest,
     Task, TaskStatus,
 };
-use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
+use crate::domain::ports::{AgentFilter, AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
     CircuitScope, GoalContextService,
@@ -24,6 +24,55 @@ use crate::services::{
 use super::helpers::{auto_commit_worktree, run_post_completion_workflow};
 use super::types::SwarmEvent;
 use super::SwarmOrchestrator;
+
+/// Map agent template tool names (lowercase YAML) to Claude Code CLI tool names.
+///
+/// Template tools like "read", "shell", "memory" need to be translated to
+/// the PascalCase names that `claude --allowedTools` expects.
+/// Tools like "memory" and "tasks" are Abathur REST APIs accessed via WebFetch,
+/// not Claude Code built-in tools, so they map to WebFetch access.
+fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
+    let mut cli_tools = Vec::new();
+    let mut needs_webfetch = false;
+
+    for tool in template_tool_names {
+        match tool.as_str() {
+            "read" => cli_tools.push("Read".to_string()),
+            "write" => {
+                cli_tools.push("Write".to_string());
+            }
+            "edit" => {
+                cli_tools.push("Edit".to_string());
+                cli_tools.push("MultiEdit".to_string());
+            }
+            "shell" => cli_tools.push("Bash".to_string()),
+            "glob" => cli_tools.push("Glob".to_string()),
+            "grep" => cli_tools.push("Grep".to_string()),
+            "memory" | "tasks" => {
+                // Abathur REST APIs - agents access these via WebFetch
+                needs_webfetch = true;
+            }
+            // Pass through any already-PascalCase tool names
+            other => cli_tools.push(other.to_string()),
+        }
+    }
+
+    // Agents with memory/tasks tools need WebFetch to call REST APIs
+    if needs_webfetch && !cli_tools.contains(&"WebFetch".to_string()) {
+        cli_tools.push("WebFetch".to_string());
+    }
+
+    // Ensure baseline read-only tools are always present (agents must be able to explore code)
+    for baseline in &["Read", "Glob", "Grep"] {
+        if !cli_tools.contains(&baseline.to_string()) {
+            cli_tools.push(baseline.to_string());
+        }
+    }
+
+    cli_tools.sort();
+    cli_tools.dedup();
+    cli_tools
+}
 
 impl<G, T, W, A, M> SwarmOrchestrator<G, T, W, A, M>
 where
@@ -143,17 +192,103 @@ where
         Ok(())
     }
 
+    /// Route a task to the appropriate agent type.
+    ///
+    /// Resolution priority:
+    /// 1. Explicit `agent_type` on the task (user passed `--agent`)
+    /// 2. `routing_hints.preferred_agent`
+    /// 3. Capability matching: find an agent whose tools cover the task's `required_tools`
+    /// 4. Default to `overmind` so the task gets analyzed, decomposed, and
+    ///    routed to dynamically-created agents.
+    async fn route_task(&self, task: &Task) -> String {
+        // 1. Explicit assignment takes priority
+        if let Some(ref agent) = task.agent_type {
+            return agent.clone();
+        }
+
+        // 2. Routing hints - preferred agent
+        if let Some(ref preferred) = task.routing_hints.preferred_agent {
+            // Validate the preferred agent actually exists
+            if let Ok(Some(_)) = self.agent_repo.get_template_by_name(preferred).await {
+                return preferred.clone();
+            }
+        }
+
+        // 3. Capability matching - try to find an agent whose tools satisfy required_tools
+        if !task.routing_hints.required_tools.is_empty() {
+            if let Some(matched) = self.match_agent_by_tools(&task.routing_hints.required_tools).await {
+                return matched;
+            }
+        }
+
+        // 4. For subtasks created by the overmind, don't recurse back into overmind.
+        //    If a parent task was assigned to overmind and created this subtask without
+        //    an explicit agent, route back to overmind for further routing. (Subtasks
+        //    should have agent_type set by the overmind, but this is a safety net.)
+        if task.parent_id.is_some() {
+            return "overmind".to_string();
+        }
+
+        // 5. Default: route to overmind for analysis and decomposition
+        "overmind".to_string()
+    }
+
+    /// Find an agent template whose tools cover the required tools.
+    ///
+    /// Returns the best match (agent covering the most required tools) or None.
+    async fn match_agent_by_tools(&self, required_tools: &[String]) -> Option<String> {
+        let templates = self.agent_repo.list_templates(AgentFilter::default()).await.ok()?;
+
+        let mut best_match: Option<(String, usize)> = None;
+
+        for template in &templates {
+            // Skip meta-level agents for direct tool matching
+            if template.name == "overmind" {
+                continue;
+            }
+
+            let tool_names: Vec<&str> = template.tools.iter().map(|t| t.name.as_str()).collect();
+            let matched_count = required_tools.iter()
+                .filter(|req| tool_names.iter().any(|t| t.eq_ignore_ascii_case(req)))
+                .count();
+
+            if matched_count > 0 {
+                if let Some((_, best_count)) = &best_match {
+                    if matched_count > *best_count {
+                        best_match = Some((template.name.clone(), matched_count));
+                    }
+                } else {
+                    best_match = Some((template.name.clone(), matched_count));
+                }
+            }
+        }
+
+        best_match.map(|(name, _)| name)
+    }
+
     /// Spawn an agent for a ready task.
     ///
-    /// Before execution, loads relevant goals via GoalContextService and
-    /// prepends goal guidance to the task description.
+    /// Before execution, routes the task to the appropriate agent, loads
+    /// relevant goals via GoalContextService, and prepends goal guidance
+    /// to the task description.
     async fn spawn_task_agent(
         &self,
         task: &Task,
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
+        // Route the task to an appropriate agent
+        let agent_type = self.route_task(task).await;
+
+        // Persist the routing decision so it's visible in logs and task queries
+        if task.agent_type.is_none() {
+            if let Ok(Some(mut updated)) = self.task_repo.get(task.id).await {
+                updated.agent_type = Some(agent_type.clone());
+                let _ = self.task_repo.update(&updated).await;
+            }
+        }
+
         // Check circuit breaker
-        let scope = CircuitScope::agent(task.agent_type.as_deref().unwrap_or("default"));
+        let scope = CircuitScope::agent(&agent_type);
         let check_result = self.circuit_breaker.check(scope.clone()).await;
 
         if check_result.is_blocked() {
@@ -163,7 +298,7 @@ where
                     AuditCategory::Execution,
                     AuditAction::CircuitBreakerTriggered,
                     AuditActor::System,
-                    format!("Task {} blocked by circuit breaker", task.id),
+                    format!("Task {} blocked by circuit breaker for agent '{}'", task.id, agent_type),
                 )
                 .with_entity(task.id, "task"),
             ).await;
@@ -223,19 +358,18 @@ where
 
         // Try to acquire agent permit
         if let Ok(permit) = self.agent_semaphore.clone().try_acquire_owned() {
-            // Get agent template for system prompt
-            let agent_type = task.agent_type.clone().unwrap_or_else(|| "default".to_string());
             let system_prompt = self.get_agent_system_prompt(&agent_type).await;
 
-            // Get agent template for version tracking and capabilities
-            let (template_version, capabilities) = match self.agent_repo.get_template_by_name(&agent_type).await {
+            // Get agent template for version tracking, capabilities, and tool restrictions
+            let (template_version, capabilities, cli_tools) = match self.agent_repo.get_template_by_name(&agent_type).await {
                 Ok(Some(template)) => {
                     let caps: Vec<String> = template.tools.iter()
                         .map(|t| t.name.clone())
                         .collect();
-                    (template.version, caps)
+                    let tools = map_template_tools_to_cli(&caps);
+                    (template.version, caps, tools)
                 }
-                _ => (1, vec!["task-execution".to_string()]),
+                _ => (1, vec!["task-execution".to_string()], vec![]),
             };
 
             // Register agent capabilities with A2A gateway if configured
@@ -248,7 +382,7 @@ where
             let _ = event_tx.send(SwarmEvent::TaskSpawned {
                 task_id: task.id,
                 task_title: task.title.clone(),
-                agent_type: task.agent_type.clone(),
+                agent_type: Some(agent_type.clone()),
             }).await;
 
             // Create worktree if configured
@@ -331,7 +465,16 @@ where
                     config = config.with_working_dir(wt_path);
                 }
 
+                // Apply agent-specific tool restrictions from template
+                // (empty vec falls back to DEFAULT_TOOLS in build_args)
+                if !cli_tools.is_empty() {
+                    config = config.with_allowed_tools(cli_tools);
+                }
+
                 // Add MCP servers so agents can access memory, tasks, and A2A
+                // Note: HTTP URLs are filtered in build_args() since Claude Code --mcp
+                // expects MCP protocol servers, not REST APIs. REST API access is
+                // documented in the system prompt for agents to use via WebFetch.
                 if let Some(ref memory_server) = mcp_servers.memory_server {
                     config = config.with_mcp_server(memory_server);
                 }

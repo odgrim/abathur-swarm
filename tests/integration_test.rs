@@ -220,7 +220,7 @@ async fn test_agent_system_integration() {
     assert_eq!(running.len(), 0);
 }
 
-/// Test goal-to-task decomposition with meta-planner.
+/// Test goal-to-task decomposition with MetaPlanner service.
 #[tokio::test]
 async fn test_goal_decomposition() {
     let (goal_repo, task_repo, _, agent_repo, _) = setup_test_repos().await;

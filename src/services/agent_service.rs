@@ -253,9 +253,9 @@ impl<R: AgentRepository> AgentService<R> {
 
     /// Load baseline specialist templates.
     ///
-    /// This should be called during system initialization to ensure
-    /// all core specialist agents are available. Returns the number
-    /// of templates created (skips existing ones).
+    /// Returns the number of templates created (skips existing ones).
+    /// Currently returns 0 since all specialists are created dynamically
+    /// by the Overmind at runtime.
     pub async fn load_baseline_specialists(&self) -> DomainResult<usize> {
         let specialists = specialist_templates::create_baseline_specialists();
         let mut created = 0;
@@ -301,8 +301,8 @@ impl<R: AgentRepository> AgentService<R> {
 
     /// Seed all baseline specialist templates if they don't exist.
     ///
-    /// This should be called during initialization to ensure core specialists
-    /// are available for the swarm to use.
+    /// Currently a no-op since all specialists are created dynamically
+    /// by the Overmind at runtime.
     pub async fn seed_baseline_specialists(&self) -> DomainResult<Vec<String>> {
         let baseline = specialist_templates::create_baseline_specialists();
         let mut seeded = Vec::new();
@@ -320,22 +320,16 @@ impl<R: AgentRepository> AgentService<R> {
     }
 
     /// Ensure a specific specialist template exists, creating if needed.
+    ///
+    /// With the overmind-only model, this will only find specialists that
+    /// have been dynamically created at runtime (no baseline specialists exist).
     pub async fn ensure_specialist(&self, name: &str) -> DomainResult<AgentTemplate> {
-        // Check if exists
+        // Check if exists in database (dynamically created agents)
         if let Some(template) = self.repository.get_template_by_name(name).await? {
             return Ok(template);
         }
 
-        // Try to find in baseline specialists
-        let baseline = specialist_templates::create_baseline_specialists();
-        for template in baseline {
-            if template.name == name {
-                self.repository.create_template(&template).await?;
-                return Ok(template);
-            }
-        }
-
-        Err(DomainError::AgentNotFound(format!("Specialist '{}' not found in baseline", name)))
+        Err(DomainError::AgentNotFound(format!("Agent '{}' not found. Create it via the Agents REST API.", name)))
     }
 }
 

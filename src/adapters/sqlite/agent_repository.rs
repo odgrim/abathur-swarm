@@ -12,6 +12,7 @@ use crate::domain::models::{
 };
 use crate::domain::ports::{AgentFilter, AgentRepository};
 
+#[derive(Clone)]
 pub struct SqliteAgentRepository {
     pool: SqlitePool,
 }

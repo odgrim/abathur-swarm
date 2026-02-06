@@ -299,8 +299,8 @@ pub enum RecoveryAction {
         task_id: Uuid,
         error_context: String,
     },
-    /// Escalate to meta-planner for task re-decomposition.
-    EscalateToMetaPlanner {
+    /// Escalate to overmind for task re-decomposition.
+    EscalateToOvermind {
         goal_id: Uuid,
         reason: String,
     },
@@ -329,7 +329,7 @@ impl RecoveryAction {
 
     /// Create an escalation action.
     pub fn escalate(goal_id: Uuid, reason: impl Into<String>) -> Self {
-        Self::EscalateToMetaPlanner {
+        Self::EscalateToOvermind {
             goal_id,
             reason: reason.into(),
         }
@@ -360,7 +360,7 @@ pub struct RecoveryPolicy {
     pub task_chain_policies: HashMap<Uuid, RecoveryAction>,
     /// Whether to always try restructuring first.
     pub prefer_restructure: bool,
-    /// Threshold for escalating to meta-planner.
+    /// Threshold for escalating to overmind.
     pub escalation_threshold: u32,
 }
 
@@ -415,6 +415,7 @@ impl RecoveryPolicy {
 
         self.default_action.clone()
     }
+
 
     /// Register a specific policy for a task chain.
     pub fn register_task_policy(&mut self, task_id: Uuid, action: RecoveryAction) {
@@ -929,7 +930,7 @@ mod tests {
         assert!(matches!(diagnose, RecoveryAction::SpawnDiagnostic { .. }));
 
         let escalate = RecoveryAction::escalate(goal_id, "escalation reason");
-        assert!(matches!(escalate, RecoveryAction::EscalateToMetaPlanner { .. }));
+        assert!(matches!(escalate, RecoveryAction::EscalateToOvermind { .. }));
     }
 
     #[test]
@@ -950,7 +951,7 @@ mod tests {
 
         // At threshold - should escalate
         let action = policy.determine_action(&CircuitScope::TaskChain(task_id), 3);
-        assert!(matches!(action, RecoveryAction::EscalateToMetaPlanner { .. }));
+        assert!(matches!(action, RecoveryAction::EscalateToOvermind { .. }));
 
         // Global scope - should use default
         let action = policy.determine_action(&CircuitScope::Global, 1);
@@ -991,7 +992,7 @@ mod tests {
         service.record_failure(scope.clone(), "error 2").await;
 
         let event = rx.try_recv().unwrap();
-        assert!(matches!(event.recovery_action, RecoveryAction::TriggerRestructure { .. }));
+        assert!(matches!(event.recovery_action, RecoveryAction::TriggerRestructure { .. }),);
         assert_eq!(event.open_count, 1);
         assert_eq!(event.recent_failures.len(), 2);
     }

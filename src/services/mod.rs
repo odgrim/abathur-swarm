@@ -21,7 +21,7 @@ pub mod llm_planner;
 pub mod memory_decay_daemon;
 pub mod memory_service;
 pub mod merge_queue;
-pub mod meta_planner;
+pub mod meta_planner; // Rust service module for decomposition planning
 pub mod overmind;
 pub mod swarm_orchestrator;
 pub mod task_service;

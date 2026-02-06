@@ -4,7 +4,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::{Memory, MemoryMetadata, MemoryQuery, MemoryTier, MemoryType};
+use crate::domain::models::{
+    Memory, MemoryMetadata, MemoryQuery, MemoryTier, MemoryType,
+    RelevanceWeights, ScoredMemory,
+};
 use crate::domain::ports::MemoryRepository;
 
 /// Configuration for memory decay thresholds.
@@ -155,6 +158,75 @@ impl<R: MemoryRepository> MemoryService<R> {
         limit: usize,
     ) -> DomainResult<Vec<Memory>> {
         self.repository.search(query, namespace, limit).await
+    }
+
+    /// Ranked search: search memories and return results scored by multi-factor relevance.
+    ///
+    /// Implements the research-recommended approach from DynTaskMAS (ICAPS 2025):
+    ///   score = w_semantic * text_match + w_decay * recency + w_importance * access_pattern
+    ///
+    /// Results are sorted by composite score (highest first) and filtered by minimum threshold.
+    pub async fn ranked_search(
+        &self,
+        query: &str,
+        namespace: Option<&str>,
+        weights: RelevanceWeights,
+        limit: usize,
+        min_score: f32,
+    ) -> DomainResult<Vec<ScoredMemory>> {
+        // First, get candidate memories via full-text search
+        // We fetch more than needed since scoring will re-rank them
+        let fetch_limit = (limit * 3).max(50);
+        let candidates = self.repository.search(query, namespace, fetch_limit).await?;
+
+        // Score each candidate using multi-factor relevance
+        let mut scored: Vec<ScoredMemory> = candidates
+            .into_iter()
+            .map(|mem| mem.relevance_score(query, &weights))
+            .filter(|scored| scored.score >= min_score)
+            .collect();
+
+        // Sort by composite score (highest first)
+        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Truncate to requested limit
+        scored.truncate(limit);
+
+        Ok(scored)
+    }
+
+    /// Load context for a task with token budget management.
+    ///
+    /// Inspired by Manus AI's context engineering approach:
+    /// - Select relevant memories using multi-factor scoring
+    /// - Fit within a token budget to avoid context window overflow
+    /// - Prioritize high-relevance memories over low-relevance ones
+    ///
+    /// Returns memories that fit within the token budget, sorted by relevance.
+    pub async fn load_context_with_budget(
+        &self,
+        query: &str,
+        namespace: Option<&str>,
+        token_budget: usize,
+        weights: RelevanceWeights,
+    ) -> DomainResult<Vec<ScoredMemory>> {
+        // Get scored candidates
+        let scored = self.ranked_search(query, namespace, weights, 100, 0.1).await?;
+
+        // Greedily fill the token budget with highest-scored memories
+        let mut selected = Vec::new();
+        let mut tokens_used = 0;
+
+        for entry in scored {
+            let entry_tokens = entry.memory.estimated_tokens();
+            if tokens_used + entry_tokens <= token_budget {
+                tokens_used += entry_tokens;
+                selected.push(entry);
+            }
+            // Don't break early - later entries might be smaller and still fit
+        }
+
+        Ok(selected)
     }
 
     /// Get memories for a specific task.
@@ -761,6 +833,95 @@ mod tests {
         let promoted = service.recall(memory.id).await.unwrap().unwrap();
 
         assert_eq!(promoted.tier, MemoryTier::Episodic);
+    }
+
+    #[tokio::test]
+    async fn test_ranked_search() {
+        let service = setup_service().await;
+
+        // Store some memories with different content
+        service.store(
+            "rust_patterns".to_string(),
+            "Rust programming patterns include iterators closures and traits".to_string(),
+            "code".to_string(),
+            MemoryTier::Semantic,
+            MemoryType::Pattern,
+            None,
+        ).await.unwrap();
+
+        service.store(
+            "python_basics".to_string(),
+            "Python is a dynamic language with list comprehensions".to_string(),
+            "code".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        service.store(
+            "rust_errors".to_string(),
+            "Error handling in Rust uses Result and Option types for safety".to_string(),
+            "code".to_string(),
+            MemoryTier::Episodic,
+            MemoryType::Pattern,
+            None,
+        ).await.unwrap();
+
+        // Search for "Rust" - should rank Rust-related memories higher
+        let results = service.ranked_search(
+            "Rust patterns",
+            Some("code"),
+            RelevanceWeights::semantic_biased(),
+            10,
+            0.0,
+        ).await.unwrap();
+
+        assert!(!results.is_empty(), "Should find some results");
+
+        // Verify results are sorted by score (descending)
+        for i in 1..results.len() {
+            assert!(results[i - 1].score >= results[i].score,
+                "Results should be sorted by score: {} >= {}",
+                results[i - 1].score, results[i].score);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_context_with_budget() {
+        let service = setup_service().await;
+
+        // Store memories with varying sizes
+        service.store(
+            "short".to_string(),
+            "Short memory.".to_string(),
+            "test".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        service.store(
+            "medium".to_string(),
+            "This is a medium-length memory entry that contains some useful information about the project architecture and design decisions that were made.".to_string(),
+            "test".to_string(),
+            MemoryTier::Episodic,
+            MemoryType::Decision,
+            None,
+        ).await.unwrap();
+
+        // Load with a tight budget - should only include what fits
+        let results = service.load_context_with_budget(
+            "memory project",
+            Some("test"),
+            50, // ~50 tokens budget
+            RelevanceWeights::default(),
+        ).await.unwrap();
+
+        // Should have results but limited by budget
+        let total_tokens: usize = results.iter()
+            .map(|r| r.memory.estimated_tokens())
+            .sum();
+        assert!(total_tokens <= 50, "Total tokens {} should be within budget of 50", total_tokens);
     }
 
     #[tokio::test]

@@ -131,8 +131,8 @@ async fn copy_baseline_agents(target_path: &Path) -> Result<usize> {
     // Check if we're in the source repo (has agent definitions)
     let source_agents = target_path.join(".claude").join("agents");
     if source_agents.exists() {
-        let meta_planner = source_agents.join("meta-planner.md");
-        if meta_planner.exists() {
+        let overmind = source_agents.join("overmind.md");
+        if overmind.exists() {
             // Already has agents, don't copy
             return Ok(0);
         }
