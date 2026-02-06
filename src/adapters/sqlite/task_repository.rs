@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    ArtifactRef, RoutingHints, Task, TaskContext, TaskPriority, TaskStatus,
+    ArtifactRef, RoutingHints, Task, TaskContext, TaskPriority, TaskSource, TaskStatus,
 };
 use crate::domain::ports::{TaskFilter, TaskRepository};
 
@@ -28,16 +28,16 @@ impl TaskRepository for SqliteTaskRepository {
         let routing_json = serde_json::to_string(&task.routing_hints)?;
         let artifacts_json = serde_json::to_string(&task.artifacts)?;
         let context_json = serde_json::to_string(&task.context)?;
+        let (source_type, source_ref) = serialize_task_source(&task.source);
 
         sqlx::query(
-            r#"INSERT INTO tasks (id, parent_id, goal_id, title, description, status, priority,
+            r#"INSERT INTO tasks (id, parent_id, title, description, status, priority,
                agent_type, routing, artifacts, context, retry_count, max_retries, worktree_path,
-               idempotency_key, version, created_at, updated_at, started_at, completed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+               idempotency_key, source_type, source_ref, version, created_at, updated_at, started_at, completed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
         )
         .bind(task.id.to_string())
         .bind(task.parent_id.map(|id| id.to_string()))
-        .bind(task.goal_id.map(|id| id.to_string()))
         .bind(&task.title)
         .bind(&task.description)
         .bind(task.status.as_str())
@@ -50,6 +50,8 @@ impl TaskRepository for SqliteTaskRepository {
         .bind(task.max_retries as i32)
         .bind(&task.worktree_path)
         .bind(&task.idempotency_key)
+        .bind(&source_type)
+        .bind(&source_ref)
         .bind(task.version as i64)
         .bind(task.created_at.to_rfc3339())
         .bind(task.updated_at.to_rfc3339())
@@ -88,16 +90,17 @@ impl TaskRepository for SqliteTaskRepository {
         let routing_json = serde_json::to_string(&task.routing_hints)?;
         let artifacts_json = serde_json::to_string(&task.artifacts)?;
         let context_json = serde_json::to_string(&task.context)?;
+        let (source_type, source_ref) = serialize_task_source(&task.source);
 
         let result = sqlx::query(
-            r#"UPDATE tasks SET parent_id = ?, goal_id = ?, title = ?, description = ?,
+            r#"UPDATE tasks SET parent_id = ?, title = ?, description = ?,
                status = ?, priority = ?, agent_type = ?, routing = ?, artifacts = ?,
                context = ?, retry_count = ?, max_retries = ?, worktree_path = ?,
+               source_type = ?, source_ref = ?,
                version = ?, updated_at = ?, started_at = ?, completed_at = ?
                WHERE id = ?"#
         )
         .bind(task.parent_id.map(|id| id.to_string()))
-        .bind(task.goal_id.map(|id| id.to_string()))
         .bind(&task.title)
         .bind(&task.description)
         .bind(task.status.as_str())
@@ -109,6 +112,8 @@ impl TaskRepository for SqliteTaskRepository {
         .bind(task.retry_count as i32)
         .bind(task.max_retries as i32)
         .bind(&task.worktree_path)
+        .bind(&source_type)
+        .bind(&source_ref)
         .bind(task.version as i64)
         .bind(task.updated_at.to_rfc3339())
         .bind(task.started_at.map(|t| t.to_rfc3339()))
@@ -149,10 +154,6 @@ impl TaskRepository for SqliteTaskRepository {
             query.push_str(" AND priority = ?");
             bindings.push(priority.as_str().to_string());
         }
-        if let Some(goal_id) = &filter.goal_id {
-            query.push_str(" AND goal_id = ?");
-            bindings.push(goal_id.to_string());
-        }
         if let Some(parent_id) = &filter.parent_id {
             query.push_str(" AND parent_id = ?");
             bindings.push(parent_id.to_string());
@@ -177,10 +178,6 @@ impl TaskRepository for SqliteTaskRepository {
             tasks.push(task);
         }
         Ok(tasks)
-    }
-
-    async fn list_by_goal(&self, goal_id: Uuid) -> DomainResult<Vec<Task>> {
-        self.list(TaskFilter { goal_id: Some(goal_id), ..Default::default() }).await
     }
 
     async fn list_by_status(&self, status: TaskStatus) -> DomainResult<Vec<Task>> {
@@ -302,6 +299,23 @@ impl TaskRepository for SqliteTaskRepository {
         }
     }
 
+    async fn list_by_source(&self, source_type: &str) -> DomainResult<Vec<Task>> {
+        let rows: Vec<TaskRow> = sqlx::query_as(
+            "SELECT * FROM tasks WHERE source_type = ? ORDER BY created_at DESC"
+        )
+        .bind(source_type)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut tasks = Vec::new();
+        for row in rows {
+            let mut task: Task = row.try_into()?;
+            self.load_dependencies(&mut task).await?;
+            tasks.push(task);
+        }
+        Ok(tasks)
+    }
+
     async fn count_by_status(&self) -> DomainResult<HashMap<TaskStatus, u64>> {
         let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT status, COUNT(*) FROM tasks GROUP BY status"
@@ -341,7 +355,6 @@ impl SqliteTaskRepository {
 struct TaskRow {
     id: String,
     parent_id: Option<String>,
-    goal_id: Option<String>,
     title: String,
     description: Option<String>,
     status: String,
@@ -354,6 +367,8 @@ struct TaskRow {
     max_retries: i32,
     worktree_path: Option<String>,
     idempotency_key: Option<String>,
+    source_type: Option<String>,
+    source_ref: Option<String>,
     version: i64,
     created_at: String,
     updated_at: String,
@@ -369,11 +384,6 @@ impl TryFrom<TaskRow> for Task {
             .map_err(|e| DomainError::SerializationError(e.to_string()))?;
 
         let parent_id = row.parent_id
-            .map(|s| Uuid::parse_str(&s))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
-
-        let goal_id = row.goal_id
             .map(|s| Uuid::parse_str(&s))
             .transpose()
             .map_err(|e| DomainError::SerializationError(e.to_string()))?;
@@ -420,12 +430,13 @@ impl TryFrom<TaskRow> for Task {
             .transpose()
             .map_err(|e| DomainError::SerializationError(e.to_string()))?;
 
+        let source = deserialize_task_source(row.source_type.as_deref(), row.source_ref.as_deref())?;
+
         Ok(Task {
             id,
             parent_id,
             title: row.title,
             description: row.description.unwrap_or_default(),
-            goal_id,
             agent_type: row.agent_type,
             routing_hints,
             depends_on: Vec::new(), // Loaded separately
@@ -436,7 +447,7 @@ impl TryFrom<TaskRow> for Task {
             artifacts,
             worktree_path: row.worktree_path,
             context,
-            evaluated_constraints: Vec::new(),
+            source,
             created_at,
             updated_at,
             started_at,
@@ -444,6 +455,49 @@ impl TryFrom<TaskRow> for Task {
             version: row.version as u64,
             idempotency_key: row.idempotency_key,
         })
+    }
+}
+
+/// Serialize a TaskSource into (source_type, source_ref) for DB storage.
+fn serialize_task_source(source: &TaskSource) -> (String, Option<String>) {
+    match source {
+        TaskSource::Human => ("human".to_string(), None),
+        TaskSource::System => ("system".to_string(), None),
+        TaskSource::SubtaskOf(uuid) => ("subtask".to_string(), Some(uuid.to_string())),
+        TaskSource::GoalEvaluation(uuid) => ("goal_evaluation".to_string(), Some(uuid.to_string())),
+    }
+}
+
+/// Deserialize (source_type, source_ref) from DB into a TaskSource.
+fn deserialize_task_source(
+    source_type: Option<&str>,
+    source_ref: Option<&str>,
+) -> Result<TaskSource, DomainError> {
+    match source_type {
+        Some("human") | None => Ok(TaskSource::Human),
+        Some("system") => Ok(TaskSource::System),
+        Some("subtask") => {
+            let uuid_str = source_ref.ok_or_else(|| {
+                DomainError::SerializationError("subtask source requires source_ref".to_string())
+            })?;
+            let uuid = Uuid::parse_str(uuid_str)
+                .map_err(|e| DomainError::SerializationError(e.to_string()))?;
+            Ok(TaskSource::SubtaskOf(uuid))
+        }
+        Some("goal_evaluation") => {
+            let uuid_str = source_ref.ok_or_else(|| {
+                DomainError::SerializationError(
+                    "goal_evaluation source requires source_ref".to_string(),
+                )
+            })?;
+            let uuid = Uuid::parse_str(uuid_str)
+                .map_err(|e| DomainError::SerializationError(e.to_string()))?;
+            Ok(TaskSource::GoalEvaluation(uuid))
+        }
+        Some(other) => Err(DomainError::SerializationError(format!(
+            "Unknown source_type: {}",
+            other
+        ))),
     }
 }
 
@@ -462,7 +516,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_and_get_task() {
         let repo = setup_test_repo().await;
-        let task = Task::new("Test Task", "Description");
+        let task = Task::with_title("Test Task", "Description");
 
         repo.create(&task).await.unwrap();
 
@@ -475,8 +529,8 @@ mod tests {
     async fn test_task_dependencies() {
         let repo = setup_test_repo().await;
 
-        let dep_task = Task::new("Dependency", "Desc");
-        let main_task = Task::new("Main", "Desc").with_dependency(dep_task.id);
+        let dep_task = Task::with_title("Dependency", "Desc");
+        let main_task = Task::with_title("Main", "Desc").with_dependency(dep_task.id);
 
         repo.create(&dep_task).await.unwrap();
         repo.create(&main_task).await.unwrap();
@@ -493,10 +547,10 @@ mod tests {
     async fn test_ready_tasks() {
         let repo = setup_test_repo().await;
 
-        let mut task1 = Task::new("Ready High", "Desc").with_priority(TaskPriority::High);
+        let mut task1 = Task::with_title("Ready High", "Desc").with_priority(TaskPriority::High);
         task1.status = TaskStatus::Ready;
 
-        let mut task2 = Task::new("Ready Low", "Desc").with_priority(TaskPriority::Low);
+        let mut task2 = Task::with_title("Ready Low", "Desc").with_priority(TaskPriority::Low);
         task2.status = TaskStatus::Ready;
 
         repo.create(&task1).await.unwrap();

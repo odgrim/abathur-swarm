@@ -380,15 +380,10 @@ where
                         .collect()
                 };
 
-                // Determine goal_id from completed tasks
-                let wave_goal_id = wave_completed_ids.first().and_then(|tid| {
-                    dag.nodes.get(tid).and_then(|n| n.goal_id)
-                });
-
                 let _ = event_tx.send(ExecutionEvent::WaveVerificationRequested {
                     wave_number: wave_idx + 1,
                     completed_task_ids: wave_completed_ids,
-                    goal_id: wave_goal_id,
+                    goal_id: None,
                 }).await;
             }
 
@@ -475,24 +470,23 @@ where
         let active_goals: Vec<Goal> = self.active_goals_cache.read().await.clone();
 
         for &task_id in wave {
-            let node = match dag.nodes.get(&task_id) {
+            let _node = match dag.nodes.get(&task_id) {
                 Some(n) => n.clone(),
                 None => continue,
             };
 
-            // Check circuit breaker for this task's goal chain
+            // Check circuit breaker for this task's agent chain
             if let Some(ref cb) = self.circuit_breaker {
-                if let Some(goal_id) = node.goal_id {
-                    let check_result = cb.check(CircuitScope::task_chain(goal_id)).await;
-                    if check_result.is_blocked() {
-                        // Skip this task - circuit is open
-                        let _ = event_tx.send(ExecutionEvent::TaskFailed {
-                            task_id,
-                            error: "Circuit breaker open for goal chain".to_string(),
-                            retry_count: 0,
-                        }).await;
-                        continue;
-                    }
+                let scope = CircuitScope::agent("default");
+                let check_result = cb.check(scope).await;
+                if check_result.is_blocked() {
+                    // Skip this task - circuit is open
+                    let _ = event_tx.send(ExecutionEvent::TaskFailed {
+                        task_id,
+                        error: "Circuit breaker open".to_string(),
+                        retry_count: 0,
+                    }).await;
+                    continue;
                 }
             }
 
@@ -507,7 +501,7 @@ where
             let total_tokens = total_tokens.clone();
             let guardrails = guardrails.clone();
             let circuit_breaker = self.circuit_breaker.clone();
-            let goal_id = node.goal_id;
+            let goal_id: Option<Uuid> = None;
             let goals_for_task = active_goals.clone();
 
             let handle = tokio::spawn(async move {
@@ -804,7 +798,7 @@ where
     };
 
     // Build enhanced system prompt with goal context, project context, constraints, artifacts, MCP services, and iteration context
-    let goal_context = build_goal_context(&active_goals, task.goal_id);
+    let goal_context = build_goal_context(&active_goals, goal_id);
     let mcp_context = build_mcp_context(&config);
     let project_context = config.project_context.as_ref().map_or(String::new(), |ctx| {
         format!("\n\n## Project Context\n\n{}", ctx)

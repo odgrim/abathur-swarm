@@ -11,7 +11,6 @@ use crate::domain::models::{Task, TaskPriority, TaskStatus};
 pub struct TaskFilter {
     pub status: Option<TaskStatus>,
     pub priority: Option<TaskPriority>,
-    pub goal_id: Option<Uuid>,
     pub parent_id: Option<Uuid>,
     pub agent_type: Option<String>,
 }
@@ -33,9 +32,6 @@ pub trait TaskRepository: Send + Sync {
 
     /// List tasks with optional filters.
     async fn list(&self, filter: TaskFilter) -> DomainResult<Vec<Task>>;
-
-    /// Get tasks by goal.
-    async fn list_by_goal(&self, goal_id: Uuid) -> DomainResult<Vec<Task>>;
 
     /// Get tasks by status.
     async fn list_by_status(&self, status: TaskStatus) -> DomainResult<Vec<Task>>;
@@ -66,6 +62,9 @@ pub trait TaskRepository: Send + Sync {
 
     /// Get task by idempotency key.
     async fn get_by_idempotency_key(&self, key: &str) -> DomainResult<Option<Task>>;
+
+    /// List tasks by source type (e.g., "human", "system", "subtask", "goal_evaluation").
+    async fn list_by_source(&self, source_type: &str) -> DomainResult<Vec<Task>>;
 
     /// Count tasks by status.
     async fn count_by_status(&self) -> DomainResult<std::collections::HashMap<TaskStatus, u64>>;

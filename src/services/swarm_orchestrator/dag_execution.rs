@@ -39,8 +39,11 @@ where
         goal_id: Uuid,
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<ExecutionResults> {
-        // Get tasks for this goal
-        let tasks = self.task_repo.list_by_goal(goal_id).await?;
+        // Get tasks created by goal evaluation
+        let all_goal_tasks = self.task_repo.list_by_source("goal_evaluation").await?;
+        let tasks: Vec<Task> = all_goal_tasks.into_iter()
+            .filter(|t| t.source == crate::domain::models::TaskSource::GoalEvaluation(goal_id))
+            .collect();
         if tasks.is_empty() {
             return Ok(ExecutionResults::default());
         }
@@ -147,8 +150,11 @@ where
         iteration_context: Option<crate::domain::models::IterationContext>,
         enable_wave_verification: bool,
     ) -> DomainResult<ExecutionResults> {
-        // Get tasks for this goal
-        let tasks = self.task_repo.list_by_goal(goal_id).await?;
+        // Get tasks created by goal evaluation
+        let all_goal_tasks = self.task_repo.list_by_source("goal_evaluation").await?;
+        let tasks: Vec<Task> = all_goal_tasks.into_iter()
+            .filter(|t| t.source == crate::domain::models::TaskSource::GoalEvaluation(goal_id))
+            .collect();
         if tasks.is_empty() {
             return Ok(ExecutionResults::default());
         }
@@ -563,7 +569,10 @@ where
         let _goal = self.goal_repo.get(goal_id).await?
             .ok_or(DomainError::GoalNotFound(goal_id))?;
 
-        let tasks = self.task_repo.list_by_goal(goal_id).await?;
+        let all_goal_tasks = self.task_repo.list_by_source("goal_evaluation").await?;
+        let tasks: Vec<Task> = all_goal_tasks.into_iter()
+            .filter(|t| t.source == crate::domain::models::TaskSource::GoalEvaluation(goal_id))
+            .collect();
         let dag = TaskDag::from_tasks(tasks);
 
         // Fetch project context from memory if available
@@ -1097,7 +1106,7 @@ where
     }
 
     /// Persist successful task outputs to memory for future agent reference.
-    async fn persist_task_outputs_to_memory(&self, goal_id: Uuid, results: &ExecutionResults) {
+    async fn persist_task_outputs_to_memory(&self, _goal_id: Uuid, results: &ExecutionResults) {
         let Some(ref memory_repo) = self.memory_repo else { return };
 
         use crate::domain::models::Memory;
@@ -1111,9 +1120,7 @@ where
                             .flatten();
 
                         let key = format!("task/{}/output", task_result.task_id);
-                        let namespace = task.as_ref()
-                            .and_then(|t| t.goal_id.map(|g| format!("goal/{}", g)))
-                            .unwrap_or_else(|| "tasks".to_string());
+                        let namespace = "tasks".to_string();
 
                         let content = format!(
                             "Task: {}\nAgent: {}\nOutput:\n{}",
@@ -1226,8 +1233,8 @@ where
                 crate::domain::models::TaskGuidancePriority::Low => crate::domain::models::TaskPriority::Low,
             };
 
-            let new_task = Task::new(&task_guidance.title, &task_guidance.description)
-                .with_goal(goal_id)
+            let new_task = Task::with_title(&task_guidance.title, &task_guidance.description)
+                .with_source(crate::domain::models::TaskSource::GoalEvaluation(goal_id))
                 .with_priority(priority);
 
             if let Err(e) = self.task_repo.create(&new_task).await {
@@ -1257,9 +1264,10 @@ where
 
     /// Get pending task IDs for a goal.
     pub(super) async fn get_pending_task_ids_for_goal(&self, goal_id: Uuid) -> DomainResult<Vec<Uuid>> {
-        let tasks = self.task_repo.list_by_goal(goal_id).await?;
-        Ok(tasks
+        let all_goal_tasks = self.task_repo.list_by_source("goal_evaluation").await?;
+        Ok(all_goal_tasks
             .iter()
+            .filter(|t| t.source == crate::domain::models::TaskSource::GoalEvaluation(goal_id))
             .filter(|t| t.status == TaskStatus::Pending || t.status == TaskStatus::Ready)
             .map(|t| t.id)
             .collect())
@@ -1281,12 +1289,6 @@ where
         // Build the augmented description
         let prefix = augmentation.format_as_description_prefix();
         if !prefix.is_empty() {
-            // Store original description in evaluated_constraints for reference
-            if !task.description.starts_with("**RETRY ATTEMPT**") &&
-               !task.description.starts_with("**Gaps to Address:**") {
-                task.evaluated_constraints.push(format!("Original description: {}", task.description));
-            }
-
             task.description = format!("{}{}", prefix, task.description);
             self.task_repo.update(&task).await?;
 

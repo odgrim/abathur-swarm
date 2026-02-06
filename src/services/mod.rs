@@ -11,6 +11,8 @@ pub mod event_bus;
 pub mod event_store;
 pub mod evolution_loop;
 pub mod goal_alignment;
+pub mod goal_context_service;
+pub mod goal_evaluation_service;
 pub mod goal_service;
 pub mod guardrails;
 pub mod integration_verifier;
@@ -34,6 +36,8 @@ pub use dag_executor::{DagExecutor, ExecutorConfig, ExecutionEvent, ExecutionRes
 pub use dag_restructure::{DagRestructureService, FailedAttempt, NewTaskSpec, RestructureConfig, RestructureContext, RestructureDecision, RestructureTrigger, TaskPriorityModifier};
 pub use evolution_loop::{EvolutionAction, EvolutionConfig, EvolutionEvent, EvolutionLoop, EvolutionTrigger, RefinementRequest, RefinementSeverity, TaskExecution, TaskOutcome, TemplateStats};
 pub use goal_alignment::{AlignmentConfig, ConstraintViolation, GoalAlignmentResult, GoalAlignmentService, HolisticEvaluation, WorkArtifact};
+pub use goal_context_service::GoalContextService;
+pub use goal_evaluation_service::{GoalEvaluationService, GoalEvaluationResult, SatisfactionLevel, GoalGap, SuggestedTask, EvaluationCycleReport};
 pub use goal_service::GoalService;
 pub use guardrails::{GuardrailResult, Guardrails, GuardrailsConfig, RuntimeMetrics};
 pub use integration_verifier::{IntegrationVerifierService, VerificationCheck, VerificationResult, VerifierConfig, TestResult};

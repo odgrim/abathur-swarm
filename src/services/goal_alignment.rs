@@ -278,12 +278,6 @@ where
         let mut contributions = Vec::new();
         let mut concerns = Vec::new();
 
-        // Check if task is directly associated with this goal
-        if task.goal_id == Some(goal.id) {
-            score += 0.2;
-            contributions.push("Task directly contributes to this goal".to_string());
-        }
-
         // Check constraints
         for constraint in &goal.constraints {
             let satisfied = self.check_constraint(task, constraint);

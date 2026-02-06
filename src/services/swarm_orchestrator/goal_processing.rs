@@ -1,21 +1,23 @@
 //! Goal processing subsystem for the swarm orchestrator.
 //!
-//! Handles goal decomposition, task spawning for ready tasks, dependency management,
+//! Handles task spawning for ready tasks, dependency management,
 //! task readiness updates, and retry logic.
+//!
+//! Goals no longer decompose into tasks or own tasks. Instead, goals provide
+//! aspirational guidance via GoalContextService when tasks are executed.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 
-use crate::domain::errors::{DomainError, DomainResult};
+use crate::domain::errors::DomainResult;
 use crate::domain::models::{
-    Goal, GoalStatus, SessionStatus, SubstrateConfig, SubstrateRequest,
-    Task, TaskStatus, TickConvergenceState, IntentSatisfaction, GapFingerprint,
+    SessionStatus, SubstrateConfig, SubstrateRequest,
+    Task, TaskStatus,
 };
-use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, Substrate, TaskRepository, WorktreeRepository};
+use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
-    CircuitScope, MetaPlanner, MetaPlannerConfig,
+    CircuitScope, GoalContextService,
     TaskExecution, TaskOutcome,
 };
 
@@ -125,304 +127,33 @@ where
         Ok(dependencies.iter().any(|dep| dep.status == TaskStatus::Failed))
     }
 
-    /// Process all active goals.
-    pub(super) async fn process_goals(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
-        // Get active goals
-        let goals = self.goal_repo.list(crate::domain::ports::GoalFilter {
-            status: Some(GoalStatus::Active),
-            ..Default::default()
-        }).await?;
-
-        for goal in goals {
-            self.process_goal(&goal, event_tx).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Process a single goal.
-    async fn process_goal(&self, goal: &Goal, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
-        // Get tasks for this goal
-        let tasks = self.task_repo.list_by_goal(goal.id).await?;
-
-        // If no tasks exist, this goal needs decomposition
-        if tasks.is_empty() {
-            let _ = event_tx.send(SwarmEvent::GoalStarted {
-                goal_id: goal.id,
-                goal_name: goal.name.clone(),
-            }).await;
-
-            // Use MetaPlanner to decompose goal into tasks
-            let task_count = self.decompose_goal_with_meta_planner(goal, event_tx).await?;
-
-            let _ = event_tx.send(SwarmEvent::GoalDecomposed {
-                goal_id: goal.id,
-                task_count,
-            }).await;
-            return Ok(());
-        }
-
-        // Get ready tasks
-        let ready_tasks: Vec<_> = tasks.iter()
-            .filter(|t| t.status == TaskStatus::Ready)
-            .collect();
-
-        // Spawn agents for ready tasks
-        for task in ready_tasks {
-            self.spawn_task_agent(task, goal, event_tx).await?;
-        }
-
-        // Check if all tasks are complete and none are still active
-        let all_complete = tasks.iter().all(|t| t.status == TaskStatus::Complete);
-        let any_active = tasks.iter().any(|t| {
-            matches!(t.status, TaskStatus::Running | TaskStatus::Ready | TaskStatus::Pending)
-        });
-
-        if all_complete && !any_active {
-            // Check if convergence already terminated for this goal
-            if let Some(state) = goal.convergence_state() {
-                if state.is_terminal() {
-                    return Ok(());
-                }
-            }
-
-            if self.config.enable_intent_verification && self.intent_verifier.is_some() {
-                self.run_tick_convergence(goal, &tasks, event_tx).await?;
-            } else {
-                // No verifier: emit iteration completed once, pause goal
-                let completed_count = tasks.len();
-                let _ = event_tx.send(SwarmEvent::GoalIterationCompleted {
-                    goal_id: goal.id,
-                    tasks_completed: completed_count,
-                }).await;
-
-                let mut updated_goal = goal.clone();
-                let terminal_state = TickConvergenceState {
-                    converged: true,
-                    ended_at: Some(chrono::Utc::now()),
-                    last_verified_task_count: completed_count,
-                    ..Default::default()
-                };
-                updated_goal.set_convergence_state(&terminal_state);
-                updated_goal.pause();
-                let _ = self.goal_repo.update(&updated_goal).await;
-
-                let _ = event_tx.send(SwarmEvent::GoalPaused {
-                    goal_id: goal.id,
-                    reason: "All tasks complete (no intent verifier configured)".to_string(),
-                }).await;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Run a single step of tick-based convergence verification.
+    /// Process ready tasks by spawning agents for them.
     ///
-    /// Called each tick when all tasks for a goal are complete. Loads or creates
-    /// a `TickConvergenceState` from goal metadata, runs intent verification,
-    /// and either creates new tasks (picked up next tick) or pauses the goal.
-    async fn run_tick_convergence(
-        &self,
-        goal: &Goal,
-        completed_tasks: &[Task],
-        event_tx: &mpsc::Sender<SwarmEvent>,
-    ) -> DomainResult<()> {
-        let intent_verifier = self.intent_verifier.as_ref().unwrap();
+    /// Goals no longer decompose into tasks. Tasks are created independently
+    /// (by humans, system triggers, or goal evaluation service). This method
+    /// simply finds ready tasks and spawns agents to execute them.
+    pub(super) async fn process_goals(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
+        // Get ready tasks and spawn agents for them
+        let ready_tasks = self.task_repo.get_ready_tasks(self.config.max_agents).await?;
 
-        // Load or create convergence state
-        let mut state = goal.convergence_state().unwrap_or_default();
-
-        // Guard: already terminal
-        if state.is_terminal() {
-            return Ok(());
+        for task in &ready_tasks {
+            self.spawn_task_agent(task, event_tx).await?;
         }
-
-        // Guard: no new completions since last check
-        let completed_count = completed_tasks.len();
-        if completed_count == state.last_verified_task_count && state.iteration > 0 {
-            return Ok(());
-        }
-
-        // Check max iterations
-        let max_iterations = self.config.convergence.max_iterations;
-        if state.iteration >= max_iterations {
-            state.ended_at = Some(chrono::Utc::now());
-            self.pause_goal_with_convergence(goal, &state, event_tx,
-                &format!("Max convergence iterations ({}) reached", max_iterations),
-                "max_iterations",
-            ).await?;
-            return Ok(());
-        }
-
-        // Check timeout
-        let timeout = std::time::Duration::from_secs(self.config.convergence.convergence_timeout_secs);
-        let elapsed = chrono::Utc::now().signed_duration_since(state.started_at);
-        if elapsed.to_std().unwrap_or_default() > timeout {
-            state.ended_at = Some(chrono::Utc::now());
-            self.pause_goal_with_convergence(goal, &state, event_tx,
-                "Convergence timeout exceeded",
-                "timeout",
-            ).await?;
-            return Ok(());
-        }
-
-        // Check drift
-        if state.drift_detected {
-            state.ended_at = Some(chrono::Utc::now());
-            let recurring: Vec<String> = state.gap_fingerprints.iter()
-                .filter(|fp| fp.occurrence_count >= 3)
-                .map(|fp| fp.normalized_description.clone())
-                .collect();
-            let _ = event_tx.send(SwarmEvent::SemanticDriftDetected {
-                goal_id: goal.id,
-                recurring_gaps: recurring,
-                iterations: state.iteration,
-            }).await;
-            self.pause_goal_with_convergence(goal, &state, event_tx,
-                "Semantic drift detected",
-                "drift",
-            ).await?;
-            return Ok(());
-        }
-
-        // Advance iteration
-        state.iteration += 1;
-        let iteration = state.iteration;
-
-        // Extract guiding intent
-        let intent = intent_verifier.extract_guiding_intent(goal.id).await?;
-
-        // Emit verification started
-        let _ = event_tx.send(SwarmEvent::IntentVerificationStarted {
-            goal_id: goal.id,
-            iteration,
-        }).await;
-
-        // Verify intent
-        let verification_result = intent_verifier
-            .verify_intent(&intent, completed_tasks, iteration)
-            .await?;
-
-        // Update gap fingerprints for drift detection
-        update_tick_gap_fingerprints(&mut state, &verification_result);
-        state.last_verified_task_count = completed_count;
-
-        let satisfaction_str = verification_result.satisfaction.as_str().to_string();
-        let should_continue = self.should_continue_convergence(&verification_result);
-
-        // Emit verification completed
-        let _ = event_tx.send(SwarmEvent::IntentVerificationCompleted {
-            goal_id: goal.id,
-            satisfaction: satisfaction_str.clone(),
-            confidence: verification_result.confidence,
-            gaps_count: verification_result.gaps.len(),
-            iteration,
-            will_retry: should_continue,
-        }).await;
-
-        self.audit_log.info(
-            AuditCategory::Goal,
-            AuditAction::GoalEvaluated,
-            format!(
-                "Tick convergence for goal {} iteration {}: {} (confidence: {:.2}, {} gaps, drift: {})",
-                goal.id, iteration, satisfaction_str,
-                verification_result.confidence, verification_result.gaps.len(),
-                state.drift_detected
-            ),
-        ).await;
-
-        // Check if converged
-        if verification_result.satisfaction == IntentSatisfaction::Satisfied {
-            state.converged = true;
-            state.ended_at = Some(chrono::Utc::now());
-            self.pause_goal_with_convergence(goal, &state, event_tx,
-                "Intent satisfied",
-                "converged",
-            ).await?;
-            return Ok(());
-        }
-
-        // Should we continue?
-        if should_continue {
-            if let Some(guidance) = &verification_result.reprompt_guidance {
-                // Create new tasks via convergence guidance (picked up next tick)
-                self.apply_convergence_guidance(goal.id, &verification_result, guidance, event_tx).await?;
-
-                // Save state for next tick
-                let mut updated_goal = goal.clone();
-                updated_goal.set_convergence_state(&state);
-                updated_goal.updated_at = chrono::Utc::now();
-                let _ = self.goal_repo.update(&updated_goal).await;
-            } else {
-                // No guidance available, can't continue meaningfully
-                state.ended_at = Some(chrono::Utc::now());
-                self.pause_goal_with_convergence(goal, &state, event_tx,
-                    "No reprompt guidance available",
-                    "no_guidance",
-                ).await?;
-            }
-        } else {
-            // Verification says don't continue
-            state.ended_at = Some(chrono::Utc::now());
-            self.pause_goal_with_convergence(goal, &state, event_tx,
-                &format!("Convergence stopped: {}", satisfaction_str),
-                &satisfaction_str,
-            ).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Pause a goal and persist terminal convergence state, emitting events.
-    async fn pause_goal_with_convergence(
-        &self,
-        goal: &Goal,
-        state: &TickConvergenceState,
-        event_tx: &mpsc::Sender<SwarmEvent>,
-        reason: &str,
-        final_satisfaction: &str,
-    ) -> DomainResult<()> {
-        let mut updated_goal = goal.clone();
-        updated_goal.set_convergence_state(state);
-        updated_goal.pause();
-        self.goal_repo.update(&updated_goal).await?;
-
-        let _ = event_tx.send(SwarmEvent::ConvergenceCompleted {
-            goal_id: goal.id,
-            converged: state.converged,
-            iterations: state.iteration,
-            final_satisfaction: final_satisfaction.to_string(),
-        }).await;
-
-        let _ = event_tx.send(SwarmEvent::GoalPaused {
-            goal_id: goal.id,
-            reason: reason.to_string(),
-        }).await;
-
-        self.audit_log.info(
-            AuditCategory::Goal,
-            if state.converged { AuditAction::GoalIterationCompleted } else { AuditAction::GoalPaused },
-            format!(
-                "Tick convergence for goal {} finished: {} after {} iterations ({})",
-                goal.id,
-                if state.converged { "CONVERGED" } else { "NOT CONVERGED" },
-                state.iteration, reason
-            ),
-        ).await;
 
         Ok(())
     }
 
     /// Spawn an agent for a ready task.
+    ///
+    /// Before execution, loads relevant goals via GoalContextService and
+    /// prepends goal guidance to the task description.
     async fn spawn_task_agent(
         &self,
         task: &Task,
-        goal: &Goal,
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
-        // Check circuit breaker for this goal's task chain
-        let scope = CircuitScope::task_chain(goal.id);
+        // Check circuit breaker
+        let scope = CircuitScope::agent(task.agent_type.as_deref().unwrap_or("default"));
         let check_result = self.circuit_breaker.check(scope.clone()).await;
 
         if check_result.is_blocked() {
@@ -432,14 +163,14 @@ where
                     AuditCategory::Execution,
                     AuditAction::CircuitBreakerTriggered,
                     AuditActor::System,
-                    format!("Task {} blocked by circuit breaker for goal {}", task.id, goal.id),
+                    format!("Task {} blocked by circuit breaker", task.id),
                 )
                 .with_entity(task.id, "task"),
             ).await;
             return Ok(());
         }
 
-        // Pre-execution constraint validation
+        // Pre-execution constraint validation via goal alignment
         if let Some(ref alignment_service) = self.goal_alignment {
             match alignment_service.evaluate_task(task).await {
                 Ok(evaluation) => {
@@ -533,10 +264,37 @@ where
                 None
             };
 
+            // Load relevant goal context for the task
+            let goal_context_service = GoalContextService::new(self.goal_repo.clone());
+            let goal_context = match goal_context_service.get_goals_for_task(task).await {
+                Ok(goals) if !goals.is_empty() => {
+                    let context_text = GoalContextService::<G>::format_goal_context(&goals);
+                    self.audit_log.info(
+                        AuditCategory::Goal,
+                        AuditAction::GoalEvaluated,
+                        format!(
+                            "Task {} received guidance from {} relevant goal(s)",
+                            task.id, goals.len()
+                        ),
+                    ).await;
+                    Some(context_text)
+                }
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::warn!("Failed to load goal context for task {}: {}", task.id, e);
+                    None
+                }
+            };
+
+            // Build the task description with goal context prepended
+            let task_description = if let Some(ref ctx) = goal_context {
+                format!("{}\n\n---\n\n{}", ctx, task.description)
+            } else {
+                task.description.clone()
+            };
+
             // Spawn task execution
             let task_id = task.id;
-            let goal_id = goal.id;
-            let task_description = task.description.clone();
             let substrate = self.substrate.clone();
             let task_repo = self.task_repo.clone();
             let goal_repo = self.goal_repo.clone();
@@ -556,6 +314,7 @@ where
             let use_merge_queue = self.config.use_merge_queue;
             let repo_path = self.config.repo_path.clone();
             let default_base_ref = self.config.default_base_ref.clone();
+            let circuit_scope = scope;
 
             tokio::spawn(async move {
                 let _permit = permit;
@@ -609,7 +368,7 @@ where
                             let _ = task_repo.update(&completed_task).await;
 
                             // Record success with circuit breaker
-                            circuit_breaker.record_success(CircuitScope::task_chain(goal_id)).await;
+                            circuit_breaker.record_success(circuit_scope.clone()).await;
 
                             // Record success in evolution loop for template improvement
                             if track_evolution {
@@ -732,7 +491,7 @@ where
 
                             // Record failure with circuit breaker
                             circuit_breaker.record_failure(
-                                CircuitScope::task_chain(goal_id),
+                                circuit_scope.clone(),
                                 &error_msg,
                             ).await;
 
@@ -786,7 +545,7 @@ where
 
                             // Record failure with circuit breaker
                             circuit_breaker.record_failure(
-                                CircuitScope::task_chain(goal_id),
+                                circuit_scope.clone(),
                                 &error_msg,
                             ).await;
 
@@ -872,180 +631,4 @@ where
 
         Ok(())
     }
-
-    /// Decompose a goal into tasks using MetaPlanner.
-    ///
-    /// Uses LLM decomposition if configured, otherwise falls back to heuristic decomposition.
-    pub(super) async fn decompose_goal_with_meta_planner(&self, goal: &Goal, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<usize> {
-        // Create MetaPlanner with current configuration
-        let meta_planner_config = MetaPlannerConfig {
-            use_llm_decomposition: self.config.use_llm_decomposition,
-            max_tasks_per_decomposition: 10,
-            auto_generate_agents: true,
-            ..Default::default()
-        };
-
-        let mut meta_planner = MetaPlanner::new(
-            self.goal_repo.clone(),
-            self.task_repo.clone(),
-            self.agent_repo.clone(),
-            meta_planner_config,
-        );
-
-        // Wire memory repository for pattern queries during decomposition
-        if let Some(ref memory_repo) = self.memory_repo {
-            meta_planner = meta_planner.with_memory_repo(memory_repo.clone() as Arc<dyn MemoryRepository>);
-        }
-
-        // Wire Overmind for Substrate-compatible LLM decomposition
-        if let Some(ref overmind) = self.overmind {
-            meta_planner = meta_planner.with_overmind(overmind.clone());
-        }
-
-        // Wire EvolutionLoop for real agent performance metrics
-        meta_planner = meta_planner.with_evolution_loop(self.evolution_loop.clone());
-
-        // Decompose the goal into tasks
-        let plan = meta_planner.decompose_goal(goal.id).await?;
-
-        // Log the decomposition
-        self.audit_log.info(
-            AuditCategory::Task,
-            AuditAction::TaskCreated,
-            format!(
-                "Goal '{}' decomposed into {} tasks (complexity: {:?})",
-                goal.name, plan.tasks.len(), plan.estimated_complexity
-            ),
-        ).await;
-
-        // Execute the plan - create the tasks
-        let created_tasks = meta_planner.execute_plan(&plan).await?;
-        let task_count = created_tasks.len();
-
-        // Emit TaskSubmitted events for each created task
-        for task in &created_tasks {
-            let _ = event_tx.send(SwarmEvent::TaskSubmitted {
-                task_id: task.id,
-                task_title: task.title.clone(),
-                goal_id: goal.id,
-            }).await;
-        }
-
-        // Ensure required agents exist (capability-driven agent genesis)
-        for agent_type in &plan.required_agents {
-            let exists = meta_planner.agent_exists(agent_type).await.unwrap_or(false);
-
-            if !exists {
-                let purpose = format!("Execute tasks for goal: {}", goal.name);
-                match meta_planner.ensure_agent(agent_type, &purpose).await {
-                    Ok(agent) => {
-                        let _ = event_tx.send(SwarmEvent::AgentCreated {
-                            agent_type: agent_type.clone(),
-                            tier: format!("{:?}", agent.tier),
-                        }).await;
-
-                        self.audit_log.info(
-                            AuditCategory::Agent,
-                            AuditAction::TemplateCreated,
-                            format!(
-                                "Dynamically created agent '{}' for goal '{}'",
-                                agent_type, goal.name
-                            ),
-                        ).await;
-                    }
-                    Err(e) => {
-                        self.audit_log.log(
-                            AuditEntry::new(
-                                AuditLevel::Warning,
-                                AuditCategory::Agent,
-                                AuditAction::TaskFailed,
-                                AuditActor::System,
-                                format!("Could not ensure agent '{}': {}", agent_type, e),
-                            ),
-                        ).await;
-                    }
-                }
-            }
-        }
-
-        Ok(task_count)
-    }
-
-    /// Basic goal decomposition (creates a single task).
-    /// Fallback when MetaPlanner is unavailable.
-    #[allow(dead_code)]
-    pub(super) async fn decompose_goal_basic(&self, goal: &Goal) -> DomainResult<usize> {
-        let task = Task::new(
-            &format!("Implement: {}", goal.name),
-            &goal.description,
-        )
-        .with_goal(goal.id)
-        .with_priority(match goal.priority {
-            crate::domain::models::GoalPriority::Low => crate::domain::models::TaskPriority::Low,
-            crate::domain::models::GoalPriority::Normal => crate::domain::models::TaskPriority::Normal,
-            crate::domain::models::GoalPriority::High => crate::domain::models::TaskPriority::High,
-            crate::domain::models::GoalPriority::Critical => crate::domain::models::TaskPriority::Critical,
-        });
-
-        task.validate().map_err(DomainError::ValidationFailed)?;
-        self.task_repo.create(&task).await?;
-
-        Ok(1)
-    }
-}
-
-/// Update gap fingerprints in a `TickConvergenceState` from a verification result.
-///
-/// Mirrors the drift detection logic in `ConvergenceState::update_gap_fingerprints`:
-/// normalizes gap descriptions, checks Jaccard similarity > 0.5, and sets
-/// `drift_detected = true` when a gap recurs 3+ times.
-fn update_tick_gap_fingerprints(
-    state: &mut TickConvergenceState,
-    result: &crate::domain::models::IntentVerificationResult,
-) {
-    for gap in &result.gaps {
-        let normalized = normalize_gap_description(&gap.description);
-
-        let existing = state.gap_fingerprints.iter_mut().find(|fp| {
-            gaps_are_similar(&fp.normalized_description, &normalized)
-        });
-
-        if let Some(fingerprint) = existing {
-            fingerprint.occurrence_count += 1;
-            if fingerprint.occurrence_count >= 3 {
-                state.drift_detected = true;
-            }
-        } else {
-            state.gap_fingerprints.push(GapFingerprint {
-                normalized_description: normalized,
-                severity: gap.severity,
-                first_seen_iteration: state.iteration,
-                occurrence_count: 1,
-            });
-        }
-    }
-}
-
-/// Normalize a gap description for comparison.
-fn normalize_gap_description(description: &str) -> String {
-    description
-        .to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Check if two gap descriptions are semantically similar using Jaccard similarity.
-fn gaps_are_similar(a: &str, b: &str) -> bool {
-    let words_a: std::collections::HashSet<_> = a.split_whitespace().collect();
-    let words_b: std::collections::HashSet<_> = b.split_whitespace().collect();
-
-    if words_a.is_empty() || words_b.is_empty() {
-        return false;
-    }
-
-    let intersection = words_a.intersection(&words_b).count();
-    let union = words_a.union(&words_b).count();
-
-    (intersection as f64 / union as f64) > 0.5
 }

@@ -94,6 +94,7 @@ where
     W: WorktreeRepository + 'static,
 {
     task_repo: Arc<T>,
+    #[allow(dead_code)]
     goal_repo: Arc<G>,
     worktree_repo: Arc<W>,
     config: VerifierConfig,
@@ -163,13 +164,7 @@ where
         let deps_check = self.check_dependencies_complete(&task).await?;
         checks.push(deps_check);
 
-        // 3. Check goal constraints (legacy)
-        if let Some(goal_id) = task.goal_id {
-            let constraint_check = self.verify_goal_constraints(&task, goal_id).await?;
-            checks.push(constraint_check);
-        }
-
-        // 4. Holistic goal alignment check against ALL active goals
+        // 3. Holistic goal alignment check against ALL active goals
         let alignment_check = self.check_holistic_alignment(&task).await?;
         checks.push(alignment_check);
 
@@ -401,6 +396,7 @@ where
     }
 
     /// Verify goal constraints are satisfied.
+    #[allow(dead_code)]
     async fn verify_goal_constraints(
         &self,
         task: &Task,
@@ -457,6 +453,7 @@ where
     }
 
     /// Evaluate a single constraint.
+    #[allow(dead_code)]
     fn evaluate_constraint(&self, _task: &Task, constraint: &GoalConstraint) -> (bool, Option<String>) {
         // Basic constraint evaluation
         // In a full implementation, this would analyze the task output

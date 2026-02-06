@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::domain::errors::DomainResult;
-use crate::domain::models::{Goal, Task, TaskStatus};
+use crate::domain::models::{Task, TaskSource, TaskStatus};
 use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
@@ -42,26 +42,12 @@ where
             .collect();
 
         for task in permanently_failed {
-            // Skip tasks without a goal_id
-            let Some(goal_id) = task.goal_id else {
-                continue;
-            };
-
-            // Get the goal for context
-            let goal = match self.goal_repo.get(goal_id).await? {
-                Some(g) => g,
-                None => continue,
-            };
-
             // First, try DAG restructuring before falling back to diagnostic analyst
-            let restructure_result = self.try_restructure_for_failure(task, &goal, event_tx).await;
+            let restructure_result = self.try_restructure_for_failure(task, event_tx).await;
 
             match restructure_result {
                 Ok(true) => {
-                    // Restructuring created new tasks - reactivate the goal
-                    let mut updated_goal = goal.clone();
-                    updated_goal.resume();
-                    let _ = self.goal_repo.update(&updated_goal).await;
+                    // Restructuring created new tasks
                     continue;
                 }
                 Ok(false) => {
@@ -82,14 +68,17 @@ where
             }
 
             // Check if we haven't already created a diagnostic task
+            let id_prefix = &task.id.to_string()[..8];
             let diagnostic_exists = self.task_repo
-                .list_by_goal(goal_id)
+                .list_by_status(TaskStatus::Ready)
                 .await?
                 .iter()
-                .any(|t| t.title.contains("Diagnostic:") && t.title.contains(&task.id.to_string()[..8]));
+                .chain(self.task_repo.list_by_status(TaskStatus::Pending).await?.iter())
+                .chain(self.task_repo.list_by_status(TaskStatus::Running).await?.iter())
+                .any(|t| t.title.contains("Diagnostic:") && t.title.contains(id_prefix));
 
             if !diagnostic_exists {
-                if let Err(e) = self.spawn_specialist_for_failure(task, goal_id, event_tx).await {
+                if let Err(e) = self.spawn_specialist_for_failure(task, event_tx).await {
                     self.audit_log.log(
                         AuditEntry::new(
                             AuditLevel::Warning,
@@ -127,7 +116,6 @@ where
     async fn try_restructure_for_failure(
         &self,
         failed_task: &Task,
-        goal: &Goal,
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<bool> {
         let trigger = RestructureTrigger::PermanentFailure {
@@ -142,16 +130,16 @@ where
             return Ok(false);
         }
 
-        // Get related failures in the same goal
-        let goal_tasks = self.task_repo.list_by_goal(goal.id).await?;
-        let related_failures: Vec<Task> = goal_tasks
+        // Get related failures
+        let all_failed = self.task_repo.list_by_status(TaskStatus::Failed).await?;
+        let related_failures: Vec<Task> = all_failed
             .into_iter()
-            .filter(|t| t.status == TaskStatus::Failed && t.id != failed_task.id)
+            .filter(|t| t.id != failed_task.id)
             .collect();
 
         // Build restructure context
         let context = RestructureContext {
-            goal: goal.clone(),
+            goal: None,
             failed_task: failed_task.clone(),
             failure_reason: format!("Task failed after {} retries", failed_task.retry_count),
             previous_attempts: vec![],
@@ -197,11 +185,11 @@ where
                 Ok(true)
             }
             RestructureDecision::DecomposeDifferently { new_subtasks, remove_original } => {
-                self.create_restructure_subtasks(goal, failed_task, &new_subtasks, remove_original, event_tx).await?;
+                self.create_restructure_subtasks(failed_task, &new_subtasks, remove_original, event_tx).await?;
                 Ok(true)
             }
             RestructureDecision::AlternativePath { description, new_tasks } => {
-                self.create_restructure_subtasks(goal, failed_task, &new_tasks, false, event_tx).await?;
+                self.create_restructure_subtasks(failed_task, &new_tasks, false, event_tx).await?;
 
                 self.audit_log.info(
                     AuditCategory::Task,
@@ -278,11 +266,10 @@ where
     /// Create subtasks from a restructure decision (shared between DecomposeDifferently and AlternativePath).
     async fn create_restructure_subtasks(
         &self,
-        goal: &Goal,
         failed_task: &Task,
         new_tasks: &[crate::services::dag_restructure::NewTaskSpec],
         remove_original: bool,
-        event_tx: &mpsc::Sender<SwarmEvent>,
+        _event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
         let mut title_to_id: Vec<(String, Uuid)> = Vec::new();
         for spec in new_tasks {
@@ -292,8 +279,8 @@ where
                 TaskPriorityModifier::Lower => crate::domain::models::TaskPriority::Low,
             };
 
-            let mut new_task = Task::new(&spec.title, &spec.description)
-                .with_goal(goal.id)
+            let mut new_task = Task::with_title(&spec.title, &spec.description)
+                .with_source(TaskSource::System)
                 .with_priority(priority);
 
             if let Some(ref agent_type) = spec.agent_type {
@@ -310,11 +297,6 @@ where
             if new_task.validate().is_ok() {
                 title_to_id.push((spec.title.clone(), new_task.id));
                 self.task_repo.create(&new_task).await?;
-                let _ = event_tx.send(SwarmEvent::TaskSubmitted {
-                    task_id: new_task.id,
-                    task_title: new_task.title.clone(),
-                    goal_id: goal.id,
-                }).await;
             }
         }
 
@@ -332,10 +314,9 @@ where
     async fn spawn_specialist_for_failure(
         &self,
         failed_task: &Task,
-        goal_id: Uuid,
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
-        let diagnostic_task = Task::new(
+        let diagnostic_task = Task::with_title(
             &format!("Diagnostic: Investigate failure of task {}", &failed_task.id.to_string()[..8]),
             &format!(
                 "The following task has permanently failed after {} retries:\n\n\
@@ -352,7 +333,7 @@ where
                 failed_task.description
             ),
         )
-        .with_goal(goal_id)
+        .with_source(TaskSource::System)
         .with_agent("diagnostic-analyst");
 
         diagnostic_task.validate().map_err(crate::domain::errors::DomainError::ValidationFailed)?;
@@ -382,7 +363,6 @@ where
     pub async fn check_spawn_limits_and_handle(
         &self,
         parent_id: Option<Uuid>,
-        goal_id: Uuid,
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<bool> {
         use crate::services::task_service::SpawnLimitConfig;
@@ -417,11 +397,14 @@ where
 
         if depth >= spawn_limits.max_subtask_depth {
             if spawn_limits.allow_limit_extensions {
+                let id_prefix = &parent_task.id.to_string()[..8];
                 let specialist_exists = self.task_repo
-                    .list_by_goal(goal_id)
+                    .list_by_status(TaskStatus::Ready)
                     .await?
                     .iter()
-                    .any(|t| t.title.contains("Limit Evaluation:") && t.title.contains(&parent_task.id.to_string()[..8]));
+                    .chain(self.task_repo.list_by_status(TaskStatus::Pending).await?.iter())
+                    .chain(self.task_repo.list_by_status(TaskStatus::Running).await?.iter())
+                    .any(|t| t.title.contains("Limit Evaluation:") && t.title.contains(id_prefix));
 
                 if !specialist_exists {
                     self.spawn_limit_evaluation_specialist(
@@ -429,7 +412,6 @@ where
                         "subtask_depth",
                         depth,
                         spawn_limits.max_subtask_depth,
-                        goal_id,
                         event_tx,
                     ).await?;
                 }
@@ -446,11 +428,14 @@ where
 
         if direct_subtasks >= spawn_limits.max_subtasks_per_task {
             if spawn_limits.allow_limit_extensions {
+                let id_prefix = &parent_task.id.to_string()[..8];
                 let specialist_exists = self.task_repo
-                    .list_by_goal(goal_id)
+                    .list_by_status(TaskStatus::Ready)
                     .await?
                     .iter()
-                    .any(|t| t.title.contains("Limit Evaluation:") && t.title.contains(&parent_task.id.to_string()[..8]));
+                    .chain(self.task_repo.list_by_status(TaskStatus::Pending).await?.iter())
+                    .chain(self.task_repo.list_by_status(TaskStatus::Running).await?.iter())
+                    .any(|t| t.title.contains("Limit Evaluation:") && t.title.contains(id_prefix));
 
                 if !specialist_exists {
                     self.spawn_limit_evaluation_specialist(
@@ -458,7 +443,6 @@ where
                         "subtasks_per_task",
                         direct_subtasks,
                         spawn_limits.max_subtasks_per_task,
-                        goal_id,
                         event_tx,
                     ).await?;
                 }
@@ -476,10 +460,9 @@ where
         limit_type: &str,
         current_value: u32,
         limit_value: u32,
-        goal_id: Uuid,
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
-        let evaluation_task = Task::new(
+        let evaluation_task = Task::with_title(
             &format!("Limit Evaluation: {} exceeded for task {}", limit_type, &parent_task.id.to_string()[..8]),
             &format!(
                 "Spawn limit exceeded while creating subtasks:\n\n\
@@ -501,7 +484,7 @@ where
                 limit_value
             ),
         )
-        .with_goal(goal_id)
+        .with_source(TaskSource::System)
         .with_agent("limit-evaluation-specialist");
 
         evaluation_task.validate().map_err(crate::domain::errors::DomainError::ValidationFailed)?;
@@ -562,8 +545,9 @@ where
         let conflicts = merge_queue.get_conflicts_needing_resolution().await;
 
         for conflict in conflicts {
+            // Check if a resolution task already exists for this conflict
             let resolution_exists = self.task_repo
-                .list_by_goal(conflict.task_id)
+                .list_by_status(TaskStatus::Ready)
                 .await
                 .map(|tasks| {
                     tasks.iter().any(|t| {
@@ -571,55 +555,69 @@ where
                         t.title.contains(&conflict.source_branch)
                     })
                 })
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || self.task_repo
+                    .list_by_status(TaskStatus::Running)
+                    .await
+                    .map(|tasks| {
+                        tasks.iter().any(|t| {
+                            t.title.contains("Resolve merge conflict") &&
+                            t.title.contains(&conflict.source_branch)
+                        })
+                    })
+                    .unwrap_or(false)
+                || self.task_repo
+                    .list_by_status(TaskStatus::Pending)
+                    .await
+                    .map(|tasks| {
+                        tasks.iter().any(|t| {
+                            t.title.contains("Resolve merge conflict") &&
+                            t.title.contains(&conflict.source_branch)
+                        })
+                    })
+                    .unwrap_or(false);
 
             if !resolution_exists {
-                if let Ok(Some(task)) = self.task_repo.get(conflict.task_id).await {
-                    let Some(goal_id) = task.goal_id else {
-                        continue;
-                    };
+                let resolution_task = Task::with_title(
+                    &format!("Resolve merge conflict: {} → {}", conflict.source_branch, conflict.target_branch),
+                    &format!(
+                        "A merge conflict was detected when trying to merge branch '{}' into '{}'.\n\n\
+                        Conflicting files:\n{}\n\n\
+                        Working directory: {}\n\n\
+                        Please resolve the conflicts by:\n\
+                        1. Analyzing the conflicting changes\n\
+                        2. Understanding the intent of each change\n\
+                        3. Merging the changes in a way that preserves both intents\n\
+                        4. Testing the merged result\n\
+                        5. Completing the merge commit",
+                        conflict.source_branch,
+                        conflict.target_branch,
+                        conflict.conflict_files.iter()
+                            .map(|f| format!("  - {}", f))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        conflict.workdir
+                    ),
+                )
+                .with_source(TaskSource::System)
+                .with_agent("merge-conflict-specialist");
 
-                    let resolution_task = Task::new(
-                        &format!("Resolve merge conflict: {} → {}", conflict.source_branch, conflict.target_branch),
-                        &format!(
-                            "A merge conflict was detected when trying to merge branch '{}' into '{}'.\n\n\
-                            Conflicting files:\n{}\n\n\
-                            Working directory: {}\n\n\
-                            Please resolve the conflicts by:\n\
-                            1. Analyzing the conflicting changes\n\
-                            2. Understanding the intent of each change\n\
-                            3. Merging the changes in a way that preserves both intents\n\
-                            4. Testing the merged result\n\
-                            5. Completing the merge commit",
-                            conflict.source_branch,
-                            conflict.target_branch,
-                            conflict.conflict_files.iter()
-                                .map(|f| format!("  - {}", f))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                            conflict.workdir
-                        ),
-                    )
-                    .with_goal(goal_id)
-                    .with_agent("merge-conflict-specialist");
+                if resolution_task.validate().is_ok() {
+                    if let Ok(()) = self.task_repo.create(&resolution_task).await {
+                        let _ = event_tx.send(SwarmEvent::SpecialistSpawned {
+                            specialist_type: "merge-conflict-specialist".to_string(),
+                            trigger: format!("Merge conflict in {} files", conflict.conflict_files.len()),
+                            task_id: Some(resolution_task.id),
+                        }).await;
 
-                    if resolution_task.validate().is_ok() {
-                        if let Ok(()) = self.task_repo.create(&resolution_task).await {
-                            let _ = event_tx.send(SwarmEvent::SpecialistSpawned {
-                                specialist_type: "merge-conflict-specialist".to_string(),
-                                trigger: format!("Merge conflict in {} files", conflict.conflict_files.len()),
-                                task_id: Some(resolution_task.id),
-                            }).await;
-
-                            self.audit_log.info(
-                                AuditCategory::Agent,
-                                AuditAction::AgentSpawned,
-                                format!(
-                                    "Spawned Merge Conflict Specialist for {} → {}",
-                                    conflict.source_branch, conflict.target_branch
-                                ),
-                            ).await;
-                        }
+                        self.audit_log.info(
+                            AuditCategory::Agent,
+                            AuditAction::AgentSpawned,
+                            format!(
+                                "Spawned Merge Conflict Specialist for {} → {}",
+                                conflict.source_branch, conflict.target_branch
+                            ),
+                        ).await;
                     }
                 }
             }

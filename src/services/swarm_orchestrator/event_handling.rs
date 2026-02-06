@@ -384,7 +384,7 @@ where
                 _ => crate::domain::models::TaskPriority::Normal,
             };
 
-            let mut task = crate::domain::models::Task::new(
+            let mut task = crate::domain::models::Task::with_title(
                 &format!("Delegated: {}", &delegation.task_description.chars().take(50).collect::<String>()),
                 &format!(
                     "## A2A Delegation\n\n\
@@ -396,10 +396,6 @@ where
             )
             .with_priority(priority)
             .with_agent(&delegation.target_agent);
-
-            if let Some(goal_id) = delegation.goal_id {
-                task = task.with_goal(goal_id);
-            }
 
             if let Some(parent_id) = delegation.parent_task_id {
                 task.parent_id = Some(parent_id);

@@ -67,8 +67,8 @@ impl RestructureTrigger {
 /// Context for restructuring decision.
 #[derive(Debug, Clone)]
 pub struct RestructureContext {
-    /// The goal being worked on.
-    pub goal: Goal,
+    /// The goal being worked on (if known).
+    pub goal: Option<Goal>,
     /// The failed task.
     pub failed_task: Task,
     /// Failure reason.
@@ -371,7 +371,8 @@ impl DagRestructureService {
             ),
             context: format!(
                 "Failure reason: {}\nGoal: {}",
-                context.failure_reason, context.goal.name
+                context.failure_reason,
+                context.goal.as_ref().map(|g| g.name.as_str()).unwrap_or("unknown")
             ),
         }
     }
@@ -471,9 +472,9 @@ impl DagRestructureService {
             task_title: context.failed_task.title.clone(),
             task_description: context.failed_task.description.clone(),
             goal_context: GoalContext {
-                goal_id: context.goal.id,
-                goal_name: context.goal.name.clone(),
-                goal_description: context.goal.description.clone(),
+                goal_id: context.goal.as_ref().map(|g| g.id).unwrap_or(Uuid::nil()),
+                goal_name: context.goal.as_ref().map(|g| g.name.clone()).unwrap_or_default(),
+                goal_description: context.goal.as_ref().map(|g| g.description.clone()).unwrap_or_default(),
                 other_tasks_status: format!(
                     "{} related failures",
                     context.related_failures.len()
@@ -580,7 +581,7 @@ mod tests {
     use crate::domain::models::{GoalPriority, TaskPriority};
 
     fn create_test_task() -> Task {
-        let mut task = Task::new("Test Task", "Test description")
+        let mut task = Task::with_title("Test Task", "Test description")
             .with_priority(TaskPriority::Normal);
         task.status = TaskStatus::Failed;
         task
@@ -660,7 +661,7 @@ mod tests {
         let mut service = DagRestructureService::with_defaults();
 
         let context = RestructureContext {
-            goal: create_test_goal(),
+            goal: Some(create_test_goal()),
             failed_task: create_test_task(),
             failure_reason: "Test failure".to_string(),
             previous_attempts: vec![],
@@ -686,7 +687,7 @@ mod tests {
         let mut service = DagRestructureService::with_defaults();
 
         let context = RestructureContext {
-            goal: create_test_goal(),
+            goal: Some(create_test_goal()),
             failed_task: create_test_task(),
             failure_reason: "Test failure".to_string(),
             previous_attempts: vec![],
@@ -727,7 +728,7 @@ mod tests {
         assert_eq!(service.attempt_count(task_id), 0);
 
         let context = RestructureContext {
-            goal: create_test_goal(),
+            goal: Some(create_test_goal()),
             failed_task: {
                 let mut t = create_test_task();
                 t.id = task_id;

@@ -68,7 +68,11 @@ impl ClaudeCodeSubstrate {
     }
 
     /// Build CLI arguments for a request.
-    fn build_args(&self, request: &SubstrateRequest) -> Vec<String> {
+    ///
+    /// `output_format` controls the CLI output format:
+    /// - `"json"`: single JSON blob with result + usage (used by `execute`)
+    /// - `"stream-json"`: streaming JSON events (used by `execute_streaming`)
+    fn build_args(&self, request: &SubstrateRequest, output_format: &str) -> Vec<String> {
         let mut args = vec![];
 
         // Print mode for non-interactive execution
@@ -76,8 +80,8 @@ impl ClaudeCodeSubstrate {
             args.push("--print".to_string());
             // Output format for structured output
             args.push("--output-format".to_string());
-            args.push(self.config.output_format.clone());
-            if self.config.output_format == "stream-json" {
+            args.push(output_format.to_string());
+            if output_format == "stream-json" {
                 args.push("--verbose".to_string());
             }
         }
@@ -340,7 +344,7 @@ impl Substrate for ClaudeCodeSubstrate {
     }
 
     async fn execute(&self, request: SubstrateRequest) -> DomainResult<SubstrateSession> {
-        let args = self.build_args(&request);
+        let args = self.build_args(&request, "json");
         let working_dir = request.config.working_dir
             .clone()
             .unwrap_or_else(|| ".".to_string());
@@ -436,14 +440,44 @@ impl Substrate for ClaudeCodeSubstrate {
             processes.remove(&session.id);
         }
 
-        // If we didn't get usage from streaming, try to extract from final output
-        if total_input_tokens == 0 && total_output_tokens == 0 {
-            let (input, output, cache_read, cache_write) = Self::extract_final_usage(&output_text);
-            total_input_tokens = input;
-            total_output_tokens = output;
-            session.cache_read_tokens = cache_read;
-            session.cache_write_tokens = cache_write;
-        }
+        // Parse the JSON output to extract result text and usage.
+        // With --output-format json, Claude outputs a single JSON object containing
+        // the result text, usage stats, and metadata.
+        let result_text = if let Ok(json) = serde_json::from_str::<serde_json::Value>(output_text.trim()) {
+            // Extract usage from JSON response
+            if let Some(usage) = json.get("usage") {
+                total_input_tokens = usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                total_output_tokens = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                session.cache_read_tokens = usage.get("cache_read_input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                session.cache_write_tokens = usage.get("cache_creation_input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+            }
+
+            // Extract turn count from JSON if available
+            if let Some(num_turns) = json.get("num_turns").and_then(|n| n.as_u64()) {
+                turns = num_turns as u32;
+            }
+
+            // Extract cost if available
+            if let Some(cost) = json.get("cost_usd").and_then(|c| c.as_f64()) {
+                session.cost_cents = Some(cost * 100.0);
+            }
+
+            // Extract the result text from JSON
+            json.get("result")
+                .and_then(|r| r.as_str())
+                .unwrap_or(output_text.trim())
+                .to_string()
+        } else {
+            // Fallback for non-JSON output: try line-by-line extraction
+            if total_input_tokens == 0 && total_output_tokens == 0 {
+                let (input, output, cache_read, cache_write) = Self::extract_final_usage(&output_text);
+                total_input_tokens = input;
+                total_output_tokens = output;
+                session.cache_read_tokens = cache_read;
+                session.cache_write_tokens = cache_write;
+            }
+            output_text.trim().to_string()
+        };
 
         // Update session with token counts
         session.input_tokens = total_input_tokens;
@@ -452,7 +486,7 @@ impl Substrate for ClaudeCodeSubstrate {
 
         // Determine success based on exit code
         if exit_status.success() {
-            session.complete(output_text.trim());
+            session.complete(&result_text);
         } else {
             let error_msg = if !error_text.trim().is_empty() {
                 error_text.trim().to_string()
@@ -475,7 +509,7 @@ impl Substrate for ClaudeCodeSubstrate {
         &self,
         request: SubstrateRequest,
     ) -> DomainResult<(mpsc::Receiver<SubstrateOutput>, SubstrateSession)> {
-        let args = self.build_args(&request);
+        let args = self.build_args(&request, "stream-json");
         let working_dir = request.config.working_dir
             .clone()
             .unwrap_or_else(|| ".".to_string());
@@ -708,14 +742,20 @@ mod tests {
             "Hello world",
         ).with_config(SubstrateConfig::default().with_max_turns(10));
 
-        let args = substrate.build_args(&request);
+        let args = substrate.build_args(&request, "stream-json");
 
         assert!(args.contains(&"--print".to_string()));
         assert!(args.contains(&"--max-turns".to_string()));
         assert!(args.contains(&"10".to_string()));
         assert!(args.contains(&"-p".to_string()));
         assert!(args.contains(&"--output-format".to_string()));
+        assert!(args.contains(&"stream-json".to_string()));
         assert!(args.contains(&"--verbose".to_string()));
+
+        // JSON format should not include --verbose
+        let json_args = substrate.build_args(&request, "json");
+        assert!(json_args.contains(&"json".to_string()));
+        assert!(!json_args.contains(&"--verbose".to_string()));
     }
 
     #[test]

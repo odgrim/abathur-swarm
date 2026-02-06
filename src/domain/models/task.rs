@@ -88,6 +88,25 @@ impl TaskStatus {
     }
 }
 
+/// Where a task originated from.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum TaskSource {
+    /// Task submitted directly by a human
+    Human,
+    /// Task created by the system (e.g., specialist triggers, diagnostics)
+    System,
+    /// Subtask spawned by another task during execution
+    SubtaskOf(Uuid),
+    /// Task created by goal evaluation to address a gap
+    GoalEvaluation(Uuid),
+}
+
+impl Default for TaskSource {
+    fn default() -> Self {
+        Self::Human
+    }
+}
+
 /// Priority level for tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -199,8 +218,6 @@ pub struct Task {
     pub title: String,
     /// Detailed description/prompt
     pub description: String,
-    /// Associated goal
-    pub goal_id: Option<Uuid>,
     /// Assigned agent type
     pub agent_type: Option<String>,
     /// Routing hints
@@ -221,8 +238,8 @@ pub struct Task {
     pub worktree_path: Option<String>,
     /// Execution context
     pub context: TaskContext,
-    /// Evaluated constraints from goal
-    pub evaluated_constraints: Vec<String>,
+    /// Where this task originated from
+    pub source: TaskSource,
     /// When created
     pub created_at: DateTime<Utc>,
     /// When last updated
@@ -238,15 +255,16 @@ pub struct Task {
 }
 
 impl Task {
-    /// Create a new task.
-    pub fn new(title: impl Into<String>, description: impl Into<String>) -> Self {
+    /// Create a new task from a prompt. Title is auto-generated.
+    pub fn new(prompt: impl Into<String>) -> Self {
+        let description = prompt.into();
+        let title = generate_title(&description);
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
             parent_id: None,
-            title: title.into(),
-            description: description.into(),
-            goal_id: None,
+            title,
+            description,
             agent_type: None,
             routing_hints: RoutingHints::default(),
             depends_on: Vec::new(),
@@ -257,7 +275,7 @@ impl Task {
             artifacts: Vec::new(),
             worktree_path: None,
             context: TaskContext::default(),
-            evaluated_constraints: Vec::new(),
+            source: TaskSource::default(),
             created_at: now,
             updated_at: now,
             started_at: None,
@@ -267,10 +285,32 @@ impl Task {
         }
     }
 
-    /// Associate with a goal.
-    pub fn with_goal(mut self, goal_id: Uuid) -> Self {
-        self.goal_id = Some(goal_id);
-        self
+    /// Create a new task with an explicit title and prompt/description.
+    pub fn with_title(title: impl Into<String>, description: impl Into<String>) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            parent_id: None,
+            title: title.into(),
+            description: description.into(),
+            agent_type: None,
+            routing_hints: RoutingHints::default(),
+            depends_on: Vec::new(),
+            status: TaskStatus::default(),
+            priority: TaskPriority::default(),
+            retry_count: 0,
+            max_retries: 3,
+            artifacts: Vec::new(),
+            worktree_path: None,
+            context: TaskContext::default(),
+            source: TaskSource::default(),
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            completed_at: None,
+            version: 1,
+            idempotency_key: None,
+        }
     }
 
     /// Set parent task.
@@ -296,6 +336,12 @@ impl Task {
     /// Set agent type.
     pub fn with_agent(mut self, agent_type: impl Into<String>) -> Self {
         self.agent_type = Some(agent_type.into());
+        self
+    }
+
+    /// Set task source.
+    pub fn with_source(mut self, source: TaskSource) -> Self {
+        self.source = source;
         self
     }
 
@@ -363,10 +409,30 @@ impl Task {
         if self.title.is_empty() {
             return Err("Task title cannot be empty".to_string());
         }
+        if self.description.trim().is_empty() {
+            return Err("Task prompt cannot be empty".to_string());
+        }
         if self.depends_on.contains(&self.id) {
             return Err("Task cannot depend on itself".to_string());
         }
         Ok(())
+    }
+}
+
+/// Generate a short title from a prompt string.
+/// Takes the first line, truncates at ~80 chars on a word boundary.
+fn generate_title(prompt: &str) -> String {
+    let first_line = prompt.lines().next().unwrap_or(prompt).trim();
+    if first_line.is_empty() {
+        return "Untitled task".to_string();
+    }
+    let max_len = 80;
+    if first_line.len() <= max_len {
+        return first_line.to_string();
+    }
+    match first_line[..max_len].rfind(' ') {
+        Some(pos) => format!("{}...", &first_line[..pos]),
+        None => format!("{}...", &first_line[..max_len]),
     }
 }
 
@@ -375,15 +441,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_task_creation() {
-        let task = Task::new("Test Task", "Description");
-        assert_eq!(task.title, "Test Task");
+    fn test_task_creation_from_prompt() {
+        let task = Task::new("Implement the login feature");
+        assert_eq!(task.title, "Implement the login feature");
+        assert_eq!(task.description, "Implement the login feature");
         assert_eq!(task.status, TaskStatus::Pending);
     }
 
     #[test]
+    fn test_task_creation_with_title() {
+        let task = Task::with_title("Test Task", "Description");
+        assert_eq!(task.title, "Test Task");
+        assert_eq!(task.description, "Description");
+        assert_eq!(task.status, TaskStatus::Pending);
+    }
+
+    #[test]
+    fn test_generate_title() {
+        // Short prompt: title equals full prompt
+        assert_eq!(generate_title("Short prompt"), "Short prompt");
+
+        // Multi-line: takes first line only
+        assert_eq!(generate_title("First line\nSecond line"), "First line");
+
+        // Long prompt: truncates at word boundary
+        let long = "This is a very long prompt that exceeds eighty characters and should be truncated at a word boundary somewhere";
+        let title = generate_title(long);
+        assert!(title.len() <= 84); // 80 + "..."
+        assert!(title.ends_with("..."));
+    }
+
+    #[test]
     fn test_task_state_transitions() {
-        let mut task = Task::new("Test", "Desc");
+        let mut task = Task::new("Test task description");
 
         // Pending -> Ready
         assert!(task.can_transition_to(TaskStatus::Ready));
@@ -402,7 +492,7 @@ mod tests {
 
     #[test]
     fn test_task_retry() {
-        let mut task = Task::new("Test", "Desc");
+        let mut task = Task::new("Test task description");
         task.status = TaskStatus::Failed;
 
         assert!(task.can_retry());
@@ -414,7 +504,7 @@ mod tests {
     #[test]
     fn test_task_dependencies() {
         let dep_id = Uuid::new_v4();
-        let task = Task::new("Test", "Desc")
+        let task = Task::new("Test task description")
             .with_dependency(dep_id);
 
         assert!(task.depends_on.contains(&dep_id));
@@ -422,10 +512,20 @@ mod tests {
 
     #[test]
     fn test_task_validation() {
-        let task = Task::new("", "Empty title");
+        // Empty title via with_title
+        let task = Task::with_title("", "Some prompt");
         assert!(task.validate().is_err());
 
-        let task = Task::new("Valid", "Desc");
+        // Empty prompt
+        let task = Task::with_title("Valid Title", "");
+        assert!(task.validate().is_err());
+
+        // Whitespace-only prompt
+        let task = Task::with_title("Valid Title", "   ");
+        assert!(task.validate().is_err());
+
+        // Valid task
+        let task = Task::new("Valid prompt");
         assert!(task.validate().is_ok());
     }
 }

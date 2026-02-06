@@ -837,7 +837,7 @@ async fn start_mcp_servers(
     json_mode: bool,
 ) -> Result<McpServerHandles> {
     use crate::adapters::mcp::{MemoryHttpServer, MemoryHttpConfig, TasksHttpServer, TasksHttpConfig, A2AHttpGateway, A2AHttpConfig, EventsHttpServer, EventsHttpConfig};
-    use crate::adapters::sqlite::{SqliteMemoryRepository, SqliteTaskRepository, SqliteGoalRepository, SqliteEventRepository};
+    use crate::adapters::sqlite::{SqliteMemoryRepository, SqliteTaskRepository, SqliteEventRepository};
     use crate::services::{MemoryService, TaskService, EventBus, EventBusConfig};
     use std::sync::Arc;
 
@@ -874,8 +874,7 @@ async fn start_mcp_servers(
     if let Some(ref url) = urls.tasks_server {
         let port = extract_port(url).unwrap_or(9101);
         let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-        let task_service = TaskService::new(task_repo, goal_repo);
+        let task_service = TaskService::new(task_repo);
         let config = TasksHttpConfig {
             port,
             ..Default::default()

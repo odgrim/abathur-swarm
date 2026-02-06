@@ -377,8 +377,8 @@ where
             }
 
             // Create the task
-            let mut task = Task::new(&spec.title, &spec.description)
-                .with_goal(plan.goal_id)
+            let mut task = Task::with_title(&spec.title, &spec.description)
+                .with_source(crate::domain::models::TaskSource::GoalEvaluation(plan.goal_id))
                 .with_priority(spec.priority);
 
             if let Some(ref agent) = spec.agent_type {
@@ -536,8 +536,8 @@ where
         let goal = self.goal_repo.get(goal_id).await?
             .ok_or(DomainError::GoalNotFound(goal_id))?;
 
-        // Get existing tasks for this goal
-        let existing_tasks = self.task_repo.list_by_goal(goal_id).await?;
+        // Get existing tasks from goal evaluation source
+        let existing_tasks = self.task_repo.list_by_source("goal_evaluation").await?;
         let existing_task_summaries: Vec<ExistingTaskSummary> = existing_tasks
             .iter()
             .map(|t| ExistingTaskSummary {

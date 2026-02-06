@@ -4,8 +4,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::{Task, TaskContext, TaskPriority, TaskStatus};
-use crate::domain::ports::{GoalRepository, TaskFilter, TaskRepository};
+use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus};
+use crate::domain::ports::{TaskFilter, TaskRepository};
+use crate::services::goal_evaluation_service::SuggestedTask;
 
 /// Configuration for spawn limits.
 #[derive(Debug, Clone)]
@@ -78,17 +79,15 @@ impl SpawnLimitType {
     }
 }
 
-pub struct TaskService<T: TaskRepository, G: GoalRepository> {
+pub struct TaskService<T: TaskRepository> {
     task_repo: Arc<T>,
-    goal_repo: Arc<G>,
     spawn_limits: SpawnLimitConfig,
 }
 
-impl<T: TaskRepository, G: GoalRepository> TaskService<T, G> {
-    pub fn new(task_repo: Arc<T>, goal_repo: Arc<G>) -> Self {
+impl<T: TaskRepository> TaskService<T> {
+    pub fn new(task_repo: Arc<T>) -> Self {
         Self {
             task_repo,
-            goal_repo,
             spawn_limits: SpawnLimitConfig::default(),
         }
     }
@@ -223,28 +222,20 @@ impl<T: TaskRepository, G: GoalRepository> TaskService<T, G> {
     #[allow(clippy::too_many_arguments)]
     pub async fn submit_task(
         &self,
-        title: String,
+        title: Option<String>,
         description: String,
-        goal_id: Option<Uuid>,
         parent_id: Option<Uuid>,
         priority: TaskPriority,
         agent_type: Option<String>,
         depends_on: Vec<Uuid>,
         context: Option<TaskContext>,
         idempotency_key: Option<String>,
+        source: TaskSource,
     ) -> DomainResult<Task> {
         // Check for duplicate by idempotency key
         if let Some(ref key) = idempotency_key {
             if let Some(existing) = self.task_repo.get_by_idempotency_key(key).await? {
                 return Ok(existing);
-            }
-        }
-
-        // Validate goal exists if specified
-        if let Some(gid) = goal_id {
-            let goal = self.goal_repo.get(gid).await?;
-            if goal.is_none() {
-                return Err(DomainError::GoalNotFound(gid));
             }
         }
 
@@ -264,12 +255,13 @@ impl<T: TaskRepository, G: GoalRepository> TaskService<T, G> {
             }
         }
 
-        let mut task = Task::new(title, description)
-            .with_priority(priority);
+        let mut task = match title {
+            Some(t) => Task::with_title(t, description),
+            None => Task::new(description),
+        };
+        task = task.with_priority(priority)
+            .with_source(source);
 
-        if let Some(gid) = goal_id {
-            task = task.with_goal(gid);
-        }
         if let Some(pid) = parent_id {
             task = task.with_parent(pid);
         }
@@ -311,11 +303,6 @@ impl<T: TaskRepository, G: GoalRepository> TaskService<T, G> {
     /// Get ready tasks ordered by priority.
     pub async fn get_ready_tasks(&self, limit: usize) -> DomainResult<Vec<Task>> {
         self.task_repo.get_ready_tasks(limit).await
-    }
-
-    /// Get tasks for a specific goal.
-    pub async fn get_tasks_for_goal(&self, goal_id: Uuid) -> DomainResult<Vec<Task>> {
-        self.task_repo.list_by_goal(goal_id).await
     }
 
     /// Transition task to Running state (claim it).
@@ -424,6 +411,24 @@ impl<T: TaskRepository, G: GoalRepository> TaskService<T, G> {
         Ok(task)
     }
 
+    /// Create a task from a goal evaluation suggestion.
+    ///
+    /// Sets the source to `GoalEvaluation(goal_id)` and uses the suggested task's
+    /// title, description, and priority.
+    pub async fn create_from_evaluation(&self, suggested: SuggestedTask, goal_id: Uuid) -> DomainResult<Task> {
+        self.submit_task(
+            Some(suggested.title),
+            suggested.description,
+            None,
+            suggested.priority,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::GoalEvaluation(goal_id),
+        ).await
+    }
+
     /// Get task status counts.
     pub async fn get_status_counts(&self) -> DomainResult<std::collections::HashMap<TaskStatus, u64>> {
         self.task_repo.count_by_status().await
@@ -497,17 +502,16 @@ impl<T: TaskRepository, G: GoalRepository> TaskService<T, G> {
 mod tests {
     use super::*;
     use crate::adapters::sqlite::{
-        create_test_pool, SqliteGoalRepository, SqliteTaskRepository, Migrator, all_embedded_migrations
+        create_test_pool, SqliteTaskRepository, Migrator, all_embedded_migrations
     };
 
-    async fn setup_service() -> TaskService<SqliteTaskRepository, SqliteGoalRepository> {
+    async fn setup_service() -> TaskService<SqliteTaskRepository> {
         let pool = create_test_pool().await.unwrap();
         let migrator = Migrator::new(pool.clone());
         migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
 
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
-        TaskService::new(task_repo, goal_repo)
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        TaskService::new(task_repo)
     }
 
     #[tokio::test]
@@ -515,15 +519,15 @@ mod tests {
         let service = setup_service().await;
 
         let task = service.submit_task(
-            "Test Task".to_string(),
+            Some("Test Task".to_string()),
             "Description".to_string(),
-            None,
             None,
             TaskPriority::Normal,
             None,
             vec![],
             None,
             None,
+            TaskSource::Human,
         ).await.unwrap();
 
         assert_eq!(task.title, "Test Task");
@@ -536,28 +540,28 @@ mod tests {
 
         // Create a dependency task
         let dep = service.submit_task(
-            "Dependency".to_string(),
+            Some("Dependency".to_string()),
             "Must complete first".to_string(),
-            None,
             None,
             TaskPriority::Normal,
             None,
             vec![],
             None,
             None,
+            TaskSource::Human,
         ).await.unwrap();
 
         // Create main task that depends on it
         let main = service.submit_task(
-            "Main Task".to_string(),
+            Some("Main Task".to_string()),
             "Depends on first".to_string(),
-            None,
             None,
             TaskPriority::Normal,
             None,
             vec![dep.id],
             None,
             None,
+            TaskSource::Human,
         ).await.unwrap();
 
         // Main should be pending (dependency not complete)
@@ -577,27 +581,27 @@ mod tests {
         let service = setup_service().await;
 
         let task1 = service.submit_task(
-            "Task".to_string(),
+            Some("Task".to_string()),
             "Description".to_string(),
-            None,
             None,
             TaskPriority::Normal,
             None,
             vec![],
             None,
             Some("unique-key".to_string()),
+            TaskSource::Human,
         ).await.unwrap();
 
         let task2 = service.submit_task(
-            "Different Task".to_string(),
+            Some("Different Task".to_string()),
             "Different Description".to_string(),
-            None,
             None,
             TaskPriority::High,
             None,
             vec![],
             None,
             Some("unique-key".to_string()),
+            TaskSource::Human,
         ).await.unwrap();
 
         // Should return same task
@@ -610,15 +614,15 @@ mod tests {
         let service = setup_service().await;
 
         let task = service.submit_task(
-            "Test".to_string(),
+            Some("Test".to_string()),
             "Desc".to_string(),
-            None,
             None,
             TaskPriority::Normal,
             None,
             vec![],
             None,
             None,
+            TaskSource::Human,
         ).await.unwrap();
 
         let claimed = service.claim_task(task.id, "test-agent").await.unwrap();
@@ -635,15 +639,15 @@ mod tests {
         let service = setup_service().await;
 
         let task = service.submit_task(
-            "Test".to_string(),
+            Some("Test".to_string()),
             "Desc".to_string(),
-            None,
             None,
             TaskPriority::Normal,
             None,
             vec![],
             None,
             None,
+            TaskSource::Human,
         ).await.unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();

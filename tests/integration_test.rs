@@ -11,7 +11,7 @@ use abathur::adapters::sqlite::{
 };
 use abathur::adapters::substrates::SubstrateRegistry;
 use abathur::domain::models::{
-    Goal, GoalPriority, GoalStatus, Task, TaskStatus,
+    Goal, GoalPriority, GoalStatus, Task, TaskSource, TaskStatus,
     AgentTier, MemoryTier, SubstrateType, TaskDag,
 };
 use abathur::domain::ports::{
@@ -59,6 +59,8 @@ async fn test_goal_lifecycle() {
         GoalPriority::High,
         None,
         vec![],
+        vec![],
+        vec![],
     ).await.expect("Failed to create goal");
 
     // Verify goal was created
@@ -81,34 +83,34 @@ async fn test_goal_lifecycle() {
 /// Test the complete task lifecycle with dependencies.
 #[tokio::test]
 async fn test_task_lifecycle_with_dependencies() {
-    let (goal_repo, task_repo, _, _, _) = setup_test_repos().await;
+    let (_, task_repo, _, _, _) = setup_test_repos().await;
 
-    let task_service = TaskService::new(task_repo.clone(), goal_repo.clone());
+    let task_service = TaskService::new(task_repo.clone());
 
     // Create a parent task using the service
     let parent_task = task_service.submit_task(
-        "Setup".to_string(),
+            Some("Setup".to_string()),
         "Set up the environment".to_string(),
-        None,  // goal_id
         None,  // parent_id
         abathur::domain::models::TaskPriority::Normal,
         None,  // agent_type
         vec![], // depends_on
         None,  // context
         None,  // idempotency_key
+        TaskSource::Human,
     ).await.expect("Failed to submit parent task");
 
     // Create a dependent task
     let child_task = task_service.submit_task(
-        "Build".to_string(),
+            Some("Build".to_string()),
         "Build the application".to_string(),
-        None,
         None,
         abathur::domain::models::TaskPriority::Normal,
         None,
         vec![parent_task.id], // depends on parent
         None,
         None,
+        TaskSource::Human,
     ).await.expect("Failed to submit child task");
 
     // Parent should be ready (no deps)
@@ -260,9 +262,9 @@ async fn test_goal_decomposition() {
     assert!(!created_tasks.is_empty());
 
     // Verify tasks were created
-    let tasks = task_repo.list_by_goal(goal.id)
+    let tasks = task_repo.list_by_source("goal_evaluation")
         .await
-        .expect("Failed to list tasks by goal");
+        .expect("Failed to list tasks by source");
     assert!(!tasks.is_empty());
 }
 
@@ -275,7 +277,7 @@ async fn test_worktree_service_operations() {
     let worktree_service = WorktreeService::new(worktree_repo.clone(), WorktreeConfig::default());
 
     // Create a task first
-    let task = Task::new("Test task", "A task for worktree testing");
+    let task = Task::with_title("Test task", "A task for worktree testing");
     task_repo.create(&task).await.expect("Failed to create task");
 
     // Get stats (should have no worktrees)
@@ -340,6 +342,8 @@ async fn test_full_workflow() {
         GoalPriority::Normal,
         None,
         vec![],
+        vec![],
+        vec![],
     ).await.expect("Failed to create goal");
 
     // 2. Use meta-planner to decompose
@@ -354,7 +358,7 @@ async fn test_full_workflow() {
     let _tasks = meta_planner.execute_plan(&plan).await.expect("Failed to execute plan");
 
     // 3. Use task service to work through tasks
-    let task_service = TaskService::new(task_repo.clone(), goal_repo.clone());
+    let task_service = TaskService::new(task_repo.clone());
 
     // Get ready tasks and complete them
     let ready = task_service.get_ready_tasks(10).await.expect("Failed to get ready");
@@ -379,9 +383,9 @@ async fn test_dag_execution_mock() {
     let (_, task_repo, _, _, _) = setup_test_repos().await;
 
     // Create some tasks with dependencies
-    let task1 = Task::new("Task 1", "First task");
-    let task2 = Task::new("Task 2", "Second task").with_dependency(task1.id);
-    let task3 = Task::new("Task 3", "Third task").with_dependency(task1.id);
+    let task1 = Task::with_title("Task 1", "First task");
+    let task2 = Task::with_title("Task 2", "Second task").with_dependency(task1.id);
+    let task3 = Task::with_title("Task 3", "Third task").with_dependency(task1.id);
 
     task_repo.create(&task1).await.expect("Failed to create task1");
     task_repo.create(&task2).await.expect("Failed to create task2");
@@ -409,34 +413,34 @@ async fn test_dag_execution_mock() {
 /// Test idempotency of task operations.
 #[tokio::test]
 async fn test_task_idempotency() {
-    let (goal_repo, task_repo, _, _, _) = setup_test_repos().await;
+    let (_, task_repo, _, _, _) = setup_test_repos().await;
 
-    let task_service = TaskService::new(task_repo.clone(), goal_repo.clone());
+    let task_service = TaskService::new(task_repo.clone());
 
     // First submission should succeed
     let task1 = task_service.submit_task(
-        "Idempotent Task".to_string(),
+            Some("Idempotent Task".to_string()),
         "Testing idempotency".to_string(),
-        None,
         None,
         abathur::domain::models::TaskPriority::Normal,
         None,
         vec![],
         None,
         Some("unique-key-123".to_string()),
+        TaskSource::Human,
     ).await.expect("First submit failed");
 
     // Second submission with same key should return the same task
     let task2 = task_service.submit_task(
-        "Different name".to_string(),
+            Some("Different name".to_string()),
         "Different description".to_string(),
-        None,
         None,
         abathur::domain::models::TaskPriority::Normal,
         None,
         vec![],
         None,
         Some("unique-key-123".to_string()),
+        TaskSource::Human,
     ).await.expect("Second submit failed");
 
     // Should be the same task
@@ -453,20 +457,20 @@ async fn test_task_idempotency() {
 /// Test error handling and retries.
 #[tokio::test]
 async fn test_task_retry_on_failure() {
-    let (goal_repo, task_repo, _, _, _) = setup_test_repos().await;
+    let (_, task_repo, _, _, _) = setup_test_repos().await;
 
-    let task_service = TaskService::new(task_repo.clone(), goal_repo.clone());
+    let task_service = TaskService::new(task_repo.clone());
 
     let task = task_service.submit_task(
-        "Failing Task".to_string(),
+            Some("Failing Task".to_string()),
         "A task that will fail".to_string(),
-        None,
         None,
         abathur::domain::models::TaskPriority::Normal,
         None,
         vec![],
         None,
         None,
+        TaskSource::Human,
     ).await.expect("Failed to submit");
 
     // Claim the task
@@ -535,6 +539,8 @@ async fn test_goal_constraints() {
             GoalConstraint::boundary("max_cost", "Maximum cost should be $100"),
             GoalConstraint::invariant("required_tool", "Must use Bash tool"),
         ],
+        vec![],
+        vec![],
     ).await.expect("Failed to create goal");
 
     // Get effective constraints

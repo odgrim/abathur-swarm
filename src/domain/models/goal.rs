@@ -176,49 +176,6 @@ pub struct GoalMetadata {
     pub custom: std::collections::HashMap<String, serde_json::Value>,
 }
 
-/// Lightweight convergence state stored in goal metadata between ticks.
-///
-/// Tracks just enough to detect drift, guard against re-verification of
-/// the same task set, and enforce iteration/timeout limits.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TickConvergenceState {
-    /// Current iteration of tick-based convergence.
-    pub iteration: u32,
-    /// Whether convergence has been achieved.
-    pub converged: bool,
-    /// Whether semantic drift has been detected.
-    pub drift_detected: bool,
-    /// Number of completed tasks at last verification.
-    pub last_verified_task_count: usize,
-    /// Gap fingerprints for drift detection across ticks.
-    pub gap_fingerprints: Vec<super::intent_verification::GapFingerprint>,
-    /// When tick convergence started.
-    pub started_at: DateTime<Utc>,
-    /// When tick convergence ended (if terminal).
-    pub ended_at: Option<DateTime<Utc>>,
-}
-
-impl Default for TickConvergenceState {
-    fn default() -> Self {
-        Self {
-            iteration: 0,
-            converged: false,
-            drift_detected: false,
-            last_verified_task_count: 0,
-            gap_fingerprints: Vec::new(),
-            started_at: Utc::now(),
-            ended_at: None,
-        }
-    }
-}
-
-impl TickConvergenceState {
-    /// Returns true if convergence is terminal (converged or explicitly ended).
-    pub fn is_terminal(&self) -> bool {
-        self.converged || self.ended_at.is_some()
-    }
-}
-
 /// A convergent goal that guides the swarm.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Goal {
@@ -236,6 +193,12 @@ pub struct Goal {
     pub parent_id: Option<Uuid>,
     /// Constraints that apply to this goal
     pub constraints: Vec<GoalConstraint>,
+    /// Domains this goal is relevant to (e.g., "code-quality", "security", "testing")
+    #[serde(default)]
+    pub applicability_domains: Vec<String>,
+    /// Concrete criteria for evaluating whether this goal is being met
+    #[serde(default)]
+    pub evaluation_criteria: Vec<String>,
     /// Additional metadata
     pub metadata: GoalMetadata,
     /// When this goal was created
@@ -258,6 +221,8 @@ impl Goal {
             priority: GoalPriority::default(),
             parent_id: None,
             constraints: Vec::new(),
+            applicability_domains: Vec::new(),
+            evaluation_criteria: Vec::new(),
             metadata: GoalMetadata::default(),
             created_at: now,
             updated_at: now,
@@ -286,6 +251,18 @@ impl Goal {
     /// Add a tag to this goal.
     pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
         self.metadata.tags.push(tag.into());
+        self
+    }
+
+    /// Add an applicability domain to this goal.
+    pub fn with_applicability_domain(mut self, domain: impl Into<String>) -> Self {
+        self.applicability_domains.push(domain.into());
+        self
+    }
+
+    /// Add an evaluation criterion to this goal.
+    pub fn with_evaluation_criterion(mut self, criterion: impl Into<String>) -> Self {
+        self.evaluation_criteria.push(criterion.into());
         self
     }
 
@@ -335,33 +312,12 @@ impl Goal {
     }
 
     /// Resume this goal (from paused state).
-    ///
-    /// Clears any tick convergence state so a fresh convergence cycle begins.
     pub fn resume(&mut self) {
         if self.can_transition_to(GoalStatus::Active) {
-            self.clear_convergence_state();
             self.status = GoalStatus::Active;
             self.updated_at = Utc::now();
             self.version += 1;
         }
-    }
-
-    /// Read the tick convergence state from goal metadata, if present.
-    pub fn convergence_state(&self) -> Option<TickConvergenceState> {
-        self.metadata.custom.get("convergence_state")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-    }
-
-    /// Persist a tick convergence state into goal metadata.
-    pub fn set_convergence_state(&mut self, state: &TickConvergenceState) {
-        if let Ok(value) = serde_json::to_value(state) {
-            self.metadata.custom.insert("convergence_state".to_string(), value);
-        }
-    }
-
-    /// Remove the tick convergence state from goal metadata.
-    pub fn clear_convergence_state(&mut self) {
-        self.metadata.custom.remove("convergence_state");
     }
 
     /// Retire this goal.
@@ -383,6 +339,8 @@ pub struct GoalBuilder {
     parent_id: Option<Uuid>,
     constraints: Vec<GoalConstraint>,
     tags: Vec<String>,
+    applicability_domains: Vec<String>,
+    evaluation_criteria: Vec<String>,
 }
 
 impl GoalBuilder {
@@ -420,6 +378,16 @@ impl GoalBuilder {
         self
     }
 
+    pub fn applicability_domain(mut self, domain: impl Into<String>) -> Self {
+        self.applicability_domains.push(domain.into());
+        self
+    }
+
+    pub fn evaluation_criterion(mut self, criterion: impl Into<String>) -> Self {
+        self.evaluation_criteria.push(criterion.into());
+        self
+    }
+
     pub fn build(self) -> Result<Goal, String> {
         let name = self.name.ok_or("Goal name is required")?;
         let description = self.description.unwrap_or_default();
@@ -437,6 +405,14 @@ impl GoalBuilder {
 
         for tag in self.tags {
             goal = goal.with_tag(tag);
+        }
+
+        for domain in self.applicability_domains {
+            goal = goal.with_applicability_domain(domain);
+        }
+
+        for criterion in self.evaluation_criteria {
+            goal = goal.with_evaluation_criterion(criterion);
         }
 
         goal.validate()?;

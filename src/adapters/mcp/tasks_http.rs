@@ -18,8 +18,8 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-use crate::domain::models::{Task, TaskPriority, TaskStatus};
-use crate::domain::ports::{GoalRepository, TaskRepository};
+use crate::domain::models::{Task, TaskPriority, TaskSource, TaskStatus};
+use crate::domain::ports::TaskRepository;
 use crate::services::TaskService;
 
 /// Configuration for the tasks HTTP server.
@@ -46,9 +46,9 @@ impl Default for TasksHttpConfig {
 /// Request to submit a new task.
 #[derive(Debug, Deserialize)]
 pub struct SubmitTaskRequest {
-    pub title: String,
+    pub prompt: String,
     #[serde(default)]
-    pub description: Option<String>,
+    pub title: Option<String>,
     #[serde(default)]
     pub agent_type: Option<String>,
     #[serde(default)]
@@ -107,7 +107,6 @@ pub struct TaskResponse {
     pub status: String,
     pub priority: String,
     pub agent_type: Option<String>,
-    pub goal_id: Option<Uuid>,
     pub depends_on: Vec<Uuid>,
     pub retry_count: u32,
     pub max_retries: u32,
@@ -129,7 +128,6 @@ impl From<Task> for TaskResponse {
             status: t.status.as_str().to_string(),
             priority: t.priority.as_str().to_string(),
             agent_type: t.agent_type,
-            goal_id: t.goal_id,
             depends_on: t.depends_on,
             retry_count: t.retry_count,
             max_retries: t.max_retries,
@@ -162,20 +160,20 @@ pub struct ErrorResponse {
 }
 
 /// Shared state for the tasks HTTP server.
-struct AppState<T: TaskRepository, G: GoalRepository> {
-    service: TaskService<T, G>,
+struct AppState<T: TaskRepository> {
+    service: TaskService<T>,
 }
 
 /// Tasks HTTP Server.
-pub struct TasksHttpServer<T: TaskRepository + 'static, G: GoalRepository + 'static> {
+pub struct TasksHttpServer<T: TaskRepository + 'static> {
     config: TasksHttpConfig,
-    service: TaskService<T, G>,
+    service: TaskService<T>,
 }
 
-impl<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRepository + Clone + Send + Sync + 'static>
-    TasksHttpServer<T, G>
+impl<T: TaskRepository + Clone + Send + Sync + 'static>
+    TasksHttpServer<T>
 {
-    pub fn new(service: TaskService<T, G>, config: TasksHttpConfig) -> Self {
+    pub fn new(service: TaskService<T>, config: TasksHttpConfig) -> Self {
         Self { config, service }
     }
 
@@ -187,18 +185,18 @@ impl<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRepository + Clon
 
         let app = Router::new()
             // Task CRUD operations
-            .route("/api/v1/tasks", get(list_tasks::<T, G>))
-            .route("/api/v1/tasks", post(submit_task::<T, G>))
-            .route("/api/v1/tasks/{id}", get(get_task::<T, G>))
+            .route("/api/v1/tasks", get(list_tasks::<T>))
+            .route("/api/v1/tasks", post(submit_task::<T>))
+            .route("/api/v1/tasks/{id}", get(get_task::<T>))
             // Task lifecycle operations
-            .route("/api/v1/tasks/{id}/claim", post(claim_task::<T, G>))
-            .route("/api/v1/tasks/{id}/complete", post(complete_task::<T, G>))
-            .route("/api/v1/tasks/{id}/fail", post(fail_task::<T, G>))
-            .route("/api/v1/tasks/{id}/retry", post(retry_task::<T, G>))
+            .route("/api/v1/tasks/{id}/claim", post(claim_task::<T>))
+            .route("/api/v1/tasks/{id}/complete", post(complete_task::<T>))
+            .route("/api/v1/tasks/{id}/fail", post(fail_task::<T>))
+            .route("/api/v1/tasks/{id}/retry", post(retry_task::<T>))
             // Ready tasks
-            .route("/api/v1/tasks/ready", get(list_ready_tasks::<T, G>))
+            .route("/api/v1/tasks/ready", get(list_ready_tasks::<T>))
             // Statistics
-            .route("/api/v1/tasks/stats", get(get_stats::<T, G>))
+            .route("/api/v1/tasks/stats", get(get_stats::<T>))
             // Health check
             .route("/health", get(health_check))
             .with_state(state);
@@ -250,15 +248,11 @@ async fn health_check() -> &'static str {
     "OK"
 }
 
-async fn list_tasks<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRepository + Clone + Send + Sync + 'static>(
-    State(state): State<Arc<AppState<T, G>>>,
+async fn list_tasks<T: TaskRepository + Clone + Send + Sync + 'static>(
+    State(state): State<Arc<AppState<T>>>,
     Query(params): Query<TaskQueryParams>,
 ) -> Result<Json<Vec<TaskResponse>>, (StatusCode, Json<ErrorResponse>)> {
-    let result = if let Some(goal_id) = params.goal_id {
-        state.service.get_tasks_for_goal(goal_id).await
-    } else {
-        state.service.get_ready_tasks(params.limit).await
-    };
+    let result = state.service.get_ready_tasks(params.limit).await;
 
     match result {
         Ok(tasks) => {
@@ -284,8 +278,8 @@ async fn list_tasks<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRe
     }
 }
 
-async fn submit_task<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRepository + Clone + Send + Sync + 'static>(
-    State(state): State<Arc<AppState<T, G>>>,
+async fn submit_task<T: TaskRepository + Clone + Send + Sync + 'static>(
+    State(state): State<Arc<AppState<T>>>,
     Json(req): Json<SubmitTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskResponse>), (StatusCode, Json<ErrorResponse>)> {
     let priority = req
@@ -294,20 +288,24 @@ async fn submit_task<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalR
         .and_then(|p| parse_priority(p))
         .unwrap_or(TaskPriority::Normal);
 
-    let description = req.description.unwrap_or_default();
+    // Determine source based on whether a goal_id was provided
+    let source = match req.goal_id {
+        Some(gid) => TaskSource::GoalEvaluation(gid),
+        None => TaskSource::Human,
+    };
 
     match state
         .service
         .submit_task(
             req.title,
-            description,
-            req.goal_id,
+            req.prompt,
             req.parent_id,
             priority,
             req.agent_type,
             req.depends_on,
             None,
             req.idempotency_key,
+            source,
         )
         .await
     {
@@ -322,8 +320,8 @@ async fn submit_task<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalR
     }
 }
 
-async fn get_task<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRepository + Clone + Send + Sync + 'static>(
-    State(state): State<Arc<AppState<T, G>>>,
+async fn get_task<T: TaskRepository + Clone + Send + Sync + 'static>(
+    State(state): State<Arc<AppState<T>>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TaskResponse>, (StatusCode, Json<ErrorResponse>)> {
     match state.service.get_task(id).await {
@@ -345,8 +343,8 @@ async fn get_task<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRepo
     }
 }
 
-async fn claim_task<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRepository + Clone + Send + Sync + 'static>(
-    State(state): State<Arc<AppState<T, G>>>,
+async fn claim_task<T: TaskRepository + Clone + Send + Sync + 'static>(
+    State(state): State<Arc<AppState<T>>>,
     Path(id): Path<Uuid>,
     Json(req): Json<ClaimTaskRequest>,
 ) -> Result<Json<TaskResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -362,8 +360,8 @@ async fn claim_task<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRe
     }
 }
 
-async fn complete_task<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRepository + Clone + Send + Sync + 'static>(
-    State(state): State<Arc<AppState<T, G>>>,
+async fn complete_task<T: TaskRepository + Clone + Send + Sync + 'static>(
+    State(state): State<Arc<AppState<T>>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TaskResponse>, (StatusCode, Json<ErrorResponse>)> {
     match state.service.complete_task(id).await {
@@ -378,8 +376,8 @@ async fn complete_task<T: TaskRepository + Clone + Send + Sync + 'static, G: Goa
     }
 }
 
-async fn fail_task<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRepository + Clone + Send + Sync + 'static>(
-    State(state): State<Arc<AppState<T, G>>>,
+async fn fail_task<T: TaskRepository + Clone + Send + Sync + 'static>(
+    State(state): State<Arc<AppState<T>>>,
     Path(id): Path<Uuid>,
     Json(req): Json<FailTaskRequest>,
 ) -> Result<Json<TaskResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -395,8 +393,8 @@ async fn fail_task<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRep
     }
 }
 
-async fn retry_task<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRepository + Clone + Send + Sync + 'static>(
-    State(state): State<Arc<AppState<T, G>>>,
+async fn retry_task<T: TaskRepository + Clone + Send + Sync + 'static>(
+    State(state): State<Arc<AppState<T>>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TaskResponse>, (StatusCode, Json<ErrorResponse>)> {
     match state.service.retry_task(id).await {
@@ -411,8 +409,8 @@ async fn retry_task<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRe
     }
 }
 
-async fn list_ready_tasks<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRepository + Clone + Send + Sync + 'static>(
-    State(state): State<Arc<AppState<T, G>>>,
+async fn list_ready_tasks<T: TaskRepository + Clone + Send + Sync + 'static>(
+    State(state): State<Arc<AppState<T>>>,
     Query(params): Query<TaskQueryParams>,
 ) -> Result<Json<Vec<TaskResponse>>, (StatusCode, Json<ErrorResponse>)> {
     match state.service.get_ready_tasks(params.limit).await {
@@ -427,8 +425,8 @@ async fn list_ready_tasks<T: TaskRepository + Clone + Send + Sync + 'static, G: 
     }
 }
 
-async fn get_stats<T: TaskRepository + Clone + Send + Sync + 'static, G: GoalRepository + Clone + Send + Sync + 'static>(
-    State(state): State<Arc<AppState<T, G>>>,
+async fn get_stats<T: TaskRepository + Clone + Send + Sync + 'static>(
+    State(state): State<Arc<AppState<T>>>,
 ) -> Result<Json<QueueStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Get counts by fetching tasks for each status
     // Note: In production, we'd add a dedicated count_by_status method
@@ -501,11 +499,17 @@ mod tests {
 
     #[test]
     fn test_submit_request_deserialization() {
-        let json = r#"{"title": "Test task", "description": "Do something"}"#;
+        let json = r#"{"prompt": "Do something"}"#;
         let req: SubmitTaskRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.title, "Test task");
-        assert_eq!(req.description, Some("Do something".to_string()));
+        assert_eq!(req.prompt, "Do something");
+        assert!(req.title.is_none());
         assert!(req.depends_on.is_empty());
+
+        // With optional title
+        let json = r#"{"prompt": "Do something", "title": "Custom title"}"#;
+        let req: SubmitTaskRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.prompt, "Do something");
+        assert_eq!(req.title, Some("Custom title".to_string()));
     }
 
     #[test]
@@ -518,7 +522,6 @@ mod tests {
             status: "pending".to_string(),
             priority: "normal".to_string(),
             agent_type: Some("developer".to_string()),
-            goal_id: None,
             depends_on: vec![],
             retry_count: 0,
             max_retries: 3,

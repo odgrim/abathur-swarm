@@ -25,10 +25,12 @@ impl GoalRepository for SqliteGoalRepository {
     async fn create(&self, goal: &Goal) -> DomainResult<()> {
         let constraints_json = serde_json::to_string(&goal.constraints)?;
         let metadata_json = serde_json::to_string(&goal.metadata)?;
+        let domains_json = serde_json::to_string(&goal.applicability_domains)?;
+        let criteria_json = serde_json::to_string(&goal.evaluation_criteria)?;
 
         sqlx::query(
-            r#"INSERT INTO goals (id, name, description, status, priority, parent_id, constraints, metadata, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+            r#"INSERT INTO goals (id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
         )
         .bind(goal.id.to_string())
         .bind(&goal.name)
@@ -38,6 +40,8 @@ impl GoalRepository for SqliteGoalRepository {
         .bind(goal.parent_id.map(|id| id.to_string()))
         .bind(&constraints_json)
         .bind(&metadata_json)
+        .bind(&domains_json)
+        .bind(&criteria_json)
         .bind(goal.created_at.to_rfc3339())
         .bind(goal.updated_at.to_rfc3339())
         .execute(&self.pool)
@@ -48,7 +52,7 @@ impl GoalRepository for SqliteGoalRepository {
 
     async fn get(&self, id: Uuid) -> DomainResult<Option<Goal>> {
         let row: Option<GoalRow> = sqlx::query_as(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, created_at, updated_at FROM goals WHERE id = ?"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at FROM goals WHERE id = ?"
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -60,10 +64,13 @@ impl GoalRepository for SqliteGoalRepository {
     async fn update(&self, goal: &Goal) -> DomainResult<()> {
         let constraints_json = serde_json::to_string(&goal.constraints)?;
         let metadata_json = serde_json::to_string(&goal.metadata)?;
+        let domains_json = serde_json::to_string(&goal.applicability_domains)?;
+        let criteria_json = serde_json::to_string(&goal.evaluation_criteria)?;
 
         let result = sqlx::query(
             r#"UPDATE goals SET name = ?, description = ?, status = ?, priority = ?,
-               parent_id = ?, constraints = ?, metadata = ?, updated_at = ?
+               parent_id = ?, constraints = ?, metadata = ?, applicability_domains = ?,
+               evaluation_criteria = ?, updated_at = ?
                WHERE id = ?"#
         )
         .bind(&goal.name)
@@ -73,6 +80,8 @@ impl GoalRepository for SqliteGoalRepository {
         .bind(goal.parent_id.map(|id| id.to_string()))
         .bind(&constraints_json)
         .bind(&metadata_json)
+        .bind(&domains_json)
+        .bind(&criteria_json)
         .bind(goal.updated_at.to_rfc3339())
         .bind(goal.id.to_string())
         .execute(&self.pool)
@@ -100,7 +109,7 @@ impl GoalRepository for SqliteGoalRepository {
 
     async fn list(&self, filter: GoalFilter) -> DomainResult<Vec<Goal>> {
         let mut query = String::from(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, created_at, updated_at FROM goals WHERE 1=1"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at FROM goals WHERE 1=1"
         );
         let mut bindings: Vec<String> = Vec::new();
 
@@ -132,7 +141,7 @@ impl GoalRepository for SqliteGoalRepository {
 
     async fn get_children(&self, parent_id: Uuid) -> DomainResult<Vec<Goal>> {
         let rows: Vec<GoalRow> = sqlx::query_as(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, created_at, updated_at FROM goals WHERE parent_id = ? ORDER BY created_at"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at FROM goals WHERE parent_id = ? ORDER BY created_at"
         )
         .bind(parent_id.to_string())
         .fetch_all(&self.pool)
@@ -143,12 +152,30 @@ impl GoalRepository for SqliteGoalRepository {
 
     async fn get_active_with_constraints(&self) -> DomainResult<Vec<Goal>> {
         let rows: Vec<GoalRow> = sqlx::query_as(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, created_at, updated_at FROM goals WHERE status = 'active' ORDER BY priority DESC, created_at"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at FROM goals WHERE status = 'active' ORDER BY priority DESC, created_at"
         )
         .fetch_all(&self.pool)
         .await?;
 
         rows.into_iter().map(|r| r.try_into()).collect()
+    }
+
+    async fn find_by_domains(&self, domains: &[String]) -> DomainResult<Vec<Goal>> {
+        // Load all active goals, then filter in-code (SQLite JSON support is limited)
+        let rows: Vec<GoalRow> = sqlx::query_as(
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at FROM goals WHERE status = 'active'"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let all_active: Vec<Goal> = rows.into_iter().map(|r| r.try_into()).collect::<Result<Vec<_>, _>>()?;
+
+        Ok(all_active
+            .into_iter()
+            .filter(|goal| {
+                goal.applicability_domains.iter().any(|d| domains.contains(d))
+            })
+            .collect())
     }
 
     async fn count_by_status(&self) -> DomainResult<HashMap<GoalStatus, u64>> {
@@ -178,6 +205,8 @@ struct GoalRow {
     parent_id: Option<String>,
     constraints: Option<String>,
     metadata: Option<String>,
+    applicability_domains: Option<String>,
+    evaluation_criteria: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -212,6 +241,18 @@ impl TryFrom<GoalRow> for Goal {
             .map_err(|e| DomainError::SerializationError(e.to_string()))?
             .unwrap_or_default();
 
+        let applicability_domains: Vec<String> = row.applicability_domains
+            .map(|s| serde_json::from_str(&s))
+            .transpose()
+            .map_err(|e| DomainError::SerializationError(e.to_string()))?
+            .unwrap_or_default();
+
+        let evaluation_criteria: Vec<String> = row.evaluation_criteria
+            .map(|s| serde_json::from_str(&s))
+            .transpose()
+            .map_err(|e| DomainError::SerializationError(e.to_string()))?
+            .unwrap_or_default();
+
         let created_at = chrono::DateTime::parse_from_rfc3339(&row.created_at)
             .map_err(|e| DomainError::SerializationError(e.to_string()))?
             .with_timezone(&chrono::Utc);
@@ -228,6 +269,8 @@ impl TryFrom<GoalRow> for Goal {
             priority,
             parent_id,
             constraints,
+            applicability_domains,
+            evaluation_criteria,
             metadata,
             created_at,
             updated_at,

@@ -5,12 +5,10 @@ use clap::{Args, Subcommand};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::adapters::sqlite::{
-    SqliteGoalRepository, SqliteTaskRepository, initialize_database
-};
+use crate::adapters::sqlite::{SqliteTaskRepository, initialize_database};
 use crate::cli::id_resolver::resolve_task_id;
 use crate::cli::output::{output, CommandOutput};
-use crate::domain::models::{Task, TaskContext, TaskPriority, TaskStatus};
+use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::TaskFilter;
 use crate::services::TaskService;
 
@@ -24,11 +22,11 @@ pub struct TaskArgs {
 pub enum TaskCommands {
     /// Submit a new task
     Submit {
-        /// Task title
-        title: String,
-        /// Task description
+        /// The prompt to send to the agent
+        prompt: String,
+        /// Optional custom title (auto-generated from prompt if omitted)
         #[arg(short, long)]
-        description: Option<String>,
+        title: Option<String>,
         /// Priority (low, normal, high, critical)
         #[arg(short, long, default_value = "normal")]
         priority: String,
@@ -97,7 +95,6 @@ pub struct TaskOutput {
     pub title: String,
     pub status: String,
     pub priority: String,
-    pub goal_id: Option<String>,
     pub agent_type: Option<String>,
     pub depends_on: Vec<String>,
     pub retry_count: u32,
@@ -110,7 +107,6 @@ impl From<&Task> for TaskOutput {
             title: task.title.clone(),
             status: task.status.as_str().to_string(),
             priority: task.priority.as_str().to_string(),
-            goal_id: task.goal_id.map(|id| id.to_string()),
             agent_type: task.agent_type.clone(),
             depends_on: task.depends_on.iter().map(|id| id.to_string()).collect(),
             retry_count: task.retry_count,
@@ -176,9 +172,6 @@ impl CommandOutput for TaskDetailOutput {
             format!("Priority: {}", self.task.priority),
         ];
 
-        if let Some(goal) = &self.task.goal_id {
-            lines.push(format!("Goal: {}", goal));
-        }
         if let Some(agent) = &self.task.agent_type {
             lines.push(format!("Agent: {}", agent));
         }
@@ -272,13 +265,12 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-    let service = TaskService::new(task_repo, goal_repo);
+    let service = TaskService::new(task_repo);
 
     match args.command {
         TaskCommands::Submit {
+            prompt,
             title,
-            description,
             priority,
             goal,
             parent,
@@ -289,11 +281,6 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
         } => {
             let priority = TaskPriority::from_str(&priority)
                 .ok_or_else(|| anyhow::anyhow!("Invalid priority: {}", priority))?;
-
-            let goal_id = goal
-                .map(|g| Uuid::parse_str(&g))
-                .transpose()
-                .context("Invalid goal ID")?;
 
             let parent_id = parent
                 .map(|p| Uuid::parse_str(&p))
@@ -311,16 +298,25 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 ..Default::default()
             });
 
+            // If a goal ID was provided via CLI, use GoalEvaluation source; otherwise Human
+            let source = match goal {
+                Some(g) => {
+                    let gid = Uuid::parse_str(&g).context("Invalid goal ID")?;
+                    TaskSource::GoalEvaluation(gid)
+                }
+                None => TaskSource::Human,
+            };
+
             let task = service.submit_task(
                 title,
-                description.unwrap_or_default(),
-                goal_id,
+                prompt,
                 parent_id,
                 priority,
                 agent,
                 deps,
                 context,
                 idempotency_key,
+                source,
             ).await?;
 
             let out = TaskActionOutput {
@@ -331,14 +327,13 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
             output(&out, json_mode);
         }
 
-        TaskCommands::List { status, priority, goal, agent, ready, limit } => {
+        TaskCommands::List { status, priority, goal: _, agent, ready, limit } => {
             let tasks = if ready {
                 service.get_ready_tasks(limit).await?
             } else {
                 let filter = TaskFilter {
                     status: status.as_ref().and_then(|s| TaskStatus::from_str(s)),
                     priority: priority.as_ref().and_then(|p| TaskPriority::from_str(p)),
-                    goal_id: goal.as_ref().and_then(|g| Uuid::parse_str(g).ok()),
                     agent_type: agent,
                     parent_id: None,
                 };

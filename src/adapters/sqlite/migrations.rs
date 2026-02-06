@@ -114,6 +114,14 @@ pub fn add_events_table_migration() -> Migration {
     }
 }
 
+pub fn goal_task_rebuild_migration() -> Migration {
+    Migration {
+        version: 6,
+        description: "Goal-task rebuild".to_string(),
+        sql: include_str!("../../../migrations/006_goal_task_rebuild.sql").to_string(),
+    }
+}
+
 pub fn all_embedded_migrations() -> Vec<Migration> {
     vec![
         initial_schema_migration(),
@@ -121,5 +129,6 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
         add_agent_instances_migration(),
         fix_worktrees_fk_migration(),
         add_events_table_migration(),
+        goal_task_rebuild_migration(),
     ]
 }

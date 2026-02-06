@@ -41,7 +41,7 @@ use abathur::adapters::substrates::{ClaudeCodeSubstrate, MockSubstrate};
 use abathur::adapters::substrates::mock::MockResponse;
 use abathur::domain::models::{
     AgentConstraint, AgentTier, Goal, GoalConstraint, GoalPriority, GoalStatus, MemoryTier,
-    MemoryType, Task, TaskDag, TaskPriority, TaskStatus, ToolCapability,
+    MemoryType, Task, TaskDag, TaskPriority, TaskSource, TaskStatus, ToolCapability,
 };
 use abathur::domain::ports::{
     AgentRepository, GoalRepository, MemoryRepository, NullMemoryRepository, Substrate,
@@ -136,6 +136,8 @@ async fn test_goal_lifecycle_with_constraints() {
                 GoalConstraint::boundary("performance", "Login must complete in under 500ms"),
                 GoalConstraint::preference("ux", "Use OAuth2 if possible"),
             ],
+            vec![],
+            vec![],
         )
         .await
         .expect("Failed to create goal");
@@ -198,7 +200,7 @@ async fn test_task_dag_with_dependencies() {
     let (goal_repo, task_repo, _, _, _) = setup_test_environment().await;
 
     let goal_service = GoalService::new(goal_repo.clone());
-    let task_service = TaskService::new(task_repo.clone(), goal_repo.clone());
+    let task_service = TaskService::new(task_repo.clone());
 
     // Create a goal to associate tasks with
     let goal = goal_service
@@ -207,6 +209,8 @@ async fn test_task_dag_with_dependencies() {
             "Create REST API endpoints".to_string(),
             GoalPriority::Normal,
             None,
+            vec![],
+            vec![],
             vec![],
         )
         .await
@@ -228,75 +232,75 @@ async fn test_task_dag_with_dependencies() {
 
     let setup_task = task_service
         .submit_task(
-            "Setup Project".to_string(),
+            Some("Setup Project".to_string()),
             "Initialize project structure and dependencies".to_string(),
-            Some(goal.id),
             None,
             TaskPriority::High,
             Some("worker".to_string()),
             vec![], // No dependencies
             None,
             None,
+            TaskSource::GoalEvaluation(goal.id),
         )
         .await
         .expect("Failed to create setup task");
 
     let auth_task = task_service
         .submit_task(
-            "Implement Auth".to_string(),
+            Some("Implement Auth".to_string()),
             "Create authentication middleware".to_string(),
-            Some(goal.id),
             None,
             TaskPriority::Normal,
             Some("worker".to_string()),
             vec![setup_task.id], // Depends on setup
             None,
             None,
+            TaskSource::GoalEvaluation(goal.id),
         )
         .await
         .expect("Failed to create auth task");
 
     let db_task = task_service
         .submit_task(
-            "Setup Database".to_string(),
+            Some("Setup Database".to_string()),
             "Configure database connection and migrations".to_string(),
-            Some(goal.id),
             None,
             TaskPriority::Normal,
             Some("worker".to_string()),
             vec![setup_task.id], // Depends on setup (parallel with auth)
             None,
             None,
+            TaskSource::GoalEvaluation(goal.id),
         )
         .await
         .expect("Failed to create db task");
 
     let api_task = task_service
         .submit_task(
-            "Build API Endpoints".to_string(),
+            Some("Build API Endpoints".to_string()),
             "Create CRUD endpoints for all resources".to_string(),
-            Some(goal.id),
             None,
             TaskPriority::Normal,
             Some("worker".to_string()),
             vec![auth_task.id, db_task.id], // Depends on both auth AND db
             None,
             None,
+            TaskSource::GoalEvaluation(goal.id),
         )
         .await
         .expect("Failed to create api task");
 
     let test_task = task_service
         .submit_task(
-            "Write Tests".to_string(),
+            Some("Write Tests".to_string()),
             "Create integration tests for all endpoints".to_string(),
-            Some(goal.id),
             None,
             TaskPriority::Low,
             Some("worker".to_string()),
             vec![api_task.id], // Depends on api
             None,
             None,
+            TaskSource::GoalEvaluation(goal.id),
         )
         .await
         .expect("Failed to create test task");
@@ -486,16 +490,16 @@ async fn test_agent_template_and_instance_management() {
 /// Test DAG execution with wave-based parallelism using mock substrate.
 #[tokio::test]
 async fn test_dag_execution_with_waves() {
-    let (goal_repo, task_repo, _, agent_repo, _) = setup_test_environment().await;
+    let (_goal_repo, task_repo, _, agent_repo, _) = setup_test_environment().await;
 
     // Create a mock substrate that tracks all executions
     let mock_substrate = Arc::new(MockSubstrate::new());
 
     // Create tasks with DAG structure
-    let task1 = Task::new("Task 1 - Foundation", "Set up foundation");
-    let task2 = Task::new("Task 2 - Module A", "Build module A").with_dependency(task1.id);
-    let task3 = Task::new("Task 3 - Module B", "Build module B").with_dependency(task1.id);
-    let task4 = Task::new("Task 4 - Integration", "Integrate modules")
+    let task1 = Task::with_title("Task 1 - Foundation", "Set up foundation");
+    let task2 = Task::with_title("Task 2 - Module A", "Build module A").with_dependency(task1.id);
+    let task3 = Task::with_title("Task 3 - Module B", "Build module B").with_dependency(task1.id);
+    let task4 = Task::with_title("Task 4 - Integration", "Integrate modules")
         .with_dependency(task2.id)
         .with_dependency(task3.id);
 
@@ -587,8 +591,8 @@ async fn test_dag_execution_with_failures() {
     let mock_substrate = Arc::new(MockSubstrate::new());
 
     // Create tasks
-    let task1 = Task::new("Task 1 - Will Succeed", "This will succeed");
-    let task2 = Task::new("Task 2 - Will Fail", "This will fail").with_dependency(task1.id);
+    let task1 = Task::with_title("Task 1 - Will Succeed", "This will succeed");
+    let task2 = Task::with_title("Task 2 - Will Fail", "This will fail").with_dependency(task1.id);
 
     // Configure task2 to fail
     mock_substrate
@@ -802,12 +806,12 @@ async fn test_evolution_loop_goal_violations() {
 /// Complete end-to-end test: Goal → Decomposition → Execution → Evolution
 #[tokio::test]
 async fn test_full_end_to_end_workflow() {
-    let (goal_repo, task_repo, memory_repo, agent_repo, worktree_repo) =
+    let (goal_repo, task_repo, memory_repo, agent_repo, _worktree_repo) =
         setup_test_environment().await;
 
     // 1. Create services
     let goal_service = GoalService::new(goal_repo.clone());
-    let task_service = TaskService::new(task_repo.clone(), goal_repo.clone());
+    let _task_service = TaskService::new(task_repo.clone());
     let agent_service = AgentService::new(agent_repo.clone());
     let memory_service = MemoryService::new(memory_repo.clone());
     let evolution_loop = Arc::new(EvolutionLoop::with_default_config());
@@ -823,6 +827,8 @@ async fn test_full_end_to_end_workflow() {
                 GoalConstraint::invariant("testing", "All endpoints must have tests"),
                 GoalConstraint::boundary("coverage", "Test coverage must be > 80%"),
             ],
+            vec![],
+            vec![],
         )
         .await
         .expect("Failed to create goal");
@@ -1015,8 +1021,8 @@ async fn test_swarm_orchestrator_goal_execution() {
     goal_repo.create(&goal).await.expect("Failed to create goal");
 
     // Create ready task for the goal
-    let mut task = Task::new("Test Task", "A task to execute");
-    task.goal_id = Some(goal.id);
+    let mut task = Task::with_title("Test Task", "A task to execute")
+        .with_source(TaskSource::GoalEvaluation(goal.id));
     task.status = TaskStatus::Ready;
     task_repo.create(&task).await.expect("Failed to create task");
 
@@ -1103,7 +1109,7 @@ async fn test_memory_system_integration() {
     assert!(recalled.unwrap().content.contains("Result type"));
 
     // Run maintenance
-    let report = memory_service
+    let _report = memory_service
         .run_maintenance()
         .await
         .expect("Failed to run maintenance");
@@ -1119,22 +1125,22 @@ async fn test_memory_system_integration() {
 /// Test that duplicate task submissions are handled correctly.
 #[tokio::test]
 async fn test_task_idempotency() {
-    let (goal_repo, task_repo, _, _, _) = setup_test_environment().await;
+    let (_goal_repo, task_repo, _, _, _) = setup_test_environment().await;
 
-    let task_service = TaskService::new(task_repo.clone(), goal_repo.clone());
+    let task_service = TaskService::new(task_repo.clone());
 
     // Submit task with idempotency key
     let task1 = task_service
         .submit_task(
-            "Unique Task".to_string(),
+            Some("Unique Task".to_string()),
             "This task should only exist once".to_string(),
-            None,
             None,
             TaskPriority::Normal,
             None,
             vec![],
             None,
             Some("unique-idempotency-key".to_string()),
+            TaskSource::Human,
         )
         .await
         .expect("First submission should succeed");
@@ -1142,15 +1148,15 @@ async fn test_task_idempotency() {
     // Submit again with same key but different content
     let task2 = task_service
         .submit_task(
-            "Different Title".to_string(),
+            Some("Different Title".to_string()),
             "Different description".to_string(),
-            None,
             None,
             TaskPriority::High, // Different priority
             None,
             vec![],
             None,
             Some("unique-idempotency-key".to_string()),
+            TaskSource::Human,
         )
         .await
         .expect("Second submission should succeed");
@@ -1183,7 +1189,7 @@ async fn test_e2e_all_critical_paths() {
     // These tests are also run individually, but this serves as a smoke test
     // to ensure all components work together.
 
-    let (goal_repo, task_repo, memory_repo, agent_repo, worktree_repo) =
+    let (goal_repo, task_repo, memory_repo, agent_repo, _worktree_repo) =
         setup_test_environment().await;
 
     // 1. Goal Creation
@@ -1195,6 +1201,8 @@ async fn test_e2e_all_critical_paths() {
             GoalPriority::Normal,
             None,
             vec![GoalConstraint::preference("test", "Run fast")],
+            vec![],
+            vec![],
         )
         .await
         .expect("Goal creation failed");
@@ -1202,33 +1210,33 @@ async fn test_e2e_all_critical_paths() {
     println!("  ✓ Goal creation");
 
     // 2. Task Creation with Dependencies
-    let task_service = TaskService::new(task_repo.clone(), goal_repo.clone());
+    let task_service = TaskService::new(task_repo.clone());
     let task1 = task_service
         .submit_task(
-            "Task 1".to_string(),
+            Some("Task 1".to_string()),
             "First task".to_string(),
-            Some(goal.id),
             None,
             TaskPriority::Normal,
             None,
             vec![],
             None,
             None,
+            TaskSource::GoalEvaluation(goal.id),
         )
         .await
         .expect("Task 1 creation failed");
 
-    let task2 = task_service
+    let _task2 = task_service
         .submit_task(
-            "Task 2".to_string(),
+            Some("Task 2".to_string()),
             "Second task".to_string(),
-            Some(goal.id),
             None,
             TaskPriority::Normal,
             None,
             vec![task1.id],
             None,
             None,
+            TaskSource::GoalEvaluation(goal.id),
         )
         .await
         .expect("Task 2 creation failed");
@@ -1246,7 +1254,7 @@ async fn test_e2e_all_critical_paths() {
 
     // 4. Agent Template Registration
     let agent_service = AgentService::new(agent_repo.clone());
-    let template = agent_service
+    let _template = agent_service
         .register_template(
             "e2e-worker".to_string(),
             "E2E test worker".to_string(),
@@ -1330,11 +1338,6 @@ async fn test_e2e_all_critical_paths() {
 // Or with env var:
 //   ABATHUR_REAL_E2E=1 cargo test --test e2e_swarm_integration_test
 
-/// Check if real E2E tests should run.
-fn should_run_real_e2e() -> bool {
-    std::env::var("ABATHUR_REAL_E2E").map(|v| v == "1").unwrap_or(false)
-}
-
 /// Check if Claude CLI is available.
 async fn claude_cli_available() -> bool {
     tokio::process::Command::new("claude")
@@ -1361,7 +1364,7 @@ async fn test_real_agent_simple_task_execution() {
         return;
     }
 
-    let (_, task_repo, _, agent_repo, _) = setup_test_environment().await;
+    let (_, task_repo, _, _agent_repo, _) = setup_test_environment().await;
 
     // Create a real Claude Code substrate with haiku for efficiency
     use abathur::adapters::substrates::claude_code::ClaudeCodeConfig;
@@ -1377,7 +1380,7 @@ async fn test_real_agent_simple_task_execution() {
     let substrate = Arc::new(ClaudeCodeSubstrate::new(config));
 
     // Create a simple test task
-    let task = Task::new(
+    let task = Task::with_title(
         "Test Task - Echo Success",
         "This is an automated test. Reply with exactly: TEST_SUCCESS_12345",
     );
@@ -1432,7 +1435,7 @@ async fn test_real_agent_dag_execution() {
         return;
     }
 
-    let (goal_repo, task_repo, _, agent_repo, _) = setup_test_environment().await;
+    let (_goal_repo, task_repo, _, agent_repo, _) = setup_test_environment().await;
 
     // Create Claude Code substrate with haiku
     use abathur::adapters::substrates::claude_code::ClaudeCodeConfig;
@@ -1449,13 +1452,13 @@ async fn test_real_agent_dag_execution() {
 
     // Create tasks with dependency
     // Task 1: Independent task
-    let task1 = Task::new(
+    let task1 = Task::with_title(
         "Test Task 1",
         "This is test task 1. Reply with: TASK1_COMPLETE",
     );
 
     // Task 2: Depends on task 1
-    let task2 = Task::new(
+    let task2 = Task::with_title(
         "Test Task 2",
         "This is test task 2. Reply with: TASK2_COMPLETE",
     )
@@ -1581,7 +1584,7 @@ async fn test_real_agent_evolution_tracking() {
     println!("Executing real tasks with evolution tracking...");
 
     for i in 0..3 {
-        let task = Task::new(
+        let task = Task::with_title(
             &format!("Evolution Test Task {}", i + 1),
             &format!("Test task {}. Reply with: SUCCESS_{}", i + 1, i + 1),
         );
@@ -1676,12 +1679,12 @@ async fn test_real_e2e_full_workflow() {
 
     println!("\n=== REAL E2E TEST: Full Workflow with Live Agents ===\n");
 
-    let (goal_repo, task_repo, memory_repo, agent_repo, worktree_repo) =
+    let (goal_repo, task_repo, memory_repo, agent_repo, _worktree_repo) =
         setup_test_environment().await;
 
     // 1. Create services
     let goal_service = GoalService::new(goal_repo.clone());
-    let task_service = TaskService::new(task_repo.clone(), goal_repo.clone());
+    let task_service = TaskService::new(task_repo.clone());
     let agent_service = AgentService::new(agent_repo.clone());
     let memory_service = MemoryService::new(memory_repo.clone());
     let evolution_loop = Arc::new(EvolutionLoop::with_default_config());
@@ -1694,6 +1697,8 @@ async fn test_real_e2e_full_workflow() {
             GoalPriority::Normal,
             None,
             vec![GoalConstraint::invariant("format", "All responses must include SUCCESS marker")],
+            vec![],
+            vec![],
         )
         .await
         .expect("Failed to create goal");
@@ -1705,30 +1710,30 @@ async fn test_real_e2e_full_workflow() {
 
     let task1 = task_service
         .submit_task(
-            "Setup Task".to_string(),
+            Some("Setup Task".to_string()),
             "This is the setup phase. Reply with: SETUP_COMPLETE".to_string(),
-            Some(goal.id),
             None,
             TaskPriority::High,
             Some("test-worker".to_string()),
             vec![],
             None,
             None,
+            TaskSource::GoalEvaluation(goal.id),
         )
         .await
         .expect("Failed to create task1");
 
-    let task2 = task_service
+    let _task2 = task_service
         .submit_task(
-            "Verify Task".to_string(),
+            Some("Verify Task".to_string()),
             "This is the verification phase. Reply with: VERIFY_COMPLETE".to_string(),
-            Some(goal.id),
             None,
             TaskPriority::Normal,
             Some("test-worker".to_string()),
             vec![task1.id],
             None,
             None,
+            TaskSource::GoalEvaluation(goal.id),
         )
         .await
         .expect("Failed to create task2");

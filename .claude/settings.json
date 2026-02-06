@@ -39,5 +39,8 @@
       "task_update_status",
       "goals_list"
     ]
+  },
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   }
 }

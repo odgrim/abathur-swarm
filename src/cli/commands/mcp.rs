@@ -12,7 +12,7 @@ use crate::adapters::mcp::{
     TasksHttpServer,
 };
 use crate::adapters::sqlite::{
-    all_embedded_migrations, create_pool, Migrator, SqliteGoalRepository, SqliteMemoryRepository,
+    all_embedded_migrations, create_pool, Migrator, SqliteMemoryRepository,
     SqliteTaskRepository,
 };
 use crate::domain::models::a2a::A2AAgentCard;
@@ -197,9 +197,8 @@ async fn start_tasks_http(host: String, port: u16, enable_cors: bool, json_mode:
         .run_embedded_migrations(all_embedded_migrations())
         .await?;
 
-    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
-    let service = TaskService::new(task_repo, goal_repo);
+    let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+    let service = TaskService::new(task_repo);
 
     let config = TasksHttpConfig {
         host: host.clone(),
@@ -326,9 +325,8 @@ async fn start_all(
     let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
     let memory_service = MemoryService::new(memory_repo);
 
-    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
-    let task_service = TaskService::new(task_repo, goal_repo);
+    let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+    let task_service = TaskService::new(task_repo);
 
     // Create servers
     let memory_config = MemoryHttpConfig {

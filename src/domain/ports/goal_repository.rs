@@ -40,4 +40,7 @@ pub trait GoalRepository: Send + Sync {
 
     /// Count goals by status.
     async fn count_by_status(&self) -> DomainResult<std::collections::HashMap<GoalStatus, u64>>;
+
+    /// Find active goals whose applicability_domains overlap with the given domains.
+    async fn find_by_domains(&self, domains: &[String]) -> DomainResult<Vec<Goal>>;
 }

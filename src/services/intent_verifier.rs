@@ -143,12 +143,7 @@ where
             .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
-        let mut intent = OriginalIntent::from_task(task_id, &task.description);
-
-        // Include evaluated constraints as requirements
-        for constraint in &task.evaluated_constraints {
-            intent.key_requirements.push(constraint.clone());
-        }
+        let intent = OriginalIntent::from_task(task_id, &task.description);
 
         Ok(intent)
     }
@@ -177,7 +172,7 @@ where
         // Build an intent from the batch context
         let mut intent = OriginalIntent {
             id: Uuid::new_v4(),
-            source_id: tasks.first().map(|t| t.goal_id.unwrap_or(t.id)).unwrap_or(Uuid::nil()),
+            source_id: tasks.first().map(|t| t.id).unwrap_or(Uuid::nil()),
             source_type: crate::domain::models::IntentSource::DagBranch,
             original_text: context_description.to_string(),
             key_requirements: Vec::new(),
@@ -188,9 +183,6 @@ where
         // Gather requirements from all tasks
         for task in tasks {
             intent.key_requirements.push(format!("Task '{}': {}", task.title, task.description));
-            for constraint in &task.evaluated_constraints {
-                intent.key_requirements.push(constraint.clone());
-            }
         }
 
         // Verify using the standard method
@@ -1182,8 +1174,7 @@ NEW_TASKS:
     }
 
     fn create_mock_task(title: &str) -> Task {
-        Task::new(title, "Test description")
-            .with_goal(Uuid::new_v4())
+        Task::with_title(title, "Test description")
             .with_priority(TaskPriority::Normal)
     }
 
