@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::domain::errors::DomainResult;
 use crate::domain::models::{
-    SessionStatus, SubstrateConfig, SubstrateRequest,
+    AgentDefinition, SessionStatus, SubstrateConfig, SubstrateRequest,
     Task, TaskStatus,
 };
 use crate::domain::ports::{AgentFilter, AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
@@ -397,6 +397,24 @@ where
             } else {
                 None
             };
+
+            // Write agent definition to worktree so the spawned Claude process can discover it
+            if let Some(ref wt_path) = worktree_path {
+                if let Ok(Some(ref template)) = self.agent_repo.get_template_by_name(&agent_type).await {
+                    let def = AgentDefinition::from_template(template);
+                    let agents_dir = std::path::Path::new(wt_path).join(".claude").join("agents");
+                    if let Err(e) = std::fs::create_dir_all(&agents_dir) {
+                        tracing::warn!("Failed to create .claude/agents/ in worktree: {}", e);
+                    } else {
+                        let agent_file = agents_dir.join(format!("{}.md", agent_type));
+                        if let Err(e) = std::fs::write(&agent_file, def.to_markdown()) {
+                            tracing::warn!("Failed to write agent definition to worktree: {}", e);
+                        } else {
+                            tracing::debug!("Wrote agent definition for '{}' to {:?}", agent_type, agent_file);
+                        }
+                    }
+                }
+            }
 
             // Load relevant goal context for the task
             let goal_context_service = GoalContextService::new(self.goal_repo.clone());

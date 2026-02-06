@@ -105,8 +105,8 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
     let db_url = format!("sqlite:{}", db_path.display());
     initialize_database(&db_url).await.context("Failed to initialize database")?;
 
-    // Copy agents if source exists
-    let agents_copied = copy_baseline_agents(&target_path).await.unwrap_or(0);
+    // Write baseline agent definitions to disk
+    let agents_copied = write_baseline_agents(&target_path).await.unwrap_or(0);
 
     let output_data = InitOutput {
         success: true,
@@ -125,52 +125,27 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
     Ok(())
 }
 
-async fn copy_baseline_agents(target_path: &Path) -> Result<usize> {
+async fn write_baseline_agents(target_path: &Path) -> Result<usize> {
+    use crate::domain::models::{AgentDefinition, specialist_templates};
+
     let target_agents = target_path.join(".claude").join("agents");
 
-    // Check if we're in the source repo (has agent definitions)
-    let source_agents = target_path.join(".claude").join("agents");
-    if source_agents.exists() {
-        let overmind = source_agents.join("overmind.md");
-        if overmind.exists() {
-            // Already has agents, don't copy
-            return Ok(0);
-        }
+    // Don't overwrite existing agent definitions
+    let overmind_path = target_agents.join("overmind.md");
+    if overmind_path.exists() {
+        return Ok(0);
     }
 
-    // Try to find source agents from executable location
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            if let Some(parent) = exe_dir.parent() {
-                let source = parent.join(".claude").join("agents");
-                if source.exists() {
-                    return copy_agents_recursive(&source, &target_agents).await;
-                }
-            }
-        }
-    }
-
-    Ok(0)
-}
-
-async fn copy_agents_recursive(source: &Path, target: &Path) -> Result<usize> {
+    // Generate agent definitions from hardcoded templates
+    let baseline = specialist_templates::create_baseline_agents();
     let mut count = 0;
-    let mut entries = fs::read_dir(source).await?;
 
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        let file_name = entry.file_name();
-        let target_path = target.join(&file_name);
-
-        if path.is_dir() {
-            if !target_path.exists() {
-                fs::create_dir_all(&target_path).await?;
-            }
-            count += Box::pin(copy_agents_recursive(&path, &target_path)).await?;
-        } else if path.extension().is_some_and(|ext| ext == "md") {
-            fs::copy(&path, &target_path).await?;
-            count += 1;
-        }
+    for template in &baseline {
+        let def = AgentDefinition::from_template(template);
+        let file_path = target_agents.join(format!("{}.md", template.name));
+        fs::write(&file_path, def.to_markdown()).await
+            .with_context(|| format!("Failed to write agent definition {:?}", file_path))?;
+        count += 1;
     }
 
     Ok(count)

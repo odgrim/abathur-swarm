@@ -61,6 +61,9 @@ pub struct OvermindService {
     config: OvermindConfig,
     /// Semaphore to limit concurrent Overmind invocations.
     concurrency_limiter: Semaphore,
+    /// System prompt for the Overmind agent.
+    /// Loaded from DB template at init, falls back to `OVERMIND_SYSTEM_PROMPT`.
+    system_prompt: String,
 }
 
 impl OvermindService {
@@ -71,12 +74,19 @@ impl OvermindService {
             substrate,
             config,
             concurrency_limiter: Semaphore::new(max_concurrent),
+            system_prompt: OVERMIND_SYSTEM_PROMPT.to_string(),
         }
     }
 
     /// Create with default configuration.
     pub fn with_defaults(substrate: Arc<dyn Substrate>) -> Self {
         Self::new(substrate, OvermindConfig::default())
+    }
+
+    /// Create with a custom system prompt (loaded from DB template).
+    pub fn with_system_prompt(mut self, prompt: String) -> Self {
+        self.system_prompt = prompt;
+        self
     }
 
     // ========================================================================
@@ -240,7 +250,7 @@ impl OvermindService {
         let substrate_request = SubstrateRequest::new(
             task_id,
             "overmind",
-            OVERMIND_SYSTEM_PROMPT,
+            &self.system_prompt,
             prompt,
         )
         .with_config(

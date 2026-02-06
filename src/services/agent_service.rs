@@ -3,9 +3,11 @@
 use std::sync::Arc;
 use uuid::Uuid;
 
+use std::path::Path;
+
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    AgentConstraint, AgentInstance, AgentStatus, AgentTemplate, AgentTier,
+    AgentConstraint, AgentDefinition, AgentInstance, AgentStatus, AgentTemplate, AgentTier,
     InstanceStatus, ToolCapability, specialist_templates,
 };
 use crate::domain::ports::{AgentFilter, AgentRepository};
@@ -313,6 +315,62 @@ impl<R: AgentRepository> AgentService<R> {
                 // Create the template
                 self.repository.create_template(&template).await?;
                 seeded.push(template.name.clone());
+            }
+        }
+
+        Ok(seeded)
+    }
+
+    /// Seed baseline agent templates from disk and/or hardcoded definitions.
+    ///
+    /// Precedence: disk `.md` file > hardcoded constant.
+    ///
+    /// 1. Scan `.claude/agents/*.md` in `project_dir`
+    /// 2. Parse each into an `AgentDefinition` → `AgentTemplate`
+    /// 3. If the template doesn't exist in the DB, insert it
+    /// 4. Fallback: if no `.md` files found (or overmind not among them),
+    ///    use `create_baseline_agents()` which uses the hardcoded `OVERMIND_SYSTEM_PROMPT`
+    pub async fn seed_baseline_agents(&self, project_dir: &Path) -> DomainResult<Vec<String>> {
+        let agents_dir = project_dir.join(".claude").join("agents");
+        let mut seeded = Vec::new();
+        let mut found_names = Vec::new();
+
+        // 1. Try to load from disk
+        match AgentDefinition::load_from_directory(&agents_dir) {
+            Ok(definitions) if !definitions.is_empty() => {
+                tracing::info!(
+                    "Found {} agent definition(s) in {:?}",
+                    definitions.len(),
+                    agents_dir
+                );
+                for def in &definitions {
+                    found_names.push(def.name.clone());
+                    let template = def.to_agent_template();
+
+                    if self.repository.get_template_by_name(&template.name).await?.is_none() {
+                        self.repository.create_template(&template).await?;
+                        seeded.push(template.name.clone());
+                        tracing::info!("Seeded agent '{}' from disk definition", template.name);
+                    }
+                }
+            }
+            Ok(_) => {
+                tracing::debug!("No agent definitions found in {:?}", agents_dir);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load agent definitions from {:?}: {}", agents_dir, e);
+            }
+        }
+
+        // 2. Fallback: seed any baseline agents not found on disk
+        let baseline = specialist_templates::create_baseline_agents();
+        for template in baseline {
+            if !found_names.contains(&template.name) {
+                if self.repository.get_template_by_name(&template.name).await?.is_none() {
+                    self.repository.create_template(&template).await?;
+                    seeded.push(template.name.clone());
+                    tracing::info!("Seeded agent '{}' from hardcoded fallback", template.name);
+                }
             }
         }
 

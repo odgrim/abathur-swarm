@@ -323,20 +323,20 @@ where
             ).await;
         }
 
-        // Seed baseline specialist templates if they don't exist
+        // Seed baseline agent templates (disk-first with hardcoded fallback)
         {
             use crate::services::AgentService;
             let agent_service = AgentService::new(self.agent_repo.clone());
-            match agent_service.seed_baseline_specialists().await {
+            match agent_service.seed_baseline_agents(&self.config.repo_path).await {
                 Ok(seeded) if !seeded.is_empty() => {
                     self.audit_log.info(
                         AuditCategory::Agent,
                         AuditAction::AgentSpawned,
-                        format!("Seeded {} baseline specialist templates: {}", seeded.len(), seeded.join(", ")),
+                        format!("Seeded {} baseline agent templates: {}", seeded.len(), seeded.join(", ")),
                     ).await;
                 }
                 Ok(_) => {
-                    // All specialists already exist
+                    // All agents already exist
                 }
                 Err(e) => {
                     self.audit_log.log(
@@ -345,7 +345,7 @@ where
                             AuditCategory::Agent,
                             AuditAction::AgentSpawned,
                             AuditActor::System,
-                            format!("Failed to seed specialist templates (non-fatal): {}", e),
+                            format!("Failed to seed agent templates (non-fatal): {}", e),
                         ),
                     ).await;
                 }
