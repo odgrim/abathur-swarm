@@ -120,6 +120,16 @@ pub enum McpCommand {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
     },
+    /// Start the MCP stdio server (JSON-RPC 2.0 over stdin/stdout)
+    Stdio {
+        /// Path to the abathur database
+        #[arg(long)]
+        db_path: String,
+
+        /// Task ID for parent context (subtasks auto-set parent_id)
+        #[arg(long)]
+        task_id: Option<String>,
+    },
     /// Show MCP server status
     Status,
 }
@@ -169,6 +179,7 @@ pub async fn execute(args: McpArgs, json_mode: bool) -> Result<()> {
             a2a_port,
             host,
         } => start_all(host, memory_port, tasks_port, agents_port, a2a_port, json_mode).await,
+        McpCommand::Stdio { db_path, task_id } => start_stdio(db_path, task_id).await,
         McpCommand::Status => show_status(json_mode).await,
     }
 }
@@ -500,6 +511,44 @@ async fn start_all(
             }
         }
     }
+
+    Ok(())
+}
+
+async fn start_stdio(db_path: String, task_id: Option<String>) -> Result<()> {
+    use crate::adapters::mcp::StdioServer;
+    use crate::adapters::sqlite::SqliteGoalRepository;
+
+    // Parse optional task ID
+    let task_uuid = match task_id {
+        Some(ref id) => Some(
+            uuid::Uuid::parse_str(id)
+                .map_err(|e| anyhow::anyhow!("Invalid task ID '{}': {}", id, e))?,
+        ),
+        None => None,
+    };
+
+    // Initialize database
+    let pool = create_pool(&db_path, None).await?;
+    let migrator = Migrator::new(pool.clone());
+    migrator
+        .run_embedded_migrations(all_embedded_migrations())
+        .await?;
+
+    // Create repositories and services
+    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+    let task_service = TaskService::new(task_repo);
+
+    let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+    let agent_service = AgentService::new(agent_repo);
+
+    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
+    let memory_service = MemoryService::new(memory_repo);
+
+    let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
+
+    let server = StdioServer::new(task_service, agent_service, memory_service, goal_repo, task_uuid);
+    server.run().await?;
 
     Ok(())
 }

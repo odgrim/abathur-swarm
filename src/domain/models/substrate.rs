@@ -91,9 +91,29 @@ impl Default for SubstrateConfig {
 }
 
 /// Default tools available to all agents.
+///
+/// Notably, Claude Code's built-in `Task` (subagent spawner) and `TodoWrite`
+/// are excluded. Agents must use the Abathur MCP tools (task_submit, agent_create,
+/// memory_search, etc.) provided via the MCP stdio server — otherwise they bypass
+/// the swarm orchestration layer entirely.
+///
+/// `WebFetch` and `WebSearch` are kept for general web access; Abathur APIs
+/// are now native MCP tools, not WebFetch targets.
 pub const DEFAULT_TOOLS: &[&str] = &[
-    "Edit", "Write", "Bash", "Glob", "Grep", "Read",
-    "TodoWrite", "WebFetch", "WebSearch", "Task", "MultiEdit",
+    "Bash", "Edit", "Glob", "Grep", "MultiEdit", "Read",
+    "WebFetch", "WebSearch", "Write",
+];
+
+/// Tools that must NEVER be available to swarm agents.
+///
+/// These are Claude Code built-in tools that provide their own task/team
+/// orchestration, bypassing Abathur's swarm layer entirely.
+pub const BLOCKED_TOOLS: &[&str] = &[
+    "Task", "TodoWrite", "TodoRead",
+    "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop", "TaskOutput",
+    "TeamCreate", "TeamDelete", "SendMessage",
+    "EnterPlanMode", "ExitPlanMode",
+    "Skill", "NotebookEdit",
 ];
 
 impl SubstrateConfig {

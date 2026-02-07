@@ -108,6 +108,9 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
     // Write baseline agent definitions to disk
     let agents_copied = write_baseline_agents(&target_path).await.unwrap_or(0);
 
+    // Merge abathur MCP config into .claude/settings.json
+    merge_claude_settings(&target_path).await.context("Failed to merge .claude/settings.json")?;
+
     let output_data = InitOutput {
         success: true,
         message: if args.force {
@@ -122,6 +125,73 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
     };
 
     output(&output_data, json_mode);
+    Ok(())
+}
+
+const ABATHUR_TOOLS: &[&str] = &[
+    "mcp__abathur__task_submit",
+    "mcp__abathur__task_list",
+    "mcp__abathur__task_get",
+    "mcp__abathur__task_update_status",
+    "mcp__abathur__agent_create",
+    "mcp__abathur__agent_list",
+    "mcp__abathur__agent_get",
+    "mcp__abathur__memory_search",
+    "mcp__abathur__memory_store",
+    "mcp__abathur__memory_get",
+    "mcp__abathur__goals_list",
+];
+
+async fn merge_claude_settings(target_path: &Path) -> Result<()> {
+    let settings_path = target_path.join(".claude").join("settings.json");
+
+    // Read existing or start fresh
+    let mut settings: serde_json::Value = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path).await?;
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+
+    let map = settings.as_object_mut().expect("settings must be an object");
+
+    // Merge mcpServers
+    let servers = map
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .expect("mcpServers must be an object");
+    servers.remove("abathur-memory"); // legacy
+    servers.remove("abathur-tasks"); // legacy
+    servers.insert(
+        "abathur".into(),
+        serde_json::json!({
+            "command": "abathur",
+            "args": ["mcp", "stdio", "--db-path", "abathur.db"]
+        }),
+    );
+
+    // Merge permissions.allowedTools
+    let permissions = map
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .expect("permissions must be an object");
+    let tools = permissions
+        .entry("allowedTools")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .expect("allowedTools must be an array");
+    for tool in ABATHUR_TOOLS {
+        let val = serde_json::Value::String(tool.to_string());
+        if !tools.contains(&val) {
+            tools.push(val);
+        }
+    }
+
+    // Write back (pretty-printed)
+    let content = serde_json::to_string_pretty(&settings)?;
+    fs::write(&settings_path, format!("{content}\n")).await?;
     Ok(())
 }
 

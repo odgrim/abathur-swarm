@@ -370,13 +370,28 @@ where
 
         let with_git = format!("{}{}", base_prompt, git_instructions);
 
-        // Append Abathur REST API documentation so agents can access system services via WebFetch
-        let api_docs = self.build_api_docs();
-        let with_apis = if api_docs.is_empty() {
-            with_git
-        } else {
-            format!("{}\n\n{}", with_git, api_docs)
-        };
+        // Append tool restrictions to prevent agents from using Claude Code's built-in
+        // orchestration tools that bypass Abathur's swarm layer
+        let tool_restrictions = "\n\n## Tool Restrictions\n\n\
+            You are running inside the Abathur swarm. You MUST NOT use Claude Code's built-in \
+            Task, TodoWrite, TeamCreate, TaskCreate, or any other built-in task/team management tools. \
+            These bypass Abathur's orchestration and make your work invisible to the swarm.\n\n\
+            Instead, use the Abathur MCP tools (task_submit, agent_create, memory_store, etc.) \
+            which are available as native tools in your tool list.";
+
+        let with_restrictions = format!("{}{}", with_git, tool_restrictions);
+
+        // Tools are now provided via MCP stdio server — no REST API docs needed.
+        // The agent sees task_submit, agent_create, memory_search, etc. as native tools.
+        let api_docs = "\n\n## Abathur Tools\n\n\
+            You have native tools for interacting with the Abathur swarm:\n\
+            - task_submit, task_list, task_get, task_update_status: Manage tasks and subtasks\n\
+            - agent_create, agent_list, agent_get: Create and discover agent templates\n\
+            - memory_search, memory_store, memory_get: Query and store swarm memory\n\
+            - goals_list: View active goals for context\n\n\
+            Use these tools directly — do NOT use WebFetch to call HTTP endpoints.";
+
+        let with_apis = format!("{}{}", with_restrictions, api_docs);
 
         // Append goal context to the system prompt
         let goal_context = self.build_goal_context().await;
@@ -387,61 +402,8 @@ where
         }
     }
 
-    /// Build REST API documentation for injection into agent system prompts.
-    ///
-    /// Agents access Abathur system services (memory, tasks, A2A) via WebFetch
-    /// calls to these REST endpoints. This replaces MCP protocol access since
-    /// the servers expose HTTP REST APIs.
-    fn build_api_docs(&self) -> String {
-        let mcp = &self.config.mcp_servers;
-        if mcp.memory_server.is_none() && mcp.tasks_server.is_none() {
-            return String::new();
-        }
-
-        let mut docs = String::from("## Abathur System APIs\n\n\
-            You have access to Abathur's system services via HTTP REST APIs.\n\
-            Use the WebFetch tool to call these endpoints.\n");
-
-        if let Some(ref memory_url) = mcp.memory_server {
-            let base = memory_url.trim_end_matches('/');
-            docs.push_str(&format!(
-                "\n### Memory Service ({})\n\
-                Store and retrieve memories from previous work.\n\
-                - **Search memories**: GET {}/memories?query=<search_term>&limit=10\n\
-                - **Get memory by ID**: GET {}/memories/<id>\n\
-                - **Store memory**: POST {}/memories (JSON body: {{\"content\": \"...\", \"memory_type\": \"lesson_learned\", \"tags\": [\"tag1\"]}})\n\
-                - **Memory types**: lesson_learned, decision, pattern, failure, convention\n",
-                base, base, base, base
-            ));
-        }
-
-        if let Some(ref tasks_url) = mcp.tasks_server {
-            let base = tasks_url.trim_end_matches('/');
-            docs.push_str(&format!(
-                "\n### Tasks Service ({})\n\
-                Create subtasks to decompose work and route to specialist agents.\n\
-                - **List tasks**: GET {}/tasks?status=<status>\n\
-                - **Get task**: GET {}/tasks/<id>\n\
-                - **Submit task**: POST {}/tasks (JSON body: {{\"title\": \"...\", \"description\": \"...\", \"agent_type\": \"agent-name\", \"depends_on\": []}})\n\
-                - **Update task status**: PATCH {}/tasks/<id> (JSON body: {{\"status\": \"complete\"}})\n\
-                - **List goals**: GET {}/goals\n",
-                base, base, base, base, base, base
-            ));
-        }
-
-        if let Some(ref a2a_url) = mcp.a2a_gateway {
-            let base = a2a_url.trim_end_matches('/');
-            docs.push_str(&format!(
-                "\n### A2A Gateway ({})\n\
-                Discover and communicate with other agents.\n\
-                - **List agents**: GET {}/agents\n\
-                - **Send message**: POST {}/messages (JSON body: {{\"to\": \"agent-name\", \"content\": \"...\"}})\n",
-                base, base, base
-            ));
-        }
-
-        docs
-    }
+    // build_api_docs removed — tools are now provided via MCP stdio server.
+    // The agent sees task_submit, agent_create, memory_search, etc. as native tools.
 
     /// Evaluate goal alignment for a completed task.
     ///

@@ -79,8 +79,12 @@ impl AgentDefinition {
             .to_string();
 
         let version = mapping.get(serde_yaml::Value::String("version".to_string()))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .and_then(|v| {
+                v.as_str().map(|s| s.to_string())
+                    .or_else(|| v.as_u64().map(|n| n.to_string()))
+                    .or_else(|| v.as_i64().map(|n| n.to_string()))
+                    .or_else(|| v.as_f64().map(|n| n.to_string()))
+            });
 
         let description = mapping.get(serde_yaml::Value::String("description".to_string()))
             .and_then(|v| v.as_str())

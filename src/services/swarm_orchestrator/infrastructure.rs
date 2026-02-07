@@ -29,6 +29,92 @@ where
     A: AgentRepository + 'static,
     M: MemoryRepository + 'static,
 {
+    /// Check if the MCP infrastructure is ready.
+    ///
+    /// With MCP stdio servers, agents get their own server process via --mcp,
+    /// so there are no external servers to health-check. Instead, verify that
+    /// the abathur binary and database file exist so stdio servers can launch.
+    /// Falls back to HTTP health checks for any configured HTTP servers (A2A gateway).
+    pub async fn check_mcp_readiness(&self) -> bool {
+        // Check abathur binary exists (needed by MCP stdio servers)
+        let exe_ok = std::env::current_exe()
+            .map(|p| p.exists())
+            .unwrap_or(false);
+        if !exe_ok {
+            tracing::warn!("Abathur binary not found — MCP stdio servers cannot launch");
+            return false;
+        }
+
+        // Check database file exists — use absolute path consistent with agent MCP configs
+        let db_path = std::env::current_dir()
+            .unwrap_or_else(|_| self.config.repo_path.clone())
+            .join(".abathur")
+            .join("abathur.db");
+        if !db_path.exists() {
+            tracing::warn!("Database not found at {:?} — MCP stdio servers cannot launch", db_path);
+            return false;
+        }
+
+        // Health-check any HTTP servers that are still configured (e.g., A2A gateway)
+        if let Some(ref a2a_url) = self.config.mcp_servers.a2a_gateway {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .unwrap_or_default();
+
+            let health_url = format!("{}/health", a2a_url.trim_end_matches('/'));
+            match client.get(&health_url).send().await {
+                Ok(resp) if resp.status().is_success() => {}
+                Ok(resp) => {
+                    tracing::warn!("A2A gateway at {} returned status {}", a2a_url, resp.status());
+                    return false;
+                }
+                Err(e) => {
+                    tracing::warn!("A2A gateway at {} unreachable: {}", a2a_url, e);
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Wait for all configured MCP servers to become healthy.
+    ///
+    /// Retries up to 30 times with 1-second intervals (30s total).
+    /// Used at startup to ensure infrastructure is ready before processing tasks.
+    pub async fn await_mcp_readiness(&self) -> DomainResult<()> {
+        let max_attempts = 30u32;
+
+        for attempt in 1..=max_attempts {
+            if self.check_mcp_readiness().await {
+                self.audit_log.info(
+                    AuditCategory::System,
+                    AuditAction::SwarmStarted,
+                    format!("All MCP servers healthy (attempt {}/{})", attempt, max_attempts),
+                ).await;
+                return Ok(());
+            }
+
+            tracing::info!("Waiting for MCP servers... (attempt {}/{})", attempt, max_attempts);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        self.audit_log.log(
+            AuditEntry::new(
+                AuditLevel::Error,
+                AuditCategory::System,
+                AuditAction::SwarmStarted,
+                AuditActor::System,
+                format!("MCP servers not ready after {} attempts", max_attempts),
+            ),
+        ).await;
+
+        Err(crate::domain::errors::DomainError::ExecutionFailed(
+            format!("MCP servers not ready after {} attempts", max_attempts),
+        ))
+    }
+
     /// Verify a completed task using the IntegrationVerifier.
     ///
     /// Returns the verification result if verification is enabled and passes.

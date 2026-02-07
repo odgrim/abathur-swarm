@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::domain::errors::DomainResult;
 use crate::domain::models::{
-    AgentDefinition, SessionStatus, SubstrateConfig, SubstrateRequest,
+    SessionStatus, SubstrateConfig, SubstrateRequest,
     Task, TaskStatus,
 };
 use crate::domain::ports::{AgentFilter, AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
@@ -33,7 +33,6 @@ use super::SwarmOrchestrator;
 /// not Claude Code built-in tools, so they map to WebFetch access.
 fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
     let mut cli_tools = Vec::new();
-    let mut needs_webfetch = false;
 
     for tool in template_tool_names {
         match tool.as_str() {
@@ -48,18 +47,25 @@ fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
             "shell" => cli_tools.push("Bash".to_string()),
             "glob" => cli_tools.push("Glob".to_string()),
             "grep" => cli_tools.push("Grep".to_string()),
-            "memory" | "tasks" => {
-                // Abathur REST APIs - agents access these via WebFetch
-                needs_webfetch = true;
+            // Abathur APIs are now provided via MCP stdio server as native tools.
+            // These template tool names are kept for capability matching but don't
+            // need CLI tool mapping — the MCP server handles them.
+            "memory" | "tasks" | "agents" => {}
+            // Pass through any already-PascalCase tool names, but reject blocked tools
+            other => {
+                const BLOCKED: &[&str] = &[
+                    "task", "todowrite", "todoread", "taskcreate", "taskupdate",
+                    "tasklist", "taskget", "taskstop", "taskoutput",
+                    "teamcreate", "teamdelete", "sendmessage",
+                    "enterplanmode", "exitplanmode", "skill", "notebookedit",
+                ];
+                if BLOCKED.contains(&other.to_lowercase().as_str()) {
+                    tracing::warn!("Agent template requested blocked tool '{}' - skipping", other);
+                } else {
+                    cli_tools.push(other.to_string());
+                }
             }
-            // Pass through any already-PascalCase tool names
-            other => cli_tools.push(other.to_string()),
         }
-    }
-
-    // Agents with memory/tasks tools need WebFetch to call REST APIs
-    if needs_webfetch && !cli_tools.contains(&"WebFetch".to_string()) {
-        cli_tools.push("WebFetch".to_string());
     }
 
     // Ensure baseline read-only tools are always present (agents must be able to explore code)
@@ -276,6 +282,25 @@ where
         task: &Task,
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
+        // Runtime safety net: don't spawn agents if MCP servers are down.
+        // The task stays Ready and will be retried on the next poll cycle.
+        if !self.check_mcp_readiness().await {
+            self.audit_log.log(
+                AuditEntry::new(
+                    AuditLevel::Warning,
+                    AuditCategory::Execution,
+                    AuditAction::TaskFailed,
+                    AuditActor::System,
+                    format!(
+                        "Skipping spawn for task {} - MCP servers not ready (will retry next cycle)",
+                        task.id
+                    ),
+                )
+                .with_entity(task.id, "task"),
+            ).await;
+            return Ok(());
+        }
+
         // Route the task to an appropriate agent
         let agent_type = self.route_task(task).await;
 
@@ -398,19 +423,56 @@ where
                 None
             };
 
-            // Write agent definition to worktree so the spawned Claude process can discover it
+            // Write CLAUDE.md to worktree with tool restrictions.
+            // Claude Code reads CLAUDE.md as project-level instructions.
+            // NOTE: We intentionally do NOT write .claude/agents/*.md files to the
+            // worktree — Claude Code discovers those as custom agent definitions which
+            // can override --allowedTools restrictions.
             if let Some(ref wt_path) = worktree_path {
-                if let Ok(Some(ref template)) = self.agent_repo.get_template_by_name(&agent_type).await {
-                    let def = AgentDefinition::from_template(template);
-                    let agents_dir = std::path::Path::new(wt_path).join(".claude").join("agents");
-                    if let Err(e) = std::fs::create_dir_all(&agents_dir) {
-                        tracing::warn!("Failed to create .claude/agents/ in worktree: {}", e);
-                    } else {
-                        let agent_file = agents_dir.join(format!("{}.md", agent_type));
-                        if let Err(e) = std::fs::write(&agent_file, def.to_markdown()) {
-                            tracing::warn!("Failed to write agent definition to worktree: {}", e);
-                        } else {
-                            tracing::debug!("Wrote agent definition for '{}' to {:?}", agent_type, agent_file);
+                let claude_md_path = std::path::Path::new(wt_path).join("CLAUDE.md");
+                let claude_md_content = "\
+# Abathur Agent Rules
+
+IMPORTANT: You are running inside the Abathur swarm orchestration system.
+
+## Prohibited Tools
+NEVER use these Claude Code built-in tools — they bypass Abathur's orchestration:
+- Task (subagent spawner)
+- TodoWrite / TodoRead
+- TaskCreate, TaskUpdate, TaskList, TaskGet, TaskStop, TaskOutput
+- TeamCreate, TeamDelete, SendMessage
+- EnterPlanMode, ExitPlanMode
+- Skill
+- NotebookEdit
+
+## How to manage work
+- Create subtasks: Use the `task_submit` tool directly
+- Create agents: Use the `agent_create` tool directly
+- Track progress: Use `task_list` and `task_get` tools
+- Store learnings: Use the `memory_store` tool directly
+";
+                if let Err(e) = std::fs::write(&claude_md_path, claude_md_content) {
+                    tracing::warn!("Failed to write CLAUDE.md to worktree: {}", e);
+                } else {
+                    tracing::debug!("Wrote CLAUDE.md with tool restrictions to {:?}", claude_md_path);
+                }
+
+                // Neutralize mcpServers in worktree settings.
+                // The orchestrator provides MCP via --mcp-config with absolute paths;
+                // the settings-level server uses a relative DB path that won't resolve
+                // from the worktree CWD.
+                let settings_path = std::path::Path::new(wt_path)
+                    .join(".claude")
+                    .join("settings.json");
+                if settings_path.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&settings_path) {
+                        if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
+                            if let Some(obj) = json.as_object_mut() {
+                                obj.remove("mcpServers");
+                                if let Ok(updated) = serde_json::to_string_pretty(&json) {
+                                    let _ = std::fs::write(&settings_path, format!("{updated}\n"));
+                                }
+                            }
                         }
                     }
                 }
@@ -461,7 +523,6 @@ where
             let track_evolution = self.config.track_evolution;
             let agent_type_for_evolution = agent_type.clone();
             let template_version_for_evolution = template_version;
-            let mcp_servers = self.config.mcp_servers.clone();
             let verify_on_completion = self.config.verify_on_completion;
             let use_merge_queue = self.config.use_merge_queue;
             let repo_path = self.config.repo_path.clone();
@@ -489,19 +550,21 @@ where
                     config = config.with_allowed_tools(cli_tools);
                 }
 
-                // Add MCP servers so agents can access memory, tasks, and A2A
-                // Note: HTTP URLs are filtered in build_args() since Claude Code --mcp
-                // expects MCP protocol servers, not REST APIs. REST API access is
-                // documented in the system prompt for agents to use via WebFetch.
-                if let Some(ref memory_server) = mcp_servers.memory_server {
-                    config = config.with_mcp_server(memory_server);
-                }
-                if let Some(ref tasks_server) = mcp_servers.tasks_server {
-                    config = config.with_mcp_server(tasks_server);
-                }
-                if let Some(ref a2a_gateway) = mcp_servers.a2a_gateway {
-                    config = config.with_mcp_server(a2a_gateway);
-                }
+                // Construct MCP stdio server command for agent access to Abathur APIs.
+                // Use absolute path so the MCP server finds the DB regardless of
+                // the agent's working directory (worktrees have a different CWD).
+                let abathur_exe = std::env::current_exe()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("abathur"));
+                let db_path = std::env::current_dir()
+                    .unwrap_or_else(|_| repo_path.clone())
+                    .join(".abathur")
+                    .join("abathur.db");
+
+                let mcp_config = serde_json::json!({
+                    "command": abathur_exe.to_string_lossy(),
+                    "args": ["mcp", "stdio", "--db-path", db_path.to_string_lossy(), "--task-id", task_id.to_string()]
+                });
+                config = config.with_mcp_server(mcp_config.to_string());
 
                 let request = SubstrateRequest::new(
                     task_id,

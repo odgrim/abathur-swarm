@@ -103,15 +103,13 @@ impl ClaudeCodeSubstrate {
             args.push(request.system_prompt.clone());
         }
 
-        // MCP servers - only pass if they're actual MCP protocol servers (not HTTP REST APIs)
-        // HTTP REST APIs (like Abathur's memory/tasks servers) should be documented in
-        // the system prompt for agents to use via WebFetch tool
+        // MCP servers — JSON configs are MCP stdio server definitions, pass them through.
+        // HTTP URLs were the old REST API approach — skip for backwards compat.
         for server in &request.config.mcp_servers {
-            // Skip HTTP URLs as they're REST APIs, not MCP servers
             if server.starts_with("http://") || server.starts_with("https://") {
                 continue;
             }
-            args.push("--mcp".to_string());
+            args.push("--mcp-config".to_string());
             args.push(server.clone());
         }
 
@@ -126,6 +124,10 @@ impl ClaudeCodeSubstrate {
                 args.push(request.config.allowed_tool_names.join(","));
             }
         }
+
+        // Explicitly block Claude Code orchestration tools that bypass Abathur
+        args.push("--disallowedTools".to_string());
+        args.push(crate::domain::models::BLOCKED_TOOLS.join(","));
 
         // Allowed files patterns
         for pattern in &request.config.allowed_files {

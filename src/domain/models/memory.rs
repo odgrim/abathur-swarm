@@ -386,7 +386,16 @@ impl Memory {
         }
     }
 
-    /// Compute Jaccard word-overlap similarity between two text strings.
+    /// Compute weighted text similarity between two strings.
+    ///
+    /// Uses a combination of:
+    /// - Jaccard word-overlap for broad matching
+    /// - Term-frequency weighted overlap for precision (rarer shared words score higher)
+    /// - Bigram overlap for phrase-level similarity
+    ///
+    /// This outperforms pure Jaccard for memory retrieval because it gives
+    /// more weight to distinctive terms (e.g., "circuit_breaker" matching is
+    /// more significant than "the" matching).
     fn text_similarity(text_a: &str, text_b: &str) -> f32 {
         if text_a.is_empty() && text_b.is_empty() {
             return 1.0;
@@ -394,21 +403,78 @@ impl Memory {
 
         let lower_a = text_a.to_lowercase();
         let lower_b = text_b.to_lowercase();
-        let words_a: std::collections::HashSet<&str> = lower_a.split_whitespace().collect();
-        let words_b: std::collections::HashSet<&str> = lower_b.split_whitespace().collect();
+        let words_a: Vec<&str> = lower_a.split_whitespace().collect();
+        let words_b: Vec<&str> = lower_b.split_whitespace().collect();
 
         if words_a.is_empty() && words_b.is_empty() {
             return 1.0;
         }
-
-        let intersection = words_a.intersection(&words_b).count() as f32;
-        let union = words_a.union(&words_b).count() as f32;
-
-        if union == 0.0 {
-            return 1.0;
+        if words_a.is_empty() || words_b.is_empty() {
+            return 0.0;
         }
 
-        intersection / union
+        let set_a: std::collections::HashSet<&str> = words_a.iter().copied().collect();
+        let set_b: std::collections::HashSet<&str> = words_b.iter().copied().collect();
+
+        // 1. Jaccard similarity (baseline)
+        let intersection = set_a.intersection(&set_b).count() as f32;
+        let union = set_a.union(&set_b).count() as f32;
+        let jaccard = if union > 0.0 { intersection / union } else { 0.0 };
+
+        // 2. Term-frequency weighted overlap: shared words that are rarer score higher
+        // Words appearing in both get a boost inversely proportional to their frequency
+        let total_words = (words_a.len() + words_b.len()) as f32;
+        let mut freq_a: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
+        let mut freq_b: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
+        for &w in &words_a { *freq_a.entry(w).or_default() += 1.0; }
+        for &w in &words_b { *freq_b.entry(w).or_default() += 1.0; }
+
+        // Common stop words get reduced weight
+        const STOP_WORDS: &[&str] = &[
+            "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "will", "would", "shall",
+            "should", "may", "might", "must", "can", "could", "of", "in", "to",
+            "for", "with", "on", "at", "from", "by", "and", "or", "but", "not",
+            "this", "that", "it", "its", "as", "if", "then", "than", "so",
+        ];
+
+        let mut weighted_overlap = 0.0f32;
+        let mut weight_sum = 0.0f32;
+        for word in set_a.intersection(&set_b) {
+            // Inverse document frequency proxy: rarer words in the combined corpus score higher
+            let combined_freq = freq_a.get(word).unwrap_or(&0.0) + freq_b.get(word).unwrap_or(&0.0);
+            let idf_proxy = (total_words / combined_freq).ln().max(0.1);
+            let stop_penalty = if STOP_WORDS.contains(word) { 0.1 } else { 1.0 };
+            let weight = idf_proxy * stop_penalty;
+            weighted_overlap += weight;
+            weight_sum += weight;
+        }
+        // Also add non-shared words to the weight sum (at reduced weight)
+        for word in set_a.symmetric_difference(&set_b) {
+            let combined_freq = freq_a.get(word).unwrap_or(&0.0) + freq_b.get(word).unwrap_or(&0.0);
+            let idf_proxy = (total_words / combined_freq).ln().max(0.1);
+            let stop_penalty = if STOP_WORDS.contains(word) { 0.1 } else { 1.0 };
+            weight_sum += idf_proxy * stop_penalty;
+        }
+        let tf_idf_score = if weight_sum > 0.0 { weighted_overlap / weight_sum } else { 0.0 };
+
+        // 3. Bigram overlap for phrase-level matching
+        let bigrams_a: std::collections::HashSet<String> = words_a.windows(2)
+            .map(|w| format!("{} {}", w[0], w[1]))
+            .collect();
+        let bigrams_b: std::collections::HashSet<String> = words_b.windows(2)
+            .map(|w| format!("{} {}", w[0], w[1]))
+            .collect();
+        let bigram_score = if bigrams_a.is_empty() && bigrams_b.is_empty() {
+            jaccard // Fall back to word-level if no bigrams
+        } else {
+            let bi_intersection = bigrams_a.intersection(&bigrams_b).count() as f32;
+            let bi_union = bigrams_a.union(&bigrams_b).count() as f32;
+            if bi_union > 0.0 { bi_intersection / bi_union } else { 0.0 }
+        };
+
+        // Combine: 30% Jaccard + 50% TF-IDF weighted + 20% bigram
+        (0.30 * jaccard + 0.50 * tf_idf_score + 0.20 * bigram_score).min(1.0)
     }
 
     /// Estimate the token count of this memory's content.

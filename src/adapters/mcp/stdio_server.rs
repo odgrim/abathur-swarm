@@ -1,0 +1,897 @@
+//! MCP stdio server implementing JSON-RPC 2.0 over stdin/stdout.
+//!
+//! Exposes Abathur's task, agent, and memory operations as native Claude Code
+//! tools via the MCP (Model Context Protocol). This replaces the HTTP REST API
+//! approach where agents had to use WebFetch to call endpoints.
+//!
+//! Protocol: newline-delimited JSON-RPC 2.0 on stdin/stdout.
+//! Logging goes to stderr (stdout is reserved for protocol messages).
+
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use uuid::Uuid;
+
+use crate::domain::models::{GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource};
+use crate::domain::ports::{AgentFilter, GoalFilter, GoalRepository, MemoryRepository, TaskRepository};
+use crate::services::{AgentService, MemoryService, TaskService};
+use crate::domain::ports::AgentRepository;
+
+/// MCP stdio server that exposes Abathur APIs as native tools.
+pub struct StdioServer<T, A, M, G>
+where
+    T: TaskRepository + Clone + Send + Sync + 'static,
+    A: AgentRepository + Clone + Send + Sync + 'static,
+    M: MemoryRepository + Clone + Send + Sync + 'static,
+    G: GoalRepository + Send + Sync + 'static,
+{
+    task_service: TaskService<T>,
+    agent_service: AgentService<A>,
+    memory_service: MemoryService<M>,
+    goal_repo: Arc<G>,
+    /// When set, task_submit auto-populates parent_id
+    task_id: Option<Uuid>,
+}
+
+impl<T, A, M, G> StdioServer<T, A, M, G>
+where
+    T: TaskRepository + Clone + Send + Sync + 'static,
+    A: AgentRepository + Clone + Send + Sync + 'static,
+    M: MemoryRepository + Clone + Send + Sync + 'static,
+    G: GoalRepository + Send + Sync + 'static,
+{
+    pub fn new(
+        task_service: TaskService<T>,
+        agent_service: AgentService<A>,
+        memory_service: MemoryService<M>,
+        goal_repo: Arc<G>,
+        task_id: Option<Uuid>,
+    ) -> Self {
+        Self {
+            task_service,
+            agent_service,
+            memory_service,
+            goal_repo,
+            task_id,
+        }
+    }
+
+    /// Run the stdio server loop, reading JSON-RPC from stdin and writing responses to stdout.
+    pub async fn run(&self) -> anyhow::Result<()> {
+        let stdin = tokio::io::stdin();
+        let mut stdout = tokio::io::stdout();
+        let reader = BufReader::new(stdin);
+        let mut lines = reader.lines();
+
+        eprintln!("[abathur-mcp] stdio server started");
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+
+            let response = self.handle_message(&line).await;
+            let mut response_bytes = response.into_bytes();
+            response_bytes.push(b'\n');
+            stdout.write_all(&response_bytes).await?;
+            stdout.flush().await?;
+        }
+
+        eprintln!("[abathur-mcp] stdio server stopped");
+        Ok(())
+    }
+
+    async fn handle_message(&self, line: &str) -> String {
+        let request: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                return self.error_response(
+                    serde_json::Value::Null,
+                    -32700,
+                    &format!("Parse error: {}", e),
+                );
+            }
+        };
+
+        let id = request.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let method = request
+            .get("method")
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
+        let params = request.get("params").cloned().unwrap_or(serde_json::json!({}));
+
+        match method {
+            "initialize" => self.handle_initialize(id),
+            "tools/list" => self.handle_tools_list(id),
+            "tools/call" => self.handle_tools_call(id, &params).await,
+            "notifications/initialized" => {
+                // Client notification — no response required, but we'll be lenient
+                // and return nothing (the spec says notifications have no id)
+                String::new()
+            }
+            _ => self.error_response(id, -32601, &format!("Method not found: {}", method)),
+        }
+    }
+
+    fn handle_initialize(&self, id: serde_json::Value) -> String {
+        let result = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": {}
+            },
+            "serverInfo": {
+                "name": "abathur",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        });
+        self.success_response(id, result)
+    }
+
+    fn handle_tools_list(&self, id: serde_json::Value) -> String {
+        let tools = serde_json::json!({
+            "tools": [
+                {
+                    "name": "task_submit",
+                    "description": "Create a subtask in the Abathur swarm. The task will be routed to the specified agent_type for execution.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string", "description": "Short title for the task" },
+                            "description": { "type": "string", "description": "Detailed description of what needs to be done" },
+                            "agent_type": { "type": "string", "description": "Name of the agent template to execute this task (e.g., 'rust-implementer')" },
+                            "depends_on": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "UUIDs of tasks that must complete before this one starts"
+                            },
+                            "priority": { "type": "string", "enum": ["low", "normal", "high", "critical"], "description": "Task priority (default: normal)" }
+                        },
+                        "required": ["description"]
+                    }
+                },
+                {
+                    "name": "task_list",
+                    "description": "List tasks in the Abathur swarm, optionally filtered by status.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "status": { "type": "string", "enum": ["pending", "ready", "running", "complete", "failed", "blocked"], "description": "Filter by task status" },
+                            "limit": { "type": "integer", "description": "Maximum number of tasks to return (default: 50)" }
+                        }
+                    }
+                },
+                {
+                    "name": "task_get",
+                    "description": "Get a task by its UUID.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "description": "Task UUID" }
+                        },
+                        "required": ["id"]
+                    }
+                },
+                {
+                    "name": "task_update_status",
+                    "description": "Update a task's status to complete or failed.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "description": "Task UUID" },
+                            "status": { "type": "string", "enum": ["complete", "failed"], "description": "New status" },
+                            "error": { "type": "string", "description": "Error message (required when status is 'failed')" }
+                        },
+                        "required": ["id", "status"]
+                    }
+                },
+                {
+                    "name": "agent_create",
+                    "description": "Create a new agent template in the Abathur swarm. Agents are specialized workers that execute specific types of tasks.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string", "description": "Unique agent name (e.g., 'rust-implementer')" },
+                            "description": { "type": "string", "description": "What this agent does" },
+                            "tier": { "type": "string", "enum": ["worker", "specialist", "architect"], "description": "Agent tier (default: worker)" },
+                            "system_prompt": { "type": "string", "description": "System prompt that defines the agent's behavior" },
+                            "tools": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string" },
+                                        "description": { "type": "string" },
+                                        "required": { "type": "boolean" }
+                                    },
+                                    "required": ["name", "description"]
+                                },
+                                "description": "Tools this agent needs (e.g., read, write, edit, shell, glob, grep)"
+                            },
+                            "constraints": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string" },
+                                        "description": { "type": "string" }
+                                    },
+                                    "required": ["name", "description"]
+                                },
+                                "description": "Constraints for agent behavior"
+                            },
+                            "max_turns": { "type": "integer", "description": "Maximum turns for this agent (default: 25)" }
+                        },
+                        "required": ["name", "description", "system_prompt"]
+                    }
+                },
+                {
+                    "name": "agent_list",
+                    "description": "List all available agent templates in the Abathur swarm.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                },
+                {
+                    "name": "agent_get",
+                    "description": "Get an agent template by name.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string", "description": "Agent template name" }
+                        },
+                        "required": ["name"]
+                    }
+                },
+                {
+                    "name": "memory_search",
+                    "description": "Search memories in the Abathur swarm by keyword query.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string", "description": "Search query" },
+                            "namespace": { "type": "string", "description": "Optional namespace filter" },
+                            "limit": { "type": "integer", "description": "Maximum results (default: 20)" }
+                        },
+                        "required": ["query"]
+                    }
+                },
+                {
+                    "name": "memory_store",
+                    "description": "Store a memory in the Abathur swarm for future reference.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "key": { "type": "string", "description": "Unique key for this memory" },
+                            "content": { "type": "string", "description": "Memory content" },
+                            "namespace": { "type": "string", "description": "Namespace (default: 'default')" },
+                            "memory_type": { "type": "string", "enum": ["fact", "code", "decision", "error", "pattern", "reference", "context"], "description": "Type of memory (default: fact)" },
+                            "tier": { "type": "string", "enum": ["working", "episodic", "semantic"], "description": "Memory tier (default: working)" }
+                        },
+                        "required": ["key", "content"]
+                    }
+                },
+                {
+                    "name": "memory_get",
+                    "description": "Get a memory by its UUID.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "description": "Memory UUID" }
+                        },
+                        "required": ["id"]
+                    }
+                },
+                {
+                    "name": "goals_list",
+                    "description": "List active goals in the Abathur swarm for context on overall project direction.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                }
+            ]
+        });
+        self.success_response(id, tools)
+    }
+
+    async fn handle_tools_call(&self, id: serde_json::Value, params: &serde_json::Value) -> String {
+        let tool_name = params
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("");
+        let arguments = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+
+        let result = match tool_name {
+            "task_submit" => self.tool_task_submit(&arguments).await,
+            "task_list" => self.tool_task_list(&arguments).await,
+            "task_get" => self.tool_task_get(&arguments).await,
+            "task_update_status" => self.tool_task_update_status(&arguments).await,
+            "agent_create" => self.tool_agent_create(&arguments).await,
+            "agent_list" => self.tool_agent_list(&arguments).await,
+            "agent_get" => self.tool_agent_get(&arguments).await,
+            "memory_search" => self.tool_memory_search(&arguments).await,
+            "memory_store" => self.tool_memory_store(&arguments).await,
+            "memory_get" => self.tool_memory_get(&arguments).await,
+            "goals_list" => self.tool_goals_list(&arguments).await,
+            _ => Err(format!("Unknown tool: {}", tool_name)),
+        };
+
+        match result {
+            Ok(content) => {
+                let result = serde_json::json!({
+                    "content": [{
+                        "type": "text",
+                        "text": content
+                    }]
+                });
+                self.success_response(id, result)
+            }
+            Err(error) => {
+                let result = serde_json::json!({
+                    "content": [{
+                        "type": "text",
+                        "text": error
+                    }],
+                    "isError": true
+                });
+                self.success_response(id, result)
+            }
+        }
+    }
+
+    // ========================================================================
+    // Task tools
+    // ========================================================================
+
+    async fn tool_task_submit(&self, args: &serde_json::Value) -> Result<String, String> {
+        let description = args
+            .get("description")
+            .and_then(|d| d.as_str())
+            .ok_or("Missing required field: description")?
+            .to_string();
+
+        let title = args.get("title").and_then(|t| t.as_str()).map(|s| s.to_string());
+        let agent_type = args.get("agent_type").and_then(|a| a.as_str()).map(|s| s.to_string());
+        let priority = args
+            .get("priority")
+            .and_then(|p| p.as_str())
+            .and_then(parse_priority)
+            .unwrap_or(TaskPriority::Normal);
+
+        let depends_on: Vec<Uuid> = args
+            .get("depends_on")
+            .and_then(|d| d.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().and_then(|s| Uuid::parse_str(s).ok()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Auto-populate parent_id from --task-id context
+        let parent_id = self.task_id;
+
+        let task = self
+            .task_service
+            .submit_task(
+                title,
+                description,
+                parent_id,
+                priority,
+                agent_type,
+                depends_on,
+                None,
+                None,
+                TaskSource::Human,
+            )
+            .await
+            .map_err(|e| format!("Failed to submit task: {}", e))?;
+
+        let response = serde_json::json!({
+            "id": task.id.to_string(),
+            "title": task.title,
+            "status": task.status.as_str(),
+            "parent_id": parent_id.map(|id| id.to_string()),
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    async fn tool_task_list(&self, args: &serde_json::Value) -> Result<String, String> {
+        let limit = args
+            .get("limit")
+            .and_then(|l| l.as_u64())
+            .unwrap_or(50) as usize;
+
+        let status_filter = args.get("status").and_then(|s| s.as_str());
+
+        let tasks = if let Some(status_str) = status_filter {
+            let status = parse_task_status(status_str)
+                .ok_or_else(|| format!("Invalid status: {}", status_str))?;
+            use crate::domain::ports::TaskFilter;
+            self.task_service
+                .list_tasks(TaskFilter { status: Some(status), ..Default::default() })
+                .await
+                .map_err(|e| format!("Failed to list tasks: {}", e))?
+        } else {
+            self.task_service
+                .get_ready_tasks(limit)
+                .await
+                .map_err(|e| format!("Failed to list tasks: {}", e))?
+        };
+
+        let tasks: Vec<serde_json::Value> = tasks
+            .into_iter()
+            .take(limit)
+            .map(|t| {
+                serde_json::json!({
+                    "id": t.id.to_string(),
+                    "title": t.title,
+                    "status": t.status.as_str(),
+                    "priority": t.priority.as_str(),
+                    "agent_type": t.agent_type,
+                    "parent_id": t.parent_id.map(|id| id.to_string()),
+                })
+            })
+            .collect();
+
+        serde_json::to_string_pretty(&tasks).map_err(|e| e.to_string())
+    }
+
+    async fn tool_task_get(&self, args: &serde_json::Value) -> Result<String, String> {
+        let id_str = args
+            .get("id")
+            .and_then(|i| i.as_str())
+            .ok_or("Missing required field: id")?;
+        let id = Uuid::parse_str(id_str).map_err(|e| format!("Invalid UUID: {}", e))?;
+
+        let task = self
+            .task_service
+            .get_task(id)
+            .await
+            .map_err(|e| format!("Failed to get task: {}", e))?
+            .ok_or_else(|| format!("Task {} not found", id))?;
+
+        let response = serde_json::json!({
+            "id": task.id.to_string(),
+            "title": task.title,
+            "description": task.description,
+            "status": task.status.as_str(),
+            "priority": task.priority.as_str(),
+            "agent_type": task.agent_type,
+            "parent_id": task.parent_id.map(|id| id.to_string()),
+            "depends_on": task.depends_on.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            "retry_count": task.retry_count,
+            "created_at": task.created_at.to_rfc3339(),
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    async fn tool_task_update_status(&self, args: &serde_json::Value) -> Result<String, String> {
+        let id_str = args
+            .get("id")
+            .and_then(|i| i.as_str())
+            .ok_or("Missing required field: id")?;
+        let id = Uuid::parse_str(id_str).map_err(|e| format!("Invalid UUID: {}", e))?;
+
+        let status = args
+            .get("status")
+            .and_then(|s| s.as_str())
+            .ok_or("Missing required field: status")?;
+
+        let task = match status {
+            "complete" | "completed" => self
+                .task_service
+                .complete_task(id)
+                .await
+                .map_err(|e| format!("Failed to complete task: {}", e))?,
+            "failed" | "fail" => {
+                let error = args.get("error").and_then(|e| e.as_str()).map(|s| s.to_string());
+                self.task_service
+                    .fail_task(id, error)
+                    .await
+                    .map_err(|e| format!("Failed to fail task: {}", e))?
+            }
+            _ => return Err(format!("Invalid status '{}'. Use 'complete' or 'failed'.", status)),
+        };
+
+        let response = serde_json::json!({
+            "id": task.id.to_string(),
+            "status": task.status.as_str(),
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    // ========================================================================
+    // Agent tools
+    // ========================================================================
+
+    async fn tool_agent_create(&self, args: &serde_json::Value) -> Result<String, String> {
+        let name = args
+            .get("name")
+            .and_then(|n| n.as_str())
+            .ok_or("Missing required field: name")?
+            .to_string();
+        let description = args
+            .get("description")
+            .and_then(|d| d.as_str())
+            .ok_or("Missing required field: description")?
+            .to_string();
+        let system_prompt = args
+            .get("system_prompt")
+            .and_then(|s| s.as_str())
+            .ok_or("Missing required field: system_prompt")?
+            .to_string();
+
+        let tier_str = args.get("tier").and_then(|t| t.as_str()).unwrap_or("worker");
+        let tier = crate::domain::models::agent::AgentTier::parse_str(tier_str)
+            .unwrap_or(crate::domain::models::agent::AgentTier::Worker);
+
+        let tools: Vec<crate::domain::models::agent::ToolCapability> = args
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        let name = v.get("name")?.as_str()?;
+                        let desc = v.get("description")?.as_str()?;
+                        let required = v.get("required").and_then(|r| r.as_bool()).unwrap_or(false);
+                        let mut tool = crate::domain::models::agent::ToolCapability::new(name, desc);
+                        if required {
+                            tool = tool.required();
+                        }
+                        Some(tool)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let constraints: Vec<crate::domain::models::agent::AgentConstraint> = args
+            .get("constraints")
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        let name = v.get("name")?.as_str()?;
+                        let desc = v.get("description")?.as_str()?;
+                        Some(crate::domain::models::agent::AgentConstraint::new(name, desc))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let max_turns = args.get("max_turns").and_then(|m| m.as_u64()).map(|m| m as u32);
+
+        let template = self
+            .agent_service
+            .register_template(name, description, tier, system_prompt, tools, constraints, max_turns)
+            .await
+            .map_err(|e| format!("Failed to create agent: {}", e))?;
+
+        let response = serde_json::json!({
+            "name": template.name,
+            "tier": template.tier.as_str(),
+            "version": template.version,
+            "status": template.status.as_str(),
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    async fn tool_agent_list(&self, _args: &serde_json::Value) -> Result<String, String> {
+        let templates = self
+            .agent_service
+            .list_templates(AgentFilter::default())
+            .await
+            .map_err(|e| format!("Failed to list agents: {}", e))?;
+
+        let agents: Vec<serde_json::Value> = templates
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "tier": t.tier.as_str(),
+                    "version": t.version,
+                    "status": t.status.as_str(),
+                    "tools": t.tools.iter().map(|tool| tool.name.clone()).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+
+        serde_json::to_string_pretty(&agents).map_err(|e| e.to_string())
+    }
+
+    async fn tool_agent_get(&self, args: &serde_json::Value) -> Result<String, String> {
+        let name = args
+            .get("name")
+            .and_then(|n| n.as_str())
+            .ok_or("Missing required field: name")?;
+
+        let template = self
+            .agent_service
+            .get_template(name)
+            .await
+            .map_err(|e| format!("Failed to get agent: {}", e))?
+            .ok_or_else(|| format!("Agent '{}' not found", name))?;
+
+        let response = serde_json::json!({
+            "name": template.name,
+            "description": template.description,
+            "tier": template.tier.as_str(),
+            "version": template.version,
+            "system_prompt": template.system_prompt,
+            "tools": template.tools.iter().map(|t| serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+                "required": t.required,
+            })).collect::<Vec<_>>(),
+            "constraints": template.constraints.iter().map(|c| serde_json::json!({
+                "name": c.name,
+                "description": c.description,
+            })).collect::<Vec<_>>(),
+            "status": template.status.as_str(),
+            "max_turns": template.max_turns,
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    // ========================================================================
+    // Memory tools
+    // ========================================================================
+
+    async fn tool_memory_search(&self, args: &serde_json::Value) -> Result<String, String> {
+        let query = args
+            .get("query")
+            .and_then(|q| q.as_str())
+            .ok_or("Missing required field: query")?;
+        let namespace = args.get("namespace").and_then(|n| n.as_str());
+        let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(20) as usize;
+
+        let memories = self
+            .memory_service
+            .search(query, namespace, limit)
+            .await
+            .map_err(|e| format!("Failed to search memories: {}", e))?;
+
+        let results: Vec<serde_json::Value> = memories
+            .into_iter()
+            .map(|m| {
+                serde_json::json!({
+                    "id": m.id.to_string(),
+                    "key": m.key,
+                    "content": m.content,
+                    "namespace": m.namespace,
+                    "memory_type": m.memory_type.as_str(),
+                    "tier": m.tier.as_str(),
+                    "tags": m.metadata.tags,
+                })
+            })
+            .collect();
+
+        serde_json::to_string_pretty(&results).map_err(|e| e.to_string())
+    }
+
+    async fn tool_memory_store(&self, args: &serde_json::Value) -> Result<String, String> {
+        let key = args
+            .get("key")
+            .and_then(|k| k.as_str())
+            .ok_or("Missing required field: key")?
+            .to_string();
+        let content = args
+            .get("content")
+            .and_then(|c| c.as_str())
+            .ok_or("Missing required field: content")?
+            .to_string();
+        let namespace = args
+            .get("namespace")
+            .and_then(|n| n.as_str())
+            .unwrap_or("default")
+            .to_string();
+        let memory_type = args
+            .get("memory_type")
+            .and_then(|t| t.as_str())
+            .and_then(parse_memory_type)
+            .unwrap_or(MemoryType::Fact);
+        let tier = args
+            .get("tier")
+            .and_then(|t| t.as_str())
+            .and_then(parse_memory_tier)
+            .unwrap_or(MemoryTier::Working);
+
+        let memory = self
+            .memory_service
+            .store(key, content, namespace, tier, memory_type, None)
+            .await
+            .map_err(|e| format!("Failed to store memory: {}", e))?;
+
+        let response = serde_json::json!({
+            "id": memory.id.to_string(),
+            "key": memory.key,
+            "tier": memory.tier.as_str(),
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    async fn tool_memory_get(&self, args: &serde_json::Value) -> Result<String, String> {
+        let id_str = args
+            .get("id")
+            .and_then(|i| i.as_str())
+            .ok_or("Missing required field: id")?;
+        let id = Uuid::parse_str(id_str).map_err(|e| format!("Invalid UUID: {}", e))?;
+
+        let memory = self
+            .memory_service
+            .recall(id)
+            .await
+            .map_err(|e| format!("Failed to get memory: {}", e))?
+            .ok_or_else(|| format!("Memory {} not found", id))?;
+
+        let response = serde_json::json!({
+            "id": memory.id.to_string(),
+            "key": memory.key,
+            "content": memory.content,
+            "namespace": memory.namespace,
+            "memory_type": memory.memory_type.as_str(),
+            "tier": memory.tier.as_str(),
+            "tags": memory.metadata.tags,
+            "access_count": memory.access_count,
+            "created_at": memory.created_at.to_rfc3339(),
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    // ========================================================================
+    // Goal tools
+    // ========================================================================
+
+    async fn tool_goals_list(&self, _args: &serde_json::Value) -> Result<String, String> {
+        let goals = self
+            .goal_repo
+            .list(GoalFilter {
+                status: Some(GoalStatus::Active),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| format!("Failed to list goals: {}", e))?;
+
+        let results: Vec<serde_json::Value> = goals
+            .into_iter()
+            .map(|g| {
+                serde_json::json!({
+                    "id": g.id.to_string(),
+                    "name": g.name,
+                    "description": g.description,
+                    "priority": format!("{:?}", g.priority),
+                    "status": format!("{:?}", g.status),
+                    "constraints": g.constraints.iter().map(|c| serde_json::json!({
+                        "name": c.name,
+                        "description": c.description,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+
+        serde_json::to_string_pretty(&results).map_err(|e| e.to_string())
+    }
+
+    // ========================================================================
+    // JSON-RPC helpers
+    // ========================================================================
+
+    fn success_response(&self, id: serde_json::Value, result: serde_json::Value) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result
+        })
+        .to_string()
+    }
+
+    fn error_response(&self, id: serde_json::Value, code: i32, message: &str) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": code,
+                "message": message
+            }
+        })
+        .to_string()
+    }
+}
+
+// ========================================================================
+// Helpers
+// ========================================================================
+
+fn parse_priority(s: &str) -> Option<TaskPriority> {
+    match s.to_lowercase().as_str() {
+        "low" => Some(TaskPriority::Low),
+        "normal" => Some(TaskPriority::Normal),
+        "high" => Some(TaskPriority::High),
+        "critical" => Some(TaskPriority::Critical),
+        _ => None,
+    }
+}
+
+fn parse_task_status(s: &str) -> Option<crate::domain::models::TaskStatus> {
+    match s.to_lowercase().as_str() {
+        "pending" => Some(crate::domain::models::TaskStatus::Pending),
+        "ready" => Some(crate::domain::models::TaskStatus::Ready),
+        "running" => Some(crate::domain::models::TaskStatus::Running),
+        "complete" | "completed" => Some(crate::domain::models::TaskStatus::Complete),
+        "failed" => Some(crate::domain::models::TaskStatus::Failed),
+        "blocked" => Some(crate::domain::models::TaskStatus::Blocked),
+        _ => None,
+    }
+}
+
+fn parse_memory_type(s: &str) -> Option<MemoryType> {
+    match s.to_lowercase().as_str() {
+        "fact" => Some(MemoryType::Fact),
+        "code" => Some(MemoryType::Code),
+        "decision" => Some(MemoryType::Decision),
+        "error" => Some(MemoryType::Error),
+        "pattern" => Some(MemoryType::Pattern),
+        "reference" => Some(MemoryType::Reference),
+        "context" => Some(MemoryType::Context),
+        _ => None,
+    }
+}
+
+fn parse_memory_tier(s: &str) -> Option<MemoryTier> {
+    match s.to_lowercase().as_str() {
+        "working" => Some(MemoryTier::Working),
+        "episodic" => Some(MemoryTier::Episodic),
+        "semantic" => Some(MemoryTier::Semantic),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_priority() {
+        assert_eq!(parse_priority("low"), Some(TaskPriority::Low));
+        assert_eq!(parse_priority("NORMAL"), Some(TaskPriority::Normal));
+        assert_eq!(parse_priority("High"), Some(TaskPriority::High));
+        assert_eq!(parse_priority("critical"), Some(TaskPriority::Critical));
+        assert_eq!(parse_priority("invalid"), None);
+    }
+
+    #[test]
+    fn test_parse_task_status() {
+        assert_eq!(
+            parse_task_status("pending"),
+            Some(crate::domain::models::TaskStatus::Pending)
+        );
+        assert_eq!(
+            parse_task_status("complete"),
+            Some(crate::domain::models::TaskStatus::Complete)
+        );
+        assert_eq!(
+            parse_task_status("completed"),
+            Some(crate::domain::models::TaskStatus::Complete)
+        );
+        assert_eq!(parse_task_status("invalid"), None);
+    }
+
+    #[test]
+    fn test_parse_memory_type() {
+        assert_eq!(parse_memory_type("fact"), Some(MemoryType::Fact));
+        assert_eq!(parse_memory_type("CODE"), Some(MemoryType::Code));
+        assert_eq!(parse_memory_type("invalid"), None);
+    }
+
+    #[test]
+    fn test_parse_memory_tier() {
+        assert_eq!(parse_memory_tier("working"), Some(MemoryTier::Working));
+        assert_eq!(parse_memory_tier("SEMANTIC"), Some(MemoryTier::Semantic));
+        assert_eq!(parse_memory_tier("invalid"), None);
+    }
+}

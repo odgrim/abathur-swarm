@@ -367,6 +367,24 @@ where
             }
         }
 
+        // Wait for MCP servers to become healthy before entering the main loop.
+        // If servers never come up, abort startup rather than spawning agents
+        // into an environment where they can't reach the orchestration APIs.
+        if let Err(e) = self.await_mcp_readiness().await {
+            self.audit_log.log(
+                AuditEntry::new(
+                    AuditLevel::Error,
+                    AuditCategory::System,
+                    AuditAction::SwarmStarted,
+                    AuditActor::System,
+                    format!("Aborting orchestrator: {}", e),
+                ),
+            ).await;
+            let _ = event_tx.send(SwarmEvent::Stopped).await;
+            self.emit_to_event_bus(SwarmEvent::Stopped).await;
+            return Err(e);
+        }
+
         // Main orchestration loop
         loop {
             let current_status = self.status.read().await.clone();
