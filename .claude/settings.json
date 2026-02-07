@@ -1,46 +1,28 @@
 {
   "mcpServers": {
-    "abathur-memory": {
-      "command": "abathur",
+    "abathur": {
       "args": [
         "mcp",
-        "memory-http",
-        "--port",
-        "3100"
+        "stdio",
+        "--db-path",
+        "abathur.db"
       ],
-      "env": {}
-    },
-    "abathur-tasks": {
-      "command": "abathur",
-      "args": [
-        "mcp",
-        "tasks-http",
-        "--port",
-        "3101"
-      ],
-      "env": {}
+      "command": "abathur"
     }
   },
   "permissions": {
     "allowedTools": [
-      "read",
-      "write",
-      "edit",
-      "shell",
-      "glob",
-      "grep",
-      "memory_query",
-      "memory_search",
-      "memory_store",
-      "memory_get",
-      "task_submit",
-      "task_list",
-      "task_get",
-      "task_update_status",
-      "goals_list"
+      "mcp__abathur__task_submit",
+      "mcp__abathur__task_list",
+      "mcp__abathur__task_get",
+      "mcp__abathur__task_update_status",
+      "mcp__abathur__agent_create",
+      "mcp__abathur__agent_list",
+      "mcp__abathur__agent_get",
+      "mcp__abathur__memory_search",
+      "mcp__abathur__memory_store",
+      "mcp__abathur__memory_get",
+      "mcp__abathur__goals_list"
     ]
-  },
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   }
 }
