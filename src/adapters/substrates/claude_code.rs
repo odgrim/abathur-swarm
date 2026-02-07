@@ -375,7 +375,7 @@ impl Substrate for ClaudeCodeSubstrate {
     }
 
     async fn execute(&self, request: SubstrateRequest) -> DomainResult<SubstrateSession> {
-        let args = self.build_args(&request, "json");
+        let args = self.build_args(&request, "stream-json");
         let working_dir = request.config.working_dir
             .clone()
             .unwrap_or_else(|| ".".to_string());
@@ -425,14 +425,28 @@ impl Substrate for ClaudeCodeSubstrate {
         // Open task log file
         let mut log_file = self.open_task_log(request.task_id).await;
 
+        // Drain stderr concurrently to prevent pipe deadlock.
+        // If stderr's pipe buffer fills while we're blocked reading stdout,
+        // the child process blocks on its stderr write and never produces stdout.
+        let stderr_handle = tokio::spawn(async move {
+            let stderr_reader = BufReader::new(stderr);
+            let mut stderr_lines = stderr_reader.lines();
+            let mut lines = Vec::new();
+            while let Ok(Some(line)) = stderr_lines.next_line().await {
+                lines.push(line);
+            }
+            lines
+        });
+
         // Collect output
         let mut output_text = String::new();
         let mut error_text = String::new();
         let mut total_input_tokens = 0u64;
         let mut total_output_tokens = 0u64;
         let mut turns = 0u32;
+        let mut result_json: Option<serde_json::Value> = None;
 
-        // Read stdout line by line
+        // Read stdout line by line (stream-json emits one JSON event per line)
         let stdout_reader = BufReader::new(stdout);
         let mut stdout_lines = stdout_reader.lines();
 
@@ -440,10 +454,19 @@ impl Substrate for ClaudeCodeSubstrate {
             output_text.push_str(&line);
             output_text.push('\n');
 
-            // Tee to log file
+            // Tee to log file and flush immediately for real-time visibility
             if let Some(ref mut f) = log_file {
                 let _ = f.write_all(line.as_bytes()).await;
                 let _ = f.write_all(b"\n").await;
+                let _ = f.flush().await;
+            }
+
+            // Capture the "result" event for final metadata extraction
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                if json.get("type").and_then(|t| t.as_str()) == Some("result") {
+                    result_json = Some(json);
+                    continue;
+                }
             }
 
             if let Some(parsed) = Self::parse_output_line(&line) {
@@ -462,24 +485,18 @@ impl Substrate for ClaudeCodeSubstrate {
             }
         }
 
-        // Read stderr
-        let stderr_reader = BufReader::new(stderr);
-        let mut stderr_lines = stderr_reader.lines();
-        while let Ok(Some(line)) = stderr_lines.next_line().await {
-            error_text.push_str(&line);
-            error_text.push('\n');
-
-            // Tee stderr to log file
-            if let Some(ref mut f) = log_file {
-                let _ = f.write_all(b"[stderr] ");
-                let _ = f.write_all(line.as_bytes()).await;
-                let _ = f.write_all(b"\n").await;
+        // Collect stderr (already drained concurrently)
+        if let Ok(stderr_lines) = stderr_handle.await {
+            for line in stderr_lines {
+                error_text.push_str(&line);
+                error_text.push('\n');
+                if let Some(ref mut f) = log_file {
+                    let _ = f.write_all(b"[stderr] ").await;
+                    let _ = f.write_all(line.as_bytes()).await;
+                    let _ = f.write_all(b"\n").await;
+                    let _ = f.flush().await;
+                }
             }
-        }
-
-        // Flush log file
-        if let Some(ref mut f) = log_file {
-            let _ = f.flush().await;
         }
 
         // Wait for process to complete
@@ -492,35 +509,30 @@ impl Substrate for ClaudeCodeSubstrate {
             processes.remove(&session.id);
         }
 
-        // Parse the JSON output to extract result text and usage.
-        // With --output-format json, Claude outputs a single JSON object containing
-        // the result text, usage stats, and metadata.
-        let result_text = if let Ok(json) = serde_json::from_str::<serde_json::Value>(output_text.trim()) {
-            // Extract usage from JSON response
+        // Extract result from the stream's final "result" event, which contains
+        // the result text, usage stats, cost, and turn count.
+        let result_text = if let Some(ref json) = result_json {
             if let Some(usage) = json.get("usage") {
-                total_input_tokens = usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                total_output_tokens = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                total_input_tokens = usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(total_input_tokens);
+                total_output_tokens = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(total_output_tokens);
                 session.cache_read_tokens = usage.get("cache_read_input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
                 session.cache_write_tokens = usage.get("cache_creation_input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
             }
 
-            // Extract turn count from JSON if available
             if let Some(num_turns) = json.get("num_turns").and_then(|n| n.as_u64()) {
                 turns = num_turns as u32;
             }
 
-            // Extract cost if available
             if let Some(cost) = json.get("cost_usd").and_then(|c| c.as_f64()) {
                 session.cost_cents = Some(cost * 100.0);
             }
 
-            // Extract the result text from JSON
             json.get("result")
                 .and_then(|r| r.as_str())
-                .unwrap_or(output_text.trim())
+                .unwrap_or("Completed")
                 .to_string()
         } else {
-            // Fallback for non-JSON output: try line-by-line extraction
+            // Fallback: no result event found, try line-by-line extraction
             if total_input_tokens == 0 && total_output_tokens == 0 {
                 let (input, output, cache_read, cache_write) = Self::extract_final_usage(&output_text);
                 total_input_tokens = input;
@@ -621,9 +633,18 @@ impl Substrate for ClaudeCodeSubstrate {
         // Spawn task to read and stream output
         tokio::spawn(async move {
             let stdout_reader = BufReader::new(stdout);
-            let stderr_reader = BufReader::new(stderr);
             let mut stdout_lines = stdout_reader.lines();
-            let mut stderr_lines = stderr_reader.lines();
+
+            // Drain stderr concurrently to prevent pipe deadlock
+            let stderr_handle = tokio::spawn(async move {
+                let stderr_reader = BufReader::new(stderr);
+                let mut stderr_lines = stderr_reader.lines();
+                let mut lines = Vec::new();
+                while let Ok(Some(line)) = stderr_lines.next_line().await {
+                    lines.push(line);
+                }
+                lines
+            });
 
             let mut all_output = String::new();
             let mut total_input = 0u64;
@@ -634,10 +655,11 @@ impl Substrate for ClaudeCodeSubstrate {
                 all_output.push_str(&line);
                 all_output.push('\n');
 
-                // Tee to log file
+                // Tee to log file and flush immediately for real-time visibility
                 if let Some(ref mut f) = log_file {
                     let _ = f.write_all(line.as_bytes()).await;
                     let _ = f.write_all(b"\n").await;
+                    let _ = f.flush().await;
                 }
 
                 if let Some(output) = Self::parse_output_line(&line) {
@@ -654,23 +676,19 @@ impl Substrate for ClaudeCodeSubstrate {
                 }
             }
 
-            // Read any stderr
+            // Collect stderr (already drained concurrently)
             let mut error_output = String::new();
-            while let Ok(Some(line)) = stderr_lines.next_line().await {
-                error_output.push_str(&line);
-                error_output.push('\n');
-
-                // Tee stderr to log file
-                if let Some(ref mut f) = log_file {
-                    let _ = f.write_all(b"[stderr] ");
-                    let _ = f.write_all(line.as_bytes()).await;
-                    let _ = f.write_all(b"\n").await;
+            if let Ok(stderr_lines) = stderr_handle.await {
+                for line in stderr_lines {
+                    error_output.push_str(&line);
+                    error_output.push('\n');
+                    if let Some(ref mut f) = log_file {
+                        let _ = f.write_all(b"[stderr] ").await;
+                        let _ = f.write_all(line.as_bytes()).await;
+                        let _ = f.write_all(b"\n").await;
+                        let _ = f.flush().await;
+                    }
                 }
-            }
-
-            // Flush log file
-            if let Some(ref mut f) = log_file {
-                let _ = f.flush().await;
             }
 
             // Wait for process and check exit status
