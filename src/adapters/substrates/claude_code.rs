@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
@@ -35,6 +35,8 @@ pub struct ClaudeCodeConfig {
     pub output_format: String,
     /// Additional CLI flags
     pub extra_flags: Vec<String>,
+    /// Directory for per-task log files (None to disable)
+    pub log_dir: Option<PathBuf>,
 }
 
 impl Default for ClaudeCodeConfig {
@@ -47,6 +49,7 @@ impl Default for ClaudeCodeConfig {
             print_mode: true,
             output_format: "stream-json".to_string(),
             extra_flags: vec![],
+            log_dir: Some(PathBuf::from(".abathur/logs/tasks")),
         }
     }
 }
@@ -64,6 +67,32 @@ impl ClaudeCodeSubstrate {
             config,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             running_processes: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Open a log file for the given task, creating the log directory if needed.
+    /// Returns None if logging is disabled or the file cannot be created.
+    async fn open_task_log(&self, task_id: Uuid) -> Option<tokio::fs::File> {
+        let log_dir = self.config.log_dir.as_ref()?;
+        if let Err(e) = tokio::fs::create_dir_all(log_dir).await {
+            tracing::warn!("Failed to create task log dir {}: {}", log_dir.display(), e);
+            return None;
+        }
+        let log_path = log_dir.join(format!("{}.log", task_id));
+        match tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .await
+        {
+            Ok(f) => {
+                tracing::debug!("Task log: {}", log_path.display());
+                Some(f)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to open task log {}: {}", log_path.display(), e);
+                None
+            }
         }
     }
 
@@ -393,6 +422,9 @@ impl Substrate for ClaudeCodeSubstrate {
         let stderr = child.stderr.take()
             .ok_or_else(|| DomainError::ValidationFailed("Failed to capture stderr".to_string()))?;
 
+        // Open task log file
+        let mut log_file = self.open_task_log(request.task_id).await;
+
         // Collect output
         let mut output_text = String::new();
         let mut error_text = String::new();
@@ -407,6 +439,12 @@ impl Substrate for ClaudeCodeSubstrate {
         while let Ok(Some(line)) = stdout_lines.next_line().await {
             output_text.push_str(&line);
             output_text.push('\n');
+
+            // Tee to log file
+            if let Some(ref mut f) = log_file {
+                let _ = f.write_all(line.as_bytes()).await;
+                let _ = f.write_all(b"\n").await;
+            }
 
             if let Some(parsed) = Self::parse_output_line(&line) {
                 match parsed {
@@ -430,6 +468,18 @@ impl Substrate for ClaudeCodeSubstrate {
         while let Ok(Some(line)) = stderr_lines.next_line().await {
             error_text.push_str(&line);
             error_text.push('\n');
+
+            // Tee stderr to log file
+            if let Some(ref mut f) = log_file {
+                let _ = f.write_all(b"[stderr] ");
+                let _ = f.write_all(line.as_bytes()).await;
+                let _ = f.write_all(b"\n").await;
+            }
+        }
+
+        // Flush log file
+        if let Some(ref mut f) = log_file {
+            let _ = f.flush().await;
         }
 
         // Wait for process to complete
@@ -565,6 +615,9 @@ impl Substrate for ClaudeCodeSubstrate {
         let sessions_clone = self.sessions.clone();
         let processes_clone = self.running_processes.clone();
 
+        // Open task log file (before moving into spawned task)
+        let mut log_file = self.open_task_log(request.task_id).await;
+
         // Spawn task to read and stream output
         tokio::spawn(async move {
             let stdout_reader = BufReader::new(stdout);
@@ -580,6 +633,12 @@ impl Substrate for ClaudeCodeSubstrate {
             while let Ok(Some(line)) = stdout_lines.next_line().await {
                 all_output.push_str(&line);
                 all_output.push('\n');
+
+                // Tee to log file
+                if let Some(ref mut f) = log_file {
+                    let _ = f.write_all(line.as_bytes()).await;
+                    let _ = f.write_all(b"\n").await;
+                }
 
                 if let Some(output) = Self::parse_output_line(&line) {
                     match &output {
@@ -600,6 +659,18 @@ impl Substrate for ClaudeCodeSubstrate {
             while let Ok(Some(line)) = stderr_lines.next_line().await {
                 error_output.push_str(&line);
                 error_output.push('\n');
+
+                // Tee stderr to log file
+                if let Some(ref mut f) = log_file {
+                    let _ = f.write_all(b"[stderr] ");
+                    let _ = f.write_all(line.as_bytes()).await;
+                    let _ = f.write_all(b"\n").await;
+                }
+            }
+
+            // Flush log file
+            if let Some(ref mut f) = log_file {
+                let _ = f.flush().await;
             }
 
             // Wait for process and check exit status
