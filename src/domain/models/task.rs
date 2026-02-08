@@ -19,6 +19,8 @@ pub enum TaskStatus {
     Blocked,
     /// Task is currently being executed
     Running,
+    /// Task execution finished, awaiting post-completion verification
+    Validating,
     /// Task completed successfully
     Complete,
     /// Task failed during execution
@@ -40,6 +42,7 @@ impl TaskStatus {
             Self::Ready => "ready",
             Self::Blocked => "blocked",
             Self::Running => "running",
+            Self::Validating => "validating",
             Self::Complete => "complete",
             Self::Failed => "failed",
             Self::Canceled => "canceled",
@@ -53,6 +56,7 @@ impl TaskStatus {
             "ready" => Some(Self::Ready),
             "blocked" => Some(Self::Blocked),
             "running" => Some(Self::Running),
+            "validating" => Some(Self::Validating),
             "complete" => Some(Self::Complete),
             "failed" => Some(Self::Failed),
             "canceled" | "cancelled" => Some(Self::Canceled),
@@ -76,7 +80,8 @@ impl TaskStatus {
             Self::Pending => vec![Self::Ready, Self::Blocked, Self::Canceled],
             Self::Ready => vec![Self::Running, Self::Blocked, Self::Canceled],
             Self::Blocked => vec![Self::Ready, Self::Canceled],
-            Self::Running => vec![Self::Complete, Self::Failed, Self::Canceled],
+            Self::Running => vec![Self::Validating, Self::Complete, Self::Failed, Self::Canceled],
+            Self::Validating => vec![Self::Complete, Self::Failed],
             Self::Complete => vec![],
             Self::Failed => vec![Self::Ready], // Can retry
             Self::Canceled => vec![],
@@ -508,6 +513,30 @@ mod tests {
             .with_dependency(dep_id);
 
         assert!(task.depends_on.contains(&dep_id));
+    }
+
+    #[test]
+    fn test_validating_transitions() {
+        // Running -> Validating -> Complete
+        let mut task = Task::new("Test validating flow");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task.transition_to(TaskStatus::Validating).unwrap();
+        assert_eq!(task.status, TaskStatus::Validating);
+        assert!(!task.is_terminal());
+        assert!(task.completed_at.is_none());
+        task.transition_to(TaskStatus::Complete).unwrap();
+        assert!(task.is_terminal());
+        assert!(task.completed_at.is_some());
+
+        // Running -> Validating -> Failed
+        let mut task2 = Task::new("Test validating failure");
+        task2.transition_to(TaskStatus::Ready).unwrap();
+        task2.transition_to(TaskStatus::Running).unwrap();
+        task2.transition_to(TaskStatus::Validating).unwrap();
+        task2.transition_to(TaskStatus::Failed).unwrap();
+        assert!(task2.is_terminal());
+        assert!(task2.completed_at.is_some());
     }
 
     #[test]

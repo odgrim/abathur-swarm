@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::domain::errors::DomainResult;
+use crate::domain::models::TaskStatus;
 use crate::domain::ports::{GoalRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, AuditLogService,
@@ -187,6 +188,14 @@ where
                 }).await;
 
                 if result.passed {
+                    // Transition Validating -> Complete
+                    if let Ok(Some(mut task)) = task_repo.get(task_id).await {
+                        if task.status == TaskStatus::Validating {
+                            let _ = task.transition_to(TaskStatus::Complete);
+                            let _ = task_repo.update(&task).await;
+                        }
+                    }
+
                     audit_log.info(
                         AuditCategory::Task,
                         AuditAction::TaskCompleted,
@@ -196,6 +205,14 @@ where
                         ),
                     ).await;
                 } else {
+                    // Transition Validating -> Failed
+                    if let Ok(Some(mut task)) = task_repo.get(task_id).await {
+                        if task.status == TaskStatus::Validating {
+                            let _ = task.transition_to(TaskStatus::Failed);
+                            let _ = task_repo.update(&task).await;
+                        }
+                    }
+
                     audit_log.log(
                         AuditEntry::new(
                             AuditLevel::Warning,
@@ -214,6 +231,14 @@ where
                 result.passed
             }
             Err(e) => {
+                // Transition Validating -> Failed on verification error
+                if let Ok(Some(mut task)) = task_repo.get(task_id).await {
+                    if task.status == TaskStatus::Validating {
+                        let _ = task.transition_to(TaskStatus::Failed);
+                        let _ = task_repo.update(&task).await;
+                    }
+                }
+
                 audit_log.log(
                     AuditEntry::new(
                         AuditLevel::Warning,

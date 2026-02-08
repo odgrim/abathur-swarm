@@ -605,7 +605,12 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             let turns = session.turns_completed;
                             total_tokens.fetch_add(tokens, Ordering::Relaxed);
 
-                            let _ = completed_task.transition_to(TaskStatus::Complete);
+                            let target_status = if verify_on_completion {
+                                TaskStatus::Validating
+                            } else {
+                                TaskStatus::Complete
+                            };
+                            let _ = completed_task.transition_to(target_status);
                             let _ = task_repo.update(&completed_task).await;
 
                             // Record success with circuit breaker

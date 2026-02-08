@@ -419,6 +419,9 @@ where
             // Process specialist agent triggers (conflicts, persistent failures, etc.)
             self.process_specialist_triggers(&event_tx).await?;
 
+            // Detect stalled goals (active goals with no in-flight work)
+            self.detect_stalled_goals(&event_tx).await?;
+
             // Process A2A delegation requests from agents
             if self.config.mcp_servers.a2a_gateway.is_some() {
                 self.process_a2a_delegations(&event_tx).await?;
@@ -466,6 +469,9 @@ where
         if self.config.auto_retry {
             self.process_retries(&tx).await?;
         }
+
+        // Detect stalled goals
+        self.detect_stalled_goals(&tx).await?;
 
         // Update stats
         self.update_stats(&tx).await?;
