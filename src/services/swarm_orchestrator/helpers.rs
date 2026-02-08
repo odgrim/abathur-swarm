@@ -155,6 +155,7 @@ pub async fn run_post_completion_workflow<G, T, W>(
     prefer_pull_requests: bool,
     repo_path: &std::path::Path,
     default_base_ref: &str,
+    require_commits: bool,
 ) -> DomainResult<()>
 where
     G: GoalRepository + 'static,
@@ -171,6 +172,7 @@ where
                 run_tests: false,
                 run_lint: false,
                 check_format: false,
+                require_commits,
                 ..VerifierConfig::default()
             },
         );
@@ -213,6 +215,12 @@ where
                         }
                     }
 
+                    // Also mark worktree as failed so retry can create a fresh one
+                    if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                        wt.fail("Verification failed".to_string());
+                        let _ = worktree_repo.update(&wt).await;
+                    }
+
                     audit_log.log(
                         AuditEntry::new(
                             AuditLevel::Warning,
@@ -237,6 +245,12 @@ where
                         let _ = task.transition_to(TaskStatus::Failed);
                         let _ = task_repo.update(&task).await;
                     }
+                }
+
+                // Also mark worktree as failed so retry can create a fresh one
+                if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                    wt.fail(format!("Verification error: {}", e));
+                    let _ = worktree_repo.update(&wt).await;
                 }
 
                 audit_log.log(

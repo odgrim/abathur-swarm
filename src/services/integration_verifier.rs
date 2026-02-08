@@ -23,6 +23,9 @@ pub struct VerifierConfig {
     pub run_lint: bool,
     /// Whether to check formatting.
     pub check_format: bool,
+    /// Whether to require commits ahead of base ref.
+    /// Set to false for read-only agents (research, analysis) that produce no code changes.
+    pub require_commits: bool,
     /// Timeout for test execution (seconds).
     pub test_timeout_secs: u64,
     /// Whether to fail on warnings.
@@ -35,6 +38,7 @@ impl Default for VerifierConfig {
             run_tests: true,
             run_lint: true,
             check_format: true,
+            require_commits: true,
             test_timeout_secs: 300,
             fail_on_warnings: false,
         }
@@ -171,9 +175,11 @@ where
         // 5. Get worktree and check for commits / run code checks
         let worktree = self.worktree_repo.get_by_task(task_id).await?;
         if let Some(wt) = worktree {
-            // Check that the agent actually produced commits
-            let commits_check = self.check_has_commits(&wt.path, &wt.base_ref).await;
-            checks.push(commits_check);
+            // Check that the agent actually produced commits (skip for read-only agents)
+            if self.config.require_commits {
+                let commits_check = self.check_has_commits(&wt.path, &wt.base_ref).await;
+                checks.push(commits_check);
+            }
 
             // Run integration tests
             if self.config.run_tests {
@@ -719,6 +725,7 @@ mod tests {
         assert!(config.run_tests);
         assert!(config.run_lint);
         assert!(config.check_format);
+        assert!(config.require_commits);
         assert_eq!(config.test_timeout_secs, 300);
     }
 

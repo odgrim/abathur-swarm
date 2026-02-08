@@ -27,10 +27,17 @@ pub async fn resolve_worktree_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid
         .await
 }
 
+/// Resolve a memory ID prefix to a full UUID.
+pub async fn resolve_memory_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid> {
+    resolve_prefix(pool, prefix, "memory", MEMORY_QUERY)
+        .await
+}
+
 const TASK_QUERY: &str = "SELECT id FROM tasks WHERE id LIKE ?";
 const GOAL_QUERY: &str = "SELECT id FROM goals WHERE id LIKE ?";
 const WORKTREE_QUERY: &str =
     "SELECT id FROM worktrees WHERE id LIKE ? UNION SELECT id FROM worktrees WHERE task_id LIKE ?";
+const MEMORY_QUERY: &str = "SELECT id FROM memories WHERE id LIKE ?";
 
 fn validate_prefix(prefix: &str) -> Result<()> {
     if prefix.is_empty() {

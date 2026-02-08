@@ -401,15 +401,20 @@ where
             let system_prompt = self.get_agent_system_prompt(&agent_type).await;
 
             // Get agent template for version tracking, capabilities, and tool restrictions
-            let (template_version, capabilities, cli_tools) = match self.agent_repo.get_template_by_name(&agent_type).await {
+            let (template_version, capabilities, cli_tools, agent_can_write) = match self.agent_repo.get_template_by_name(&agent_type).await {
                 Ok(Some(template)) => {
                     let caps: Vec<String> = template.tools.iter()
                         .map(|t| t.name.clone())
                         .collect();
                     let tools = map_template_tools_to_cli(&caps);
-                    (template.version, caps, tools)
+                    let can_write = caps.iter().any(|c| {
+                        let lower = c.to_lowercase();
+                        lower == "write" || lower == "edit" || lower == "shell"
+                    });
+                    (template.version, caps, tools, can_write)
                 }
-                _ => (1, vec!["task-execution".to_string()], vec![]),
+                // Default to true when template lookup fails (safer to require commits from unknown agents)
+                _ => (1, vec!["task-execution".to_string()], vec![], true),
             };
 
             // Register agent capabilities with A2A gateway if configured
@@ -540,6 +545,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let prefer_pull_requests = self.config.prefer_pull_requests;
             let repo_path = self.config.repo_path.clone();
             let default_base_ref = self.config.default_base_ref.clone();
+            let require_commits = agent_can_write;
             let circuit_scope = scope;
 
             tokio::spawn(async move {
@@ -681,6 +687,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     prefer_pull_requests,
                                     &repo_path,
                                     &default_base_ref,
+                                    require_commits,
                                 ).await;
 
                                 if let Err(e) = workflow_result {

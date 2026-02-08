@@ -3,7 +3,6 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::adapters::sqlite::{goal_repository::SqliteGoalRepository, initialize_database};
 use crate::cli::id_resolver::resolve_goal_id;
@@ -195,10 +194,10 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
             let priority = GoalPriority::from_str(&priority)
                 .ok_or_else(|| anyhow::anyhow!("Invalid priority: {}", priority))?;
 
-            let parent_id = parent
-                .map(|p| Uuid::parse_str(&p))
-                .transpose()
-                .context("Invalid parent ID")?;
+            let parent_id = match parent {
+                Some(p) => Some(resolve_goal_id(&pool, &p).await?),
+                None => None,
+            };
 
             let constraints: Vec<GoalConstraint> = constraint
                 .iter()
@@ -262,7 +261,7 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
         }
 
         GoalCommands::Pause { id } => {
-            let uuid = Uuid::parse_str(&id).context("Invalid goal ID")?;
+            let uuid = resolve_goal_id(&pool, &id).await?;
             let goal = service.transition_status(uuid, GoalStatus::Paused).await?;
 
             let out = GoalActionOutput {
@@ -274,7 +273,7 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
         }
 
         GoalCommands::Resume { id } => {
-            let uuid = Uuid::parse_str(&id).context("Invalid goal ID")?;
+            let uuid = resolve_goal_id(&pool, &id).await?;
             let goal = service.transition_status(uuid, GoalStatus::Active).await?;
 
             let out = GoalActionOutput {
@@ -286,7 +285,7 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
         }
 
         GoalCommands::Retire { id } => {
-            let uuid = Uuid::parse_str(&id).context("Invalid goal ID")?;
+            let uuid = resolve_goal_id(&pool, &id).await?;
             let goal = service.transition_status(uuid, GoalStatus::Retired).await?;
 
             let out = GoalActionOutput {

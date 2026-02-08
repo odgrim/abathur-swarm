@@ -3,10 +3,9 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::adapters::sqlite::{SqliteTaskRepository, initialize_database};
-use crate::cli::id_resolver::resolve_task_id;
+use crate::cli::id_resolver::{resolve_goal_id, resolve_task_id};
 use crate::cli::output::{output, CommandOutput};
 use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::TaskFilter;
@@ -282,16 +281,15 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
             let priority = TaskPriority::from_str(&priority)
                 .ok_or_else(|| anyhow::anyhow!("Invalid priority: {}", priority))?;
 
-            let parent_id = parent
-                .map(|p| Uuid::parse_str(&p))
-                .transpose()
-                .context("Invalid parent ID")?;
+            let parent_id = match parent {
+                Some(p) => Some(resolve_task_id(&pool, &p).await?),
+                None => None,
+            };
 
-            let deps: Vec<Uuid> = depends_on
-                .iter()
-                .map(|d| Uuid::parse_str(d))
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .context("Invalid dependency ID")?;
+            let mut deps = Vec::new();
+            for d in &depends_on {
+                deps.push(resolve_task_id(&pool, d).await?);
+            }
 
             let context = input.map(|i| TaskContext {
                 input: i,
@@ -301,7 +299,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
             // If a goal ID was provided via CLI, use GoalEvaluation source; otherwise Human
             let source = match goal {
                 Some(g) => {
-                    let gid = Uuid::parse_str(&g).context("Invalid goal ID")?;
+                    let gid = resolve_goal_id(&pool, &g).await?;
                     TaskSource::GoalEvaluation(gid)
                 }
                 None => TaskSource::Human,
@@ -365,7 +363,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
         }
 
         TaskCommands::Cancel { id } => {
-            let uuid = Uuid::parse_str(&id).context("Invalid task ID")?;
+            let uuid = resolve_task_id(&pool, &id).await?;
             let task = service.cancel_task(uuid).await?;
 
             let out = TaskActionOutput {
@@ -377,7 +375,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
         }
 
         TaskCommands::Retry { id } => {
-            let uuid = Uuid::parse_str(&id).context("Invalid task ID")?;
+            let uuid = resolve_task_id(&pool, &id).await?;
             let task = service.retry_task(uuid).await?;
 
             let out = TaskActionOutput {
