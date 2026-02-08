@@ -132,101 +132,101 @@ where
             "tools": [
                 {
                     "name": "task_submit",
-                    "description": "Create a subtask in the Abathur swarm. The task will be routed to the specified agent_type for execution.",
+                    "description": "Create a subtask and delegate it to an agent for execution. This is the primary way to delegate work in the Abathur swarm. Set agent_type to route the task to a specific agent template (create one first with agent_create if needed). The parent_id is automatically set from your current task context. Use depends_on to chain tasks that must execute in order. Returns the new task's UUID which you can use with task_get to track progress or pass to other tasks via depends_on.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "title": { "type": "string", "description": "Short title for the task" },
-                            "description": { "type": "string", "description": "Detailed description of what needs to be done" },
-                            "agent_type": { "type": "string", "description": "Name of the agent template to execute this task (e.g., 'rust-implementer')" },
+                            "title": { "type": "string", "description": "Short human-readable title for the task (e.g., 'Implement rate limiting middleware')" },
+                            "description": { "type": "string", "description": "Detailed description of what needs to be done. This becomes the task prompt given to the executing agent — be specific about requirements, expected output, and constraints." },
+                            "agent_type": { "type": "string", "description": "Name of the agent template to execute this task (e.g., 'rust-implementer'). Must match an existing agent template — use agent_list to see available agents, or agent_create to make a new one first." },
                             "depends_on": {
                                 "type": "array",
                                 "items": { "type": "string" },
-                                "description": "UUIDs of tasks that must complete before this one starts"
+                                "description": "UUIDs of tasks that must complete before this one starts. Use this to create task pipelines (e.g., implement before test, test before review)."
                             },
-                            "priority": { "type": "string", "enum": ["low", "normal", "high", "critical"], "description": "Task priority (default: normal)" }
+                            "priority": { "type": "string", "enum": ["low", "normal", "high", "critical"], "description": "Task priority. Higher priority tasks are picked up first. Default: normal." }
                         },
                         "required": ["description"]
                     }
                 },
                 {
                     "name": "task_list",
-                    "description": "List tasks in the Abathur swarm, optionally filtered by status.",
+                    "description": "List tasks in the Abathur swarm. Use this to monitor the progress of subtasks you've created. Filter by status to find running, completed, or failed tasks. Without a status filter, returns tasks that are ready to execute.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "status": { "type": "string", "enum": ["pending", "ready", "running", "complete", "failed", "blocked"], "description": "Filter by task status" },
+                            "status": { "type": "string", "enum": ["pending", "ready", "running", "complete", "failed", "blocked"], "description": "Filter by task status. 'running' shows in-progress work, 'failed' shows tasks needing attention, 'complete' shows finished work, 'blocked' shows tasks waiting on dependencies." },
                             "limit": { "type": "integer", "description": "Maximum number of tasks to return (default: 50)" }
                         }
                     }
                 },
                 {
                     "name": "task_get",
-                    "description": "Get a task by its UUID.",
+                    "description": "Get full details of a task by its UUID. Use this to check a subtask's result, read its description, inspect failure reasons, or verify its dependency chain. Returns title, description, status, priority, agent_type, parent_id, depends_on, retry_count, and timestamps.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "id": { "type": "string", "description": "Task UUID" }
+                            "id": { "type": "string", "description": "Task UUID (returned by task_submit or task_list)" }
                         },
                         "required": ["id"]
                     }
                 },
                 {
                     "name": "task_update_status",
-                    "description": "Update a task's status to complete or failed.",
+                    "description": "Mark a task as complete or failed. Use 'complete' when the task's work is done successfully. Use 'failed' with an error message when the task cannot be completed — this allows the orchestrator to retry or reassign.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "id": { "type": "string", "description": "Task UUID" },
-                            "status": { "type": "string", "enum": ["complete", "failed"], "description": "New status" },
-                            "error": { "type": "string", "description": "Error message (required when status is 'failed')" }
+                            "id": { "type": "string", "description": "Task UUID to update" },
+                            "status": { "type": "string", "enum": ["complete", "failed"], "description": "New status: 'complete' for success, 'failed' for failure" },
+                            "error": { "type": "string", "description": "Error message explaining what went wrong. Required when status is 'failed'." }
                         },
                         "required": ["id", "status"]
                     }
                 },
                 {
                     "name": "agent_create",
-                    "description": "Create a new agent template in the Abathur swarm. Agents are specialized workers that execute specific types of tasks.",
+                    "description": "Create a new agent template in the Abathur swarm. Agents are specialized workers that execute tasks. Each agent has a focused system_prompt defining its role, a set of tools it can use, and optional constraints. Create agents before delegating tasks to them via task_submit. Use agent_list first to check if a suitable agent already exists. Design agents with minimal tools and focused prompts — don't create 'do everything' agents.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "name": { "type": "string", "description": "Unique agent name (e.g., 'rust-implementer')" },
-                            "description": { "type": "string", "description": "What this agent does" },
-                            "tier": { "type": "string", "enum": ["worker", "specialist", "architect"], "description": "Agent tier (default: worker)" },
-                            "system_prompt": { "type": "string", "description": "System prompt that defines the agent's behavior" },
+                            "name": { "type": "string", "description": "Unique agent name using kebab-case (e.g., 'rust-implementer', 'code-reviewer', 'test-writer')" },
+                            "description": { "type": "string", "description": "Short description of what this agent specializes in" },
+                            "tier": { "type": "string", "enum": ["worker", "specialist", "architect"], "description": "Agent tier. 'worker' for task execution (most common), 'specialist' for domain expertise, 'architect' for planning. Default: worker." },
+                            "system_prompt": { "type": "string", "description": "System prompt that defines the agent's behavior, expertise, and working style. Be specific about what the agent should do and how. Include instructions for validation (e.g., 'run cargo check after changes')." },
                             "tools": {
                                 "type": "array",
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "name": { "type": "string" },
-                                        "description": { "type": "string" },
-                                        "required": { "type": "boolean" }
+                                        "name": { "type": "string", "description": "Tool name: read, write, edit, shell, glob, grep, memory, tasks, agents" },
+                                        "description": { "type": "string", "description": "What the agent uses this tool for" },
+                                        "required": { "type": "boolean", "description": "Whether the agent needs this tool to function" }
                                     },
                                     "required": ["name", "description"]
                                 },
-                                "description": "Tools this agent needs (e.g., read, write, edit, shell, glob, grep)"
+                                "description": "Tools this agent needs. Only grant what's necessary — read-only agents don't need write/edit/shell. Available tools: read, write, edit, shell, glob, grep, memory, tasks, agents."
                             },
                             "constraints": {
                                 "type": "array",
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "name": { "type": "string" },
-                                        "description": { "type": "string" }
+                                        "name": { "type": "string", "description": "Short constraint identifier" },
+                                        "description": { "type": "string", "description": "What the agent must do or avoid" }
                                     },
                                     "required": ["name", "description"]
                                 },
-                                "description": "Constraints for agent behavior"
+                                "description": "Behavioral constraints to keep the agent on track (e.g., 'always run tests', 'read-only', 'no file deletion')"
                             },
-                            "max_turns": { "type": "integer", "description": "Maximum turns for this agent (default: 25)" }
+                            "max_turns": { "type": "integer", "description": "Maximum agentic turns before the agent is stopped. Default: 25. Use higher values (30-50) for complex implementation tasks." }
                         },
                         "required": ["name", "description", "system_prompt"]
                     }
                 },
                 {
                     "name": "agent_list",
-                    "description": "List all available agent templates in the Abathur swarm.",
+                    "description": "List all available agent templates in the Abathur swarm. Call this before creating new agents to check if a suitable one already exists. Returns each agent's name, description, tier, tools, and status.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {}
@@ -234,57 +234,57 @@ where
                 },
                 {
                     "name": "agent_get",
-                    "description": "Get an agent template by name.",
+                    "description": "Get full details of an agent template by name, including its system prompt, tools, constraints, and version. Use this to inspect an agent's capabilities before delegating a task to it.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "name": { "type": "string", "description": "Agent template name" }
+                            "name": { "type": "string", "description": "Agent template name (e.g., 'rust-implementer')" }
                         },
                         "required": ["name"]
                     }
                 },
                 {
                     "name": "memory_search",
-                    "description": "Search memories in the Abathur swarm by keyword query.",
+                    "description": "Search the Abathur swarm's shared memory by keyword query. Use this before planning to find similar past tasks, known failure patterns, architectural decisions, and reusable context. Returns matching memories with their content, type, and metadata.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "query": { "type": "string", "description": "Search query" },
-                            "namespace": { "type": "string", "description": "Optional namespace filter" },
-                            "limit": { "type": "integer", "description": "Maximum results (default: 20)" }
+                            "query": { "type": "string", "description": "Search query — keywords or phrases to match against stored memories" },
+                            "namespace": { "type": "string", "description": "Optional namespace filter to scope search (e.g., 'architecture', 'errors')" },
+                            "limit": { "type": "integer", "description": "Maximum results to return (default: 20)" }
                         },
                         "required": ["query"]
                     }
                 },
                 {
                     "name": "memory_store",
-                    "description": "Store a memory in the Abathur swarm for future reference.",
+                    "description": "Store a memory in the Abathur swarm for future reference by yourself and other agents. Use this to record decisions, failure patterns, architectural context, and task decomposition rationale. Stored memories are searchable via memory_search.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "key": { "type": "string", "description": "Unique key for this memory" },
-                            "content": { "type": "string", "description": "Memory content" },
-                            "namespace": { "type": "string", "description": "Namespace (default: 'default')" },
-                            "memory_type": { "type": "string", "enum": ["fact", "code", "decision", "error", "pattern", "reference", "context"], "description": "Type of memory (default: fact)" },
-                            "tier": { "type": "string", "enum": ["working", "episodic", "semantic"], "description": "Memory tier (default: working)" }
+                            "key": { "type": "string", "description": "Unique key for this memory (e.g., 'rate-limiting-approach', 'auth-failure-pattern')" },
+                            "content": { "type": "string", "description": "The memory content — be descriptive enough that future agents can understand the context" },
+                            "namespace": { "type": "string", "description": "Namespace to organize memories (default: 'default'). Use namespaces like 'architecture', 'errors', 'decisions'." },
+                            "memory_type": { "type": "string", "enum": ["fact", "code", "decision", "error", "pattern", "reference", "context"], "description": "Type of memory. 'decision' for architectural choices, 'error' for failure patterns, 'pattern' for reusable approaches. Default: fact." },
+                            "tier": { "type": "string", "enum": ["working", "episodic", "semantic"], "description": "Memory tier. 'working' for short-lived task context, 'episodic' for task-specific learnings, 'semantic' for long-term knowledge. Default: working." }
                         },
                         "required": ["key", "content"]
                     }
                 },
                 {
                     "name": "memory_get",
-                    "description": "Get a memory by its UUID.",
+                    "description": "Retrieve a specific memory by its UUID. Use this to get the full content of a memory found via memory_search.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
-                            "id": { "type": "string", "description": "Memory UUID" }
+                            "id": { "type": "string", "description": "Memory UUID (returned by memory_search or memory_store)" }
                         },
                         "required": ["id"]
                     }
                 },
                 {
                     "name": "goals_list",
-                    "description": "List active goals in the Abathur swarm for context on overall project direction.",
+                    "description": "List active goals in the Abathur swarm. Goals define the overall project direction and constraints that all work must align with. Check goals before planning task decomposition to ensure your approach satisfies project-level requirements.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {}
