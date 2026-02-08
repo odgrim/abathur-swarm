@@ -1,15 +1,4 @@
 {
-  "mcpServers": {
-    "abathur": {
-      "args": [
-        "mcp",
-        "stdio",
-        "--db-path",
-        "abathur.db"
-      ],
-      "command": "abathur"
-    }
-  },
   "permissions": {
     "allowedTools": [
       "mcp__abathur__task_submit",
