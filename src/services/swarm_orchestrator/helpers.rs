@@ -67,6 +67,79 @@ pub async fn auto_commit_worktree(worktree_path: &str, task_id: Uuid) -> bool {
     }
 }
 
+/// Try to create a pull request for a completed task's branch.
+///
+/// Returns the PR URL on success, or `None` if `gh` is unavailable, auth fails,
+/// or the push/PR creation fails for any reason.
+pub async fn try_create_pull_request(
+    worktree_path: &str,
+    branch: &str,
+    task_title: &str,
+    task_description: &str,
+    default_base_ref: &str,
+) -> Option<String> {
+    use tokio::process::Command;
+
+    // Push the branch to origin
+    let push = Command::new("git")
+        .args(["push", "-u", "origin", branch])
+        .current_dir(worktree_path)
+        .output()
+        .await;
+
+    match push {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            tracing::warn!(
+                "git push failed for branch '{}': {}",
+                branch,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!("git push failed for branch '{}': {}", branch, e);
+            return None;
+        }
+    }
+
+    // Create PR via gh CLI
+    let pr_result = Command::new("gh")
+        .args([
+            "pr", "create",
+            "--title", task_title,
+            "--body", task_description,
+            "--base", default_base_ref,
+            "--head", branch,
+        ])
+        .current_dir(worktree_path)
+        .output()
+        .await;
+
+    match pr_result {
+        Ok(output) if output.status.success() => {
+            let pr_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if pr_url.is_empty() {
+                None
+            } else {
+                Some(pr_url)
+            }
+        }
+        Ok(output) => {
+            tracing::warn!(
+                "gh pr create failed for branch '{}': {}",
+                branch,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!("gh not available or failed: {}", e);
+            None
+        }
+    }
+}
+
 /// Helper function to run post-completion workflow (verification and merging).
 /// This is called from spawned tasks after successful task completion.
 pub async fn run_post_completion_workflow<G, T, W>(
@@ -78,6 +151,7 @@ pub async fn run_post_completion_workflow<G, T, W>(
     audit_log: &Arc<AuditLogService>,
     verify_on_completion: bool,
     use_merge_queue: bool,
+    prefer_pull_requests: bool,
     repo_path: &std::path::Path,
     default_base_ref: &str,
 ) -> DomainResult<()>
@@ -157,7 +231,48 @@ where
         true // Skip verification, assume passed
     };
 
-    // Step 2: Queue for merge if verification passed and merge queue is enabled
+    // Step 2: Try PR creation if preferred, then fall back to merge queue
+    if verification_passed && prefer_pull_requests {
+        if let Ok(Some(worktree)) = worktree_repo.get_by_task(task_id).await {
+            // Look up task title/description for the PR
+            let (pr_title, pr_body) = if let Ok(Some(task)) = task_repo.get(task_id).await {
+                (task.title.clone(), task.description.clone())
+            } else {
+                (format!("Task {}", task_id), String::new())
+            };
+
+            if let Some(pr_url) = try_create_pull_request(
+                &worktree.path,
+                &worktree.branch,
+                &pr_title,
+                &pr_body,
+                default_base_ref,
+            ).await {
+                let _ = event_tx.send(SwarmEvent::PullRequestCreated {
+                    task_id,
+                    pr_url: pr_url.clone(),
+                    branch: worktree.branch.clone(),
+                }).await;
+
+                audit_log.info(
+                    AuditCategory::Task,
+                    AuditAction::TaskCompleted,
+                    format!("Task {} PR created: {}", task_id, pr_url),
+                ).await;
+
+                return Ok(());
+            }
+
+            // PR creation failed — fall through to merge queue
+            audit_log.info(
+                AuditCategory::Task,
+                AuditAction::TaskCompleted,
+                format!("Task {} PR creation failed, falling back to merge queue", task_id),
+            ).await;
+        }
+    }
+
+    // Step 3: Queue for merge if verification passed and merge queue is enabled
     if verification_passed && use_merge_queue {
         if let Ok(Some(worktree)) = worktree_repo.get_by_task(task_id).await {
             let verifier = IntegrationVerifierService::new(

@@ -203,6 +203,11 @@ pub enum EventPayload {
         task_id: Uuid,
         stage: String,
     },
+    PullRequestCreated {
+        task_id: Uuid,
+        pr_url: String,
+        branch: String,
+    },
     TaskMerged {
         task_id: Uuid,
         commit_sha: String,
@@ -583,6 +588,13 @@ impl From<SwarmEvent> for UnifiedEvent {
                 None,
                 Some(task_id),
                 EventPayload::TaskQueuedForMerge { task_id, stage },
+            ),
+            SwarmEvent::PullRequestCreated { task_id, pr_url, branch } => (
+                EventSeverity::Info,
+                EventCategory::Task,
+                None,
+                Some(task_id),
+                EventPayload::PullRequestCreated { task_id, pr_url, branch },
             ),
             SwarmEvent::TaskMerged { task_id, commit_sha } => (
                 EventSeverity::Info,

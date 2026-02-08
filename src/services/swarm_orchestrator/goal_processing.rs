@@ -537,6 +537,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let template_version_for_evolution = template_version;
             let verify_on_completion = self.config.verify_on_completion;
             let use_merge_queue = self.config.use_merge_queue;
+            let prefer_pull_requests = self.config.prefer_pull_requests;
             let repo_path = self.config.repo_path.clone();
             let default_base_ref = self.config.default_base_ref.clone();
             let circuit_scope = scope;
@@ -662,7 +663,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             }).await;
 
                             // Run post-completion workflow: verify and merge
-                            if verify_on_completion || use_merge_queue {
+                            if verify_on_completion || use_merge_queue || prefer_pull_requests {
                                 let workflow_result = run_post_completion_workflow(
                                     task_id,
                                     task_repo.clone(),
@@ -672,6 +673,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     &audit_log,
                                     verify_on_completion,
                                     use_merge_queue,
+                                    prefer_pull_requests,
                                     &repo_path,
                                     &default_base_ref,
                                 ).await;

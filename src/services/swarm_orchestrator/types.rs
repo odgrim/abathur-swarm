@@ -35,6 +35,9 @@ pub struct SwarmConfig {
     pub verify_on_completion: bool,
     /// Whether to use merge queue for controlled merging.
     pub use_merge_queue: bool,
+    /// Whether to prefer creating pull requests over direct merges.
+    /// When true, tries `gh pr create` first; falls back to merge queue on failure.
+    pub prefer_pull_requests: bool,
     /// Whether to track agent evolution metrics.
     pub track_evolution: bool,
     /// MCP server addresses for agent access to system services.
@@ -148,6 +151,7 @@ impl Default for SwarmConfig {
             use_llm_decomposition: true,
             verify_on_completion: true,
             use_merge_queue: true,
+            prefer_pull_requests: true,
             track_evolution: true,
             mcp_servers: McpServerConfig::default(),
             spawn_limits: crate::services::config::SpawnLimitsConfig::default(),
@@ -199,6 +203,8 @@ pub enum SwarmEvent {
     TaskVerified { task_id: Uuid, passed: bool, checks_passed: usize, checks_total: usize },
     /// Task queued for merge.
     TaskQueuedForMerge { task_id: Uuid, stage: String },
+    /// Pull request created for completed task.
+    PullRequestCreated { task_id: Uuid, pr_url: String, branch: String },
     /// Task merged successfully.
     TaskMerged { task_id: Uuid, commit_sha: String },
     /// Evolution event triggered.

@@ -614,6 +614,11 @@ async fn run_swarm_foreground(
                         println!("  Task queued for merge: {} (stage: {})", task_id, stage);
                     }
                 }
+                SwarmEvent::PullRequestCreated { task_id, pr_url, branch } => {
+                    if !json_mode {
+                        println!("  PR created: {} (branch: {}, url: {})", task_id, branch, pr_url);
+                    }
+                }
                 SwarmEvent::TaskMerged { task_id, commit_sha } => {
                     if !json_mode {
                         println!("  Task merged: {} (commit: {})", task_id, commit_sha);
