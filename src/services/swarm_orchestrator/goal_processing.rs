@@ -47,10 +47,25 @@ fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
             "shell" => cli_tools.push("Bash".to_string()),
             "glob" => cli_tools.push("Glob".to_string()),
             "grep" => cli_tools.push("Grep".to_string()),
-            // Abathur APIs are now provided via MCP stdio server as native tools.
-            // These template tool names are kept for capability matching but don't
-            // need CLI tool mapping — the MCP server handles them.
-            "memory" | "tasks" | "agents" => {}
+            // Abathur APIs are provided via MCP stdio server as native tools.
+            // Claude Code still needs these in --allowedTools to use them in headless mode.
+            "memory" => {
+                cli_tools.push("mcp__abathur__memory_search".to_string());
+                cli_tools.push("mcp__abathur__memory_store".to_string());
+                cli_tools.push("mcp__abathur__memory_get".to_string());
+            }
+            "tasks" => {
+                cli_tools.push("mcp__abathur__task_submit".to_string());
+                cli_tools.push("mcp__abathur__task_list".to_string());
+                cli_tools.push("mcp__abathur__task_get".to_string());
+                cli_tools.push("mcp__abathur__task_update_status".to_string());
+                cli_tools.push("mcp__abathur__goals_list".to_string());
+            }
+            "agents" => {
+                cli_tools.push("mcp__abathur__agent_create".to_string());
+                cli_tools.push("mcp__abathur__agent_list".to_string());
+                cli_tools.push("mcp__abathur__agent_get".to_string());
+            }
             // Pass through any already-PascalCase tool names, but reject blocked tools
             other => {
                 const BLOCKED: &[&str] = &[
@@ -561,8 +576,12 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                     .join("abathur.db");
 
                 let mcp_config = serde_json::json!({
-                    "command": abathur_exe.to_string_lossy(),
-                    "args": ["mcp", "stdio", "--db-path", db_path.to_string_lossy(), "--task-id", task_id.to_string()]
+                    "mcpServers": {
+                        "abathur": {
+                            "command": abathur_exe.to_string_lossy(),
+                            "args": ["mcp", "stdio", "--db-path", db_path.to_string_lossy(), "--task-id", task_id.to_string()]
+                        }
+                    }
                 });
                 config = config.with_mcp_server(mcp_config.to_string());
 

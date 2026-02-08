@@ -5,8 +5,6 @@ version: 1
 description: Agentic orchestrator that analyzes tasks, dynamically creates agents, and delegates work through REST APIs
 tools:
   - read
-  - write
-  - edit
   - shell
   - glob
   - grep
