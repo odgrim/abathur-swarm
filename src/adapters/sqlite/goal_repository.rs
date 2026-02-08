@@ -26,11 +26,10 @@ impl GoalRepository for SqliteGoalRepository {
         let constraints_json = serde_json::to_string(&goal.constraints)?;
         let metadata_json = serde_json::to_string(&goal.metadata)?;
         let domains_json = serde_json::to_string(&goal.applicability_domains)?;
-        let criteria_json = serde_json::to_string(&goal.evaluation_criteria)?;
 
         sqlx::query(
             r#"INSERT INTO goals (id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)"#
         )
         .bind(goal.id.to_string())
         .bind(&goal.name)
@@ -41,7 +40,6 @@ impl GoalRepository for SqliteGoalRepository {
         .bind(&constraints_json)
         .bind(&metadata_json)
         .bind(&domains_json)
-        .bind(&criteria_json)
         .bind(goal.created_at.to_rfc3339())
         .bind(goal.updated_at.to_rfc3339())
         .execute(&self.pool)
@@ -65,12 +63,11 @@ impl GoalRepository for SqliteGoalRepository {
         let constraints_json = serde_json::to_string(&goal.constraints)?;
         let metadata_json = serde_json::to_string(&goal.metadata)?;
         let domains_json = serde_json::to_string(&goal.applicability_domains)?;
-        let criteria_json = serde_json::to_string(&goal.evaluation_criteria)?;
 
         let result = sqlx::query(
             r#"UPDATE goals SET name = ?, description = ?, status = ?, priority = ?,
                parent_id = ?, constraints = ?, metadata = ?, applicability_domains = ?,
-               evaluation_criteria = ?, updated_at = ?
+               updated_at = ?
                WHERE id = ?"#
         )
         .bind(&goal.name)
@@ -81,7 +78,6 @@ impl GoalRepository for SqliteGoalRepository {
         .bind(&constraints_json)
         .bind(&metadata_json)
         .bind(&domains_json)
-        .bind(&criteria_json)
         .bind(goal.updated_at.to_rfc3339())
         .bind(goal.id.to_string())
         .execute(&self.pool)
@@ -247,7 +243,8 @@ impl TryFrom<GoalRow> for Goal {
             .map_err(|e| DomainError::SerializationError(e.to_string()))?
             .unwrap_or_default();
 
-        let evaluation_criteria: Vec<String> = row.evaluation_criteria
+        // evaluation_criteria column is kept for DB compatibility but no longer used
+        let _evaluation_criteria: Vec<String> = row.evaluation_criteria
             .map(|s| serde_json::from_str(&s))
             .transpose()
             .map_err(|e| DomainError::SerializationError(e.to_string()))?
@@ -270,7 +267,6 @@ impl TryFrom<GoalRow> for Goal {
             parent_id,
             constraints,
             applicability_domains,
-            evaluation_criteria,
             metadata,
             created_at,
             updated_at,

@@ -252,13 +252,6 @@ impl<G: GoalRepository> GoalContextService<G> {
                 }
             }
 
-            if !goal.evaluation_criteria.is_empty() {
-                output.push_str("Success criteria:\n");
-                for criterion in &goal.evaluation_criteria {
-                    output.push_str(&format!("- {}\n", criterion));
-                }
-            }
-
             output.push('\n');
         }
 

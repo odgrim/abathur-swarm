@@ -196,9 +196,6 @@ pub struct Goal {
     /// Domains this goal is relevant to (e.g., "code-quality", "security", "testing")
     #[serde(default)]
     pub applicability_domains: Vec<String>,
-    /// Concrete criteria for evaluating whether this goal is being met
-    #[serde(default)]
-    pub evaluation_criteria: Vec<String>,
     /// Additional metadata
     pub metadata: GoalMetadata,
     /// When this goal was created
@@ -222,7 +219,6 @@ impl Goal {
             parent_id: None,
             constraints: Vec::new(),
             applicability_domains: Vec::new(),
-            evaluation_criteria: Vec::new(),
             metadata: GoalMetadata::default(),
             created_at: now,
             updated_at: now,
@@ -257,12 +253,6 @@ impl Goal {
     /// Add an applicability domain to this goal.
     pub fn with_applicability_domain(mut self, domain: impl Into<String>) -> Self {
         self.applicability_domains.push(domain.into());
-        self
-    }
-
-    /// Add an evaluation criterion to this goal.
-    pub fn with_evaluation_criterion(mut self, criterion: impl Into<String>) -> Self {
-        self.evaluation_criteria.push(criterion.into());
         self
     }
 
@@ -340,7 +330,6 @@ pub struct GoalBuilder {
     constraints: Vec<GoalConstraint>,
     tags: Vec<String>,
     applicability_domains: Vec<String>,
-    evaluation_criteria: Vec<String>,
 }
 
 impl GoalBuilder {
@@ -383,11 +372,6 @@ impl GoalBuilder {
         self
     }
 
-    pub fn evaluation_criterion(mut self, criterion: impl Into<String>) -> Self {
-        self.evaluation_criteria.push(criterion.into());
-        self
-    }
-
     pub fn build(self) -> Result<Goal, String> {
         let name = self.name.ok_or("Goal name is required")?;
         let description = self.description.unwrap_or_default();
@@ -409,10 +393,6 @@ impl GoalBuilder {
 
         for domain in self.applicability_domains {
             goal = goal.with_applicability_domain(domain);
-        }
-
-        for criterion in self.evaluation_criteria {
-            goal = goal.with_evaluation_criterion(criterion);
         }
 
         goal.validate()?;

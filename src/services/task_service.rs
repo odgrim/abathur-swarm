@@ -6,7 +6,6 @@ use uuid::Uuid;
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::{TaskFilter, TaskRepository};
-use crate::services::goal_evaluation_service::SuggestedTask;
 
 /// Configuration for spawn limits.
 #[derive(Debug, Clone)]
@@ -409,24 +408,6 @@ impl<T: TaskRepository> TaskService<T> {
         self.mark_dependents_blocked(task_id).await?;
 
         Ok(task)
-    }
-
-    /// Create a task from a goal evaluation suggestion.
-    ///
-    /// Sets the source to `GoalEvaluation(goal_id)` and uses the suggested task's
-    /// title, description, and priority.
-    pub async fn create_from_evaluation(&self, suggested: SuggestedTask, goal_id: Uuid) -> DomainResult<Task> {
-        self.submit_task(
-            Some(suggested.title),
-            suggested.description,
-            None,
-            suggested.priority,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::GoalEvaluation(goal_id),
-        ).await
     }
 
     /// Get task status counts.

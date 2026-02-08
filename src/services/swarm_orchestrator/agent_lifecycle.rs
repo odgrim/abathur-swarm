@@ -11,7 +11,7 @@ use crate::domain::models::{GoalStatus, SubstrateRequest};
 use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
-    EvolutionAction, HolisticEvaluation, RefinementRequest,
+    EvolutionAction, RefinementRequest,
 };
 
 use super::types::SwarmEvent;
@@ -404,49 +404,6 @@ where
 
     // build_api_docs removed — tools are now provided via MCP stdio server.
     // The agent sees task_submit, agent_create, memory_search, etc. as native tools.
-
-    /// Evaluate goal alignment for a completed task.
-    ///
-    /// Returns the evaluation result if goal alignment service is configured.
-    pub async fn evaluate_goal_alignment(&self, task_id: Uuid) -> DomainResult<Option<HolisticEvaluation>> {
-        let Some(ref alignment_service) = self.goal_alignment else {
-            return Ok(None);
-        };
-
-        let task = self.task_repo.get(task_id).await?
-            .ok_or(crate::domain::errors::DomainError::TaskNotFound(task_id))?;
-
-        let evaluation = alignment_service.evaluate_task(&task).await?;
-
-        // Log alignment result
-        if evaluation.passes {
-            self.audit_log.info(
-                AuditCategory::Goal,
-                AuditAction::GoalEvaluated,
-                format!(
-                    "Task {} aligned with goals: {:.0}% ({}/{} goals satisfied)",
-                    task_id, evaluation.overall_score * 100.0,
-                    evaluation.goals_satisfied, evaluation.goal_alignments.len()
-                ),
-            ).await;
-        } else {
-            self.audit_log.log(
-                AuditEntry::new(
-                    AuditLevel::Warning,
-                    AuditCategory::Goal,
-                    AuditAction::GoalEvaluated,
-                    AuditActor::System,
-                    format!(
-                        "Task {} misaligned with goals: {:.0}% - {}",
-                        task_id, evaluation.overall_score * 100.0, evaluation.summary
-                    ),
-                )
-                .with_entity(task_id, "task"),
-            ).await;
-        }
-
-        Ok(Some(evaluation))
-    }
 
     /// Refresh the cache of active goals for context injection.
     pub(super) async fn refresh_active_goals_cache(&self) -> DomainResult<()> {

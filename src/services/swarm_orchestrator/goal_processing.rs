@@ -345,57 +345,6 @@ where
             return Ok(());
         }
 
-        // Pre-execution constraint validation via goal alignment
-        if let Some(ref alignment_service) = self.goal_alignment {
-            match alignment_service.evaluate_task(task).await {
-                Ok(evaluation) => {
-                    // Check for constraint violations before execution
-                    for alignment in &evaluation.goal_alignments {
-                        if !alignment.constraints_satisfied {
-                            for violation in &alignment.violations {
-                                self.audit_log.log(
-                                    AuditEntry::new(
-                                        AuditLevel::Warning,
-                                        AuditCategory::Goal,
-                                        AuditAction::GoalEvaluated,
-                                        AuditActor::System,
-                                        format!(
-                                            "Task {} may violate constraint '{}': {} (severity: {:.0}%)",
-                                            task.id,
-                                            violation.constraint_name,
-                                            violation.description,
-                                            violation.severity * 100.0
-                                        ),
-                                    )
-                                    .with_entity(task.id, "task"),
-                                ).await;
-                            }
-                        }
-                    }
-
-                    // Emit alignment evaluation event
-                    let _ = event_tx.send(SwarmEvent::GoalAlignmentEvaluated {
-                        task_id: task.id,
-                        overall_score: evaluation.overall_score,
-                        passes: evaluation.passes,
-                    }).await;
-                }
-                Err(e) => {
-                    // Log but don't block execution on evaluation failure
-                    self.audit_log.log(
-                        AuditEntry::new(
-                            AuditLevel::Warning,
-                            AuditCategory::Goal,
-                            AuditAction::GoalEvaluated,
-                            AuditActor::System,
-                            format!("Failed to evaluate task {} alignment: {}", task.id, e),
-                        )
-                        .with_entity(task.id, "task"),
-                    ).await;
-                }
-            }
-        }
-
         // Try to acquire agent permit
         if let Ok(permit) = self.agent_semaphore.clone().try_acquire_owned() {
             let system_prompt = self.get_agent_system_prompt(&agent_type).await;

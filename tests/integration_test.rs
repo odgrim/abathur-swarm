@@ -11,15 +11,15 @@ use abathur::adapters::sqlite::{
 };
 use abathur::adapters::substrates::SubstrateRegistry;
 use abathur::domain::models::{
-    Goal, GoalPriority, GoalStatus, Task, TaskSource, TaskStatus,
+    GoalPriority, GoalStatus, Task, TaskSource, TaskStatus,
     AgentTier, MemoryTier, SubstrateType, TaskDag,
 };
 use abathur::domain::ports::{
-    GoalRepository, TaskRepository, TaskFilter, Substrate, MemoryRepository, NullMemoryRepository,
+    TaskRepository, TaskFilter, Substrate, MemoryRepository, NullMemoryRepository,
 };
 use abathur::services::{
     GoalService, TaskService, MemoryService, AgentService, WorktreeService,
-    SwarmOrchestrator, SwarmConfig, MetaPlanner, MetaPlannerConfig,
+    SwarmOrchestrator, SwarmConfig,
 };
 
 /// Helper to set up test repositories.
@@ -58,7 +58,6 @@ async fn test_goal_lifecycle() {
         "Add feature X to the system".to_string(),
         GoalPriority::High,
         None,
-        vec![],
         vec![],
         vec![],
     ).await.expect("Failed to create goal");
@@ -220,54 +219,6 @@ async fn test_agent_system_integration() {
     assert_eq!(running.len(), 0);
 }
 
-/// Test goal-to-task decomposition with MetaPlanner service.
-#[tokio::test]
-async fn test_goal_decomposition() {
-    let (goal_repo, task_repo, _, agent_repo, _) = setup_test_repos().await;
-
-    // Create a goal using repository directly
-    let goal = Goal::new("Build API", "Create a REST API endpoint")
-        .with_priority(GoalPriority::High);
-    goal_repo.create(&goal).await.expect("Failed to create goal");
-
-    let config = MetaPlannerConfig {
-        max_decomposition_depth: 3,
-        default_agent_tier: AgentTier::Worker,
-        auto_generate_agents: true,
-        max_tasks_per_decomposition: 10,
-        use_llm_decomposition: false, // Use heuristic for tests
-        llm_config: None,
-    };
-
-    let meta_planner = MetaPlanner::new(
-        goal_repo.clone(),
-        task_repo.clone(),
-        agent_repo.clone(),
-        config,
-    );
-
-    // Decompose the goal
-    let plan = meta_planner.decompose_goal(goal.id)
-        .await
-        .expect("Failed to decompose goal");
-
-    assert!(!plan.tasks.is_empty());
-    assert_eq!(plan.goal_id, goal.id);
-
-    // Execute the plan
-    let created_tasks = meta_planner.execute_plan(&plan)
-        .await
-        .expect("Failed to execute plan");
-
-    assert!(!created_tasks.is_empty());
-
-    // Verify tasks were created
-    let tasks = task_repo.list_by_source("goal_evaluation")
-        .await
-        .expect("Failed to list tasks by source");
-    assert!(!tasks.is_empty());
-}
-
 /// Test worktree service operations.
 #[tokio::test]
 async fn test_worktree_service_operations() {
@@ -327,54 +278,6 @@ async fn test_swarm_orchestrator_basic() {
     let stats = orchestrator.tick().await.expect("Failed to tick");
     assert_eq!(stats.active_goals, 0);
     assert_eq!(stats.pending_tasks, 0);
-}
-
-/// Test full workflow: goal -> tasks -> execution.
-#[tokio::test]
-async fn test_full_workflow() {
-    let (goal_repo, task_repo, _, agent_repo, _) = setup_test_repos().await;
-
-    // 1. Create a goal
-    let goal_service = GoalService::new(goal_repo.clone());
-    let goal = goal_service.create_goal(
-        "Test Goal".to_string(),
-        "A goal for full workflow testing".to_string(),
-        GoalPriority::Normal,
-        None,
-        vec![],
-        vec![],
-        vec![],
-    ).await.expect("Failed to create goal");
-
-    // 2. Use meta-planner to decompose
-    let meta_config = MetaPlannerConfig::default();
-    let meta_planner = MetaPlanner::new(
-        goal_repo.clone(),
-        task_repo.clone(),
-        agent_repo.clone(),
-        meta_config,
-    );
-    let plan = meta_planner.decompose_goal(goal.id).await.expect("Failed to decompose");
-    let _tasks = meta_planner.execute_plan(&plan).await.expect("Failed to execute plan");
-
-    // 3. Use task service to work through tasks
-    let task_service = TaskService::new(task_repo.clone());
-
-    // Get ready tasks and complete them
-    let ready = task_service.get_ready_tasks(10).await.expect("Failed to get ready");
-    for task in ready {
-        let _ = task_service.claim_task(task.id, "test-agent").await;
-        task_service.complete_task(task.id).await.expect("Failed to complete task");
-    }
-
-    // 4. Retire the goal (goals are never "completed" - they can be retired when no longer relevant)
-    goal_service.transition_status(goal.id, GoalStatus::Retired)
-        .await.expect("Failed to retire goal");
-
-    // 5. Verify final state
-    let final_goal = goal_service.get_goal(goal.id).await.expect("Failed to get goal");
-    assert!(final_goal.is_some());
-    assert_eq!(final_goal.unwrap().status, GoalStatus::Retired);
 }
 
 /// Test DAG execution with mock substrate.
@@ -539,7 +442,6 @@ async fn test_goal_constraints() {
             GoalConstraint::boundary("max_cost", "Maximum cost should be $100"),
             GoalConstraint::invariant("required_tool", "Must use Bash tool"),
         ],
-        vec![],
         vec![],
     ).await.expect("Failed to create goal");
 

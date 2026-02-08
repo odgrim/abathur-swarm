@@ -7,14 +7,13 @@
 //! using Claude Code CLI.
 
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    AgentTemplate, AgentTier, Task, TaskPriority, ToolCapability,
+    AgentTemplate, AgentTier, TaskPriority, ToolCapability,
 };
 use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository};
-use crate::services::llm_planner::{LlmPlanner, LlmPlannerConfig, PlanningContext};
+use crate::services::llm_planner::LlmPlannerConfig;
 use crate::services::EvolutionLoop;
 
 /// Configuration for the meta-planner.
@@ -50,8 +49,6 @@ impl Default for MetaPlannerConfig {
 /// A task decomposition plan.
 #[derive(Debug, Clone)]
 pub struct DecompositionPlan {
-    /// Goal being decomposed.
-    pub goal_id: Uuid,
     /// Generated tasks.
     pub tasks: Vec<TaskSpec>,
     /// Required agent types.
@@ -148,8 +145,9 @@ where
     T: TaskRepository + 'static,
     A: AgentRepository + 'static,
 {
-    goal_repo: Arc<G>,
-    task_repo: Arc<T>,
+    // Kept for API compatibility; may be used again when decomposition is re-added.
+    _goal_repo: Arc<G>,
+    _task_repo: Arc<T>,
     agent_repo: Arc<A>,
     memory_repo: Option<Arc<dyn MemoryRepository>>,
     config: MetaPlannerConfig,
@@ -172,8 +170,8 @@ where
         config: MetaPlannerConfig,
     ) -> Self {
         Self {
-            goal_repo,
-            task_repo,
+            _goal_repo: goal_repo,
+            _task_repo: task_repo,
             agent_repo,
             memory_repo: None,
             config,
@@ -236,167 +234,6 @@ where
             .await?;
 
         Ok(memories.into_iter().map(|m| m.content).collect())
-    }
-
-    /// Decompose a goal into tasks.
-    ///
-    /// Routing priority:
-    /// 1. If `use_llm_decomposition` AND Overmind available → Substrate-compatible Overmind path
-    /// 2. If `use_llm_decomposition` AND no Overmind → CLI-based LLM path (production only)
-    /// 3. Otherwise → heuristic decomposition
-    pub async fn decompose_goal(&self, goal_id: Uuid) -> DomainResult<DecompositionPlan> {
-        if self.config.use_llm_decomposition {
-            // Prefer Overmind (Substrate-compatible, works with MockSubstrate)
-            if let Some(ref overmind) = self.overmind {
-                match self.decompose_goal_with_overmind(goal_id, overmind).await {
-                    Ok(plan) => return Ok(plan),
-                    Err(e) => {
-                        tracing::warn!("Overmind decomposition failed, trying LLM fallback: {}", e);
-                    }
-                }
-            }
-            // Fall back to CLI-based LLM decomposition
-            match self.decompose_goal_with_llm(goal_id, None).await {
-                Ok(plan) => Ok(plan),
-                Err(e) => {
-                    tracing::warn!("LLM decomposition failed, falling back to heuristic: {}", e);
-                    self.decompose_goal_heuristic(goal_id).await
-                }
-            }
-        } else {
-            // Use heuristic decomposition
-            self.decompose_goal_heuristic(goal_id).await
-        }
-    }
-
-    /// Decompose a goal using LLM (Claude Code CLI).
-    ///
-    /// This method uses the LlmPlanner to intelligently decompose the goal
-    /// into a detailed task DAG with proper dependencies.
-    pub async fn decompose_goal_with_llm(
-        &self,
-        goal_id: Uuid,
-        context: Option<PlanningContext>,
-    ) -> DomainResult<DecompositionPlan> {
-        let goal = self.goal_repo.get(goal_id).await?
-            .ok_or(DomainError::GoalNotFound(goal_id))?;
-
-        // Get LLM config or use defaults
-        let llm_config = self.config.llm_config.clone()
-            .unwrap_or_else(LlmPlannerConfig::default);
-
-        let llm_planner = LlmPlanner::new(llm_config);
-
-        // Build planning context
-        let planning_context = if let Some(ctx) = context {
-            ctx
-        } else {
-            // Get existing agent types for context
-            use crate::domain::ports::AgentFilter;
-            let agents = self.agent_repo.list_templates(AgentFilter::default()).await?;
-            let agent_names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
-
-            // Query memory for relevant patterns
-            let memory_patterns = self.query_decomposition_patterns(&goal.description).await?;
-
-            PlanningContext::new()
-                .with_agents(agent_names)
-                .with_memory_patterns(memory_patterns)
-        };
-
-        // Get LLM decomposition
-        let decomposition = llm_planner.decompose_goal(&goal, &planning_context).await?;
-
-        // Convert to internal TaskSpec format
-        let tasks = llm_planner.to_task_specs(&decomposition);
-        let complexity = llm_planner.parse_complexity(&decomposition.complexity);
-
-        // Limit tasks if configured
-        let tasks = if tasks.len() > self.config.max_tasks_per_decomposition {
-            tasks.into_iter()
-                .take(self.config.max_tasks_per_decomposition)
-                .collect()
-        } else {
-            tasks
-        };
-
-        Ok(DecompositionPlan {
-            goal_id,
-            tasks,
-            required_agents: decomposition.required_capabilities,
-            estimated_complexity: complexity,
-        })
-    }
-
-    /// Decompose a goal using simple heuristics.
-    ///
-    /// Creates a single task from the goal. Use this as a fallback
-    /// when LLM decomposition is unavailable or for simple goals.
-    pub async fn decompose_goal_heuristic(&self, goal_id: Uuid) -> DomainResult<DecompositionPlan> {
-        let goal = self.goal_repo.get(goal_id).await?
-            .ok_or(DomainError::GoalNotFound(goal_id))?;
-
-        // Create a simple single-task decomposition
-        let task_spec = TaskSpec {
-            title: format!("Implement: {}", goal.name),
-            description: goal.description.clone(),
-            priority: match goal.priority {
-                crate::domain::models::GoalPriority::Low => TaskPriority::Low,
-                crate::domain::models::GoalPriority::Normal => TaskPriority::Normal,
-                crate::domain::models::GoalPriority::High => TaskPriority::High,
-                crate::domain::models::GoalPriority::Critical => TaskPriority::Critical,
-            },
-            agent_type: Some("default".to_string()),
-            depends_on_indices: vec![],
-            needs_worktree: true,
-        };
-
-        let tasks = vec![task_spec];
-        let complexity = Complexity::from_task_count(tasks.len());
-
-        Ok(DecompositionPlan {
-            goal_id,
-            tasks,
-            required_agents: vec!["default".to_string()],
-            estimated_complexity: complexity,
-        })
-    }
-
-    /// Execute a decomposition plan by creating the tasks.
-    pub async fn execute_plan(&self, plan: &DecompositionPlan) -> DomainResult<Vec<Task>> {
-        let mut created_tasks = Vec::new();
-        let mut task_id_map: std::collections::HashMap<usize, Uuid> = std::collections::HashMap::new();
-
-        for (idx, spec) in plan.tasks.iter().enumerate() {
-            // Build dependencies from previously created tasks
-            let mut depends_on = Vec::new();
-            for &dep_idx in &spec.depends_on_indices {
-                if let Some(&dep_id) = task_id_map.get(&dep_idx) {
-                    depends_on.push(dep_id);
-                }
-            }
-
-            // Create the task
-            let mut task = Task::with_title(&spec.title, &spec.description)
-                .with_source(crate::domain::models::TaskSource::GoalEvaluation(plan.goal_id))
-                .with_priority(spec.priority);
-
-            if let Some(ref agent) = spec.agent_type {
-                task = task.with_agent(agent);
-            }
-
-            for dep_id in depends_on {
-                task = task.with_dependency(dep_id);
-            }
-
-            task.validate().map_err(DomainError::ValidationFailed)?;
-            self.task_repo.create(&task).await?;
-
-            task_id_map.insert(idx, task.id);
-            created_tasks.push(task);
-        }
-
-        Ok(created_tasks)
     }
 
     /// Generate a new agent template specification.
@@ -521,113 +358,6 @@ where
         }
     }
 
-    /// Decompose a goal using the Overmind for intelligent strategic planning.
-    ///
-    /// This method invokes the Overmind agent to analyze the goal and create
-    /// a strategically planned task DAG with proper dependencies, verification
-    /// points, and execution hints.
-    pub async fn decompose_goal_with_overmind(
-        &self,
-        goal_id: Uuid,
-        overmind: &crate::services::OvermindService,
-    ) -> DomainResult<DecompositionPlan> {
-        use crate::domain::models::overmind::{GoalDecompositionRequest, ExistingTaskSummary};
-
-        let goal = self.goal_repo.get(goal_id).await?
-            .ok_or(DomainError::GoalNotFound(goal_id))?;
-
-        // Get existing tasks from goal evaluation source
-        let existing_tasks = self.task_repo.list_by_source("goal_evaluation").await?;
-        let existing_task_summaries: Vec<ExistingTaskSummary> = existing_tasks
-            .iter()
-            .map(|t| ExistingTaskSummary {
-                id: t.id,
-                title: t.title.clone(),
-                status: t.status.as_str().to_string(),
-                agent_type: t.agent_type.clone(),
-            })
-            .collect();
-
-        // Get available agent types
-        use crate::domain::ports::AgentFilter;
-        let agents = self.agent_repo.list_templates(AgentFilter::default()).await?;
-        let agent_names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
-
-        // Query memory for decomposition patterns
-        let memory_patterns = self.query_decomposition_patterns(&goal.description).await?;
-
-        // Extract constraints
-        let constraints: Vec<String> = goal.constraints
-            .iter()
-            .map(|c| format!("{}: {}", c.name, c.description))
-            .collect();
-
-        // Build the request
-        let request = GoalDecompositionRequest {
-            goal_id,
-            goal_name: goal.name.clone(),
-            goal_description: goal.description.clone(),
-            constraints,
-            available_agents: agent_names,
-            existing_tasks: existing_task_summaries,
-            memory_patterns,
-            max_tasks: self.config.max_tasks_per_decomposition,
-        };
-
-        // Invoke Overmind
-        let decision = overmind.decompose_goal(request).await?;
-
-        // Build a title-to-index map for dependency resolution (using owned strings)
-        let title_to_idx: std::collections::HashMap<String, usize> = decision.tasks
-            .iter()
-            .enumerate()
-            .map(|(idx, t)| (t.title.clone(), idx))
-            .collect();
-
-        // Convert Overmind decision to DecompositionPlan
-        let tasks: Vec<TaskSpec> = decision.tasks
-            .into_iter()
-            .enumerate()
-            .map(|(idx, task_def)| {
-                // Find dependency indices using the pre-built map
-                let depends_on_indices: Vec<usize> = task_def.depends_on
-                    .iter()
-                    .filter_map(|dep_title| {
-                        title_to_idx.get(dep_title)
-                            .copied()
-                            .filter(|&pos| pos < idx) // Only depend on earlier tasks
-                    })
-                    .collect();
-
-                TaskSpec {
-                    title: task_def.title,
-                    description: task_def.description,
-                    priority: task_def.priority,
-                    agent_type: task_def.agent_type,
-                    depends_on_indices,
-                    needs_worktree: task_def.needs_worktree,
-                }
-            })
-            .collect();
-
-        // Determine complexity from task count
-        let complexity = Complexity::from_task_count(tasks.len());
-
-        // Extract required agents
-        let required_agents: Vec<String> = tasks
-            .iter()
-            .filter_map(|t| t.agent_type.clone())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-
-        Ok(DecompositionPlan {
-            goal_id,
-            tasks,
-            required_agents,
-            estimated_complexity: complexity,
-        })
-    }
 }
 
 #[cfg(test)]

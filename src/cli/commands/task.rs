@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use std::sync::Arc;
 
 use crate::adapters::sqlite::{SqliteTaskRepository, initialize_database};
-use crate::cli::id_resolver::{resolve_goal_id, resolve_task_id};
+use crate::cli::id_resolver::resolve_task_id;
 use crate::cli::output::{output, CommandOutput};
 use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::TaskFilter;
@@ -29,9 +29,6 @@ pub enum TaskCommands {
         /// Priority (low, normal, high, critical)
         #[arg(short, long, default_value = "normal")]
         priority: String,
-        /// Associated goal ID
-        #[arg(short, long)]
-        goal: Option<String>,
         /// Parent task ID
         #[arg(long)]
         parent: Option<String>,
@@ -56,9 +53,6 @@ pub enum TaskCommands {
         /// Filter by priority
         #[arg(short, long)]
         priority: Option<String>,
-        /// Filter by goal ID
-        #[arg(short, long)]
-        goal: Option<String>,
         /// Filter by agent type
         #[arg(short, long)]
         agent: Option<String>,
@@ -271,7 +265,6 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
             prompt,
             title,
             priority,
-            goal,
             parent,
             agent,
             depends_on,
@@ -296,14 +289,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 ..Default::default()
             });
 
-            // If a goal ID was provided via CLI, use GoalEvaluation source; otherwise Human
-            let source = match goal {
-                Some(g) => {
-                    let gid = resolve_goal_id(&pool, &g).await?;
-                    TaskSource::GoalEvaluation(gid)
-                }
-                None => TaskSource::Human,
-            };
+            let source = TaskSource::Human;
 
             let task = service.submit_task(
                 title,
@@ -325,7 +311,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
             output(&out, json_mode);
         }
 
-        TaskCommands::List { status, priority, goal: _, agent, ready, limit } => {
+        TaskCommands::List { status, priority, agent, ready, limit } => {
             let tasks = if ready {
                 service.get_ready_tasks(limit).await?
             } else {

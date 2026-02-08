@@ -464,7 +464,6 @@ fn serialize_task_source(source: &TaskSource) -> (String, Option<String>) {
         TaskSource::Human => ("human".to_string(), None),
         TaskSource::System => ("system".to_string(), None),
         TaskSource::SubtaskOf(uuid) => ("subtask".to_string(), Some(uuid.to_string())),
-        TaskSource::GoalEvaluation(uuid) => ("goal_evaluation".to_string(), Some(uuid.to_string())),
     }
 }
 
@@ -484,16 +483,8 @@ fn deserialize_task_source(
                 .map_err(|e| DomainError::SerializationError(e.to_string()))?;
             Ok(TaskSource::SubtaskOf(uuid))
         }
-        Some("goal_evaluation") => {
-            let uuid_str = source_ref.ok_or_else(|| {
-                DomainError::SerializationError(
-                    "goal_evaluation source requires source_ref".to_string(),
-                )
-            })?;
-            let uuid = Uuid::parse_str(uuid_str)
-                .map_err(|e| DomainError::SerializationError(e.to_string()))?;
-            Ok(TaskSource::GoalEvaluation(uuid))
-        }
+        // Legacy: goal_evaluation rows in DB are treated as Human
+        Some("goal_evaluation") => Ok(TaskSource::Human),
         Some(other) => Err(DomainError::SerializationError(format!(
             "Unknown source_type: {}",
             other

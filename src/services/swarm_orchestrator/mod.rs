@@ -4,9 +4,8 @@
 //!
 //! - **types**: Public configuration, event, and status types
 //! - **event_handling**: Human escalation, A2A messaging, event bus integration
-//! - **agent_lifecycle**: Agent evolution, registration, prompts, goal alignment
-//! - **dag_execution**: DAG-based goal execution, convergence loops, merge queue
-//! - **goal_processing**: Goal decomposition, task spawning, dependency management
+//! - **agent_lifecycle**: Agent evolution, registration, prompts
+//! - **goal_processing**: Task spawning, dependency management
 //! - **specialist_triggers**: Failure recovery, restructuring, diagnostics, merge conflicts
 //! - **infrastructure**: Cold start, decay daemon, MCP servers, stats, verification
 //! - **helpers**: Utility functions for spawned tasks (auto-commit, post-completion)
@@ -14,7 +13,6 @@
 pub mod types;
 mod event_handling;
 mod agent_lifecycle;
-mod dag_execution;
 mod goal_processing;
 mod specialist_triggers;
 mod infrastructure;
@@ -41,7 +39,6 @@ use crate::services::{
     AuditLogConfig, AuditLogService,
     CircuitBreakerConfig, CircuitBreakerService,
     DaemonHandle, EvolutionLoop,
-    GoalAlignmentService,
     IntentVerifierConfig, IntentVerifierService,
     dag_restructure::DagRestructureService,
     guardrails::{Guardrails, GuardrailsConfig},
@@ -78,7 +75,6 @@ where
     pub(super) circuit_breaker: Arc<CircuitBreakerService>,
     pub(super) decay_daemon_handle: Arc<RwLock<Option<DaemonHandle>>>,
     pub(super) evolution_loop: Arc<EvolutionLoop>,
-    pub(super) goal_alignment: Option<Arc<GoalAlignmentService<G>>>,
     pub(super) active_goals_cache: Arc<RwLock<Vec<Goal>>>,
     pub(super) restructure_service: Arc<tokio::sync::Mutex<DagRestructureService>>,
     pub(super) guardrails: Arc<Guardrails>,
@@ -111,7 +107,6 @@ where
         config: SwarmConfig,
     ) -> Self {
         let max_agents = config.max_agents;
-        let goal_alignment = Some(Arc::new(GoalAlignmentService::with_defaults(goal_repo.clone())));
         Self {
             goal_repo,
             task_repo,
@@ -128,7 +123,6 @@ where
             circuit_breaker: Arc::new(CircuitBreakerService::with_defaults()),
             decay_daemon_handle: Arc::new(RwLock::new(None)),
             evolution_loop: Arc::new(EvolutionLoop::with_default_config()),
-            goal_alignment,
             active_goals_cache: Arc::new(RwLock::new(Vec::new())),
             restructure_service: Arc::new(tokio::sync::Mutex::new(DagRestructureService::with_defaults())),
             guardrails: Arc::new(Guardrails::with_defaults()),
@@ -419,9 +413,6 @@ where
             // Process specialist agent triggers (conflicts, persistent failures, etc.)
             self.process_specialist_triggers(&event_tx).await?;
 
-            // Detect stalled goals (active goals with no in-flight work)
-            self.detect_stalled_goals(&event_tx).await?;
-
             // Process A2A delegation requests from agents
             if self.config.mcp_servers.a2a_gateway.is_some() {
                 self.process_a2a_delegations(&event_tx).await?;
@@ -469,9 +460,6 @@ where
         if self.config.auto_retry {
             self.process_retries(&tx).await?;
         }
-
-        // Detect stalled goals
-        self.detect_stalled_goals(&tx).await?;
 
         // Update stats
         self.update_stats(&tx).await?;

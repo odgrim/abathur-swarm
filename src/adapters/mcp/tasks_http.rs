@@ -56,8 +56,6 @@ pub struct SubmitTaskRequest {
     #[serde(default)]
     pub depends_on: Vec<Uuid>,
     #[serde(default)]
-    pub goal_id: Option<Uuid>,
-    #[serde(default)]
     pub parent_id: Option<Uuid>,
     #[serde(default)]
     pub idempotency_key: Option<String>,
@@ -87,8 +85,6 @@ pub struct ClaimTaskRequest {
 pub struct TaskQueryParams {
     #[serde(default)]
     pub status: Option<String>,
-    #[serde(default)]
-    pub goal_id: Option<Uuid>,
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
@@ -288,11 +284,7 @@ async fn submit_task<T: TaskRepository + Clone + Send + Sync + 'static>(
         .and_then(|p| parse_priority(p))
         .unwrap_or(TaskPriority::Normal);
 
-    // Determine source based on whether a goal_id was provided
-    let source = match req.goal_id {
-        Some(gid) => TaskSource::GoalEvaluation(gid),
-        None => TaskSource::Human,
-    };
+    let source = TaskSource::Human;
 
     match state
         .service

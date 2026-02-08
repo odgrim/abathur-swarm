@@ -49,7 +49,7 @@ use abathur::domain::ports::{
 };
 use abathur::services::{
     AgentService, DagExecutor, ExecutionEvent, ExecutionStatus, ExecutorConfig, EvolutionLoop,
-    GoalService, MemoryService, MetaPlanner, MetaPlannerConfig, SwarmConfig, SwarmOrchestrator,
+    GoalService, MemoryService, SwarmConfig, SwarmOrchestrator,
     TaskExecution, TaskOutcome, TaskService,
 };
 
@@ -137,7 +137,6 @@ async fn test_goal_lifecycle_with_constraints() {
                 GoalConstraint::preference("ux", "Use OAuth2 if possible"),
             ],
             vec![],
-            vec![],
         )
         .await
         .expect("Failed to create goal");
@@ -202,14 +201,13 @@ async fn test_task_dag_with_dependencies() {
     let goal_service = GoalService::new(goal_repo.clone());
     let task_service = TaskService::new(task_repo.clone());
 
-    // Create a goal to associate tasks with
-    let goal = goal_service
+    // Create a goal (aspirational context, not directly linked to tasks)
+    let _goal = goal_service
         .create_goal(
             "Build API".to_string(),
             "Create REST API endpoints".to_string(),
             GoalPriority::Normal,
             None,
-            vec![],
             vec![],
             vec![],
         )
@@ -240,7 +238,7 @@ async fn test_task_dag_with_dependencies() {
             vec![], // No dependencies
             None,
             None,
-            TaskSource::GoalEvaluation(goal.id),
+            TaskSource::Human,
         )
         .await
         .expect("Failed to create setup task");
@@ -255,7 +253,7 @@ async fn test_task_dag_with_dependencies() {
             vec![setup_task.id], // Depends on setup
             None,
             None,
-            TaskSource::GoalEvaluation(goal.id),
+            TaskSource::Human,
         )
         .await
         .expect("Failed to create auth task");
@@ -270,7 +268,7 @@ async fn test_task_dag_with_dependencies() {
             vec![setup_task.id], // Depends on setup (parallel with auth)
             None,
             None,
-            TaskSource::GoalEvaluation(goal.id),
+            TaskSource::Human,
         )
         .await
         .expect("Failed to create db task");
@@ -285,7 +283,7 @@ async fn test_task_dag_with_dependencies() {
             vec![auth_task.id, db_task.id], // Depends on both auth AND db
             None,
             None,
-            TaskSource::GoalEvaluation(goal.id),
+            TaskSource::Human,
         )
         .await
         .expect("Failed to create api task");
@@ -300,7 +298,7 @@ async fn test_task_dag_with_dependencies() {
             vec![api_task.id], // Depends on api
             None,
             None,
-            TaskSource::GoalEvaluation(goal.id),
+            TaskSource::Human,
         )
         .await
         .expect("Failed to create test task");
@@ -811,7 +809,7 @@ async fn test_full_end_to_end_workflow() {
 
     // 1. Create services
     let goal_service = GoalService::new(goal_repo.clone());
-    let _task_service = TaskService::new(task_repo.clone());
+    let task_service = TaskService::new(task_repo.clone());
     let agent_service = AgentService::new(agent_repo.clone());
     let memory_service = MemoryService::new(memory_repo.clone());
     let evolution_loop = Arc::new(EvolutionLoop::with_default_config());
@@ -828,45 +826,44 @@ async fn test_full_end_to_end_workflow() {
                 GoalConstraint::boundary("coverage", "Test coverage must be > 80%"),
             ],
             vec![],
-            vec![],
         )
         .await
         .expect("Failed to create goal");
 
     println!("Created goal: {} ({})", goal.name, goal.id);
 
-    // 3. Use meta-planner service to decompose the goal
-    let meta_config = MetaPlannerConfig {
-        max_decomposition_depth: 3,
-        default_agent_tier: AgentTier::Worker,
-        auto_generate_agents: false,
-        max_tasks_per_decomposition: 10,
-        use_llm_decomposition: false, // Use heuristic for tests
-        llm_config: None,
-    };
-
-    let meta_planner = MetaPlanner::new(
-        goal_repo.clone(),
-        task_repo.clone(),
-        agent_repo.clone(),
-        meta_config,
-    );
-
-    let plan = meta_planner
-        .decompose_goal(goal.id)
+    // 3. Create tasks manually (goals no longer decompose into tasks)
+    let task1 = task_service
+        .submit_task(
+            Some("Setup user service".to_string()),
+            "Initialize user service structure".to_string(),
+            None,
+            TaskPriority::High,
+            Some("user-service-worker".to_string()),
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+        )
         .await
-        .expect("Failed to decompose goal");
+        .expect("Failed to create task");
 
-    println!("Decomposed goal into {} tasks", plan.tasks.len());
-    assert!(!plan.tasks.is_empty(), "Should have decomposed tasks");
-
-    // Execute the plan to create tasks
-    let created_tasks = meta_planner
-        .execute_plan(&plan)
+    let _task2 = task_service
+        .submit_task(
+            Some("Implement user CRUD".to_string()),
+            "Create CRUD endpoints for users".to_string(),
+            None,
+            TaskPriority::Normal,
+            Some("user-service-worker".to_string()),
+            vec![task1.id],
+            None,
+            None,
+            TaskSource::Human,
+        )
         .await
-        .expect("Failed to execute plan");
+        .expect("Failed to create task");
 
-    println!("Created {} tasks from plan", created_tasks.len());
+    println!("Created 2 tasks for goal");
 
     // 4. Register an agent template
     let worker = agent_service
@@ -1022,7 +1019,7 @@ async fn test_swarm_orchestrator_goal_execution() {
 
     // Create ready task for the goal
     let mut task = Task::with_title("Test Task", "A task to execute")
-        .with_source(TaskSource::GoalEvaluation(goal.id));
+        .with_source(TaskSource::Human);
     task.status = TaskStatus::Ready;
     task_repo.create(&task).await.expect("Failed to create task");
 
@@ -1202,7 +1199,6 @@ async fn test_e2e_all_critical_paths() {
             None,
             vec![GoalConstraint::preference("test", "Run fast")],
             vec![],
-            vec![],
         )
         .await
         .expect("Goal creation failed");
@@ -1221,7 +1217,7 @@ async fn test_e2e_all_critical_paths() {
             vec![],
             None,
             None,
-            TaskSource::GoalEvaluation(goal.id),
+            TaskSource::Human,
         )
         .await
         .expect("Task 1 creation failed");
@@ -1236,7 +1232,7 @@ async fn test_e2e_all_critical_paths() {
             vec![task1.id],
             None,
             None,
-            TaskSource::GoalEvaluation(goal.id),
+            TaskSource::Human,
         )
         .await
         .expect("Task 2 creation failed");
@@ -1698,7 +1694,6 @@ async fn test_real_e2e_full_workflow() {
             None,
             vec![GoalConstraint::invariant("format", "All responses must include SUCCESS marker")],
             vec![],
-            vec![],
         )
         .await
         .expect("Failed to create goal");
@@ -1718,7 +1713,7 @@ async fn test_real_e2e_full_workflow() {
             vec![],
             None,
             None,
-            TaskSource::GoalEvaluation(goal.id),
+            TaskSource::Human,
         )
         .await
         .expect("Failed to create task1");
@@ -1733,7 +1728,7 @@ async fn test_real_e2e_full_workflow() {
             vec![task1.id],
             None,
             None,
-            TaskSource::GoalEvaluation(goal.id),
+            TaskSource::Human,
         )
         .await
         .expect("Failed to create task2");

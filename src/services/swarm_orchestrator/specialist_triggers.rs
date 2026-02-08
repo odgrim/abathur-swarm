@@ -8,8 +8,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::domain::errors::DomainResult;
-use crate::domain::models::{GoalStatus, Task, TaskSource, TaskStatus};
-use crate::domain::ports::{AgentRepository, GoalFilter, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
+use crate::domain::models::{Task, TaskSource, TaskStatus};
+use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
     IntegrationVerifierService, MergeQueue, MergeQueueConfig, VerifierConfig,
@@ -103,92 +103,6 @@ where
                         AuditAction::AgentSpawned,
                         AuditActor::System,
                         format!("Failed to process merge conflict specialists: {}", e),
-                    ),
-                ).await;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Detect stalled goals: active goals exist but no work is in progress.
-    ///
-    /// When all tasks have reached terminal states but goals remain active,
-    /// creates an overmind re-planning task to generate new work.
-    pub(super) async fn detect_stalled_goals(
-        &self,
-        event_tx: &mpsc::Sender<SwarmEvent>,
-    ) -> DomainResult<()> {
-        let active_goals = self.goal_repo.list(GoalFilter {
-            status: Some(GoalStatus::Active),
-            ..Default::default()
-        }).await?;
-
-        if active_goals.is_empty() {
-            return Ok(());
-        }
-
-        let task_counts = self.task_repo.count_by_status().await?;
-        let in_flight = *task_counts.get(&TaskStatus::Pending).unwrap_or(&0)
-            + *task_counts.get(&TaskStatus::Ready).unwrap_or(&0)
-            + *task_counts.get(&TaskStatus::Running).unwrap_or(&0)
-            + *task_counts.get(&TaskStatus::Blocked).unwrap_or(&0)
-            + *task_counts.get(&TaskStatus::Validating).unwrap_or(&0);
-        let terminal = *task_counts.get(&TaskStatus::Complete).unwrap_or(&0)
-            + *task_counts.get(&TaskStatus::Failed).unwrap_or(&0);
-
-        // Stall condition: active goals, no in-flight work, but some work was done
-        if in_flight > 0 || terminal == 0 {
-            return Ok(());
-        }
-
-        for goal in &active_goals {
-            // Idempotency: skip if a re-plan task already exists for this goal
-            let goal_prefix = &goal.id.to_string()[..8];
-            let replan_exists = self.task_repo
-                .list_by_status(TaskStatus::Ready)
-                .await?
-                .iter()
-                .chain(self.task_repo.list_by_status(TaskStatus::Pending).await?.iter())
-                .chain(self.task_repo.list_by_status(TaskStatus::Running).await?.iter())
-                .any(|t| t.title.contains("Re-plan:") && t.title.contains(goal_prefix));
-
-            if replan_exists {
-                continue;
-            }
-
-            let replan_task = Task::with_title(
-                &format!("Re-plan: stalled goal {}", goal_prefix),
-                &format!(
-                    "Goal '{}' (id: {}) is still active but all tasks have reached terminal states.\n\n\
-                    Goal description: {}\n\n\
-                    Task summary: {} completed, {} failed, 0 in-flight.\n\n\
-                    Please analyze why the goal is not yet satisfied and create new tasks to make progress.",
-                    goal.name,
-                    goal.id,
-                    goal.description,
-                    task_counts.get(&TaskStatus::Complete).unwrap_or(&0),
-                    task_counts.get(&TaskStatus::Failed).unwrap_or(&0),
-                ),
-            )
-            .with_source(TaskSource::System)
-            .with_agent("overmind");
-
-            if replan_task.validate().is_ok() {
-                self.task_repo.create(&replan_task).await?;
-
-                let _ = event_tx.send(SwarmEvent::SpecialistSpawned {
-                    specialist_type: "overmind".to_string(),
-                    trigger: format!("Stalled goal {}", goal_prefix),
-                    task_id: Some(replan_task.id),
-                }).await;
-
-                self.audit_log.info(
-                    AuditCategory::Goal,
-                    AuditAction::GoalEvaluated,
-                    format!(
-                        "Detected stalled goal '{}' ({}), created re-planning task",
-                        goal.name, goal_prefix
                     ),
                 ).await;
             }

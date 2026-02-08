@@ -102,8 +102,6 @@ pub enum TaskSource {
     System,
     /// Subtask spawned by another task during execution
     SubtaskOf(Uuid),
-    /// Task created by goal evaluation to address a gap
-    GoalEvaluation(Uuid),
 }
 
 impl Default for TaskSource {

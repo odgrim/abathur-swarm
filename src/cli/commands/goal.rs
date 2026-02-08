@@ -218,7 +218,6 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
                 parent_id,
                 constraints,
                 vec![],
-                vec![],
             ).await?;
 
             let out = GoalActionOutput {

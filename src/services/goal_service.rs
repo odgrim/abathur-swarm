@@ -25,7 +25,6 @@ impl<R: GoalRepository> GoalService<R> {
         parent_id: Option<Uuid>,
         constraints: Vec<GoalConstraint>,
         applicability_domains: Vec<String>,
-        evaluation_criteria: Vec<String>,
     ) -> DomainResult<Goal> {
         // Validate parent exists if specified
         if let Some(pid) = parent_id {
@@ -47,10 +46,6 @@ impl<R: GoalRepository> GoalService<R> {
 
         for domain in applicability_domains {
             goal = goal.with_applicability_domain(domain);
-        }
-
-        for criterion in evaluation_criteria {
-            goal = goal.with_evaluation_criterion(criterion);
         }
 
         goal.validate().map_err(DomainError::ValidationFailed)?;
@@ -113,19 +108,6 @@ impl<R: GoalRepository> GoalService<R> {
         Ok(goal)
     }
 
-    /// Update the evaluation criteria of a goal.
-    pub async fn update_evaluation_criteria(&self, id: Uuid, criteria: Vec<String>) -> DomainResult<Goal> {
-        let mut goal = self.repository.get(id).await?
-            .ok_or(DomainError::GoalNotFound(id))?;
-
-        goal.evaluation_criteria = criteria;
-        goal.updated_at = chrono::Utc::now();
-        goal.version += 1;
-
-        self.repository.update(&goal).await?;
-        Ok(goal)
-    }
-
     /// Get active goals.
     pub async fn get_active_goals(&self) -> DomainResult<Vec<Goal>> {
         self.repository.get_active_with_constraints().await
@@ -168,7 +150,6 @@ mod tests {
             None,
             vec![],
             vec![],
-            vec![],
         ).await.unwrap();
 
         assert_eq!(goal.name, "Test");
@@ -183,7 +164,6 @@ mod tests {
             "Desc".to_string(),
             GoalPriority::Normal,
             None,
-            vec![],
             vec![],
             vec![],
         ).await.unwrap();
@@ -203,7 +183,6 @@ mod tests {
             None,
             vec![GoalConstraint::invariant("ParentConstraint", "From parent")],
             vec!["testing".to_string()],
-            vec!["criterion1".to_string()],
         ).await.unwrap();
 
         let child = service.create_goal(
@@ -212,7 +191,6 @@ mod tests {
             GoalPriority::Normal,
             Some(parent.id),
             vec![GoalConstraint::preference("ChildConstraint", "From child")],
-            vec![],
             vec![],
         ).await.unwrap();
 
