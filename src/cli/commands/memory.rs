@@ -3,9 +3,9 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::adapters::sqlite::{SqliteMemoryRepository, initialize_database};
+use crate::cli::id_resolver::resolve_memory_id;
 use crate::cli::output::{output, CommandOutput};
 use crate::domain::models::{Memory, MemoryQuery, MemoryTier, MemoryType};
 use crate::services::MemoryService;
@@ -256,7 +256,7 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
         .await
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
-    let repo = Arc::new(SqliteMemoryRepository::new(pool));
+    let repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
     let service = MemoryService::new(repo);
 
     match args.command {
@@ -284,7 +284,7 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
         }
 
         MemoryCommands::Recall { id_or_key, namespace } => {
-            let memory = if let Ok(uuid) = Uuid::parse_str(&id_or_key) {
+            let memory = if let Ok(uuid) = resolve_memory_id(&pool, &id_or_key).await {
                 service.recall(uuid).await?
             } else {
                 let ns = namespace.unwrap_or_else(|| "default".to_string());
@@ -342,7 +342,7 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
         }
 
         MemoryCommands::Forget { id } => {
-            let uuid = Uuid::parse_str(&id).context("Invalid memory ID")?;
+            let uuid = resolve_memory_id(&pool, &id).await?;
             service.forget(uuid).await?;
 
             let out = MemoryActionOutput {

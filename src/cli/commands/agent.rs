@@ -2,10 +2,12 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
+use sqlx::SqlitePool;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::adapters::sqlite::{initialize_database, SqliteAgentRepository};
+use crate::cli::id_resolver::resolve_task_id;
 use crate::cli::output::{output, CommandOutput};
 use crate::domain::models::a2a::{A2AAgentCard, A2AMessage, MessageType};
 use crate::domain::models::{AgentTemplate, AgentTier, ToolCapability};
@@ -496,7 +498,7 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
         .await
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
-    let repo = Arc::new(SqliteAgentRepository::new(pool));
+    let repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
     let service = AgentService::new(repo.clone());
 
     match args.command {
@@ -663,7 +665,7 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
             task_id,
             gateway,
         } => {
-            send_a2a_message(to, message_type, subject, body, from, task_id, gateway, json_mode).await?;
+            send_a2a_message(&pool, to, message_type, subject, body, from, task_id, gateway, json_mode).await?;
         }
 
         AgentCommands::GatewayStatus { gateway } => {
@@ -694,6 +696,7 @@ fn parse_message_type(s: &str) -> Option<MessageType> {
 }
 
 async fn send_a2a_message(
+    pool: &SqlitePool,
     to: String,
     message_type: String,
     subject: String,
@@ -709,8 +712,7 @@ async fn send_a2a_message(
     let mut message = A2AMessage::new(msg_type, &from, &to, &subject, &body);
 
     if let Some(ref tid) = task_id {
-        let task_uuid = Uuid::parse_str(tid)
-            .context("Invalid task ID format")?;
+        let task_uuid = resolve_task_id(pool, tid).await?;
         message = message.with_task(task_uuid);
     }
 

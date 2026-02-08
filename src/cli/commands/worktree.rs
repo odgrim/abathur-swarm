@@ -3,10 +3,9 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::adapters::sqlite::{SqliteWorktreeRepository, initialize_database};
-use crate::cli::id_resolver::resolve_worktree_id;
+use crate::cli::id_resolver::{resolve_task_id, resolve_worktree_id};
 use crate::cli::output::{output, CommandOutput};
 use crate::domain::models::WorktreeStatus;
 use crate::services::{WorktreeConfig, WorktreeService, WorktreeStats};
@@ -261,8 +260,7 @@ pub async fn execute(args: WorktreeArgs, json_mode: bool) -> Result<()> {
 
     match args.command {
         WorktreeCommands::Create { task_id, base_ref } => {
-            let task_uuid = Uuid::parse_str(&task_id)
-                .context("Invalid task ID format")?;
+            let task_uuid = resolve_task_id(&pool, &task_id).await?;
 
             let worktree = service.create_worktree(task_uuid, base_ref.as_deref()).await?;
 
@@ -316,8 +314,7 @@ pub async fn execute(args: WorktreeArgs, json_mode: bool) -> Result<()> {
         }
 
         WorktreeCommands::Complete { task_id } => {
-            let task_uuid = Uuid::parse_str(&task_id)
-                .context("Invalid task ID format")?;
+            let task_uuid = resolve_task_id(&pool, &task_id).await?;
 
             let worktree = service.complete_worktree(task_uuid).await?;
 
@@ -330,8 +327,7 @@ pub async fn execute(args: WorktreeArgs, json_mode: bool) -> Result<()> {
         }
 
         WorktreeCommands::Merge { task_id } => {
-            let task_uuid = Uuid::parse_str(&task_id)
-                .context("Invalid task ID format")?;
+            let task_uuid = resolve_task_id(&pool, &task_id).await?;
 
             let worktree = service.merge_worktree(task_uuid).await?;
 
@@ -349,8 +345,7 @@ pub async fn execute(args: WorktreeArgs, json_mode: bool) -> Result<()> {
         }
 
         WorktreeCommands::Cleanup { id } => {
-            let uuid = Uuid::parse_str(&id)
-                .context("Invalid worktree ID format")?;
+            let uuid = resolve_worktree_id(&pool, &id).await?;
 
             service.cleanup_worktree(uuid).await?;
 
