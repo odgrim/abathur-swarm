@@ -3,11 +3,9 @@
 use std::sync::Arc;
 use uuid::Uuid;
 
-use std::path::Path;
-
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    AgentConstraint, AgentDefinition, AgentInstance, AgentStatus, AgentTemplate, AgentTier,
+    AgentConstraint, AgentInstance, AgentStatus, AgentTemplate, AgentTier,
     InstanceStatus, ToolCapability, specialist_templates,
 };
 use crate::domain::ports::{AgentFilter, AgentRepository};
@@ -321,55 +319,38 @@ impl<R: AgentRepository> AgentService<R> {
         Ok(seeded)
     }
 
-    /// Seed baseline agent templates from disk and/or hardcoded definitions.
+    /// Seed baseline agent templates from hardcoded definitions.
     ///
-    /// Precedence: disk `.md` file > hardcoded constant.
+    /// The DB is the sole source of agent definitions at runtime.
+    /// Hardcoded templates in `specialist_templates` serve as bootstrap.
     ///
-    /// 1. Scan `.claude/agents/*.md` in `project_dir`
-    /// 2. Parse each into an `AgentDefinition` → `AgentTemplate`
-    /// 3. If the template doesn't exist in the DB, insert it
-    /// 4. Fallback: if no `.md` files found (or overmind not among them),
-    ///    use `create_baseline_agents()` which uses the hardcoded `OVERMIND_SYSTEM_PROMPT`
-    pub async fn seed_baseline_agents(&self, project_dir: &Path) -> DomainResult<Vec<String>> {
-        let agents_dir = project_dir.join(".claude").join("agents");
-        let mut seeded = Vec::new();
-        let mut found_names = Vec::new();
-
-        // 1. Try to load from disk
-        match AgentDefinition::load_from_directory(&agents_dir) {
-            Ok(definitions) if !definitions.is_empty() => {
-                tracing::info!(
-                    "Found {} agent definition(s) in {:?}",
-                    definitions.len(),
-                    agents_dir
-                );
-                for def in &definitions {
-                    found_names.push(def.name.clone());
-                    let template = def.to_agent_template();
-
-                    if self.repository.get_template_by_name(&template.name).await?.is_none() {
-                        self.repository.create_template(&template).await?;
-                        seeded.push(template.name.clone());
-                        tracing::info!("Seeded agent '{}' from disk definition", template.name);
-                    }
-                }
-            }
-            Ok(_) => {
-                tracing::debug!("No agent definitions found in {:?}", agents_dir);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load agent definitions from {:?}: {}", agents_dir, e);
-            }
-        }
-
-        // 2. Fallback: seed any baseline agents not found on disk
+    /// - If a template is missing from the DB: insert it.
+    /// - If the hardcoded version is newer than the DB version: update it.
+    /// - If the DB version >= hardcoded version: skip (no downgrade).
+    pub async fn seed_baseline_agents(&self) -> DomainResult<Vec<String>> {
         let baseline = specialist_templates::create_baseline_agents();
+        let mut seeded = Vec::new();
+
         for template in baseline {
-            if !found_names.contains(&template.name) {
-                if self.repository.get_template_by_name(&template.name).await?.is_none() {
+            match self.repository.get_template_by_name(&template.name).await? {
+                None => {
                     self.repository.create_template(&template).await?;
                     seeded.push(template.name.clone());
-                    tracing::info!("Seeded agent '{}' from hardcoded fallback", template.name);
+                    tracing::info!("Seeded baseline agent '{}'", template.name);
+                }
+                Some(existing) if template.version > existing.version => {
+                    // Upgrade: hardcoded version is newer
+                    let mut upgraded = template.clone();
+                    upgraded.id = existing.id;
+                    self.repository.update_template(&upgraded).await?;
+                    seeded.push(upgraded.name.clone());
+                    tracing::info!(
+                        "Upgraded baseline agent '{}' from v{} to v{}",
+                        upgraded.name, existing.version, upgraded.version
+                    );
+                }
+                Some(_) => {
+                    // DB version is current or newer, skip
                 }
             }
         }
@@ -498,6 +479,53 @@ mod tests {
         let completed = service.complete_instance(instance.id).await.unwrap();
         assert_eq!(completed.status, InstanceStatus::Completed);
         assert_eq!(completed.turn_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_seed_baseline_agents_inserts_missing() {
+        let service = setup_service().await;
+
+        let seeded = service.seed_baseline_agents().await.unwrap();
+        assert!(seeded.contains(&"overmind".to_string()));
+
+        // Verify it's in the DB
+        let template = service.get_template("overmind").await.unwrap().unwrap();
+        assert_eq!(template.name, "overmind");
+        assert!(template.has_tool("agents"));
+    }
+
+    #[tokio::test]
+    async fn test_seed_baseline_agents_upgrades_older_version() {
+        let service = setup_service().await;
+
+        // Insert a v1 overmind manually
+        let mut old = specialist_templates::create_overmind();
+        old.version = 1;
+        service.repository.create_template(&old).await.unwrap();
+
+        // Seed should upgrade to v2
+        let seeded = service.seed_baseline_agents().await.unwrap();
+        assert!(seeded.contains(&"overmind".to_string()));
+
+        let template = service.get_template("overmind").await.unwrap().unwrap();
+        assert_eq!(template.version, 2);
+    }
+
+    #[tokio::test]
+    async fn test_seed_baseline_agents_no_downgrade() {
+        let service = setup_service().await;
+
+        // Insert a v99 overmind (future version)
+        let mut future = specialist_templates::create_overmind();
+        future.version = 99;
+        service.repository.create_template(&future).await.unwrap();
+
+        // Seed should NOT downgrade
+        let seeded = service.seed_baseline_agents().await.unwrap();
+        assert!(seeded.is_empty());
+
+        let template = service.get_template("overmind").await.unwrap().unwrap();
+        assert_eq!(template.version, 99);
     }
 
     #[tokio::test]

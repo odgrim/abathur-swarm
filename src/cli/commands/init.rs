@@ -89,7 +89,6 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
         abathur_dir.join("worktrees"),
         abathur_dir.join("logs"),
         claude_dir.clone(),
-        claude_dir.join("agents"),
     ];
 
     for dir in &dirs {
@@ -105,9 +104,6 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
     let db_url = format!("sqlite:{}", db_path.display());
     initialize_database(&db_url).await.context("Failed to initialize database")?;
 
-    // Write baseline agent definitions to disk
-    let agents_copied = write_baseline_agents(&target_path).await.unwrap_or(0);
-
     // Merge abathur MCP config into .claude/settings.json
     merge_claude_settings(&target_path).await.context("Failed to merge .claude/settings.json")?;
 
@@ -121,7 +117,7 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
         initialized_path: target_path,
         directories_created,
         database_initialized: true,
-        agents_copied,
+        agents_copied: 0,
     };
 
     output(&output_data, json_mode);
@@ -195,28 +191,3 @@ async fn merge_claude_settings(target_path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn write_baseline_agents(target_path: &Path) -> Result<usize> {
-    use crate::domain::models::{AgentDefinition, specialist_templates};
-
-    let target_agents = target_path.join(".claude").join("agents");
-
-    // Don't overwrite existing agent definitions
-    let overmind_path = target_agents.join("overmind.md");
-    if overmind_path.exists() {
-        return Ok(0);
-    }
-
-    // Generate agent definitions from hardcoded templates
-    let baseline = specialist_templates::create_baseline_agents();
-    let mut count = 0;
-
-    for template in &baseline {
-        let def = AgentDefinition::from_template(template);
-        let file_path = target_agents.join(format!("{}.md", template.name));
-        fs::write(&file_path, def.to_markdown()).await
-            .with_context(|| format!("Failed to write agent definition {:?}", file_path))?;
-        count += 1;
-    }
-
-    Ok(count)
-}

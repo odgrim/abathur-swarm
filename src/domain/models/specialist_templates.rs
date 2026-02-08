@@ -28,21 +28,22 @@ pub fn create_baseline_agents() -> Vec<AgentTemplate> {
 /// creates whatever agents are needed dynamically via the Agents REST API,
 /// delegates work via the Tasks REST API, and tracks completion.
 pub fn create_overmind() -> AgentTemplate {
-    AgentTemplate::new("overmind", AgentTier::Architect)
+    let mut template = AgentTemplate::new("overmind", AgentTier::Architect)
         .with_description("Agentic orchestrator that analyzes tasks, dynamically creates agents, and delegates work through REST APIs")
         .with_prompt(OVERMIND_SYSTEM_PROMPT)
         .with_tool(ToolCapability::new("read", "Read source files for context").required())
-        .with_tool(ToolCapability::new("write", "Write files").required())
-        .with_tool(ToolCapability::new("edit", "Edit existing files").required())
         .with_tool(ToolCapability::new("shell", "Execute shell commands").required())
         .with_tool(ToolCapability::new("glob", "Find files by pattern").required())
         .with_tool(ToolCapability::new("grep", "Search for patterns in codebase").required())
         .with_tool(ToolCapability::new("memory", "Query and store swarm memory"))
         .with_tool(ToolCapability::new("tasks", "Interact with task queue"))
+        .with_tool(ToolCapability::new("agents", "Create and manage agent templates"))
         .with_constraint(AgentConstraint::new(
             "decision-rationale",
             "Every decision must include confidence level and rationale",
-        ))
+        ));
+    template.version = 2;
+    template
         .with_capability("agent-creation")
         .with_capability("task-delegation")
         .with_capability("task-decomposition")
@@ -196,13 +197,14 @@ mod tests {
 
         // Verify tools
         assert!(overmind.has_tool("read"));
-        assert!(overmind.has_tool("write"));
-        assert!(overmind.has_tool("edit"));
         assert!(overmind.has_tool("shell"));
         assert!(overmind.has_tool("glob"));
         assert!(overmind.has_tool("grep"));
         assert!(overmind.has_tool("memory"));
         assert!(overmind.has_tool("tasks"));
+        assert!(overmind.has_tool("agents"));
+        assert!(!overmind.has_tool("write"));
+        assert!(!overmind.has_tool("edit"));
 
         // Verify constraints
         assert!(overmind.constraints.iter().any(|c| c.name == "decision-rationale"));

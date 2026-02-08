@@ -28,7 +28,7 @@ abathur init
 
 This creates:
 - `.abathur/` directory for the database, worktrees, and logs
-- `.claude/` directory with baseline agent definitions
+- `.claude/` directory with MCP server configuration
 
 Set a goal (goals are convergent and guide work, they don't complete):
 
@@ -97,13 +97,12 @@ The codebase follows hexagonal architecture:
 
 ## How agents work
 
-Agents are markdown files in `.claude/agents/` with YAML frontmatter defining their capabilities, allowed tools, and constraints. The orchestrator copies the entire `.claude/` directory to each worktree so agents have access to definitions and MCP config.
+Agent templates are stored in the database as the sole source of truth. The only pre-packaged agent is the **Overmind** (hardcoded in Rust as bootstrap); all other agents are created dynamically by the Overmind at runtime via the Agents MCP API.
 
 Agent tiers:
-- **Meta**: Analyzes tasks, designs execution topology, creates new agents
-- **Strategic**: Product strategy, requirements, architecture, task decomposition
-- **Execution**: Code implementation, tests, docs, refactoring  
-- **Specialist**: Security auditing, performance optimization, merge conflicts, database work
+- **Architect**: Analyzes tasks, designs execution topology, creates new agents (Overmind)
+- **Specialist**: Domain expertise (security, performance, databases)
+- **Worker**: Task execution (code implementation, tests, docs, refactoring)
 
 ## Two-stage merge queue
 

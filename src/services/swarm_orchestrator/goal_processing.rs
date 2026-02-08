@@ -440,9 +440,6 @@ where
 
             // Write CLAUDE.md to worktree with tool restrictions.
             // Claude Code reads CLAUDE.md as project-level instructions.
-            // NOTE: We intentionally do NOT write .claude/agents/*.md files to the
-            // worktree — Claude Code discovers those as custom agent definitions which
-            // can override --allowedTools restrictions.
             if let Some(ref wt_path) = worktree_path {
                 let claude_md_path = std::path::Path::new(wt_path).join("CLAUDE.md");
                 let claude_md_content = "\

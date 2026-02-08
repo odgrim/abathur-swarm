@@ -323,11 +323,11 @@ where
             ).await;
         }
 
-        // Seed baseline agent templates (disk-first with hardcoded fallback)
+        // Seed baseline agent templates (DB is sole source, hardcoded as bootstrap)
         {
             use crate::services::AgentService;
             let agent_service = AgentService::new(self.agent_repo.clone());
-            match agent_service.seed_baseline_agents(&self.config.repo_path).await {
+            match agent_service.seed_baseline_agents().await {
                 Ok(seeded) if !seeded.is_empty() => {
                     self.audit_log.info(
                         AuditCategory::Agent,
