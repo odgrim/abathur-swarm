@@ -46,6 +46,9 @@ pub enum TaskCommands {
         /// Idempotency key
         #[arg(long)]
         idempotency_key: Option<String>,
+        /// Deadline for SLA enforcement (ISO 8601 datetime, e.g. "2025-12-31T23:59:59Z")
+        #[arg(long)]
+        deadline: Option<String>,
     },
     /// List tasks
     List {
@@ -274,6 +277,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
             depends_on,
             input,
             idempotency_key,
+            deadline,
         } => {
             let priority = TaskPriority::from_str(&priority)
                 .ok_or_else(|| anyhow::anyhow!("Invalid priority: {}", priority))?;
@@ -293,6 +297,12 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 ..Default::default()
             });
 
+            let deadline = deadline
+                .map(|d| chrono::DateTime::parse_from_rfc3339(&d))
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid deadline: {}", e))?
+                .map(|d| d.with_timezone(&chrono::Utc));
+
             let cmd = DomainCommand::Task(TaskCommand::Submit {
                 title,
                 description: prompt,
@@ -303,6 +313,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 context: Box::new(context),
                 idempotency_key,
                 source: TaskSource::Human,
+                deadline,
             });
 
             let result = dispatcher.dispatch(cmd).await

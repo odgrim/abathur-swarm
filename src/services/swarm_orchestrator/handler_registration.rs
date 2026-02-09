@@ -12,11 +12,17 @@ use crate::domain::ports::{
 use crate::services::builtin_handlers::{
     A2APollHandler, DeadLetterRetryHandler, EscalationTimeoutHandler,
     EventPruningHandler, EventStorePollerHandler, EvolutionEvaluationHandler,
-    GoalCreatedHandler, GoalEvaluationHandler, GoalReconciliationHandler, GoalRetiredHandler,
-    MemoryMaintenanceHandler, MemoryReconciliationHandler, ReconciliationHandler,
-    RetryProcessingHandler, SpecialistCheckHandler, StatsUpdateHandler,
+    EvolutionTriggeredTemplateUpdateHandler,
+    GoalCreatedHandler, GoalEvaluationHandler, GoalEvaluationTaskCreationHandler,
+    GoalReconciliationHandler, GoalRetiredHandler,
+    MemoryConflictEscalationHandler, MemoryInformedDecompositionHandler,
+    MemoryMaintenanceHandler, MemoryReconciliationHandler,
+    PriorityAgingHandler, ReconciliationHandler,
+    RetryProcessingHandler, SpecialistCheckHandler, StartupCatchUpHandler,
+    StatsUpdateHandler, TaskCompletionLearningHandler,
     TaskCompletedReadinessHandler, TaskFailedBlockHandler, TaskFailedRetryHandler,
-    TaskReadySpawnHandler, TriggerCatchupHandler, WatermarkAuditHandler,
+    TaskReadySpawnHandler, TaskSLAEnforcementHandler,
+    TriggerCatchupHandler, WatermarkAuditHandler,
     WorktreeReconciliationHandler,
 };
 use crate::services::command_bus::CommandBus;
@@ -43,6 +49,7 @@ where
     /// Called in `run()` after reactor start but before the main loop.
     pub(super) async fn register_builtin_handlers(&self) {
         let reactor = &self.event_reactor;
+        let p = &self.config.polling;
 
         // TaskCompletedReadinessHandler (SYSTEM) — cascade readiness on completion
         reactor
@@ -74,9 +81,12 @@ where
             )))
             .await;
 
-        // GoalRetiredHandler (HIGH) — log goal retirement (no task coupling)
+        // GoalRetiredHandler (HIGH) — refresh cache on goal retirement (no task coupling)
         reactor
-            .register(Arc::new(GoalRetiredHandler::new()))
+            .register(Arc::new(GoalRetiredHandler::new(
+                self.goal_repo.clone(),
+                self.active_goals_cache.clone(),
+            )))
             .await;
 
         // StatsUpdateHandler (LOW) — periodic stats refresh
@@ -288,7 +298,7 @@ where
                 event_store.clone(),
                 self.event_bus.process_id(),
             ));
-            poller.initialize_watermark().await;
+            poller.initialize_watermark_with_replay(p.startup_max_replay_events).await;
             reactor.register(poller).await;
 
             // DeadLetterRetryHandler (LOW) — retry failed handler events
@@ -301,8 +311,90 @@ where
             // EventPruningHandler (LOW) — prune old events
             reactor
                 .register(Arc::new(EventPruningHandler::new(
-                    event_store,
+                    event_store.clone(),
                     self.config.event_retention_days,
+                )))
+                .await;
+
+            // StartupCatchUpHandler (SYSTEM) — fix orphaned tasks and replay missed events
+            if p.startup_catchup_enabled {
+                reactor
+                    .register(Arc::new(StartupCatchUpHandler::new(
+                        self.task_repo.clone(),
+                        self.goal_repo.clone(),
+                        event_store,
+                        p.startup_stale_task_threshold_secs,
+                        p.startup_max_replay_events,
+                    )))
+                    .await;
+            }
+        }
+
+        // TaskSLAEnforcementHandler (NORMAL) — periodic SLA deadline checks
+        reactor
+            .register(Arc::new(TaskSLAEnforcementHandler::new(
+                self.task_repo.clone(),
+                p.sla_warning_threshold_pct,
+                p.sla_critical_threshold_pct,
+                p.sla_auto_escalate_on_breach,
+            )))
+            .await;
+
+        // PriorityAgingHandler (LOW) — age task priorities based on wait time
+        if p.priority_aging_enabled {
+            reactor
+                .register(Arc::new(PriorityAgingHandler::new(
+                    self.task_repo.clone(),
+                    p.priority_aging_low_to_normal_secs,
+                    p.priority_aging_normal_to_high_secs,
+                    p.priority_aging_high_to_critical_secs,
+                )))
+                .await;
+        }
+
+        // MemoryInformedDecompositionHandler (NORMAL) — trigger goal re-evaluation on semantic patterns
+        if p.memory_informed_decomposition_enabled {
+            reactor
+                .register(Arc::new(MemoryInformedDecompositionHandler::new(
+                    self.goal_repo.clone(),
+                    p.memory_informed_cooldown_per_goal_secs,
+                )))
+                .await;
+        }
+
+        // MemoryConflictEscalationHandler (NORMAL) — escalate low-similarity memory conflicts
+        reactor
+            .register(Arc::new(MemoryConflictEscalationHandler::new()))
+            .await;
+
+        // TaskCompletionLearningHandler (NORMAL) — store learning patterns for retried tasks
+        if p.task_learning_enabled {
+            reactor
+                .register(Arc::new(TaskCompletionLearningHandler::new(
+                    command_bus.clone(),
+                    p.task_learning_min_retries,
+                    p.task_learning_store_efficiency,
+                )))
+                .await;
+        }
+
+        // GoalEvaluationTaskCreationHandler (NORMAL) — create diagnostic/remediation tasks
+        if p.auto_create_diagnostic_tasks || p.auto_create_remediation_tasks {
+            reactor
+                .register(Arc::new(GoalEvaluationTaskCreationHandler::new(
+                    command_bus.clone(),
+                    p.auto_create_diagnostic_tasks,
+                    p.max_diagnostic_tasks_per_goal,
+                    p.auto_create_remediation_tasks,
+                )))
+                .await;
+        }
+
+        // EvolutionTriggeredTemplateUpdateHandler (LOW) — submit refinement tasks for underperforming templates
+        if self.config.track_evolution {
+            reactor
+                .register(Arc::new(EvolutionTriggeredTemplateUpdateHandler::new(
+                    command_bus.clone(),
                 )))
                 .await;
         }
@@ -461,6 +553,28 @@ where
                 EventSeverity::Debug,
             ))
             .await;
+
+        // SLA check — periodic SLA deadline enforcement
+        scheduler
+            .register(interval_schedule(
+                "sla-check",
+                Duration::from_secs(p.sla_check_interval_secs),
+                EventCategory::Scheduler,
+                EventSeverity::Debug,
+            ))
+            .await;
+
+        // Priority aging — periodic priority promotion for waiting tasks
+        if p.priority_aging_enabled {
+            scheduler
+                .register(interval_schedule(
+                    "priority-aging",
+                    Duration::from_secs(p.priority_aging_interval_secs),
+                    EventCategory::Scheduler,
+                    EventSeverity::Debug,
+                ))
+                .await;
+        }
 
         // Event store polling — cross-process event propagation
         if self.event_bus.store().is_some() {

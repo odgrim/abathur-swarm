@@ -162,6 +162,38 @@ pub fn dead_letter_queue_migration() -> Migration {
     }
 }
 
+pub fn webhooks_migration() -> Migration {
+    Migration {
+        version: 12,
+        description: "Webhook subscriptions".to_string(),
+        sql: include_str!("../../../migrations/012_webhooks.sql").to_string(),
+    }
+}
+
+pub fn circuit_breaker_state_migration() -> Migration {
+    Migration {
+        version: 13,
+        description: "Circuit breaker state tracking".to_string(),
+        sql: include_str!("../../../migrations/013_circuit_breaker_state.sql").to_string(),
+    }
+}
+
+pub fn command_dedup_migration() -> Migration {
+    Migration {
+        version: 14,
+        description: "Command deduplication table".to_string(),
+        sql: include_str!("../../../migrations/014_command_dedup.sql").to_string(),
+    }
+}
+
+pub fn task_deadline_migration() -> Migration {
+    Migration {
+        version: 15,
+        description: "Add deadline column to tasks".to_string(),
+        sql: include_str!("../../../migrations/015_task_deadline.sql").to_string(),
+    }
+}
+
 pub fn all_embedded_migrations() -> Vec<Migration> {
     vec![
         initial_schema_migration(),
@@ -175,5 +207,9 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
         trigger_rules_migration(),
         event_source_process_migration(),
         dead_letter_queue_migration(),
+        webhooks_migration(),
+        circuit_breaker_state_migration(),
+        command_dedup_migration(),
+        task_deadline_migration(),
     ]
 }

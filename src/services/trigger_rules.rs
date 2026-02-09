@@ -78,6 +78,22 @@ pub enum TriggerCondition {
         count: u32,
         window_secs: u64,
     },
+    /// Fire when an expected event does NOT arrive within a deadline after
+    /// a triggering event. For example: "If TaskStarted fires but no
+    /// TaskCompleted arrives within 1800s, escalate."
+    ///
+    /// `trigger_type` is the event type that starts the timer (matched by
+    /// the rule's filter). `expected_type` is the event type that must arrive
+    /// within `deadline_secs` to cancel the timer. If the deadline expires
+    /// without the expected event, the rule fires.
+    Absence {
+        /// The event type that starts the absence timer (already matched by filter).
+        trigger_type: String,
+        /// The event type that must arrive to cancel the timer.
+        expected_type: String,
+        /// Seconds to wait for the expected event before firing.
+        deadline_secs: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -260,12 +276,30 @@ impl TriggerRule {
 // TriggerRuleEngine (EventHandler)
 // ---------------------------------------------------------------------------
 
+/// Pending absence timer: tracks when a trigger started and what event is expected.
+#[derive(Debug, Clone)]
+struct AbsenceTimer {
+    /// When the trigger event arrived (starts the clock).
+    started_at: DateTime<Utc>,
+    /// Deadline in seconds from started_at.
+    deadline_secs: u64,
+    /// The expected event type that would cancel this timer.
+    expected_type: String,
+    /// The task_id from the triggering event (for scoping).
+    task_id: Option<Uuid>,
+    /// Correlation from the triggering event.
+    correlation_id: Option<Uuid>,
+}
+
 /// Reactive engine that evaluates trigger rules on incoming events.
 pub struct TriggerRuleEngine {
     rules: Arc<RwLock<Vec<TriggerRule>>>,
     command_bus: Arc<CommandBus>,
     /// Ring buffer of recent event timestamps per rule (for CountThreshold).
     event_windows: Arc<RwLock<HashMap<Uuid, VecDeque<DateTime<Utc>>>>>,
+    /// Pending absence timers per rule ID. Each rule can have multiple pending timers
+    /// (keyed by optional task_id to scope per-task absences).
+    absence_timers: Arc<RwLock<HashMap<Uuid, Vec<AbsenceTimer>>>>,
     /// Optional EventBus for emitting trigger rule lifecycle events.
     event_bus: Option<Arc<crate::services::event_bus::EventBus>>,
     /// Optional repository for persisting rule fire state.
@@ -278,6 +312,7 @@ impl TriggerRuleEngine {
             rules: Arc::new(RwLock::new(Vec::new())),
             command_bus,
             event_windows: Arc::new(RwLock::new(HashMap::new())),
+            absence_timers: Arc::new(RwLock::new(HashMap::new())),
             event_bus: None,
             rule_repo: None,
         }
@@ -383,6 +418,107 @@ impl TriggerRuleEngine {
         let mut reactions = Vec::new();
         let mut fired_rules: Vec<TriggerRule> = Vec::new();
 
+        let event_type = event.payload.variant_name().to_string();
+
+        // Phase 0: Check if this event cancels any pending absence timers
+        {
+            let mut timers = self.absence_timers.write().await;
+            for timer_list in timers.values_mut() {
+                timer_list.retain(|timer| {
+                    // Cancel timer if the expected event arrived (scoped by task_id)
+                    let type_match = timer.expected_type == event_type;
+                    let scope_match = timer.task_id.is_none()
+                        || timer.task_id == event.task_id;
+                    !(type_match && scope_match)
+                });
+            }
+            // Remove empty entries
+            timers.retain(|_, v| !v.is_empty());
+        }
+
+        // Phase 0b: Check for expired absence timers and fire rules
+        {
+            let now = Utc::now();
+            let mut timers = self.absence_timers.write().await;
+            let mut rules = self.rules.write().await;
+
+            for rule in rules.iter_mut() {
+                if !rule.enabled {
+                    continue;
+                }
+
+                if let Some(timer_list) = timers.get_mut(&rule.id) {
+                    let mut expired_indices = Vec::new();
+                    for (i, timer) in timer_list.iter().enumerate() {
+                        let deadline = timer.started_at + chrono::Duration::seconds(timer.deadline_secs as i64);
+                        if now > deadline {
+                            expired_indices.push(i);
+                        }
+                    }
+
+                    // Fire for each expired timer
+                    for &i in expired_indices.iter().rev() {
+                        let expired = timer_list.remove(i);
+
+                        // Cooldown check
+                        let cooldown_ok = match rule.cooldown {
+                            Some(cooldown) => match rule.last_fired {
+                                Some(last) => (now - last).to_std().unwrap_or_default() >= cooldown,
+                                None => true,
+                            },
+                            None => true,
+                        };
+
+                        if !cooldown_ok {
+                            continue;
+                        }
+
+                        rule.last_fired = Some(now);
+                        rule.fire_count += 1;
+
+                        tracing::info!(
+                            rule_name = %rule.name,
+                            fire_count = rule.fire_count,
+                            expected_type = %expired.expected_type,
+                            "Trigger rule fired (absence deadline expired)"
+                        );
+
+                        // Build a synthetic event for context
+                        let synthetic = UnifiedEvent {
+                            id: EventId::new(),
+                            sequence: SequenceNumber(0),
+                            timestamp: now,
+                            severity: EventSeverity::Warning,
+                            category: EventCategory::Orchestrator,
+                            goal_id: None,
+                            task_id: expired.task_id,
+                            correlation_id: expired.correlation_id,
+                            source_process_id: None,
+                            payload: EventPayload::ScheduledEventFired {
+                                schedule_id: Uuid::new_v4(),
+                                name: format!("absence-timeout:{}", rule.name),
+                            },
+                        };
+
+                        match &rule.action {
+                            TriggerAction::EmitEvent { payload, category, severity } => {
+                                reactions.push(self.build_event(payload, *category, *severity, &synthetic));
+                            }
+                            TriggerAction::IssueCommand { command } => {
+                                self.dispatch_command(command, &rule.name).await;
+                            }
+                            TriggerAction::EmitAndCommand { payload, category, severity, command } => {
+                                reactions.push(self.build_event(payload, *category, *severity, &synthetic));
+                                self.dispatch_command(command, &rule.name).await;
+                            }
+                        }
+
+                        fired_rules.push(rule.clone());
+                    }
+                }
+            }
+        }
+
         // Phase 1: evaluate rules under write lock, collect fired rules
         {
             let mut rules = self.rules.write().await;
@@ -423,6 +559,22 @@ impl TriggerRuleEngine {
                         }
 
                         window.len() >= *count as usize
+                    }
+                    TriggerCondition::Absence { trigger_type, expected_type, deadline_secs } => {
+                        // If the current event matches the trigger_type, start a timer
+                        if event_type == *trigger_type {
+                            let mut timers = self.absence_timers.write().await;
+                            let timer_list = timers.entry(rule.id).or_default();
+                            timer_list.push(AbsenceTimer {
+                                started_at: now,
+                                deadline_secs: *deadline_secs,
+                                expected_type: expected_type.clone(),
+                                task_id: event.task_id,
+                                correlation_id: event.correlation_id,
+                            });
+                        }
+                        // Absence conditions never fire immediately — they fire on timeout
+                        false
                     }
                 };
 
@@ -571,6 +723,7 @@ impl TriggerRuleEngine {
                     context: Box::new(None),
                     idempotency_key: None,
                     source: TaskSource::System,
+                    deadline: None,
                 })
             }
             SerializableDomainCommand::PauseGoal { goal_id } => {

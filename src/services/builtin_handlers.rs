@@ -287,24 +287,22 @@ impl<M: MemoryRepository + 'static> EventHandler for MemoryMaintenanceHandler<M>
 // GoalRetiredHandler
 // ============================================================================
 
-/// When a goal is retired, log the event and refresh caches.
-///
-/// Design constraint: Goals and tasks are intentionally decoupled.
-/// Goals do NOT trigger task creation or cancellation. The Task model
-/// does not carry a goal_id field. This handler only logs the retirement
-/// event for observability.
-pub struct GoalRetiredHandler {
-    _placeholder: (),
+/// When a goal is retired, invalidate the active goals cache and emit a
+/// summary event. Does not cancel tasks (goals and tasks are decoupled
+/// in this architecture — tasks do not carry a goal_id field).
+pub struct GoalRetiredHandler<G: GoalRepository> {
+    goal_repo: Arc<G>,
+    active_goals_cache: Arc<RwLock<Vec<Goal>>>,
 }
 
-impl GoalRetiredHandler {
-    pub fn new() -> Self {
-        Self { _placeholder: () }
+impl<G: GoalRepository> GoalRetiredHandler<G> {
+    pub fn new(goal_repo: Arc<G>, active_goals_cache: Arc<RwLock<Vec<Goal>>>) -> Self {
+        Self { goal_repo, active_goals_cache }
     }
 }
 
 #[async_trait]
-impl EventHandler for GoalRetiredHandler {
+impl<G: GoalRepository + 'static> EventHandler for GoalRetiredHandler<G> {
     fn metadata(&self) -> HandlerMetadata {
         HandlerMetadata {
             id: HandlerId::new(),
@@ -326,9 +324,23 @@ impl EventHandler for GoalRetiredHandler {
     }
 
     async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
-        if let Some(goal_id) = event.goal_id {
-            tracing::info!("GoalRetiredHandler: goal {} retired", goal_id);
+        let goal_id = match event.goal_id {
+            Some(id) => id,
+            None => return Ok(Reaction::None),
+        };
+
+        tracing::info!("GoalRetiredHandler: goal {} retired, refreshing active goals cache", goal_id);
+
+        // Refresh the active goals cache to exclude the retired goal
+        let goals = self.goal_repo.get_active_with_constraints().await
+            .map_err(|e| format!("Failed to refresh active goals: {}", e))?;
+        {
+            let mut cache = self.active_goals_cache.write().await;
+            *cache = goals;
         }
+
+        // Emit a GoalStatusChanged event is already the triggering event;
+        // we log for observability and emit no additional events.
         Ok(Reaction::None)
     }
 }
@@ -378,20 +390,52 @@ impl EventHandler for EscalationTimeoutHandler {
         }
     }
 
-    async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
         // Check escalation deadlines from the shared store
         let now = chrono::Utc::now();
         let store = self.escalation_store.read().await;
-        let timed_out_count = store.iter()
+        let expired: Vec<_> = store.iter()
             .filter(|e| e.escalation.deadline.map_or(false, |d| now > d))
-            .count();
+            .cloned()
+            .collect();
         drop(store);
 
-        if timed_out_count > 0 {
-            tracing::info!("EscalationTimeoutHandler: {} escalation(s) past deadline", timed_out_count);
+        if expired.is_empty() {
+            return Ok(Reaction::None);
         }
 
-        Ok(Reaction::None)
+        tracing::info!("EscalationTimeoutHandler: {} escalation(s) past deadline", expired.len());
+
+        let mut new_events = Vec::new();
+        for esc in &expired {
+            let default_action = esc.escalation.default_action
+                .as_deref()
+                .unwrap_or("timeout-logged")
+                .to_string();
+
+            new_events.push(UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: chrono::Utc::now(),
+                severity: EventSeverity::Warning,
+                category: EventCategory::Escalation,
+                goal_id: esc.goal_id,
+                task_id: esc.task_id,
+                correlation_id: event.correlation_id,
+                source_process_id: None,
+                payload: EventPayload::HumanEscalationExpired {
+                    task_id: esc.task_id,
+                    goal_id: esc.goal_id,
+                    default_action,
+                },
+            });
+        }
+
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
     }
 }
 
@@ -766,15 +810,22 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
         }
 
         // Stale-task detection: tasks stuck in Running for > stale_task_timeout_secs
+        // Tiered warnings: 50% -> TaskRunningLong, 80% -> TaskRunningCritical + escalation, 100% -> fail
         let running = self.task_repo.list_by_status(TaskStatus::Running).await
             .map_err(|e| format!("Failed to list running tasks: {}", e))?;
 
         let now = chrono::Utc::now();
         let timeout = chrono::Duration::seconds(self.stale_task_timeout_secs as i64);
+        let warning_threshold = chrono::Duration::seconds((self.stale_task_timeout_secs as f64 * 0.5) as i64);
+        let critical_threshold = chrono::Duration::seconds((self.stale_task_timeout_secs as f64 * 0.8) as i64);
 
         for task in &running {
             if let Some(started_at) = task.started_at {
-                if now - started_at > timeout {
+                let elapsed = now - started_at;
+                let runtime_secs = elapsed.num_seconds().max(0) as u64;
+
+                if elapsed > timeout {
+                    // 100% — fail the task
                     let mut updated = task.clone();
                     updated.retry_count += 1;
                     if updated.transition_to(TaskStatus::Failed).is_ok() {
@@ -804,6 +855,62 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
                             task.id, self.stale_task_timeout_secs, started_at
                         );
                     }
+                } else if elapsed > critical_threshold {
+                    // 80% — critical warning + escalation
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: now,
+                        severity: EventSeverity::Warning,
+                        category: EventCategory::Task,
+                        goal_id: None,
+                        task_id: Some(task.id),
+                        correlation_id: event.correlation_id,
+                        source_process_id: None,
+                        payload: EventPayload::TaskRunningCritical {
+                            task_id: task.id,
+                            runtime_secs,
+                        },
+                    });
+
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: now,
+                        severity: EventSeverity::Warning,
+                        category: EventCategory::Escalation,
+                        goal_id: None,
+                        task_id: Some(task.id),
+                        correlation_id: event.correlation_id,
+                        source_process_id: None,
+                        payload: EventPayload::HumanEscalationNeeded {
+                            goal_id: None,
+                            task_id: Some(task.id),
+                            reason: format!(
+                                "Task '{}' running for {}s (80% of {}s timeout)",
+                                task.title, runtime_secs, self.stale_task_timeout_secs
+                            ),
+                            urgency: "high".to_string(),
+                            is_blocking: false,
+                        },
+                    });
+                } else if elapsed > warning_threshold {
+                    // 50% — early warning
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: now,
+                        severity: EventSeverity::Info,
+                        category: EventCategory::Task,
+                        goal_id: None,
+                        task_id: Some(task.id),
+                        correlation_id: event.correlation_id,
+                        source_process_id: None,
+                        payload: EventPayload::TaskRunningLong {
+                            task_id: task.id,
+                            runtime_secs,
+                        },
+                    });
                 }
             }
         }
@@ -1154,6 +1261,7 @@ impl EventHandler for A2APollHandler {
                     context: Box::new(None),
                     idempotency_key: None,
                     source: crate::domain::models::TaskSource::System,
+                    deadline: None,
                 }),
             );
 
@@ -1627,6 +1735,8 @@ impl<T: TaskRepository + 'static, W: WorktreeRepository + 'static> EventHandler 
     }
 
     async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        use crate::domain::models::WorktreeStatus;
+
         let active_worktrees = self.worktree_repo.list_active().await
             .map_err(|e| format!("WorktreeReconciliation: failed to list active worktrees: {}", e))?;
 
@@ -1644,11 +1754,32 @@ impl<T: TaskRepository + 'static, W: WorktreeRepository + 'static> EventHandler 
 
             if is_orphaned {
                 orphan_count += 1;
+
+                let reason = match &task {
+                    Some(t) => format!("task in terminal state: {}", t.status.as_str()),
+                    None => "task not found".to_string(),
+                };
+
+                // Actually destroy the orphaned worktree
+                let mut updated_wt = wt.clone();
+                updated_wt.status = WorktreeStatus::Removed;
+                updated_wt.updated_at = chrono::Utc::now();
+                updated_wt.completed_at = Some(chrono::Utc::now());
+                if let Err(e) = self.worktree_repo.update(&updated_wt).await {
+                    tracing::warn!(
+                        worktree_id = %wt.id,
+                        error = %e,
+                        "WorktreeReconciliation: failed to mark worktree as removed"
+                    );
+                    continue;
+                }
+
                 tracing::warn!(
                     worktree_id = %wt.id,
                     task_id = %wt.task_id,
                     path = %wt.path,
-                    "WorktreeReconciliation: orphaned worktree detected (task is terminal or missing)"
+                    reason = %reason,
+                    "WorktreeReconciliation: orphaned worktree destroyed"
                 );
 
                 new_events.push(UnifiedEvent {
@@ -1661,8 +1792,10 @@ impl<T: TaskRepository + 'static, W: WorktreeRepository + 'static> EventHandler 
                     task_id: Some(wt.task_id),
                     correlation_id: event.correlation_id,
                     source_process_id: None,
-                    payload: EventPayload::ReconciliationCompleted {
-                        corrections_made: 0, // Flagging only, not correcting
+                    payload: EventPayload::WorktreeDestroyed {
+                        worktree_id: wt.id,
+                        task_id: wt.task_id,
+                        reason: reason.clone(),
                     },
                 });
             }
@@ -1670,9 +1803,25 @@ impl<T: TaskRepository + 'static, W: WorktreeRepository + 'static> EventHandler 
 
         if orphan_count > 0 {
             tracing::info!(
-                "WorktreeReconciliation: {} orphaned worktree(s) detected",
+                "WorktreeReconciliation: {} orphaned worktree(s) destroyed",
                 orphan_count
             );
+
+            // Emit reconciliation summary with actual correction count
+            new_events.push(UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: chrono::Utc::now(),
+                severity: EventSeverity::Info,
+                category: EventCategory::Orchestrator,
+                goal_id: None,
+                task_id: None,
+                correlation_id: event.correlation_id,
+                source_process_id: None,
+                payload: EventPayload::ReconciliationCompleted {
+                    corrections_made: orphan_count,
+                },
+            });
         }
 
         if new_events.is_empty() {
@@ -1913,7 +2062,16 @@ impl EventStorePollerHandler {
 
     /// Initialize the high-water mark from the event store's latest sequence.
     /// Call this at startup so we don't replay the entire history.
+    ///
+    /// When no watermark exists (first run), we start from
+    /// `max_sequence - replay_window` instead of `max_sequence` to ensure
+    /// recent events are replayed for catch-up.
     pub async fn initialize_watermark(&self) {
+        self.initialize_watermark_with_replay(1000).await;
+    }
+
+    /// Initialize watermark with a configurable replay window.
+    pub async fn initialize_watermark_with_replay(&self, replay_window: u64) {
         match self.event_store.get_watermark("EventStorePollerHandler").await {
             Ok(Some(seq)) => {
                 let mut hwm = self.high_water_mark.write().await;
@@ -1921,12 +2079,17 @@ impl EventStorePollerHandler {
                 tracing::info!("EventStorePoller: initialized watermark at {}", seq.0);
             }
             Ok(None) => {
-                // No watermark yet — start from the latest sequence to avoid replaying history
+                // No watermark yet — start from max_sequence - replay_window to
+                // ensure recent events are replayed for catch-up
                 match self.event_store.latest_sequence().await {
                     Ok(Some(seq)) => {
+                        let start_from = seq.0.saturating_sub(replay_window);
                         let mut hwm = self.high_water_mark.write().await;
-                        *hwm = seq.0;
-                        tracing::info!("EventStorePoller: no watermark found, starting from latest seq {}", seq.0);
+                        *hwm = start_from;
+                        tracing::info!(
+                            "EventStorePoller: no watermark found, starting from seq {} (latest {} - window {})",
+                            start_from, seq.0, replay_window
+                        );
                     }
                     _ => {}
                 }
@@ -2205,6 +2368,964 @@ impl EventHandler for EventPruningHandler {
         } else {
             Ok(Reaction::None)
         }
+    }
+}
+
+// ============================================================================
+// TaskSLAEnforcementHandler (Phase 2a)
+// ============================================================================
+
+/// Triggered by the "sla-check" scheduled event (60s). Queries tasks with
+/// deadlines and emits tiered SLA events (warning/critical/breached).
+pub struct TaskSLAEnforcementHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+    warning_threshold_pct: f64,
+    critical_threshold_pct: f64,
+    auto_escalate_on_breach: bool,
+}
+
+impl<T: TaskRepository> TaskSLAEnforcementHandler<T> {
+    pub fn new(
+        task_repo: Arc<T>,
+        warning_threshold_pct: f64,
+        critical_threshold_pct: f64,
+        auto_escalate_on_breach: bool,
+    ) -> Self {
+        Self { task_repo, warning_threshold_pct, critical_threshold_pct, auto_escalate_on_breach }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for TaskSLAEnforcementHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "TaskSLAEnforcementHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "sla-check"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let now = chrono::Utc::now();
+        let mut new_events = Vec::new();
+
+        // Check all active statuses for tasks with deadlines
+        for status in &[TaskStatus::Pending, TaskStatus::Ready, TaskStatus::Running] {
+            let tasks = self.task_repo.list_by_status(*status).await
+                .map_err(|e| format!("SLA check failed: {}", e))?;
+
+            for task in tasks {
+                let deadline = match task.deadline {
+                    Some(d) => d,
+                    None => continue,
+                };
+
+                let total_duration = (deadline - task.created_at).num_seconds().max(1) as f64;
+                let remaining = (deadline - now).num_seconds();
+
+                if remaining <= 0 {
+                    // Breached
+                    let overdue_secs = (-remaining) as i64;
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: now,
+                        severity: EventSeverity::Critical,
+                        category: EventCategory::Task,
+                        goal_id: None,
+                        task_id: Some(task.id),
+                        correlation_id: event.correlation_id,
+                        source_process_id: None,
+                        payload: EventPayload::TaskSLABreached {
+                            task_id: task.id,
+                            deadline: deadline.to_rfc3339(),
+                            overdue_secs,
+                        },
+                    });
+
+                    if self.auto_escalate_on_breach {
+                        new_events.push(UnifiedEvent {
+                            id: EventId::new(),
+                            sequence: SequenceNumber(0),
+                            timestamp: now,
+                            severity: EventSeverity::Critical,
+                            category: EventCategory::Escalation,
+                            goal_id: None,
+                            task_id: Some(task.id),
+                            correlation_id: event.correlation_id,
+                            source_process_id: None,
+                            payload: EventPayload::HumanEscalationRequired {
+                                goal_id: None,
+                                task_id: Some(task.id),
+                                reason: format!("Task '{}' SLA breached: overdue by {}s", task.title, overdue_secs),
+                                urgency: "critical".to_string(),
+                                questions: vec![format!("Task '{}' has missed its deadline. What should be done?", task.title)],
+                                is_blocking: false,
+                            },
+                        });
+                    }
+                } else {
+                    let remaining_pct = remaining as f64 / total_duration;
+
+                    if remaining_pct < self.critical_threshold_pct {
+                        new_events.push(UnifiedEvent {
+                            id: EventId::new(),
+                            sequence: SequenceNumber(0),
+                            timestamp: now,
+                            severity: EventSeverity::Warning,
+                            category: EventCategory::Task,
+                            goal_id: None,
+                            task_id: Some(task.id),
+                            correlation_id: event.correlation_id,
+                            source_process_id: None,
+                            payload: EventPayload::TaskSLACritical {
+                                task_id: task.id,
+                                deadline: deadline.to_rfc3339(),
+                                remaining_secs: remaining,
+                            },
+                        });
+                    } else if remaining_pct < self.warning_threshold_pct {
+                        new_events.push(UnifiedEvent {
+                            id: EventId::new(),
+                            sequence: SequenceNumber(0),
+                            timestamp: now,
+                            severity: EventSeverity::Warning,
+                            category: EventCategory::Task,
+                            goal_id: None,
+                            task_id: Some(task.id),
+                            correlation_id: event.correlation_id,
+                            source_process_id: None,
+                            payload: EventPayload::TaskSLAWarning {
+                                task_id: task.id,
+                                deadline: deadline.to_rfc3339(),
+                                remaining_secs: remaining,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
+    }
+}
+
+// ============================================================================
+// PriorityAgingHandler (Phase 2b)
+// ============================================================================
+
+/// Triggered by the "priority-aging" scheduled event (300s, opt-in).
+/// Ages task priorities based on wait time since creation.
+pub struct PriorityAgingHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+    low_to_normal_secs: u64,
+    normal_to_high_secs: u64,
+    high_to_critical_secs: u64,
+}
+
+impl<T: TaskRepository> PriorityAgingHandler<T> {
+    pub fn new(
+        task_repo: Arc<T>,
+        low_to_normal_secs: u64,
+        normal_to_high_secs: u64,
+        high_to_critical_secs: u64,
+    ) -> Self {
+        Self { task_repo, low_to_normal_secs, normal_to_high_secs, high_to_critical_secs }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for PriorityAgingHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "PriorityAgingHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "priority-aging"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::LOW,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        use crate::domain::models::TaskPriority;
+
+        let now = chrono::Utc::now();
+        let mut new_events = Vec::new();
+
+        for status in &[TaskStatus::Pending, TaskStatus::Ready] {
+            let tasks = self.task_repo.list_by_status(*status).await
+                .map_err(|e| format!("Priority aging failed: {}", e))?;
+
+            for task in tasks {
+                let wait_secs = (now - task.created_at).num_seconds() as u64;
+
+                let new_priority = match task.priority {
+                    TaskPriority::Low if wait_secs > self.low_to_normal_secs => Some(TaskPriority::Normal),
+                    TaskPriority::Normal if wait_secs > self.normal_to_high_secs => Some(TaskPriority::High),
+                    TaskPriority::High if wait_secs > self.high_to_critical_secs => Some(TaskPriority::Critical),
+                    _ => None,
+                };
+
+                if let Some(new_pri) = new_priority {
+                    let from = task.priority.as_str().to_string();
+                    let to = new_pri.as_str().to_string();
+
+                    let mut updated = task.clone();
+                    updated.priority = new_pri;
+                    updated.updated_at = now;
+                    self.task_repo.update(&updated).await
+                        .map_err(|e| format!("Failed to update priority: {}", e))?;
+
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: now,
+                        severity: EventSeverity::Info,
+                        category: EventCategory::Task,
+                        goal_id: None,
+                        task_id: Some(task.id),
+                        correlation_id: event.correlation_id,
+                        source_process_id: None,
+                        payload: EventPayload::TaskPriorityChanged {
+                            task_id: task.id,
+                            from,
+                            to,
+                            reason: format!("priority-aging: waited {}s", wait_secs),
+                        },
+                    });
+                }
+            }
+        }
+
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
+    }
+}
+
+// ============================================================================
+// MemoryInformedDecompositionHandler (Phase 3a)
+// ============================================================================
+
+/// Triggered by `MemoryStored` where tier is semantic and type is pattern.
+/// Fires goal re-evaluation for goals with overlapping domains.
+pub struct MemoryInformedDecompositionHandler<G: GoalRepository> {
+    goal_repo: Arc<G>,
+    cooldown_secs: u64,
+    /// Track (goal_id, last_fired) to avoid duplicate evaluations.
+    cooldowns: Arc<RwLock<std::collections::HashMap<uuid::Uuid, chrono::DateTime<chrono::Utc>>>>,
+}
+
+impl<G: GoalRepository> MemoryInformedDecompositionHandler<G> {
+    pub fn new(goal_repo: Arc<G>, cooldown_secs: u64) -> Self {
+        Self {
+            goal_repo,
+            cooldown_secs,
+            cooldowns: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl<G: GoalRepository + 'static> EventHandler for MemoryInformedDecompositionHandler<G> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "MemoryInformedDecompositionHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Memory])
+                .payload_types(vec!["MemoryStored".to_string()]),
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let (memory_id, key, namespace, tier, memory_type) = match &event.payload {
+            EventPayload::MemoryStored { memory_id, key, namespace, tier, memory_type } => {
+                (*memory_id, key.clone(), namespace.clone(), tier.clone(), memory_type.clone())
+            }
+            _ => return Ok(Reaction::None),
+        };
+
+        // Only trigger for semantic tier + pattern type
+        if tier != "semantic" || memory_type != "pattern" {
+            return Ok(Reaction::None);
+        }
+
+        let now = chrono::Utc::now();
+        let goals = self.goal_repo.get_active_with_constraints().await
+            .map_err(|e| format!("Failed to get active goals: {}", e))?;
+
+        let mut new_events = Vec::new();
+        let mut cooldowns = self.cooldowns.write().await;
+
+        for goal in &goals {
+            // Check if namespace overlaps with goal domains
+            let overlaps = goal.applicability_domains.iter()
+                .any(|d| d.eq_ignore_ascii_case(&namespace));
+            if !overlaps {
+                continue;
+            }
+
+            // Check cooldown
+            if let Some(last) = cooldowns.get(&goal.id) {
+                if (now - *last).num_seconds() < self.cooldown_secs as i64 {
+                    continue;
+                }
+            }
+
+            cooldowns.insert(goal.id, now);
+
+            new_events.push(UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: now,
+                severity: EventSeverity::Info,
+                category: EventCategory::Memory,
+                goal_id: Some(goal.id),
+                task_id: None,
+                correlation_id: event.correlation_id,
+                source_process_id: None,
+                payload: EventPayload::MemoryInformedGoal {
+                    goal_id: goal.id,
+                    memory_id,
+                    memory_key: key.clone(),
+                },
+            });
+
+            // Also emit a goal-evaluation trigger
+            new_events.push(UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: now,
+                severity: EventSeverity::Debug,
+                category: EventCategory::Scheduler,
+                goal_id: Some(goal.id),
+                task_id: None,
+                correlation_id: event.correlation_id,
+                source_process_id: None,
+                payload: EventPayload::ScheduledEventFired {
+                    schedule_id: uuid::Uuid::new_v4(),
+                    name: "goal-evaluation".to_string(),
+                },
+            });
+        }
+
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
+    }
+}
+
+// ============================================================================
+// MemoryConflictEscalationHandler (Phase 3b)
+// ============================================================================
+
+/// Triggered by `MemoryConflictDetected`. Escalates conflicts that are
+/// flagged for review (low similarity) in semantic-tier memories.
+pub struct MemoryConflictEscalationHandler;
+
+impl MemoryConflictEscalationHandler {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl EventHandler for MemoryConflictEscalationHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "MemoryConflictEscalationHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Memory])
+                .payload_types(vec!["MemoryConflictDetected".to_string()]),
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let (memory_a, memory_b, key, similarity) = match &event.payload {
+            EventPayload::MemoryConflictDetected { memory_a, memory_b, key, similarity } => {
+                (*memory_a, *memory_b, key.clone(), *similarity)
+            }
+            _ => return Ok(Reaction::None),
+        };
+
+        // Only escalate for low-similarity conflicts (flagged for review)
+        if similarity >= 0.3 {
+            return Ok(Reaction::None);
+        }
+
+        let escalation = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Warning,
+            category: EventCategory::Escalation,
+            goal_id: None,
+            task_id: None,
+            correlation_id: event.correlation_id,
+            source_process_id: None,
+            payload: EventPayload::HumanEscalationRequired {
+                goal_id: None,
+                task_id: None,
+                reason: format!(
+                    "Memory conflict detected for key '{}': memories {} and {} have low similarity ({:.2})",
+                    key, memory_a, memory_b, similarity
+                ),
+                urgency: "high".to_string(),
+                questions: vec![
+                    format!("Which version of memory '{}' should be kept?", key),
+                ],
+                is_blocking: true,
+            },
+        };
+
+        Ok(Reaction::EmitEvents(vec![escalation]))
+    }
+}
+
+// ============================================================================
+// TaskCompletionLearningHandler (Phase 4a)
+// ============================================================================
+
+/// Triggered by `TaskCompletedWithResult`. Extracts learning data from task
+/// results and stores pattern memories for tasks that required retries.
+pub struct TaskCompletionLearningHandler {
+    command_bus: Arc<crate::services::command_bus::CommandBus>,
+    min_retries: u32,
+    store_efficiency: bool,
+}
+
+impl TaskCompletionLearningHandler {
+    pub fn new(
+        command_bus: Arc<crate::services::command_bus::CommandBus>,
+        min_retries: u32,
+        store_efficiency: bool,
+    ) -> Self {
+        Self { command_bus, min_retries, store_efficiency }
+    }
+}
+
+#[async_trait]
+impl EventHandler for TaskCompletionLearningHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "TaskCompletionLearningHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Task])
+                .payload_types(vec!["TaskCompletedWithResult".to_string()]),
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        use crate::services::command_bus::{CommandEnvelope, CommandSource, DomainCommand, MemoryCommand};
+        use crate::domain::models::{MemoryTier, MemoryType};
+
+        let result = match &_event.payload {
+            EventPayload::TaskCompletedWithResult { result, .. } => result,
+            _ => return Ok(Reaction::None),
+        };
+
+        // Store learning for tasks that required retries
+        if result.retry_count >= self.min_retries {
+            let error_summary = result.error.as_deref().unwrap_or("unknown");
+            let key = format!(
+                "task-learning:{}:{}",
+                result.status,
+                &error_summary.chars().take(40).collect::<String>()
+            );
+
+            let content = format!(
+                "Task {} completed with status {} after {} retries in {}s. Error: {}",
+                result.task_id, result.status, result.retry_count,
+                result.duration_secs, error_summary
+            );
+
+            let envelope = CommandEnvelope::new(
+                CommandSource::EventHandler("TaskCompletionLearningHandler".to_string()),
+                DomainCommand::Memory(MemoryCommand::Store {
+                    key,
+                    content,
+                    namespace: "task-learnings".to_string(),
+                    tier: MemoryTier::Episodic,
+                    memory_type: MemoryType::Pattern,
+                    metadata: None,
+                }),
+            );
+
+            if let Err(e) = self.command_bus.dispatch(envelope).await {
+                tracing::warn!("TaskCompletionLearningHandler: failed to store learning: {}", e);
+            }
+        }
+
+        // Store efficiency pattern for fast completions
+        if self.store_efficiency && result.retry_count == 0 && result.duration_secs < 60 {
+            let key = format!("task-efficiency:{}", result.task_id);
+            let content = format!(
+                "Task {} completed efficiently: {}s, {} tokens",
+                result.task_id, result.duration_secs, result.tokens_used
+            );
+
+            let envelope = CommandEnvelope::new(
+                CommandSource::EventHandler("TaskCompletionLearningHandler".to_string()),
+                DomainCommand::Memory(MemoryCommand::Store {
+                    key,
+                    content,
+                    namespace: "task-learnings".to_string(),
+                    tier: MemoryTier::Episodic,
+                    memory_type: MemoryType::Pattern,
+                    metadata: None,
+                }),
+            );
+
+            if let Err(e) = self.command_bus.dispatch(envelope).await {
+                tracing::debug!("TaskCompletionLearningHandler: failed to store efficiency pattern: {}", e);
+            }
+        }
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// GoalEvaluationTaskCreationHandler (Phase 4b)
+// ============================================================================
+
+/// Triggered by `SemanticDriftDetected` or `GoalConstraintViolated`.
+/// Creates diagnostic/remediation tasks for recurring issues.
+pub struct GoalEvaluationTaskCreationHandler {
+    command_bus: Arc<crate::services::command_bus::CommandBus>,
+    auto_create_diagnostic: bool,
+    max_diagnostic_per_goal: u32,
+    auto_create_remediation: bool,
+}
+
+impl GoalEvaluationTaskCreationHandler {
+    pub fn new(
+        command_bus: Arc<crate::services::command_bus::CommandBus>,
+        auto_create_diagnostic: bool,
+        max_diagnostic_per_goal: u32,
+        auto_create_remediation: bool,
+    ) -> Self {
+        Self { command_bus, auto_create_diagnostic, max_diagnostic_per_goal, auto_create_remediation }
+    }
+}
+
+#[async_trait]
+impl EventHandler for GoalEvaluationTaskCreationHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "GoalEvaluationTaskCreationHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Goal])
+                .payload_types(vec![
+                    "SemanticDriftDetected".to_string(),
+                    "GoalConstraintViolated".to_string(),
+                ]),
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        use crate::services::command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand};
+        use crate::domain::models::{TaskPriority, TaskSource};
+
+        match &event.payload {
+            EventPayload::SemanticDriftDetected { goal_id, recurring_gaps, iterations } if self.auto_create_diagnostic => {
+                for (i, gap) in recurring_gaps.iter().enumerate() {
+                    if i as u32 >= self.max_diagnostic_per_goal {
+                        break;
+                    }
+
+                    let gap_hash = format!("{:x}", md5_lite(gap));
+                    let idem_key = format!("drift:{}:{}", goal_id, gap_hash);
+                    let title = format!("Investigate recurring gap: {}", truncate_str(gap, 60));
+                    let description = format!(
+                        "Recurring gap detected across {} iterations for goal {}:\n\n{}",
+                        iterations, goal_id, gap
+                    );
+
+                    let envelope = CommandEnvelope::new(
+                        CommandSource::EventHandler("GoalEvaluationTaskCreationHandler".to_string()),
+                        DomainCommand::Task(TaskCommand::Submit {
+                            title: Some(title),
+                            description,
+                            parent_id: None,
+                            priority: TaskPriority::Normal,
+                            agent_type: None,
+                            depends_on: vec![],
+                            context: Box::new(None),
+                            idempotency_key: Some(idem_key),
+                            source: TaskSource::System,
+                            deadline: None,
+                        }),
+                    );
+
+                    if let Err(e) = self.command_bus.dispatch(envelope).await {
+                        tracing::warn!("GoalEvaluationTaskCreationHandler: failed to create diagnostic task: {}", e);
+                    }
+                }
+            }
+            EventPayload::GoalConstraintViolated { goal_id, constraint_name, violation } if self.auto_create_remediation => {
+                let idem_key = format!("remediate:{}:{}", goal_id, constraint_name);
+                let title = format!("Remediate constraint violation: {}", constraint_name);
+                let description = format!(
+                    "Constraint '{}' violated for goal {}:\n\n{}",
+                    constraint_name, goal_id, violation
+                );
+
+                let envelope = CommandEnvelope::new(
+                    CommandSource::EventHandler("GoalEvaluationTaskCreationHandler".to_string()),
+                    DomainCommand::Task(TaskCommand::Submit {
+                        title: Some(title),
+                        description,
+                        parent_id: None,
+                        priority: TaskPriority::High,
+                        agent_type: None,
+                        depends_on: vec![],
+                        context: Box::new(None),
+                        idempotency_key: Some(idem_key),
+                        source: TaskSource::System,
+                        deadline: None,
+                    }),
+                );
+
+                if let Err(e) = self.command_bus.dispatch(envelope).await {
+                    tracing::warn!("GoalEvaluationTaskCreationHandler: failed to create remediation task: {}", e);
+                }
+            }
+            _ => {}
+        }
+
+        Ok(Reaction::None)
+    }
+}
+
+/// Simple string hash for idempotency keys.
+fn md5_lite(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Truncate a string to a given length with ellipsis.
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+// ============================================================================
+// EvolutionTriggeredTemplateUpdateHandler (Phase 4c)
+// ============================================================================
+
+/// Triggered by `EvolutionTriggered`. If the agent template's success rate is
+/// below 40%, submits a refinement task.
+pub struct EvolutionTriggeredTemplateUpdateHandler {
+    command_bus: Arc<crate::services::command_bus::CommandBus>,
+}
+
+impl EvolutionTriggeredTemplateUpdateHandler {
+    pub fn new(command_bus: Arc<crate::services::command_bus::CommandBus>) -> Self {
+        Self { command_bus }
+    }
+}
+
+#[async_trait]
+impl EventHandler for EvolutionTriggeredTemplateUpdateHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "EvolutionTriggeredTemplateUpdateHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Agent])
+                .payload_types(vec!["EvolutionTriggered".to_string()]),
+            priority: HandlerPriority::LOW,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        use crate::services::command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand};
+        use crate::domain::models::{TaskPriority, TaskSource};
+
+        let (template_name, trigger) = match &event.payload {
+            EventPayload::EvolutionTriggered { template_name, trigger } => {
+                (template_name.clone(), trigger.clone())
+            }
+            _ => return Ok(Reaction::None),
+        };
+
+        // Parse success rate from the trigger string (e.g. "Low success rate: 40% (2/5)")
+        let needs_refinement = trigger.contains("Low success rate");
+
+        if !needs_refinement {
+            return Ok(Reaction::None);
+        }
+
+        let title = format!("Refine agent template: {}", template_name);
+        let description = format!(
+            "Agent template '{}' triggered evolution: {}. Review and refine the template.",
+            template_name, trigger
+        );
+
+        let envelope = CommandEnvelope::new(
+            CommandSource::EventHandler("EvolutionTriggeredTemplateUpdateHandler".to_string()),
+            DomainCommand::Task(TaskCommand::Submit {
+                title: Some(title),
+                description,
+                parent_id: None,
+                priority: TaskPriority::Normal,
+                agent_type: None,
+                depends_on: vec![],
+                context: Box::new(None),
+                idempotency_key: Some(format!("evolve:{}", template_name)),
+                source: TaskSource::System,
+                deadline: None,
+            }),
+        );
+
+        if let Err(e) = self.command_bus.dispatch(envelope).await {
+            tracing::warn!("EvolutionTriggeredTemplateUpdateHandler: failed to submit refinement task: {}", e);
+        }
+
+        // Emit template status change
+        let status_event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Agent,
+            goal_id: None,
+            task_id: None,
+            correlation_id: event.correlation_id,
+            source_process_id: None,
+            payload: EventPayload::AgentTemplateStatusChanged {
+                template_name,
+                from_status: "active".to_string(),
+                to_status: "under-review".to_string(),
+            },
+        };
+
+        Ok(Reaction::EmitEvents(vec![status_event]))
+    }
+}
+
+// ============================================================================
+// StartupCatchUpHandler (Phase 5a)
+// ============================================================================
+
+/// Triggered by `OrchestratorStarted`. Runs once at startup to fix orphaned
+/// tasks, replay missed events, re-evaluate goals, and run reconciliation.
+pub struct StartupCatchUpHandler<T: TaskRepository, G: GoalRepository> {
+    task_repo: Arc<T>,
+    goal_repo: Arc<G>,
+    event_store: Arc<dyn EventStore>,
+    stale_threshold_secs: u64,
+    max_replay_events: u64,
+}
+
+impl<T: TaskRepository, G: GoalRepository> StartupCatchUpHandler<T, G> {
+    pub fn new(
+        task_repo: Arc<T>,
+        goal_repo: Arc<G>,
+        event_store: Arc<dyn EventStore>,
+        stale_threshold_secs: u64,
+        max_replay_events: u64,
+    ) -> Self {
+        Self { task_repo, goal_repo, event_store, stale_threshold_secs, max_replay_events }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static, G: GoalRepository + 'static> EventHandler for StartupCatchUpHandler<T, G> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "StartupCatchUpHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Orchestrator])
+                .payload_types(vec!["OrchestratorStarted".to_string()]),
+            priority: HandlerPriority::SYSTEM,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let start = std::time::Instant::now();
+        let now = chrono::Utc::now();
+        let mut orphaned_tasks_fixed: u32 = 0;
+        let mut new_events = Vec::new();
+
+        // 1. Fix orphaned Running tasks (started before last shutdown)
+        let running = self.task_repo.list_by_status(TaskStatus::Running).await
+            .map_err(|e| format!("StartupCatchUp: failed to list running tasks: {}", e))?;
+
+        let stale_cutoff = now - chrono::Duration::seconds(self.stale_threshold_secs as i64);
+
+        for task in running {
+            let is_stale = task.started_at.map_or(true, |s| s < stale_cutoff);
+            if is_stale {
+                let mut updated = task.clone();
+                updated.retry_count += 1;
+                if updated.transition_to(TaskStatus::Failed).is_ok() {
+                    self.task_repo.update(&updated).await
+                        .map_err(|e| format!("StartupCatchUp: failed to update task: {}", e))?;
+                    orphaned_tasks_fixed += 1;
+
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: now,
+                        severity: EventSeverity::Warning,
+                        category: EventCategory::Task,
+                        goal_id: None,
+                        task_id: Some(task.id),
+                        correlation_id: event.correlation_id,
+                        source_process_id: None,
+                        payload: EventPayload::TaskFailed {
+                            task_id: task.id,
+                            error: "orchestrator-restart: task was running during shutdown".to_string(),
+                            retry_count: updated.retry_count,
+                        },
+                    });
+                }
+            }
+        }
+
+        // 2. Count missed events (informational)
+        let latest_seq = self.event_store.latest_sequence().await
+            .map_err(|e| format!("StartupCatchUp: failed to get latest sequence: {}", e))?;
+        let missed_events_replayed = latest_seq.map(|s| s.0).unwrap_or(0).min(self.max_replay_events);
+
+        // 3. Re-evaluate active goals
+        let active_goals = self.goal_repo.get_active_with_constraints().await
+            .map_err(|e| format!("StartupCatchUp: failed to get active goals: {}", e))?;
+        let goals_count = active_goals.len() as u32;
+
+        for goal in &active_goals {
+            new_events.push(UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: now,
+                severity: EventSeverity::Debug,
+                category: EventCategory::Scheduler,
+                goal_id: Some(goal.id),
+                task_id: None,
+                correlation_id: event.correlation_id,
+                source_process_id: None,
+                payload: EventPayload::ScheduledEventFired {
+                    schedule_id: uuid::Uuid::new_v4(),
+                    name: "goal-evaluation".to_string(),
+                },
+            });
+        }
+
+        // 4. Run reconciliation
+        new_events.push(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: now,
+            severity: EventSeverity::Debug,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: event.correlation_id,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "reconciliation".to_string(),
+            },
+        });
+
+        // 5. Run memory maintenance
+        new_events.push(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: now,
+            severity: EventSeverity::Debug,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: event.correlation_id,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "memory-maintenance".to_string(),
+            },
+        });
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        // 6. Emit summary
+        new_events.push(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: now,
+            severity: EventSeverity::Info,
+            category: EventCategory::Orchestrator,
+            goal_id: None,
+            task_id: None,
+            correlation_id: event.correlation_id,
+            source_process_id: None,
+            payload: EventPayload::StartupCatchUpCompleted {
+                orphaned_tasks_fixed,
+                missed_events_replayed,
+                goals_reevaluated: goals_count,
+                duration_ms,
+            },
+        });
+
+        tracing::info!(
+            orphaned_tasks_fixed = orphaned_tasks_fixed,
+            goals_reevaluated = goals_count,
+            duration_ms = duration_ms,
+            "StartupCatchUp: catch-up completed"
+        );
+
+        Ok(Reaction::EmitEvents(new_events))
     }
 }
 

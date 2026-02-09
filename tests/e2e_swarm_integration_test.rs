@@ -243,6 +243,7 @@ async fn test_task_dag_with_dependencies() {
             None,
             None,
             TaskSource::Human,
+            None,
         )
         .await
         .expect("Failed to create setup task");
@@ -258,6 +259,7 @@ async fn test_task_dag_with_dependencies() {
             None,
             None,
             TaskSource::Human,
+            None,
         )
         .await
         .expect("Failed to create auth task");
@@ -273,6 +275,7 @@ async fn test_task_dag_with_dependencies() {
             None,
             None,
             TaskSource::Human,
+            None,
         )
         .await
         .expect("Failed to create db task");
@@ -288,6 +291,7 @@ async fn test_task_dag_with_dependencies() {
             None,
             None,
             TaskSource::Human,
+            None,
         )
         .await
         .expect("Failed to create api task");
@@ -303,6 +307,7 @@ async fn test_task_dag_with_dependencies() {
             None,
             None,
             TaskSource::Human,
+            None,
         )
         .await
         .expect("Failed to create test task");
@@ -850,6 +855,7 @@ async fn test_full_end_to_end_workflow() {
             None,
             None,
             TaskSource::Human,
+            None,
         )
         .await
         .expect("Failed to create task");
@@ -865,6 +871,7 @@ async fn test_full_end_to_end_workflow() {
             None,
             None,
             TaskSource::Human,
+            None,
         )
         .await
         .expect("Failed to create task");
@@ -1152,6 +1159,7 @@ async fn test_task_idempotency() {
             None,
             Some("unique-idempotency-key".to_string()),
             TaskSource::Human,
+            None,
         )
         .await
         .expect("First submission should succeed");
@@ -1168,6 +1176,7 @@ async fn test_task_idempotency() {
             None,
             Some("unique-idempotency-key".to_string()),
             TaskSource::Human,
+            None,
         )
         .await
         .expect("Second submission should succeed");
@@ -1233,6 +1242,7 @@ async fn test_e2e_all_critical_paths() {
             None,
             None,
             TaskSource::Human,
+            None,
         )
         .await
         .expect("Task 1 creation failed");
@@ -1248,6 +1258,7 @@ async fn test_e2e_all_critical_paths() {
             None,
             None,
             TaskSource::Human,
+            None,
         )
         .await
         .expect("Task 2 creation failed");
@@ -1730,6 +1741,7 @@ async fn test_real_e2e_full_workflow() {
             None,
             None,
             TaskSource::Human,
+            None,
         )
         .await
         .expect("Failed to create task1");
@@ -1745,6 +1757,7 @@ async fn test_real_e2e_full_workflow() {
             None,
             None,
             TaskSource::Human,
+            None,
         )
         .await
         .expect("Failed to create task2");

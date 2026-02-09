@@ -392,6 +392,7 @@ where
             context: Box::new(None),
             idempotency_key: None,
             source: TaskSource::Human,
+            deadline: None,
         });
         let envelope = CommandEnvelope::new(CommandSource::Mcp("stdio".into()), cmd);
 

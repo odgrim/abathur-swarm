@@ -126,6 +126,7 @@ pub enum TaskCommand {
         context: Box<Option<TaskContext>>,
         idempotency_key: Option<String>,
         source: TaskSource,
+        deadline: Option<chrono::DateTime<chrono::Utc>>,
     },
     Claim {
         task_id: Uuid,

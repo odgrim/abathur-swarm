@@ -330,9 +330,10 @@ impl<R: MemoryRepository> MemoryService<R> {
         Ok((count, events))
     }
 
-    /// Prune decayed memories (below threshold).
-    pub async fn prune_decayed(&self) -> DomainResult<u64> {
+    /// Prune decayed memories (below threshold). Returns count and events.
+    pub async fn prune_decayed(&self) -> DomainResult<(u64, Vec<UnifiedEvent>)> {
         let mut count = 0;
+        let mut events = Vec::new();
 
         // Prune working memories
         let decayed = self.repository.get_decayed(self.decay_config.working_prune_threshold).await?;
@@ -352,7 +353,18 @@ impl<R: MemoryRepository> MemoryService<R> {
             }
         }
 
-        Ok(count)
+        if count > 0 {
+            events.push(Self::make_event(
+                EventSeverity::Debug,
+                EventCategory::Memory,
+                EventPayload::MemoryPruned {
+                    count,
+                    reason: "decayed".to_string(),
+                },
+            ));
+        }
+
+        Ok((count, events))
     }
 
     /// Run full maintenance: prune expired and decayed, resolve conflicts.
@@ -363,7 +375,8 @@ impl<R: MemoryRepository> MemoryService<R> {
         let (expired, events) = self.prune_expired().await?;
         all_events.extend(events);
 
-        let decayed = self.prune_decayed().await?;
+        let (decayed, events) = self.prune_decayed().await?;
+        all_events.extend(events);
 
         // Check for promotion candidates
         let (promoted, events) = self.check_all_promotions().await?;

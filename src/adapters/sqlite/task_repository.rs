@@ -33,8 +33,8 @@ impl TaskRepository for SqliteTaskRepository {
         sqlx::query(
             r#"INSERT INTO tasks (id, parent_id, title, description, status, priority,
                agent_type, routing, artifacts, context, retry_count, max_retries, worktree_path,
-               idempotency_key, source_type, source_ref, version, created_at, updated_at, started_at, completed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+               idempotency_key, source_type, source_ref, version, created_at, updated_at, started_at, completed_at, deadline)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
         )
         .bind(task.id.to_string())
         .bind(task.parent_id.map(|id| id.to_string()))
@@ -57,6 +57,7 @@ impl TaskRepository for SqliteTaskRepository {
         .bind(task.updated_at.to_rfc3339())
         .bind(task.started_at.map(|t| t.to_rfc3339()))
         .bind(task.completed_at.map(|t| t.to_rfc3339()))
+        .bind(task.deadline.map(|t| t.to_rfc3339()))
         .execute(&self.pool)
         .await?;
 
@@ -97,7 +98,7 @@ impl TaskRepository for SqliteTaskRepository {
                status = ?, priority = ?, agent_type = ?, routing = ?, artifacts = ?,
                context = ?, retry_count = ?, max_retries = ?, worktree_path = ?,
                source_type = ?, source_ref = ?,
-               version = ?, updated_at = ?, started_at = ?, completed_at = ?
+               version = ?, updated_at = ?, started_at = ?, completed_at = ?, deadline = ?
                WHERE id = ?"#
         )
         .bind(task.parent_id.map(|id| id.to_string()))
@@ -118,6 +119,7 @@ impl TaskRepository for SqliteTaskRepository {
         .bind(task.updated_at.to_rfc3339())
         .bind(task.started_at.map(|t| t.to_rfc3339()))
         .bind(task.completed_at.map(|t| t.to_rfc3339()))
+        .bind(task.deadline.map(|t| t.to_rfc3339()))
         .bind(task.id.to_string())
         .execute(&self.pool)
         .await?;
@@ -374,6 +376,7 @@ struct TaskRow {
     updated_at: String,
     started_at: Option<String>,
     completed_at: Option<String>,
+    deadline: Option<String>,
 }
 
 impl TryFrom<TaskRow> for Task {
@@ -397,6 +400,7 @@ impl TryFrom<TaskRow> for Task {
         let updated_at = super::parse_datetime(&row.updated_at)?;
         let started_at = super::parse_optional_datetime(row.started_at)?;
         let completed_at = super::parse_optional_datetime(row.completed_at)?;
+        let deadline = super::parse_optional_datetime(row.deadline)?;
 
         let source = deserialize_task_source(row.source_type.as_deref(), row.source_ref.as_deref())?;
 
@@ -420,6 +424,7 @@ impl TryFrom<TaskRow> for Task {
             updated_at,
             started_at,
             completed_at,
+            deadline,
             version: row.version as u64,
             idempotency_key: row.idempotency_key,
         })

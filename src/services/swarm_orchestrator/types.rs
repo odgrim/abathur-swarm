@@ -78,6 +78,58 @@ pub struct PollingConfig {
     pub dead_letter_retry_interval_secs: u64,
     /// Interval for pruning old events (default: 21600s = 6 hours).
     pub event_pruning_interval_secs: u64,
+
+    // --- SLA enforcement ---
+    /// Interval for SLA check (default: 60s).
+    pub sla_check_interval_secs: u64,
+    /// Warning threshold as fraction of total time remaining (default: 0.25).
+    pub sla_warning_threshold_pct: f64,
+    /// Critical threshold as fraction of total time remaining (default: 0.10).
+    pub sla_critical_threshold_pct: f64,
+    /// Whether to auto-escalate on SLA breach (default: true).
+    pub sla_auto_escalate_on_breach: bool,
+
+    // --- Priority aging ---
+    /// Whether priority aging is enabled (default: false, opt-in).
+    pub priority_aging_enabled: bool,
+    /// Interval for priority aging check (default: 300s).
+    pub priority_aging_interval_secs: u64,
+    /// Seconds before Low -> Normal promotion (default: 3600).
+    pub priority_aging_low_to_normal_secs: u64,
+    /// Seconds before Normal -> High promotion (default: 7200).
+    pub priority_aging_normal_to_high_secs: u64,
+    /// Seconds before High -> Critical promotion (default: 14400).
+    pub priority_aging_high_to_critical_secs: u64,
+
+    // --- Memory-informed decomposition ---
+    /// Whether memory-informed decomposition is enabled (default: true).
+    pub memory_informed_decomposition_enabled: bool,
+    /// Cooldown per goal for memory-informed re-evaluation (default: 120s).
+    pub memory_informed_cooldown_per_goal_secs: u64,
+
+    // --- Task completion learning ---
+    /// Whether task completion learning is enabled (default: true).
+    pub task_learning_enabled: bool,
+    /// Minimum retries before storing a learning pattern (default: 1).
+    pub task_learning_min_retries: u32,
+    /// Whether to store efficiency patterns for fast completions (default: true).
+    pub task_learning_store_efficiency: bool,
+
+    // --- Diagnostic/remediation task creation ---
+    /// Whether to auto-create diagnostic tasks from drift detection (default: true).
+    pub auto_create_diagnostic_tasks: bool,
+    /// Maximum diagnostic tasks per goal (default: 3).
+    pub max_diagnostic_tasks_per_goal: u32,
+    /// Whether to auto-create remediation tasks from constraint violations (default: true).
+    pub auto_create_remediation_tasks: bool,
+
+    // --- Startup catch-up ---
+    /// Whether startup catch-up is enabled (default: true).
+    pub startup_catchup_enabled: bool,
+    /// Maximum events to replay during startup catch-up (default: 10000).
+    pub startup_max_replay_events: u64,
+    /// Stale task threshold in seconds for startup orphan detection (default: 300).
+    pub startup_stale_task_threshold_secs: u64,
 }
 
 impl Default for PollingConfig {
@@ -99,6 +151,38 @@ impl Default for PollingConfig {
             event_store_poll_interval_secs: 5,
             dead_letter_retry_interval_secs: 60,
             event_pruning_interval_secs: 21600, // 6 hours
+
+            // SLA enforcement
+            sla_check_interval_secs: 60,
+            sla_warning_threshold_pct: 0.25,
+            sla_critical_threshold_pct: 0.10,
+            sla_auto_escalate_on_breach: true,
+
+            // Priority aging (opt-in)
+            priority_aging_enabled: false,
+            priority_aging_interval_secs: 300,
+            priority_aging_low_to_normal_secs: 3600,
+            priority_aging_normal_to_high_secs: 7200,
+            priority_aging_high_to_critical_secs: 14400,
+
+            // Memory-informed decomposition
+            memory_informed_decomposition_enabled: true,
+            memory_informed_cooldown_per_goal_secs: 120,
+
+            // Task completion learning
+            task_learning_enabled: true,
+            task_learning_min_retries: 1,
+            task_learning_store_efficiency: true,
+
+            // Diagnostic/remediation task creation
+            auto_create_diagnostic_tasks: true,
+            max_diagnostic_tasks_per_goal: 3,
+            auto_create_remediation_tasks: true,
+
+            // Startup catch-up
+            startup_catchup_enabled: true,
+            startup_max_replay_events: 10000,
+            startup_stale_task_threshold_secs: 300,
         }
     }
 }

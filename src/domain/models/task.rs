@@ -311,6 +311,8 @@ pub struct Task {
     pub started_at: Option<DateTime<Utc>>,
     /// When execution completed
     pub completed_at: Option<DateTime<Utc>>,
+    /// Optional deadline for SLA enforcement
+    pub deadline: Option<DateTime<Utc>>,
     /// Version for optimistic locking
     pub version: u64,
     /// Idempotency key for deduplication
@@ -343,6 +345,7 @@ impl Task {
             updated_at: now,
             started_at: None,
             completed_at: None,
+            deadline: None,
             version: 1,
             idempotency_key: None,
         }
@@ -371,6 +374,7 @@ impl Task {
             updated_at: now,
             started_at: None,
             completed_at: None,
+            deadline: None,
             version: 1,
             idempotency_key: None,
         }
@@ -405,6 +409,12 @@ impl Task {
     /// Set task source.
     pub fn with_source(mut self, source: TaskSource) -> Self {
         self.source = source;
+        self
+    }
+
+    /// Set deadline for SLA enforcement.
+    pub fn with_deadline(mut self, deadline: DateTime<Utc>) -> Self {
+        self.deadline = Some(deadline);
         self
     }
 

@@ -249,6 +249,7 @@ impl<T: TaskRepository> TaskService<T> {
         context: Option<TaskContext>,
         idempotency_key: Option<String>,
         source: TaskSource,
+        deadline: Option<chrono::DateTime<chrono::Utc>>,
     ) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         let mut events = Vec::new();
 
@@ -291,6 +292,7 @@ impl<T: TaskRepository> TaskService<T> {
         if let Some(key) = idempotency_key {
             task = task.with_idempotency_key(key);
         }
+        task.deadline = deadline;
 
         for dep in depends_on {
             task = task.with_dependency(dep);
@@ -562,6 +564,7 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                 context,
                 idempotency_key,
                 source,
+                deadline,
             } => {
                 let (task, events) = self
                     .submit_task(
@@ -574,6 +577,7 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                         *context,
                         idempotency_key,
                         source,
+                        deadline,
                     )
                     .await?;
                 Ok(CommandOutcome { result: CommandResult::Task(task), events })
@@ -682,6 +686,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
         ).await.unwrap();
 
         assert_eq!(task.title, "Test Task");
@@ -704,6 +709,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
         ).await.unwrap();
 
         // Create main task that depends on it
@@ -717,6 +723,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
         ).await.unwrap();
 
         // Main should be pending (dependency not complete)
@@ -748,6 +755,7 @@ mod tests {
             None,
             Some("unique-key".to_string()),
             TaskSource::Human,
+            None,
         ).await.unwrap();
 
         let (task2, _) = service.submit_task(
@@ -760,6 +768,7 @@ mod tests {
             None,
             Some("unique-key".to_string()),
             TaskSource::Human,
+            None,
         ).await.unwrap();
 
         // Should return same task
@@ -781,6 +790,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
         ).await.unwrap();
 
         let (claimed, _) = service.claim_task(task.id, "test-agent").await.unwrap();
@@ -806,6 +816,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
         ).await.unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();

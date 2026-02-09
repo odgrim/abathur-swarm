@@ -525,6 +525,75 @@ pub enum EventPayload {
         error: String,
         circuit_breaker_tripped: bool,
     },
+
+    // Task lifecycle gap events
+    TaskDependencyChanged {
+        task_id: Uuid,
+        added: Vec<Uuid>,
+        removed: Vec<Uuid>,
+    },
+    TaskPriorityChanged {
+        task_id: Uuid,
+        from: String,
+        to: String,
+        reason: String,
+    },
+
+    // Escalation gap
+    HumanEscalationExpired {
+        task_id: Option<Uuid>,
+        goal_id: Option<Uuid>,
+        default_action: String,
+    },
+
+    // Worktree gap
+    WorktreeDestroyed {
+        worktree_id: Uuid,
+        task_id: Uuid,
+        reason: String,
+    },
+
+    // Startup/recovery
+    StartupCatchUpCompleted {
+        orphaned_tasks_fixed: u32,
+        missed_events_replayed: u64,
+        goals_reevaluated: u32,
+        duration_ms: u64,
+    },
+
+    // SLA enforcement events
+    TaskSLAWarning {
+        task_id: Uuid,
+        deadline: String,
+        remaining_secs: i64,
+    },
+    TaskSLACritical {
+        task_id: Uuid,
+        deadline: String,
+        remaining_secs: i64,
+    },
+    TaskSLABreached {
+        task_id: Uuid,
+        deadline: String,
+        overdue_secs: i64,
+    },
+
+    // Stale task warning events
+    TaskRunningLong {
+        task_id: Uuid,
+        runtime_secs: u64,
+    },
+    TaskRunningCritical {
+        task_id: Uuid,
+        runtime_secs: u64,
+    },
+
+    // Memory-informed goal evaluation
+    MemoryInformedGoal {
+        goal_id: Uuid,
+        memory_id: Uuid,
+        memory_key: String,
+    },
 }
 
 impl EventPayload {
@@ -610,6 +679,17 @@ impl EventPayload {
             Self::TriggerRuleDeleted { .. } => "TriggerRuleDeleted",
             Self::MemoryMaintenanceCompleted { .. } => "MemoryMaintenanceCompleted",
             Self::HandlerError { .. } => "HandlerError",
+            Self::TaskDependencyChanged { .. } => "TaskDependencyChanged",
+            Self::TaskPriorityChanged { .. } => "TaskPriorityChanged",
+            Self::HumanEscalationExpired { .. } => "HumanEscalationExpired",
+            Self::WorktreeDestroyed { .. } => "WorktreeDestroyed",
+            Self::StartupCatchUpCompleted { .. } => "StartupCatchUpCompleted",
+            Self::TaskSLAWarning { .. } => "TaskSLAWarning",
+            Self::TaskSLACritical { .. } => "TaskSLACritical",
+            Self::TaskSLABreached { .. } => "TaskSLABreached",
+            Self::TaskRunningLong { .. } => "TaskRunningLong",
+            Self::TaskRunningCritical { .. } => "TaskRunningCritical",
+            Self::MemoryInformedGoal { .. } => "MemoryInformedGoal",
         }
     }
 }
