@@ -62,7 +62,8 @@ async fn build_cli_orchestrator(config: SwarmConfig) -> Result<CliOrchestrator> 
         event_bus, event_reactor, event_scheduler,
     )
     .with_memory_repo(memory_repo)
-    .with_trigger_rule_repo(trigger_rule_repo))
+    .with_trigger_rule_repo(trigger_rule_repo)
+    .with_pool(pool.clone()))
 }
 
 #[derive(Args, Debug)]
@@ -564,7 +565,8 @@ async fn run_swarm_foreground(
         scheduler,
     )
     .with_memory_repo(memory_repo)
-    .with_trigger_rule_repo(trigger_rule_repo);
+    .with_trigger_rule_repo(trigger_rule_repo)
+    .with_pool(pool.clone());
 
     if !json_mode {
         println!("Starting Abathur Swarm Orchestrator");

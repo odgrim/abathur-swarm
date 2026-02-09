@@ -16,6 +16,7 @@ use crate::services::{
     ColdStartConfig, ColdStartReport, ColdStartService,
     DecayDaemonConfig, IntegrationVerifierService, MemoryDecayDaemon, MemoryService,
     VerificationResult, VerifierConfig, WorktreeConfig, WorktreeService,
+    command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand},
 };
 
 use super::types::{OrchestratorStatus, SwarmEvent, SwarmStats};
@@ -316,7 +317,6 @@ where
     pub(super) async fn create_worktree_for_task(
         &self,
         task_id: Uuid,
-        event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<String> {
         let worktree_config = WorktreeConfig {
             base_path: self.config.worktree_base_path.clone(),
@@ -332,10 +332,16 @@ where
 
         let worktree = worktree_service.create_worktree(task_id, None).await?;
 
-        let _ = event_tx.send(SwarmEvent::WorktreeCreated {
+        // Publish via EventBus (bridge forwards to event_tx automatically)
+        self.event_bus.publish(crate::services::event_factory::task_event(
+            crate::services::event_bus::EventSeverity::Info,
+            None,
             task_id,
-            path: worktree.path.clone(),
-        }).await;
+            crate::services::event_bus::EventPayload::WorktreeCreated {
+                task_id,
+                path: worktree.path.clone(),
+            },
+        )).await;
 
         Ok(worktree.path)
     }
@@ -414,6 +420,7 @@ where
     /// - Tasks in `Pending` status with all dependencies complete -> transition to `Ready`
     pub async fn run_startup_reconciliation(&self) -> DomainResult<u64> {
         let mut corrections: u64 = 0;
+        let cb = self.command_bus.read().await.clone();
 
         // 1. Fail stale Running tasks (started_at older than threshold).
         //    On restart, any task that was Running has lost its agent.
@@ -427,12 +434,35 @@ where
                 "Startup reconciliation: failing stale running task {} ('{}')",
                 task.id, task.title
             );
-            let mut task = task.clone();
-            task.status = TaskStatus::Failed;
-            if let Err(e) = self.task_repo.update(&task).await {
-                tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+            if let Some(ref cb) = cb {
+                let envelope = CommandEnvelope::new(
+                    CommandSource::System,
+                    DomainCommand::Task(TaskCommand::Fail {
+                        task_id: task.id,
+                        error: Some("Stale running task detected during startup reconciliation".to_string()),
+                    }),
+                );
+                match cb.dispatch(envelope).await {
+                    Ok(_) => { corrections += 1; }
+                    Err(e) => {
+                        tracing::warn!("CommandBus failed to reconcile task {}, falling back to direct write: {}", task.id, e);
+                        let mut task = task.clone();
+                        task.status = TaskStatus::Failed;
+                        if let Err(e) = self.task_repo.update(&task).await {
+                            tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                        } else {
+                            corrections += 1;
+                        }
+                    }
+                }
             } else {
-                corrections += 1;
+                let mut task = task.clone();
+                task.status = TaskStatus::Failed;
+                if let Err(e) = self.task_repo.update(&task).await {
+                    tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                } else {
+                    corrections += 1;
+                }
             }
         }
 
@@ -458,12 +488,35 @@ where
                         "Startup reconciliation: moving task {} ('{}') back to Pending (incomplete deps)",
                         task.id, task.title
                     );
-                    let mut task = task.clone();
-                    task.status = TaskStatus::Pending;
-                    if let Err(e) = self.task_repo.update(&task).await {
-                        tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                    if let Some(ref cb) = cb {
+                        let envelope = CommandEnvelope::new(
+                            CommandSource::System,
+                            DomainCommand::Task(TaskCommand::Transition {
+                                task_id: task.id,
+                                new_status: TaskStatus::Pending,
+                            }),
+                        );
+                        match cb.dispatch(envelope).await {
+                            Ok(_) => { corrections += 1; }
+                            Err(e) => {
+                                tracing::warn!("CommandBus failed to reconcile task {}, falling back to direct write: {}", task.id, e);
+                                let mut task = task.clone();
+                                task.status = TaskStatus::Pending;
+                                if let Err(e) = self.task_repo.update(&task).await {
+                                    tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                                } else {
+                                    corrections += 1;
+                                }
+                            }
+                        }
                     } else {
-                        corrections += 1;
+                        let mut task = task.clone();
+                        task.status = TaskStatus::Pending;
+                        if let Err(e) = self.task_repo.update(&task).await {
+                            tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                        } else {
+                            corrections += 1;
+                        }
                     }
                 }
             }
@@ -496,12 +549,35 @@ where
                     "Startup reconciliation: promoting task {} ('{}') to Ready",
                     task.id, task.title
                 );
-                let mut task = task.clone();
-                task.status = TaskStatus::Ready;
-                if let Err(e) = self.task_repo.update(&task).await {
-                    tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                if let Some(ref cb) = cb {
+                    let envelope = CommandEnvelope::new(
+                        CommandSource::System,
+                        DomainCommand::Task(TaskCommand::Transition {
+                            task_id: task.id,
+                            new_status: TaskStatus::Ready,
+                        }),
+                    );
+                    match cb.dispatch(envelope).await {
+                        Ok(_) => { corrections += 1; }
+                        Err(e) => {
+                            tracing::warn!("CommandBus failed to reconcile task {}, falling back to direct write: {}", task.id, e);
+                            let mut task = task.clone();
+                            task.status = TaskStatus::Ready;
+                            if let Err(e) = self.task_repo.update(&task).await {
+                                tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                            } else {
+                                corrections += 1;
+                            }
+                        }
+                    }
                 } else {
-                    corrections += 1;
+                    let mut task = task.clone();
+                    task.status = TaskStatus::Ready;
+                    if let Err(e) = self.task_repo.update(&task).await {
+                        tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                    } else {
+                        corrections += 1;
+                    }
                 }
             }
         }

@@ -182,7 +182,8 @@ where
                 .await;
         }
 
-        // Build a shared CommandBus for handlers that need to dispatch commands
+        // Build a shared CommandBus for handlers that need to dispatch commands.
+        // Also stored on the orchestrator for use by goal_processing, specialist_triggers, etc.
         let command_bus = {
             use crate::domain::ports::NullMemoryRepository;
 
@@ -193,7 +194,7 @@ where
                 self.goal_repo.clone(),
             ));
 
-            if let Some(ref memory_repo) = self.memory_repo {
+            let bus = if let Some(ref memory_repo) = self.memory_repo {
                 let memory_service = Arc::new(MemoryService::new(
                     memory_repo.clone(),
                 ));
@@ -203,7 +204,15 @@ where
                     Arc::new(NullMemoryRepository::new()),
                 ));
                 Arc::new(CommandBus::new(task_service, goal_service, null_memory, self.event_bus.clone()))
+            };
+
+            // Store on the orchestrator so other subsystems can use it
+            {
+                let mut stored = self.command_bus.write().await;
+                *stored = Some(bus.clone());
             }
+
+            bus
         };
 
         // A2APollHandler (NORMAL) — poll A2A gateway for delegations
@@ -235,6 +244,9 @@ where
 
             if let Some(ref repo) = self.trigger_rule_repo {
                 engine_builder = engine_builder.with_rule_repo(repo.clone());
+            }
+            if let Some(ref pool) = self.pool {
+                engine_builder = engine_builder.with_pool(pool.clone());
             }
 
             let engine = Arc::new(engine_builder);
@@ -269,6 +281,9 @@ where
                 engine.load_rules(rules).await;
                 tracing::info!("Loaded {} built-in trigger rules", count);
             }
+
+            // Restore persisted absence timers from DB
+            engine.load_pending_timers().await;
 
             reactor.register(engine.clone()).await;
             engine

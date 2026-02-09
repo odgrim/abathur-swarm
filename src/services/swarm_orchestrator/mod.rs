@@ -41,6 +41,7 @@ use crate::services::{
     CircuitBreakerConfig, CircuitBreakerService,
     DaemonHandle, EvolutionLoop,
     IntentVerifierConfig, IntentVerifierService,
+    command_bus::CommandBus,
     dag_restructure::DagRestructureService,
     event_reactor::EventReactor,
     event_scheduler::EventScheduler,
@@ -94,6 +95,9 @@ where
     pub(super) escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>,
     pub(super) federation_client: Option<Arc<crate::adapters::mcp::FederationClient>>,
     pub(super) trigger_rule_repo: Option<Arc<dyn crate::domain::ports::TriggerRuleRepository>>,
+    pub(super) command_bus: Arc<RwLock<Option<Arc<CommandBus>>>>,
+    /// Optional DB pool for services that need persistence (absence timers, command dedup).
+    pub(super) pool: Option<sqlx::SqlitePool>,
 }
 
 // ============================================================================
@@ -154,6 +158,8 @@ where
             ready_task_tx: ready_tx,
             specialist_rx: Arc::new(tokio::sync::Mutex::new(specialist_rx)),
             specialist_tx,
+            command_bus: Arc::new(RwLock::new(None)),
+            pool: None,
         }
     }
 
@@ -219,6 +225,12 @@ where
         self
     }
 
+    /// Provide a DB pool for services that need persistence (absence timers, command dedup).
+    pub fn with_pool(mut self, pool: sqlx::SqlitePool) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
     /// Create orchestrator with Overmind for strategic decision-making.
     ///
     /// The Overmind is an Architect-tier agent that provides intelligent decisions
@@ -261,6 +273,15 @@ where
         &self.evolution_loop
     }
 
+    /// Get the command bus (available after `register_builtin_handlers()`).
+    #[allow(dead_code)]
+    pub(crate) async fn command_bus(&self) -> Arc<CommandBus> {
+        self.command_bus.read().await
+            .as_ref()
+            .expect("command_bus not initialized — call register_builtin_handlers() first")
+            .clone()
+    }
+
     // ========================================================================
     // Main Orchestration Loop
     // ========================================================================
@@ -276,6 +297,29 @@ where
             crate::services::event_bus::EventSeverity::Info,
             crate::services::event_bus::EventPayload::OrchestratorStarted,
         )).await;
+
+        // Spawn bridge: forward EventBus events to legacy event_tx channel for TUI/logging
+        {
+            let mut bus_rx = self.event_bus.subscribe();
+            let bridge_tx = event_tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    match bus_rx.recv().await {
+                        Ok(unified_event) => {
+                            if let Some(swarm_event) = SwarmEvent::from_event_payload(&unified_event.payload) {
+                                let _ = bridge_tx.send(swarm_event).await;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("EventBus→SwarmEvent bridge lagged by {} events", n);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            break;
+                        }
+                    }
+                }
+            });
+        }
 
         // Log swarm startup
         self.audit_log.info(
@@ -533,6 +577,9 @@ where
             // Wait before next iteration
             tokio::time::sleep(loop_interval).await;
         }
+
+        // Flush pending watermarks before stopping the reactor
+        self.event_reactor.flush_watermarks().await;
 
         // Stop EventReactor
         self.event_reactor.stop();

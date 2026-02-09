@@ -594,6 +594,16 @@ pub enum EventPayload {
         memory_id: Uuid,
         memory_key: String,
     },
+
+    // Description update events (for escalation path)
+    TaskDescriptionUpdated {
+        task_id: Uuid,
+        reason: String,
+    },
+    GoalDescriptionUpdated {
+        goal_id: Uuid,
+        reason: String,
+    },
 }
 
 impl EventPayload {
@@ -690,6 +700,8 @@ impl EventPayload {
             Self::TaskRunningLong { .. } => "TaskRunningLong",
             Self::TaskRunningCritical { .. } => "TaskRunningCritical",
             Self::MemoryInformedGoal { .. } => "MemoryInformedGoal",
+            Self::TaskDescriptionUpdated { .. } => "TaskDescriptionUpdated",
+            Self::GoalDescriptionUpdated { .. } => "GoalDescriptionUpdated",
         }
     }
 }

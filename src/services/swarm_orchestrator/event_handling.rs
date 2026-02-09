@@ -41,14 +41,24 @@ where
         self.escalation_store.read().await.clone()
     }
 
-    /// Build a CommandBus from the orchestrator's repos and event bus.
-    fn build_command_bus(&self) -> Arc<crate::services::command_bus::CommandBus> {
+    /// Get the stored CommandBus, falling back to building one if not yet initialized.
+    async fn get_command_bus(&self) -> Arc<crate::services::command_bus::CommandBus> {
+        // Try the stored bus first (set during register_builtin_handlers)
+        {
+            let stored = self.command_bus.read().await;
+            if let Some(ref bus) = *stored {
+                return bus.clone();
+            }
+        }
+
+        // Fallback: build one on the fly (should not happen in normal operation)
         use crate::domain::ports::NullMemoryRepository;
         use crate::services::command_bus::CommandBus;
         use crate::services::goal_service::GoalService;
         use crate::services::memory_service::MemoryService;
         use crate::services::task_service::TaskService;
 
+        tracing::warn!("CommandBus not initialized — building ephemeral instance");
         let task_service = Arc::new(TaskService::new(self.task_repo.clone()));
         let goal_service = Arc::new(GoalService::new(self.goal_repo.clone()));
 
@@ -65,7 +75,7 @@ where
     pub async fn respond_to_escalation(
         &self,
         response: HumanEscalationResponse,
-        event_tx: Option<&mpsc::Sender<SwarmEvent>>,
+        _event_tx: Option<&mpsc::Sender<SwarmEvent>>,
     ) -> DomainResult<()> {
         use crate::services::command_bus::{
             CommandEnvelope, CommandSource, DomainCommand, GoalCommand, TaskCommand,
@@ -86,7 +96,7 @@ where
             }
         };
 
-        let command_bus = self.build_command_bus();
+        let command_bus = self.get_command_bus().await;
 
         match &response.decision {
             EscalationDecision::Accept => {
@@ -133,6 +143,17 @@ where
                         );
                         self.task_repo.update(&updated).await?;
 
+                        // Emit description update event via EventBus
+                        self.event_bus.publish(crate::services::event_factory::task_event(
+                            crate::services::event_bus::EventSeverity::Info,
+                            None,
+                            task_id,
+                            crate::services::event_bus::EventPayload::TaskDescriptionUpdated {
+                                task_id,
+                                reason: "Human clarification appended".to_string(),
+                            },
+                        )).await;
+
                         // Transition via CommandBus for proper event emission
                         if updated.status == TaskStatus::Blocked {
                             let envelope = CommandEnvelope::new(
@@ -166,6 +187,16 @@ where
                             );
                         }
                         self.goal_repo.update(&goal).await?;
+
+                        // Emit description update event via EventBus
+                        self.event_bus.publish(crate::services::event_factory::goal_event(
+                            crate::services::event_bus::EventSeverity::Info,
+                            goal_id,
+                            crate::services::event_bus::EventPayload::GoalDescriptionUpdated {
+                                goal_id,
+                                reason: "Human modified intent (requirements changed)".to_string(),
+                            },
+                        )).await;
                     }
                 }
                 // Unblock associated task via CommandBus
@@ -213,13 +244,7 @@ where
         let allows_continuation = response.decision.allows_continuation();
         let decision_str = response.decision.as_str().to_string();
 
-        if let Some(tx) = event_tx {
-            let _ = tx.send(SwarmEvent::HumanResponseReceived {
-                escalation_id: response.event_id,
-                decision: decision_str.clone(),
-                allows_continuation,
-            }).await;
-        }
+        // (Bridge forwards EventBus→event_tx automatically)
 
         self.event_bus.publish(crate::services::event_factory::make_event(
             crate::services::event_bus::EventSeverity::Info,

@@ -8,11 +8,12 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::domain::errors::DomainResult;
-use crate::domain::models::{Task, TaskSource, TaskStatus};
+use crate::domain::models::{Task, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
     IntegrationVerifierService, MergeQueue, MergeQueueConfig, VerifierConfig,
+    command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand},
     dag_restructure::{RestructureContext, RestructureDecision, RestructureTrigger, TaskPriorityModifier},
 };
 
@@ -162,15 +163,23 @@ where
             ),
         ).await;
 
-        // Emit event
-        let _ = event_tx.send(SwarmEvent::RestructureTriggered {
-            task_id: failed_task.id,
-            decision: format!("{:?}", decision),
-        }).await;
+        // Emit event via EventBus (journaled)
+        self.event_bus.publish(crate::services::event_factory::make_event(
+            crate::services::event_bus::EventSeverity::Warning,
+            crate::services::event_bus::EventCategory::Execution,
+            None,
+            Some(failed_task.id),
+            crate::services::event_bus::EventPayload::RestructureTriggered {
+                task_id: failed_task.id,
+                decision: format!("{:?}", decision),
+            },
+        )).await;
+        // (Bridge forwards EventBus→event_tx automatically)
 
         // Apply the decision
         match decision {
             RestructureDecision::RetryDifferentApproach { new_approach, new_agent_type } => {
+                // Update description directly (no command for description updates)
                 let mut updated_task = failed_task.clone();
                 updated_task.description = format!(
                     "{}\n\n## Restructure Note\nPrevious approach failed. Try: {}",
@@ -180,8 +189,30 @@ where
                     updated_task.agent_type = Some(agent_type);
                 }
                 updated_task.retry_count = 0;
-                let _ = updated_task.transition_to(TaskStatus::Ready);
                 self.task_repo.update(&updated_task).await?;
+
+                // Emit description update event via EventBus
+                self.event_bus.publish(crate::services::event_factory::task_event(
+                    crate::services::event_bus::EventSeverity::Info,
+                    None,
+                    failed_task.id,
+                    crate::services::event_bus::EventPayload::TaskDescriptionUpdated {
+                        task_id: failed_task.id,
+                        reason: format!("DAG restructure: retry with different approach — {}", new_approach),
+                    },
+                )).await;
+
+                // Transition to Ready via CommandBus
+                if let Some(cb) = self.command_bus.read().await.as_ref() {
+                    let envelope = CommandEnvelope::new(
+                        CommandSource::System,
+                        DomainCommand::Task(TaskCommand::Transition {
+                            task_id: failed_task.id,
+                            new_status: TaskStatus::Ready,
+                        }),
+                    );
+                    let _ = cb.dispatch(envelope).await;
+                }
                 Ok(true)
             }
             RestructureDecision::DecomposeDifferently { new_subtasks, remove_original } => {
@@ -271,40 +302,76 @@ where
         remove_original: bool,
         _event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
+        let cb = self.command_bus.read().await.clone();
+
         let mut title_to_id: Vec<(String, Uuid)> = Vec::new();
         for spec in new_tasks {
             let priority = match spec.priority {
                 TaskPriorityModifier::Same => failed_task.priority.clone(),
-                TaskPriorityModifier::Higher => crate::domain::models::TaskPriority::High,
-                TaskPriorityModifier::Lower => crate::domain::models::TaskPriority::Low,
+                TaskPriorityModifier::Higher => TaskPriority::High,
+                TaskPriorityModifier::Lower => TaskPriority::Low,
             };
 
-            let mut new_task = Task::with_title(&spec.title, &spec.description)
-                .with_source(TaskSource::System)
-                .with_priority(priority);
-
-            if let Some(ref agent_type) = spec.agent_type {
-                new_task = new_task.with_agent(agent_type);
-            }
-
             // Resolve depends_on titles to UUIDs from already-created tasks
+            let mut depends_on = Vec::new();
             for dep_title in &spec.depends_on {
                 if let Some((_, dep_id)) = title_to_id.iter().find(|(t, _)| t == dep_title) {
-                    new_task = new_task.with_dependency(*dep_id);
+                    depends_on.push(*dep_id);
                 }
             }
 
-            if new_task.validate().is_ok() {
-                title_to_id.push((spec.title.clone(), new_task.id));
-                self.task_repo.create(&new_task).await?;
+            // Submit task via CommandBus (journals TaskSubmitted event)
+            if let Some(ref cb) = cb {
+                let envelope = CommandEnvelope::new(
+                    CommandSource::System,
+                    DomainCommand::Task(TaskCommand::Submit {
+                        title: Some(spec.title.clone()),
+                        description: spec.description.clone(),
+                        parent_id: None,
+                        priority: priority.clone(),
+                        agent_type: spec.agent_type.clone(),
+                        depends_on: depends_on.clone(),
+                        context: Box::new(None),
+                        idempotency_key: None,
+                        source: TaskSource::System,
+                        deadline: None,
+                    }),
+                );
+                match cb.dispatch(envelope).await {
+                    Ok(crate::services::command_bus::CommandResult::Task(task)) => {
+                        title_to_id.push((spec.title.clone(), task.id));
+                    }
+                    Ok(other) => {
+                        tracing::warn!(
+                            "CommandBus returned unexpected result type for restructure subtask '{}': {:?}",
+                            spec.title, other
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("CommandBus submit failed for restructure subtask '{}': {}", spec.title, e);
+                    }
+                }
+            } else {
+                tracing::warn!("CommandBus not available — cannot create restructure subtask '{}'", spec.title);
             }
         }
 
-        // Cancel the original task if specified
+        // Cancel the original task via CommandBus
         if remove_original {
-            let mut canceled_task = failed_task.clone();
-            let _ = canceled_task.transition_to(TaskStatus::Canceled);
-            self.task_repo.update(&canceled_task).await?;
+            if let Some(ref cb) = cb {
+                let envelope = CommandEnvelope::new(
+                    CommandSource::System,
+                    DomainCommand::Task(TaskCommand::Cancel {
+                        task_id: failed_task.id,
+                        reason: "Replaced by restructure subtasks".to_string(),
+                    }),
+                );
+                if let Err(e) = cb.dispatch(envelope).await {
+                    tracing::warn!("CommandBus cancel failed for task {}: {}", failed_task.id, e);
+                }
+            } else {
+                tracing::warn!("CommandBus not available — cannot cancel task {}", failed_task.id);
+            }
         }
 
         Ok(())
@@ -314,36 +381,68 @@ where
     async fn spawn_specialist_for_failure(
         &self,
         failed_task: &Task,
-        event_tx: &mpsc::Sender<SwarmEvent>,
+        _event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
-        let diagnostic_task = Task::with_title(
-            &format!("Diagnostic: Investigate failure of task {}", &failed_task.id.to_string()[..8]),
-            &format!(
-                "The following task has permanently failed after {} retries:\n\n\
-                Title: {}\n\
-                Description: {}\n\n\
-                Please investigate the root cause of failure and suggest remediation.\n\
-                Consider:\n\
-                - Are the task requirements achievable?\n\
-                - Are there missing dependencies or prerequisites?\n\
-                - Is the agent type appropriate for this task?\n\
-                - Are there external blockers (permissions, resources, etc.)?",
-                failed_task.retry_count,
-                failed_task.title,
-                failed_task.description
-            ),
-        )
-        .with_source(TaskSource::System)
-        .with_agent("diagnostic-analyst");
+        let title = format!("Diagnostic: Investigate failure of task {}", &failed_task.id.to_string()[..8]);
+        let description = format!(
+            "The following task has permanently failed after {} retries:\n\n\
+            Title: {}\n\
+            Description: {}\n\n\
+            Please investigate the root cause of failure and suggest remediation.\n\
+            Consider:\n\
+            - Are the task requirements achievable?\n\
+            - Are there missing dependencies or prerequisites?\n\
+            - Is the agent type appropriate for this task?\n\
+            - Are there external blockers (permissions, resources, etc.)?",
+            failed_task.retry_count,
+            failed_task.title,
+            failed_task.description
+        );
 
-        diagnostic_task.validate().map_err(crate::domain::errors::DomainError::ValidationFailed)?;
-        self.task_repo.create(&diagnostic_task).await?;
+        // Submit diagnostic task via CommandBus (journals TaskSubmitted event)
+        let diagnostic_task_id = if let Some(cb) = self.command_bus.read().await.as_ref() {
+            let envelope = CommandEnvelope::new(
+                CommandSource::System,
+                DomainCommand::Task(TaskCommand::Submit {
+                    title: Some(title.clone()),
+                    description: description.clone(),
+                    parent_id: None,
+                    priority: TaskPriority::Normal,
+                    agent_type: Some("diagnostic-analyst".to_string()),
+                    depends_on: vec![],
+                    context: Box::new(None),
+                    idempotency_key: None,
+                    source: TaskSource::System,
+                    deadline: None,
+                }),
+            );
+            match cb.dispatch(envelope).await {
+                Ok(crate::services::command_bus::CommandResult::Task(task)) => task.id,
+                Ok(other) => {
+                    tracing::warn!("CommandBus returned unexpected result for diagnostic task: {:?}", other);
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!("CommandBus submit failed for diagnostic task: {}", e);
+                    return Ok(());
+                }
+            }
+        } else {
+            tracing::warn!("CommandBus not available — cannot create diagnostic task for {}", failed_task.id);
+            return Ok(());
+        };
 
-        let _ = event_tx.send(SwarmEvent::SpecialistSpawned {
-            specialist_type: "diagnostic-analyst".to_string(),
-            trigger: format!("Task {} permanently failed", failed_task.id),
-            task_id: Some(diagnostic_task.id),
-        }).await;
+        // Publish specialist spawned event via EventBus
+        self.event_bus.publish(crate::services::event_factory::agent_event(
+            crate::services::event_bus::EventSeverity::Info,
+            Some(diagnostic_task_id),
+            crate::services::event_bus::EventPayload::SpecialistSpawned {
+                specialist_type: "diagnostic-analyst".to_string(),
+                trigger: format!("Task {} permanently failed", failed_task.id),
+                task_id: Some(diagnostic_task_id),
+            },
+        )).await;
+        // (Bridge forwards EventBus→event_tx automatically)
 
         self.audit_log.info(
             AuditCategory::Agent,
@@ -460,48 +559,85 @@ where
         limit_type: &str,
         current_value: u32,
         limit_value: u32,
-        event_tx: &mpsc::Sender<SwarmEvent>,
+        _event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
-        let evaluation_task = Task::with_title(
-            &format!("Limit Evaluation: {} exceeded for task {}", limit_type, &parent_task.id.to_string()[..8]),
-            &format!(
-                "Spawn limit exceeded while creating subtasks:\n\n\
-                Parent Task: {}\n\
-                Limit Type: {}\n\
-                Current Value: {}\n\
-                Limit Value: {}\n\n\
-                Please evaluate whether:\n\
-                1. An extension should be granted (the decomposition is genuinely necessary)\n\
-                2. The task should be restructured (different approach needed)\n\
-                3. The agent is inefficient (template refinement needed)\n\n\
-                Your decision should include:\n\
-                - GRANT_EXTENSION: Allow additional subtasks with a new limit\n\
-                - RESTRUCTURE: Recommend a different decomposition approach\n\
-                - REJECT: Task tree is too complex, simplification required",
-                parent_task.title,
-                limit_type,
-                current_value,
-                limit_value
-            ),
-        )
-        .with_source(TaskSource::System)
-        .with_agent("limit-evaluation-specialist");
-
-        evaluation_task.validate().map_err(crate::domain::errors::DomainError::ValidationFailed)?;
-        self.task_repo.create(&evaluation_task).await?;
-
-        let _ = event_tx.send(SwarmEvent::SpecialistSpawned {
-            specialist_type: "limit-evaluation-specialist".to_string(),
-            trigger: format!("{} limit exceeded ({}/{})", limit_type, current_value, limit_value),
-            task_id: Some(evaluation_task.id),
-        }).await;
-
-        let _ = event_tx.send(SwarmEvent::SpawnLimitExceeded {
-            parent_task_id: parent_task.id,
-            limit_type: limit_type.to_string(),
+        let title = format!("Limit Evaluation: {} exceeded for task {}", limit_type, &parent_task.id.to_string()[..8]);
+        let description = format!(
+            "Spawn limit exceeded while creating subtasks:\n\n\
+            Parent Task: {}\n\
+            Limit Type: {}\n\
+            Current Value: {}\n\
+            Limit Value: {}\n\n\
+            Please evaluate whether:\n\
+            1. An extension should be granted (the decomposition is genuinely necessary)\n\
+            2. The task should be restructured (different approach needed)\n\
+            3. The agent is inefficient (template refinement needed)\n\n\
+            Your decision should include:\n\
+            - GRANT_EXTENSION: Allow additional subtasks with a new limit\n\
+            - RESTRUCTURE: Recommend a different decomposition approach\n\
+            - REJECT: Task tree is too complex, simplification required",
+            parent_task.title,
+            limit_type,
             current_value,
-            limit_value,
-        }).await;
+            limit_value
+        );
+
+        // Submit evaluation task via CommandBus
+        let eval_task_id = if let Some(cb) = self.command_bus.read().await.as_ref() {
+            let envelope = CommandEnvelope::new(
+                CommandSource::System,
+                DomainCommand::Task(TaskCommand::Submit {
+                    title: Some(title.clone()),
+                    description: description.clone(),
+                    parent_id: None,
+                    priority: TaskPriority::Normal,
+                    agent_type: Some("limit-evaluation-specialist".to_string()),
+                    depends_on: vec![],
+                    context: Box::new(None),
+                    idempotency_key: None,
+                    source: TaskSource::System,
+                    deadline: None,
+                }),
+            );
+            match cb.dispatch(envelope).await {
+                Ok(crate::services::command_bus::CommandResult::Task(task)) => task.id,
+                Ok(other) => {
+                    tracing::warn!("CommandBus returned unexpected result for limit evaluation task: {:?}", other);
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!("CommandBus submit failed for limit evaluation task: {}", e);
+                    return Ok(());
+                }
+            }
+        } else {
+            tracing::warn!("CommandBus not available — cannot create limit evaluation task for {}", parent_task.id);
+            return Ok(());
+        };
+
+        // Publish events via EventBus
+        self.event_bus.publish(crate::services::event_factory::agent_event(
+            crate::services::event_bus::EventSeverity::Info,
+            Some(eval_task_id),
+            crate::services::event_bus::EventPayload::SpecialistSpawned {
+                specialist_type: "limit-evaluation-specialist".to_string(),
+                trigger: format!("{} limit exceeded ({}/{})", limit_type, current_value, limit_value),
+                task_id: Some(eval_task_id),
+            },
+        )).await;
+
+        self.event_bus.publish(crate::services::event_factory::agent_event(
+            crate::services::event_bus::EventSeverity::Warning,
+            Some(parent_task.id),
+            crate::services::event_bus::EventPayload::SpawnLimitExceeded {
+                parent_task_id: parent_task.id,
+                limit_type: limit_type.to_string(),
+                current_value,
+                limit_value,
+            },
+        )).await;
+
+        // (Bridge forwards EventBus→event_tx automatically)
 
         self.audit_log.info(
             AuditCategory::Agent,
@@ -518,7 +654,7 @@ where
     /// Process merge conflicts and spawn conflict resolution specialists.
     async fn process_merge_conflict_specialists(
         &self,
-        event_tx: &mpsc::Sender<SwarmEvent>,
+        _event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
         let verifier = IntegrationVerifierService::new(
             self.task_repo.clone(),
@@ -578,47 +714,80 @@ where
                     .unwrap_or(false);
 
             if !resolution_exists {
-                let resolution_task = Task::with_title(
-                    &format!("Resolve merge conflict: {} → {}", conflict.source_branch, conflict.target_branch),
-                    &format!(
-                        "A merge conflict was detected when trying to merge branch '{}' into '{}'.\n\n\
-                        Conflicting files:\n{}\n\n\
-                        Working directory: {}\n\n\
-                        Please resolve the conflicts by:\n\
-                        1. Analyzing the conflicting changes\n\
-                        2. Understanding the intent of each change\n\
-                        3. Merging the changes in a way that preserves both intents\n\
-                        4. Testing the merged result\n\
-                        5. Completing the merge commit",
-                        conflict.source_branch,
-                        conflict.target_branch,
-                        conflict.conflict_files.iter()
-                            .map(|f| format!("  - {}", f))
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                        conflict.workdir
-                    ),
-                )
-                .with_source(TaskSource::System)
-                .with_agent("merge-conflict-specialist");
+                let title = format!("Resolve merge conflict: {} → {}", conflict.source_branch, conflict.target_branch);
+                let description = format!(
+                    "A merge conflict was detected when trying to merge branch '{}' into '{}'.\n\n\
+                    Conflicting files:\n{}\n\n\
+                    Working directory: {}\n\n\
+                    Please resolve the conflicts by:\n\
+                    1. Analyzing the conflicting changes\n\
+                    2. Understanding the intent of each change\n\
+                    3. Merging the changes in a way that preserves both intents\n\
+                    4. Testing the merged result\n\
+                    5. Completing the merge commit",
+                    conflict.source_branch,
+                    conflict.target_branch,
+                    conflict.conflict_files.iter()
+                        .map(|f| format!("  - {}", f))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    conflict.workdir
+                );
 
-                if resolution_task.validate().is_ok() {
-                    if let Ok(()) = self.task_repo.create(&resolution_task).await {
-                        let _ = event_tx.send(SwarmEvent::SpecialistSpawned {
+                // Submit via CommandBus
+                let task_id = if let Some(cb) = self.command_bus.read().await.as_ref() {
+                    let envelope = CommandEnvelope::new(
+                        CommandSource::System,
+                        DomainCommand::Task(TaskCommand::Submit {
+                            title: Some(title.clone()),
+                            description: description.clone(),
+                            parent_id: None,
+                            priority: TaskPriority::Normal,
+                            agent_type: Some("merge-conflict-specialist".to_string()),
+                            depends_on: vec![],
+                            context: Box::new(None),
+                            idempotency_key: None,
+                            source: TaskSource::System,
+                            deadline: None,
+                        }),
+                    );
+                    match cb.dispatch(envelope).await {
+                        Ok(crate::services::command_bus::CommandResult::Task(task)) => Some(task.id),
+                        Ok(other) => {
+                            tracing::warn!("CommandBus returned unexpected result for merge conflict task: {:?}", other);
+                            None
+                        }
+                        Err(e) => {
+                            tracing::warn!("CommandBus submit failed for merge conflict task: {}", e);
+                            None
+                        }
+                    }
+                } else {
+                    tracing::warn!("CommandBus not available — cannot create merge conflict specialist task");
+                    None
+                };
+
+                if let Some(task_id) = task_id {
+                    // Publish via EventBus
+                    self.event_bus.publish(crate::services::event_factory::agent_event(
+                        crate::services::event_bus::EventSeverity::Info,
+                        Some(task_id),
+                        crate::services::event_bus::EventPayload::SpecialistSpawned {
                             specialist_type: "merge-conflict-specialist".to_string(),
                             trigger: format!("Merge conflict in {} files", conflict.conflict_files.len()),
-                            task_id: Some(resolution_task.id),
-                        }).await;
+                            task_id: Some(task_id),
+                        },
+                    )).await;
+                    // (Bridge forwards EventBus→event_tx automatically)
 
-                        self.audit_log.info(
-                            AuditCategory::Agent,
-                            AuditAction::AgentSpawned,
-                            format!(
-                                "Spawned Merge Conflict Specialist for {} → {}",
-                                conflict.source_branch, conflict.target_branch
-                            ),
-                        ).await;
-                    }
+                    self.audit_log.info(
+                        AuditCategory::Agent,
+                        AuditAction::AgentSpawned,
+                        format!(
+                            "Spawned Merge Conflict Specialist for {} → {}",
+                            conflict.source_branch, conflict.target_branch
+                        ),
+                    ).await;
                 }
             }
         }

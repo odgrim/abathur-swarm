@@ -448,3 +448,173 @@ pub struct SwarmStats {
     pub active_worktrees: usize,
     pub total_tokens_used: u64,
 }
+
+/// Try to convert an EventPayload into a SwarmEvent.
+///
+/// Not all EventPayload variants have SwarmEvent counterparts. Returns `None`
+/// for payloads that don't map to a TUI-displayable SwarmEvent.
+impl SwarmEvent {
+    pub fn from_event_payload(payload: &crate::services::event_bus::EventPayload) -> Option<Self> {
+        use crate::services::event_bus::EventPayload;
+        match payload {
+            EventPayload::OrchestratorStarted => Some(SwarmEvent::Started),
+            EventPayload::OrchestratorPaused => Some(SwarmEvent::Paused),
+            EventPayload::OrchestratorResumed => Some(SwarmEvent::Resumed),
+            EventPayload::OrchestratorStopped => Some(SwarmEvent::Stopped),
+            EventPayload::GoalStarted { goal_id, goal_name } => Some(SwarmEvent::GoalStarted {
+                goal_id: *goal_id,
+                goal_name: goal_name.clone(),
+            }),
+            EventPayload::GoalDecomposed { goal_id, task_count } => Some(SwarmEvent::GoalDecomposed {
+                goal_id: *goal_id,
+                task_count: *task_count,
+            }),
+            EventPayload::GoalIterationCompleted { goal_id, tasks_completed } => Some(SwarmEvent::GoalIterationCompleted {
+                goal_id: *goal_id,
+                tasks_completed: *tasks_completed,
+            }),
+            EventPayload::GoalPaused { goal_id, reason } => Some(SwarmEvent::GoalPaused {
+                goal_id: *goal_id,
+                reason: reason.clone(),
+            }),
+            EventPayload::ConvergenceCompleted { goal_id, converged, iterations, final_satisfaction } => Some(SwarmEvent::ConvergenceCompleted {
+                goal_id: *goal_id,
+                converged: *converged,
+                iterations: *iterations,
+                final_satisfaction: final_satisfaction.clone(),
+            }),
+            EventPayload::SemanticDriftDetected { goal_id, recurring_gaps, iterations } => Some(SwarmEvent::SemanticDriftDetected {
+                goal_id: *goal_id,
+                recurring_gaps: recurring_gaps.clone(),
+                iterations: *iterations,
+            }),
+            EventPayload::TaskSubmitted { task_id, task_title, goal_id } => Some(SwarmEvent::TaskSubmitted {
+                task_id: *task_id,
+                task_title: task_title.clone(),
+                goal_id: *goal_id,
+            }),
+            EventPayload::TaskReady { task_id, task_title } => Some(SwarmEvent::TaskReady {
+                task_id: *task_id,
+                task_title: task_title.clone(),
+            }),
+            EventPayload::TaskSpawned { task_id, task_title, agent_type } => Some(SwarmEvent::TaskSpawned {
+                task_id: *task_id,
+                task_title: task_title.clone(),
+                agent_type: agent_type.clone(),
+            }),
+            EventPayload::TaskCompleted { task_id, tokens_used } => Some(SwarmEvent::TaskCompleted {
+                task_id: *task_id,
+                tokens_used: *tokens_used,
+            }),
+            EventPayload::TaskFailed { task_id, error, retry_count } => Some(SwarmEvent::TaskFailed {
+                task_id: *task_id,
+                error: error.clone(),
+                retry_count: *retry_count,
+            }),
+            EventPayload::TaskRetrying { task_id, attempt, max_attempts } => Some(SwarmEvent::TaskRetrying {
+                task_id: *task_id,
+                attempt: *attempt,
+                max_attempts: *max_attempts,
+            }),
+            EventPayload::TaskVerified { task_id, passed, checks_passed, checks_total } => Some(SwarmEvent::TaskVerified {
+                task_id: *task_id,
+                passed: *passed,
+                checks_passed: *checks_passed,
+                checks_total: *checks_total,
+            }),
+            EventPayload::TaskQueuedForMerge { task_id, stage } => Some(SwarmEvent::TaskQueuedForMerge {
+                task_id: *task_id,
+                stage: stage.clone(),
+            }),
+            EventPayload::PullRequestCreated { task_id, pr_url, branch } => Some(SwarmEvent::PullRequestCreated {
+                task_id: *task_id,
+                pr_url: pr_url.clone(),
+                branch: branch.clone(),
+            }),
+            EventPayload::TaskMerged { task_id, commit_sha } => Some(SwarmEvent::TaskMerged {
+                task_id: *task_id,
+                commit_sha: commit_sha.clone(),
+            }),
+            EventPayload::WorktreeCreated { task_id, path } => Some(SwarmEvent::WorktreeCreated {
+                task_id: *task_id,
+                path: path.clone(),
+            }),
+            EventPayload::TaskClaimed { task_id, agent_type } => Some(SwarmEvent::TaskClaimed {
+                task_id: *task_id,
+                agent_type: agent_type.clone(),
+            }),
+            EventPayload::AgentInstanceCompleted { instance_id, task_id, tokens_used } => Some(SwarmEvent::AgentInstanceCompleted {
+                instance_id: *instance_id,
+                task_id: *task_id,
+                tokens_used: *tokens_used,
+            }),
+            EventPayload::ReconciliationCompleted { corrections_made } => Some(SwarmEvent::ReconciliationCompleted {
+                corrections_made: *corrections_made,
+            }),
+            EventPayload::EvolutionTriggered { template_name, trigger } => Some(SwarmEvent::EvolutionTriggered {
+                template_name: template_name.clone(),
+                trigger: trigger.clone(),
+            }),
+            EventPayload::SpecialistSpawned { specialist_type, trigger, task_id } => Some(SwarmEvent::SpecialistSpawned {
+                specialist_type: specialist_type.clone(),
+                trigger: trigger.clone(),
+                task_id: *task_id,
+            }),
+            EventPayload::AgentCreated { agent_type, tier } => Some(SwarmEvent::AgentCreated {
+                agent_type: agent_type.clone(),
+                tier: tier.clone(),
+            }),
+            EventPayload::GoalAlignmentEvaluated { task_id, overall_score, passes } => Some(SwarmEvent::GoalAlignmentEvaluated {
+                task_id: *task_id,
+                overall_score: *overall_score,
+                passes: *passes,
+            }),
+            EventPayload::RestructureTriggered { task_id, decision } => Some(SwarmEvent::RestructureTriggered {
+                task_id: *task_id,
+                decision: decision.clone(),
+            }),
+            EventPayload::SpawnLimitExceeded { parent_task_id, limit_type, current_value, limit_value } => Some(SwarmEvent::SpawnLimitExceeded {
+                parent_task_id: *parent_task_id,
+                limit_type: limit_type.clone(),
+                current_value: *current_value,
+                limit_value: *limit_value,
+            }),
+            EventPayload::HumanEscalationRequired { goal_id, task_id, reason, urgency, questions, is_blocking } => Some(SwarmEvent::HumanEscalationRequired {
+                goal_id: *goal_id,
+                task_id: *task_id,
+                reason: reason.clone(),
+                urgency: urgency.clone(),
+                questions: questions.clone(),
+                is_blocking: *is_blocking,
+            }),
+            EventPayload::HumanResponseReceived { escalation_id, decision, allows_continuation } => Some(SwarmEvent::HumanResponseReceived {
+                escalation_id: *escalation_id,
+                decision: decision.clone(),
+                allows_continuation: *allows_continuation,
+            }),
+            EventPayload::IntentVerificationStarted { goal_id, iteration } => Some(SwarmEvent::IntentVerificationStarted {
+                goal_id: *goal_id,
+                iteration: *iteration,
+            }),
+            EventPayload::IntentVerificationCompleted { goal_id, satisfaction, confidence, gaps_count, iteration, will_retry } => Some(SwarmEvent::IntentVerificationCompleted {
+                goal_id: *goal_id,
+                satisfaction: satisfaction.clone(),
+                confidence: *confidence,
+                gaps_count: *gaps_count,
+                iteration: *iteration,
+                will_retry: *will_retry,
+            }),
+            EventPayload::BranchVerificationStarted { branch_task_ids, waiting_task_ids } => Some(SwarmEvent::BranchVerificationStarted {
+                branch_task_ids: branch_task_ids.clone(),
+                waiting_task_ids: waiting_task_ids.clone(),
+            }),
+            EventPayload::BranchVerificationCompleted { branch_satisfied, dependents_can_proceed, gaps_count } => Some(SwarmEvent::BranchVerificationCompleted {
+                branch_satisfied: *branch_satisfied,
+                dependents_can_proceed: *dependents_can_proceed,
+                gaps_count: *gaps_count,
+            }),
+            // EventPayload variants with no SwarmEvent counterpart
+            _ => None,
+        }
+    }
+}

@@ -279,6 +279,8 @@ impl TriggerRule {
 /// Pending absence timer: tracks when a trigger started and what event is expected.
 #[derive(Debug, Clone)]
 struct AbsenceTimer {
+    /// Unique ID for persistence.
+    id: Uuid,
     /// When the trigger event arrived (starts the clock).
     started_at: DateTime<Utc>,
     /// Deadline in seconds from started_at.
@@ -304,6 +306,8 @@ pub struct TriggerRuleEngine {
     event_bus: Option<Arc<crate::services::event_bus::EventBus>>,
     /// Optional repository for persisting rule fire state.
     rule_repo: Option<Arc<dyn crate::domain::ports::TriggerRuleRepository>>,
+    /// Optional DB pool for persisting absence timers across restarts.
+    pool: Option<sqlx::SqlitePool>,
 }
 
 impl TriggerRuleEngine {
@@ -315,6 +319,7 @@ impl TriggerRuleEngine {
             absence_timers: Arc::new(RwLock::new(HashMap::new())),
             event_bus: None,
             rule_repo: None,
+            pool: None,
         }
     }
 
@@ -328,6 +333,120 @@ impl TriggerRuleEngine {
     pub fn with_rule_repo(mut self, repo: Arc<dyn crate::domain::ports::TriggerRuleRepository>) -> Self {
         self.rule_repo = Some(repo);
         self
+    }
+
+    /// Enable absence timer persistence via SQLite.
+    pub fn with_pool(mut self, pool: sqlx::SqlitePool) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
+    /// Load persisted absence timers from DB into the in-memory map.
+    ///
+    /// Called during startup to restore timers that were pending when the
+    /// process last stopped. Expired timers are left in place — they'll fire
+    /// on the next `evaluate()` call.
+    pub async fn load_pending_timers(&self) {
+        let Some(ref pool) = self.pool else { return };
+
+        #[derive(sqlx::FromRow)]
+        struct TimerRow {
+            id: String,
+            rule_id: String,
+            started_at: String,
+            deadline_secs: i64,
+            expected_payload_type: String,
+            scope_task_id: Option<String>,
+            scope_correlation_id: Option<String>,
+        }
+
+        let rows: Vec<TimerRow> = match sqlx::query_as(
+            "SELECT id, rule_id, started_at, deadline_secs, expected_payload_type, scope_task_id, scope_correlation_id FROM trigger_absence_timers"
+        )
+            .fetch_all(pool)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Failed to load absence timers from DB: {}", e);
+                return;
+            }
+        };
+
+        let mut timers = self.absence_timers.write().await;
+        let mut loaded = 0usize;
+
+        for row in rows {
+            let rule_id = match Uuid::parse_str(&row.rule_id) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+            let timer_id = match Uuid::parse_str(&row.id) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+            let started_at = match chrono::DateTime::parse_from_rfc3339(&row.started_at) {
+                Ok(dt) => dt.with_timezone(&Utc),
+                Err(_) => continue,
+            };
+
+            let timer = AbsenceTimer {
+                id: timer_id,
+                started_at,
+                deadline_secs: row.deadline_secs as u64,
+                expected_type: row.expected_payload_type,
+                task_id: row.scope_task_id.and_then(|s| Uuid::parse_str(&s).ok()),
+                correlation_id: row.scope_correlation_id.and_then(|s| Uuid::parse_str(&s).ok()),
+            };
+
+            timers.entry(rule_id).or_default().push(timer);
+            loaded += 1;
+        }
+
+        if loaded > 0 {
+            tracing::info!("Loaded {} pending absence timers from DB", loaded);
+        }
+    }
+
+    /// Persist an absence timer to DB.
+    async fn persist_timer(&self, rule_id: Uuid, timer: &AbsenceTimer) {
+        let Some(ref pool) = self.pool else { return };
+
+        if let Err(e) = sqlx::query(
+            "INSERT OR REPLACE INTO trigger_absence_timers (id, rule_id, started_at, deadline_secs, expected_payload_type, scope_task_id, scope_correlation_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )
+            .bind(timer.id.to_string())
+            .bind(rule_id.to_string())
+            .bind(timer.started_at.to_rfc3339())
+            .bind(timer.deadline_secs as i64)
+            .bind(&timer.expected_type)
+            .bind(timer.task_id.map(|id| id.to_string()))
+            .bind(timer.correlation_id.map(|id| id.to_string()))
+            .execute(pool)
+            .await
+        {
+            tracing::warn!("Failed to persist absence timer {}: {}", timer.id, e);
+        }
+    }
+
+    /// Delete an absence timer from DB.
+    async fn delete_timer(&self, timer_id: Uuid) {
+        let Some(ref pool) = self.pool else { return };
+
+        if let Err(e) = sqlx::query("DELETE FROM trigger_absence_timers WHERE id = ?")
+            .bind(timer_id.to_string())
+            .execute(pool)
+            .await
+        {
+            tracing::warn!("Failed to delete absence timer {}: {}", timer_id, e);
+        }
+    }
+
+    /// Delete multiple absence timers from DB by their IDs.
+    async fn delete_timers(&self, timer_ids: &[Uuid]) {
+        for id in timer_ids {
+            self.delete_timer(*id).await;
+        }
     }
 
     /// Load rules (e.g. from database at startup).
@@ -421,26 +540,40 @@ impl TriggerRuleEngine {
         let event_type = event.payload.variant_name().to_string();
 
         // Phase 0: Check if this event cancels any pending absence timers
+        let cancelled_timer_ids: Vec<Uuid>;
         {
             let mut timers = self.absence_timers.write().await;
+            let mut cancelled = Vec::new();
             for timer_list in timers.values_mut() {
                 timer_list.retain(|timer| {
                     // Cancel timer if the expected event arrived (scoped by task_id)
                     let type_match = timer.expected_type == event_type;
                     let scope_match = timer.task_id.is_none()
                         || timer.task_id == event.task_id;
-                    !(type_match && scope_match)
+                    if type_match && scope_match {
+                        cancelled.push(timer.id);
+                        false
+                    } else {
+                        true
+                    }
                 });
             }
             // Remove empty entries
             timers.retain(|_, v| !v.is_empty());
+            cancelled_timer_ids = cancelled;
+        }
+        // Delete cancelled timers from DB
+        if !cancelled_timer_ids.is_empty() {
+            self.delete_timers(&cancelled_timer_ids).await;
         }
 
         // Phase 0b: Check for expired absence timers and fire rules
+        let expired_timer_ids: Vec<Uuid>;
         {
             let now = Utc::now();
             let mut timers = self.absence_timers.write().await;
             let mut rules = self.rules.write().await;
+            let mut expired_ids = Vec::new();
 
             for rule in rules.iter_mut() {
                 if !rule.enabled {
@@ -459,6 +592,7 @@ impl TriggerRuleEngine {
                     // Fire for each expired timer
                     for &i in expired_indices.iter().rev() {
                         let expired = timer_list.remove(i);
+                        expired_ids.push(expired.id);
 
                         // Cooldown check
                         let cooldown_ok = match rule.cooldown {
@@ -517,9 +651,15 @@ impl TriggerRuleEngine {
                     }
                 }
             }
+            expired_timer_ids = expired_ids;
+        }
+        // Delete expired timers from DB
+        if !expired_timer_ids.is_empty() {
+            self.delete_timers(&expired_timer_ids).await;
         }
 
         // Phase 1: evaluate rules under write lock, collect fired rules
+        let mut new_timers: Vec<(Uuid, AbsenceTimer)> = Vec::new();
         {
             let mut rules = self.rules.write().await;
             let mut windows = self.event_windows.write().await;
@@ -563,15 +703,15 @@ impl TriggerRuleEngine {
                     TriggerCondition::Absence { trigger_type, expected_type, deadline_secs } => {
                         // If the current event matches the trigger_type, start a timer
                         if event_type == *trigger_type {
-                            let mut timers = self.absence_timers.write().await;
-                            let timer_list = timers.entry(rule.id).or_default();
-                            timer_list.push(AbsenceTimer {
+                            let timer = AbsenceTimer {
+                                id: Uuid::new_v4(),
                                 started_at: now,
                                 deadline_secs: *deadline_secs,
                                 expected_type: expected_type.clone(),
                                 task_id: event.task_id,
                                 correlation_id: event.correlation_id,
-                            });
+                            };
+                            new_timers.push((rule.id, timer));
                         }
                         // Absence conditions never fire immediately — they fire on timeout
                         false
@@ -622,6 +762,18 @@ impl TriggerRuleEngine {
                 fired_rules.push(rule.clone());
             }
         } // locks dropped
+
+        // Phase 1b: insert new absence timers into in-memory map and persist to DB
+        if !new_timers.is_empty() {
+            let mut timers = self.absence_timers.write().await;
+            for (rule_id, timer) in &new_timers {
+                timers.entry(*rule_id).or_default().push(timer.clone());
+            }
+            drop(timers);
+            for (rule_id, timer) in &new_timers {
+                self.persist_timer(*rule_id, timer).await;
+            }
+        }
 
         // Phase 2: persist fire state for rules that fired (outside of lock)
         if let Some(ref repo) = self.rule_repo {
@@ -877,6 +1029,54 @@ pub fn builtin_trigger_rules() -> Vec<TriggerRule> {
         )
         .with_description("Escalate memory conflicts for human review")
         .with_cooldown(300),
+
+        // task-completion-timeout: escalate if a claimed task doesn't complete within 30min
+        TriggerRule::new(
+            "task-completion-timeout",
+            SerializableEventFilter {
+                categories: vec![EventCategory::Task],
+                min_severity: None,
+                payload_types: vec!["TaskClaimed".to_string()],
+                goal_id: None,
+                task_id: None,
+            },
+            TriggerAction::EmitEvent {
+                payload: TriggerEventPayload::HumanEscalation {
+                    reason: "Task claimed but not completed within 30 minutes — may be stuck".to_string(),
+                },
+                category: EventCategory::Escalation,
+                severity: EventSeverity::Warning,
+            },
+        )
+        .with_description("Escalate when a claimed task does not complete within 30 minutes")
+        .with_condition(TriggerCondition::Absence {
+            trigger_type: "TaskClaimed".to_string(),
+            expected_type: "TaskCompleted".to_string(),
+            deadline_secs: 1800,
+        }),
+
+        // goal-progress-timeout: request evaluation if no task completes within 1hr of goal start
+        TriggerRule::new(
+            "goal-progress-timeout",
+            SerializableEventFilter {
+                categories: vec![EventCategory::Goal],
+                min_severity: None,
+                payload_types: vec!["GoalStarted".to_string()],
+                goal_id: None,
+                task_id: None,
+            },
+            TriggerAction::EmitEvent {
+                payload: TriggerEventPayload::GoalEvaluationRequested { goal_id: None },
+                category: EventCategory::Goal,
+                severity: EventSeverity::Warning,
+            },
+        )
+        .with_description("Request goal evaluation when no task completes within 1 hour of goal start")
+        .with_condition(TriggerCondition::Absence {
+            trigger_type: "GoalStarted".to_string(),
+            expected_type: "TaskCompleted".to_string(),
+            deadline_secs: 3600,
+        }),
     ]
 }
 
@@ -932,7 +1132,7 @@ mod tests {
     #[test]
     fn test_trigger_rule_creation() {
         let rules = builtin_trigger_rules();
-        assert!(rules.len() >= 4);
+        assert!(rules.len() >= 6);
         assert!(rules.iter().all(|r| r.enabled));
         assert_eq!(rules[0].name, "semantic-memory-goal-eval");
     }

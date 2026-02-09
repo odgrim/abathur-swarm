@@ -19,6 +19,7 @@ use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
     CircuitScope, GoalContextService,
     TaskExecution, TaskOutcome,
+    command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand},
 };
 
 use super::helpers::{auto_commit_worktree, run_post_completion_workflow};
@@ -279,15 +280,21 @@ where
                 }
             }
 
-            let _ = event_tx.send(SwarmEvent::TaskSpawned {
-                task_id: task.id,
-                task_title: task.title.clone(),
-                agent_type: Some(agent_type.clone()),
-            }).await;
+            // Publish TaskSpawned via EventBus (bridge forwards to event_tx)
+            self.event_bus.publish(crate::services::event_factory::task_event(
+                crate::services::event_bus::EventSeverity::Info,
+                None,
+                task.id,
+                crate::services::event_bus::EventPayload::TaskSpawned {
+                    task_id: task.id,
+                    task_title: task.title.clone(),
+                    agent_type: Some(agent_type.clone()),
+                },
+            )).await;
 
             // Create worktree if configured
             let worktree_path = if self.config.use_worktrees {
-                match self.create_worktree_for_task(task.id, event_tx).await {
+                match self.create_worktree_for_task(task.id).await {
                     Ok(path) => Some(path),
                     Err(e) => {
                         tracing::warn!("Failed to create worktree for task {}: {}", task.id, e);
@@ -386,6 +393,8 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let goal_repo = self.goal_repo.clone();
             let worktree_repo = self.worktree_repo.clone();
             let event_tx = event_tx.clone();
+            let event_bus = self.event_bus.clone();
+            let command_bus = self.command_bus.read().await.clone();
             let max_turns = self.config.default_max_turns;
             let total_tokens = self.total_tokens.clone();
             let use_worktrees = self.config.use_worktrees;
@@ -406,10 +415,46 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             tokio::spawn(async move {
                 let _permit = permit;
 
-                // Update task to running
-                if let Ok(Some(mut running_task)) = task_repo.get(task_id).await {
-                    let _ = running_task.transition_to(TaskStatus::Running);
-                    let _ = task_repo.update(&running_task).await;
+                // Claim task via CommandBus (transitions to Running and journals event)
+                if let Some(ref cb) = command_bus {
+                    let envelope = CommandEnvelope::new(
+                        CommandSource::System,
+                        DomainCommand::Task(TaskCommand::Claim {
+                            task_id,
+                            agent_type: agent_type.clone(),
+                        }),
+                    );
+                    if let Err(e) = cb.dispatch(envelope).await {
+                        tracing::warn!("Failed to claim task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
+                        if let Ok(Some(mut running_task)) = task_repo.get(task_id).await {
+                            let _ = running_task.transition_to(TaskStatus::Running);
+                            let _ = task_repo.update(&running_task).await;
+                            event_bus.publish(crate::services::event_factory::task_event(
+                                crate::services::event_bus::EventSeverity::Info,
+                                None,
+                                task_id,
+                                crate::services::event_bus::EventPayload::TaskClaimed {
+                                    task_id,
+                                    agent_type: agent_type.clone(),
+                                },
+                            )).await;
+                        }
+                    }
+                } else {
+                    tracing::warn!("CommandBus not initialized for task {} claim, using non-atomic fallback", task_id);
+                    if let Ok(Some(mut running_task)) = task_repo.get(task_id).await {
+                        let _ = running_task.transition_to(TaskStatus::Running);
+                        let _ = task_repo.update(&running_task).await;
+                        event_bus.publish(crate::services::event_factory::task_event(
+                            crate::services::event_bus::EventSeverity::Info,
+                            None,
+                            task_id,
+                            crate::services::event_bus::EventPayload::TaskClaimed {
+                                task_id,
+                                agent_type: agent_type.clone(),
+                            },
+                        )).await;
+                    }
                 }
 
                 // Build substrate request with MCP servers for agent access to system services
@@ -466,13 +511,41 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             let turns = session.turns_completed;
                             total_tokens.fetch_add(tokens, Ordering::Relaxed);
 
+                            // Transition task via CommandBus (journals event)
                             let target_status = if verify_on_completion {
                                 TaskStatus::Validating
                             } else {
                                 TaskStatus::Complete
                             };
-                            let _ = completed_task.transition_to(target_status);
-                            let _ = task_repo.update(&completed_task).await;
+                            if let Some(ref cb) = command_bus {
+                                let envelope = CommandEnvelope::new(
+                                    CommandSource::System,
+                                    DomainCommand::Task(TaskCommand::Transition {
+                                        task_id,
+                                        new_status: target_status,
+                                    }),
+                                );
+                                if let Err(e) = cb.dispatch(envelope).await {
+                                    tracing::warn!("Failed to complete task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
+                                    let _ = completed_task.transition_to(target_status);
+                                    let _ = task_repo.update(&completed_task).await;
+                                }
+                            } else {
+                                tracing::warn!("CommandBus not available for task {} completion, using non-atomic fallback", task_id);
+                                let _ = completed_task.transition_to(target_status);
+                                let _ = task_repo.update(&completed_task).await;
+                            }
+
+                            // Publish TaskCompleted event with actual token count via EventBus
+                            event_bus.publish(crate::services::event_factory::task_event(
+                                crate::services::event_bus::EventSeverity::Info,
+                                None,
+                                task_id,
+                                crate::services::event_bus::EventPayload::TaskCompleted {
+                                    task_id,
+                                    tokens_used: tokens,
+                                },
+                            )).await;
 
                             // Record success with circuit breaker
                             circuit_breaker.record_success(circuit_scope.clone()).await;
@@ -523,10 +596,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 }
                             }
 
-                            let _ = event_tx.send(SwarmEvent::TaskCompleted {
-                                task_id,
-                                tokens_used: tokens,
-                            }).await;
+                            // (Bridge forwards EventBus→event_tx automatically)
 
                             // Run post-completion workflow: verify and merge
                             if verify_on_completion || use_merge_queue || prefer_pull_requests {
@@ -579,10 +649,15 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                             ),
                                         ).await;
 
-                                        let _ = event_tx.send(SwarmEvent::EvolutionTriggered {
-                                            template_name: event.template_name.clone(),
-                                            trigger: format!("{:?}", event.trigger),
-                                        }).await;
+                                        // Publish via EventBus (bridge forwards to event_tx)
+                                        event_bus.publish(crate::services::event_factory::agent_event(
+                                            crate::services::event_bus::EventSeverity::Info,
+                                            Some(task_id),
+                                            crate::services::event_bus::EventPayload::EvolutionTriggered {
+                                                template_name: event.template_name.clone(),
+                                                trigger: format!("{:?}", event.trigger),
+                                            },
+                                        )).await;
                                     }
                                 }
                             }
@@ -594,9 +669,47 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
                             let error_msg = session.error.clone().unwrap_or_else(|| "Unknown error".to_string());
 
-                            completed_task.retry_count += 1;
-                            let _ = completed_task.transition_to(TaskStatus::Failed);
-                            let _ = task_repo.update(&completed_task).await;
+                            // Fail task via CommandBus (transitions + journals event)
+                            if let Some(ref cb) = command_bus {
+                                let envelope = CommandEnvelope::new(
+                                    CommandSource::System,
+                                    DomainCommand::Task(TaskCommand::Fail {
+                                        task_id,
+                                        error: Some(error_msg.clone()),
+                                    }),
+                                );
+                                if let Err(e) = cb.dispatch(envelope).await {
+                                    tracing::warn!("Failed to fail task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
+                                    completed_task.retry_count += 1;
+                                    let _ = completed_task.transition_to(TaskStatus::Failed);
+                                    let _ = task_repo.update(&completed_task).await;
+                                    event_bus.publish(crate::services::event_factory::task_event(
+                                        crate::services::event_bus::EventSeverity::Warning,
+                                        None,
+                                        task_id,
+                                        crate::services::event_bus::EventPayload::TaskFailed {
+                                            task_id,
+                                            error: error_msg.clone(),
+                                            retry_count: completed_task.retry_count,
+                                        },
+                                    )).await;
+                                }
+                            } else {
+                                tracing::warn!("CommandBus not available for task {} failure, using non-atomic fallback", task_id);
+                                completed_task.retry_count += 1;
+                                let _ = completed_task.transition_to(TaskStatus::Failed);
+                                let _ = task_repo.update(&completed_task).await;
+                                event_bus.publish(crate::services::event_factory::task_event(
+                                    crate::services::event_bus::EventSeverity::Warning,
+                                    None,
+                                    task_id,
+                                    crate::services::event_bus::EventPayload::TaskFailed {
+                                        task_id,
+                                        error: error_msg.clone(),
+                                        retry_count: completed_task.retry_count,
+                                    },
+                                )).await;
+                            }
 
                             // Record failure with circuit breaker
                             circuit_breaker.record_failure(
@@ -639,18 +752,52 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 }
                             }
 
-                            let _ = event_tx.send(SwarmEvent::TaskFailed {
-                                task_id,
-                                error: error_msg,
-                                retry_count: completed_task.retry_count,
-                            }).await;
+                            // (Bridge forwards EventBus→event_tx automatically)
                         }
                         Err(e) => {
                             let error_msg = e.to_string();
 
-                            completed_task.retry_count += 1;
-                            let _ = completed_task.transition_to(TaskStatus::Failed);
-                            let _ = task_repo.update(&completed_task).await;
+                            // Fail task via CommandBus (transitions + journals event)
+                            if let Some(ref cb) = command_bus {
+                                let envelope = CommandEnvelope::new(
+                                    CommandSource::System,
+                                    DomainCommand::Task(TaskCommand::Fail {
+                                        task_id,
+                                        error: Some(error_msg.clone()),
+                                    }),
+                                );
+                                if let Err(e) = cb.dispatch(envelope).await {
+                                    tracing::warn!("Failed to fail task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
+                                    completed_task.retry_count += 1;
+                                    let _ = completed_task.transition_to(TaskStatus::Failed);
+                                    let _ = task_repo.update(&completed_task).await;
+                                    event_bus.publish(crate::services::event_factory::task_event(
+                                        crate::services::event_bus::EventSeverity::Warning,
+                                        None,
+                                        task_id,
+                                        crate::services::event_bus::EventPayload::TaskFailed {
+                                            task_id,
+                                            error: error_msg.clone(),
+                                            retry_count: completed_task.retry_count,
+                                        },
+                                    )).await;
+                                }
+                            } else {
+                                tracing::warn!("CommandBus not available for task {} failure, using non-atomic fallback", task_id);
+                                completed_task.retry_count += 1;
+                                let _ = completed_task.transition_to(TaskStatus::Failed);
+                                let _ = task_repo.update(&completed_task).await;
+                                event_bus.publish(crate::services::event_factory::task_event(
+                                    crate::services::event_bus::EventSeverity::Warning,
+                                    None,
+                                    task_id,
+                                    crate::services::event_bus::EventPayload::TaskFailed {
+                                        task_id,
+                                        error: error_msg.clone(),
+                                        retry_count: completed_task.retry_count,
+                                    },
+                                )).await;
+                            }
 
                             // Record failure with circuit breaker
                             circuit_breaker.record_failure(
@@ -693,11 +840,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 }
                             }
 
-                            let _ = event_tx.send(SwarmEvent::TaskFailed {
-                                task_id,
-                                error: error_msg,
-                                retry_count: completed_task.retry_count,
-                            }).await;
+                            // (Bridge forwards EventBus→event_tx automatically)
                         }
                     }
                 }

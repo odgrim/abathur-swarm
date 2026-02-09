@@ -194,6 +194,14 @@ pub fn task_deadline_migration() -> Migration {
     }
 }
 
+pub fn trigger_absence_timers_migration() -> Migration {
+    Migration {
+        version: 16,
+        description: "Trigger absence timers persistence".to_string(),
+        sql: include_str!("../../../migrations/016_trigger_absence_timers.sql").to_string(),
+    }
+}
+
 pub fn all_embedded_migrations() -> Vec<Migration> {
     vec![
         initial_schema_migration(),
@@ -211,5 +219,6 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
         circuit_breaker_state_migration(),
         command_dedup_migration(),
         task_deadline_migration(),
+        trigger_absence_timers_migration(),
     ]
 }

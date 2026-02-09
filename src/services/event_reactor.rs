@@ -274,6 +274,9 @@ pub struct ReactorConfig {
     pub circuit_breaker_cooldown_secs: u64,
     /// Maximum size of the dedup set (LRU of recent sequence numbers).
     pub dedup_set_capacity: usize,
+    /// Maximum number of events to replay during startup catch-up.
+    /// None means replay all missed events (unbounded).
+    pub startup_max_replay_events: Option<usize>,
 }
 
 impl Default for ReactorConfig {
@@ -286,6 +289,7 @@ impl Default for ReactorConfig {
             circuit_breaker_window_secs: 600, // 10 minutes
             circuit_breaker_cooldown_secs: 60,
             dedup_set_capacity: 50_000,
+            startup_max_replay_events: Some(10_000),
         }
     }
 }
@@ -732,6 +736,33 @@ impl EventReactor {
     /// whose watermark is below each event's sequence number.
     /// Reaction return values are ignored during replay (they were already
     /// persisted/emitted in the original run).
+    /// Flush all buffered watermarks to the event store immediately.
+    ///
+    /// Should be called during shutdown to ensure no watermark updates are lost.
+    pub async fn flush_watermarks(&self) {
+        let store = match &self.event_store {
+            Some(s) => s.clone(),
+            None => return,
+        };
+
+        let to_flush: HashMap<String, SequenceNumber> = {
+            let mut buf = self.watermark_buffer.write().await;
+            buf.drain().collect()
+        };
+
+        if to_flush.is_empty() {
+            return;
+        }
+
+        for (name, seq) in &to_flush {
+            if let Err(e) = store.set_watermark(name, *seq).await {
+                tracing::warn!("Failed to flush watermark for {} during shutdown: {}", name, e);
+            }
+        }
+
+        tracing::info!("Flushed {} handler watermarks during shutdown", to_flush.len());
+    }
+
     pub async fn replay_missed_events(&self) -> Result<u64, String> {
         let store = match &self.event_store {
             Some(s) => s.clone(),
@@ -768,8 +799,19 @@ impl EventReactor {
         };
 
         // Query events since the minimum watermark
-        let events = store.replay_since(min_seq).await
+        let mut events = store.replay_since(min_seq).await
             .map_err(|e| format!("Failed to replay events: {}", e))?;
+
+        // Apply max replay limit from config
+        if let Some(max) = self.config.startup_max_replay_events {
+            if events.len() > max {
+                tracing::warn!(
+                    "Truncating replay from {} to {} events (startup_max_replay_events)",
+                    events.len(), max
+                );
+                events.truncate(max);
+            }
+        }
 
         let mut replayed_count: u64 = 0;
 
