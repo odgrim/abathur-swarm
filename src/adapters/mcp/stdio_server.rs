@@ -17,6 +17,7 @@ use crate::services::command_bus::{
     CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand, MemoryCommand,
     TaskCommand,
 };
+use crate::services::event_bus::EventBus;
 use crate::services::{AgentService, MemoryService, TaskService};
 use crate::domain::ports::AgentRepository;
 
@@ -33,6 +34,7 @@ where
     memory_service: MemoryService<M>,
     goal_repo: Arc<G>,
     command_bus: Arc<CommandBus>,
+    event_bus: Option<Arc<EventBus>>,
     /// When set, task_submit auto-populates parent_id
     task_id: Option<Uuid>,
 }
@@ -58,8 +60,15 @@ where
             memory_service,
             goal_repo,
             command_bus,
+            event_bus: None,
             task_id,
         }
+    }
+
+    /// Set the event bus for publishing memory events.
+    pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(event_bus);
+        self
     }
 
     /// Run the stdio server loop, reading JSON-RPC from stdin and writing responses to stdout.
@@ -749,11 +758,19 @@ where
             .ok_or("Missing required field: id")?;
         let id = Uuid::parse_str(id_str).map_err(|e| format!("Invalid UUID: {}", e))?;
 
-        let (memory_opt, _events) = self
+        let (memory_opt, events) = self
             .memory_service
             .recall(id)
             .await
             .map_err(|e| format!("Failed to get memory: {}", e))?;
+
+        // Publish memory access events via EventBus
+        if let Some(ref bus) = self.event_bus {
+            for event in events {
+                bus.publish(event).await;
+            }
+        }
+
         let memory = memory_opt
             .ok_or_else(|| format!("Memory {} not found", id))?;
 

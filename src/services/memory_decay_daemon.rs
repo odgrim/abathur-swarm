@@ -13,6 +13,7 @@ use tokio::time::{interval, Instant};
 
 use crate::domain::errors::DomainResult;
 use crate::domain::ports::MemoryRepository;
+use crate::services::event_bus::EventBus;
 use crate::services::memory_service::{MaintenanceReport, MemoryService};
 
 /// Configuration for the memory decay daemon.
@@ -157,6 +158,7 @@ where
     config: DecayDaemonConfig,
     status: Arc<RwLock<DaemonStatus>>,
     stop_flag: Arc<AtomicBool>,
+    event_bus: Option<Arc<EventBus>>,
 }
 
 impl<R> MemoryDecayDaemon<R>
@@ -170,12 +172,19 @@ where
             config,
             status: Arc::new(RwLock::new(DaemonStatus::default())),
             stop_flag: Arc::new(AtomicBool::new(false)),
+            event_bus: None,
         }
     }
 
     /// Create with default configuration.
     pub fn with_defaults(memory_service: Arc<MemoryService<R>>) -> Self {
         Self::new(memory_service, DecayDaemonConfig::default())
+    }
+
+    /// Set the event bus for publishing maintenance events.
+    pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(event_bus);
+        self
     }
 
     /// Get a handle to control the daemon.
@@ -282,8 +291,15 @@ where
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match result {
-            Ok((report, _events)) => {
+            Ok((report, events)) => {
                 *consecutive_failures = 0;
+
+                // Publish memory service events via EventBus
+                if let Some(ref bus) = self.event_bus {
+                    for event in events {
+                        bus.publish(event).await;
+                    }
+                }
 
                 {
                     let mut status = self.status.write().await;
@@ -317,7 +333,15 @@ where
 
     /// Run maintenance once (for testing or manual invocation).
     pub async fn run_once(&self) -> DomainResult<MaintenanceReport> {
-        let (report, _events) = self.memory_service.run_maintenance().await?;
+        let (report, events) = self.memory_service.run_maintenance().await?;
+
+        // Publish memory service events via EventBus
+        if let Some(ref bus) = self.event_bus {
+            for event in events {
+                bus.publish(event).await;
+            }
+        }
+
         Ok(report)
     }
 

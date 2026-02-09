@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::SubstrateRequest;
 use crate::domain::ports::Substrate;
+use crate::services::event_bus::EventBus;
 use crate::services::MemoryService;
 
 /// Configuration for cold start context gathering.
@@ -170,6 +171,7 @@ where
     memory_service: MemoryService<M>,
     config: ColdStartConfig,
     substrate: Option<Arc<dyn Substrate>>,
+    event_bus: Option<Arc<EventBus>>,
 }
 
 impl<M> ColdStartService<M>
@@ -181,12 +183,19 @@ where
             memory_service,
             config,
             substrate: None,
+            event_bus: None,
         }
     }
 
     /// Set the substrate for LLM-powered analysis.
     pub fn with_substrate(mut self, substrate: Arc<dyn Substrate>) -> Self {
         self.substrate = Some(substrate);
+        self
+    }
+
+    /// Set the event bus for publishing memory events.
+    pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(event_bus);
         self
     }
 
@@ -236,11 +245,17 @@ where
                 match self.analyze_with_llm(&report, substrate.as_ref()).await {
                     Ok(insights) => {
                         for (i, insight) in insights.iter().enumerate() {
-                            let (_memory, _events) = self.memory_service.learn(
+                            let (_memory, events) = self.memory_service.learn(
                                 format!("project.llm_analysis.{}", i),
                                 insight.clone(),
                                 "project.llm_analysis",
                             ).await?;
+                            // Publish learn events via EventBus
+                            if let Some(ref bus) = self.event_bus {
+                                for event in events {
+                                    bus.publish(event).await;
+                                }
+                            }
                             report.memories_created += 1;
                         }
                     }

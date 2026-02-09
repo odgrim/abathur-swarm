@@ -18,6 +18,7 @@ use crate::services::model_router::ModelRouter;
 use crate::services::guardrails::{GuardrailResult, Guardrails};
 use crate::services::circuit_breaker::{CircuitBreakerService, CircuitScope};
 use crate::services::dag_restructure::DagRestructureService;
+use crate::services::event_bus::EventBus;
 
 /// Configuration for the DAG executor.
 #[derive(Debug, Clone)]
@@ -209,6 +210,7 @@ where
     guardrails: Option<Arc<Guardrails>>,
     circuit_breaker: Option<Arc<CircuitBreakerService>>,
     restructure_service: Option<Arc<DagRestructureService>>,
+    event_bus: Option<Arc<EventBus>>,
     /// Active goals cache for injecting constraints into agent context.
     active_goals_cache: Arc<RwLock<Vec<Goal>>>,
     status: Arc<RwLock<ExecutionStatus>>,
@@ -236,6 +238,7 @@ where
             guardrails: None,
             circuit_breaker: None,
             restructure_service: None,
+            event_bus: None,
             active_goals_cache: Arc::new(RwLock::new(Vec::new())),
             status: Arc::new(RwLock::new(ExecutionStatus::Pending)),
             results: Arc::new(RwLock::new(ExecutionResults::default())),
@@ -263,6 +266,12 @@ where
     /// Add restructure service to the executor for failure recovery.
     pub fn with_restructure_service(mut self, restructure_service: Arc<DagRestructureService>) -> Self {
         self.restructure_service = Some(restructure_service);
+        self
+    }
+
+    /// Add event bus for publishing task lifecycle events.
+    pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(event_bus);
         self
     }
 
@@ -343,7 +352,7 @@ where
             }
 
             // Execute wave tasks in parallel with concurrency limit
-            let wave_results = self.execute_wave(wave, dag, &event_tx, &total_tokens, &self.guardrails).await?;
+            let wave_results = self.execute_wave(wave, dag, &event_tx, &total_tokens, &self.guardrails, &self.event_bus).await?;
 
             // Process wave results
             let mut wave_succeeded = 0;
@@ -466,6 +475,7 @@ where
         event_tx: &mpsc::Sender<ExecutionEvent>,
         total_tokens: &Arc<RwLock<u64>>,
         guardrails: &Option<Arc<Guardrails>>,
+        event_bus: &Option<Arc<EventBus>>,
     ) -> DomainResult<Vec<TaskResult>> {
         let semaphore = Arc::new(Semaphore::new(self.config.max_concurrency));
         let mut handles = vec![];
@@ -505,6 +515,7 @@ where
             let total_tokens = total_tokens.clone();
             let guardrails = guardrails.clone();
             let circuit_breaker = self.circuit_breaker.clone();
+            let event_bus_clone = event_bus.clone();
             let goal_id: Option<Uuid> = None;
             let goals_for_task = active_goals.clone();
 
@@ -522,6 +533,7 @@ where
                     guardrails,
                     circuit_breaker,
                     goals_for_task,
+                    event_bus_clone,
                 ).await
             });
 
@@ -694,6 +706,7 @@ async fn execute_single_task<T, A>(
     guardrails: Option<Arc<Guardrails>>,
     circuit_breaker: Option<Arc<CircuitBreakerService>>,
     active_goals: Vec<Goal>,
+    event_bus: Option<Arc<EventBus>>,
 ) -> TaskResult
 where
     T: TaskRepository + 'static,
@@ -765,6 +778,19 @@ where
     let mut running_task = task.clone();
     if running_task.transition_to(TaskStatus::Running).is_ok() {
         let _ = task_repo.update(&running_task).await;
+
+        // Publish TaskStarted via EventBus
+        if let Some(ref bus) = event_bus {
+            bus.publish(crate::services::event_factory::task_event(
+                crate::services::event_bus::EventSeverity::Info,
+                goal_id,
+                task_id,
+                crate::services::event_bus::EventPayload::TaskStarted {
+                    task_id,
+                    task_title: task.title.clone(),
+                },
+            )).await;
+        }
     }
 
     // Get system prompt, tools, and constraints from agent template
@@ -931,6 +957,20 @@ where
             let mut retry_task = task.clone();
             retry_task.retry_count = attempt;
             let _ = task_repo.update(&retry_task).await;
+
+            // Publish TaskRetrying via EventBus
+            if let Some(ref bus) = event_bus {
+                bus.publish(crate::services::event_factory::task_event(
+                    crate::services::event_bus::EventSeverity::Warning,
+                    goal_id,
+                    task_id,
+                    crate::services::event_bus::EventPayload::TaskRetrying {
+                        task_id,
+                        attempt,
+                        max_attempts: config.max_retries,
+                    },
+                )).await;
+            }
         }
 
         // Select model based on task complexity and retry attempt
@@ -1009,6 +1049,19 @@ where
                         let _ = task_repo.update(&completed_task).await;
                     }
 
+                    // Publish TaskCompletedWithResult via EventBus
+                    if let Some(ref bus) = event_bus {
+                        bus.publish(crate::services::event_factory::task_event(
+                            crate::services::event_bus::EventSeverity::Info,
+                            goal_id,
+                            task_id,
+                            crate::services::event_bus::EventPayload::TaskCompleted {
+                                task_id,
+                                tokens_used: tokens_used,
+                            },
+                        )).await;
+                    }
+
                     // Register task end with guardrails
                     if let Some(ref g) = guardrails {
                         g.register_task_end(task_id, true).await;
@@ -1062,6 +1115,20 @@ where
     }
 
     let error_msg = last_error.unwrap_or_else(|| "Unknown error".to_string());
+
+    // Publish TaskFailed via EventBus
+    if let Some(ref bus) = event_bus {
+        bus.publish(crate::services::event_factory::task_event(
+            crate::services::event_bus::EventSeverity::Error,
+            goal_id,
+            task_id,
+            crate::services::event_bus::EventPayload::TaskFailed {
+                task_id,
+                error: error_msg.clone(),
+                retry_count,
+            },
+        )).await;
+    }
 
     // Record failure with circuit breaker
     if let (Some(ref cb), Some(gid)) = (&circuit_breaker, goal_id) {

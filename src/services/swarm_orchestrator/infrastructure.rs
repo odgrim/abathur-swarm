@@ -211,7 +211,7 @@ where
         let cold_start_service = ColdStartService::new(
             memory_service,
             cold_start_config,
-        );
+        ).with_event_bus(self.event_bus.clone());
         let cold_start_service = if self.overmind.is_some() {
             cold_start_service.with_substrate(self.substrate.clone())
         } else {
@@ -256,7 +256,8 @@ where
         };
 
         let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
-        let daemon = MemoryDecayDaemon::new(memory_service, DecayDaemonConfig::default());
+        let daemon = MemoryDecayDaemon::new(memory_service, DecayDaemonConfig::default())
+            .with_event_bus(self.event_bus.clone());
 
         // Get the handle before running
         let handle = daemon.handle();

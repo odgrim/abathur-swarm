@@ -232,10 +232,10 @@ impl<M: MemoryRepository + 'static> EventHandler for MemoryMaintenanceHandler<M>
     }
 
     async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
-        let (report, _service_events) = self.memory_service.run_maintenance().await
+        let (report, service_events) = self.memory_service.run_maintenance().await
             .map_err(|e| format!("Memory maintenance failed: {}", e))?;
 
-        let mut events = Vec::new();
+        let mut events = service_events;
 
         let total_pruned = report.expired_pruned + report.decayed_pruned;
         if total_pruned > 0 {
@@ -772,7 +772,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
             }
         }
 
-        // Check Blocked tasks that might now be unblocked
+        // Check Blocked tasks that might now be unblocked or should cascade failure
         let blocked = self.task_repo.list_by_status(TaskStatus::Blocked).await
             .map_err(|e| format!("Failed to list blocked tasks: {}", e))?;
 
@@ -780,7 +780,40 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
             let deps = self.task_repo.get_dependencies(task.id).await
                 .map_err(|e| format!("Failed to get deps: {}", e))?;
 
-            if deps.iter().any(|d| d.status == TaskStatus::Failed || d.status == TaskStatus::Canceled) {
+            let has_failed_dep = deps.iter().any(|d| d.status == TaskStatus::Failed || d.status == TaskStatus::Canceled);
+
+            if has_failed_dep {
+                // Cascade failure: if a critical dependency has permanently failed,
+                // fail this task too rather than leaving it stuck in Blocked forever
+                let all_failed_or_complete = deps.iter().all(|d| {
+                    d.status == TaskStatus::Complete ||
+                    d.status == TaskStatus::Failed ||
+                    d.status == TaskStatus::Canceled
+                });
+                if all_failed_or_complete {
+                    let mut updated = task.clone();
+                    if updated.transition_to(TaskStatus::Failed).is_ok() {
+                        self.task_repo.update(&updated).await
+                            .map_err(|e| format!("Failed to update: {}", e))?;
+                        corrections += 1;
+                        new_events.push(UnifiedEvent {
+                            id: EventId::new(),
+                            sequence: SequenceNumber(0),
+                            timestamp: chrono::Utc::now(),
+                            severity: EventSeverity::Warning,
+                            category: EventCategory::Task,
+                            goal_id: None,
+                            task_id: Some(task.id),
+                            correlation_id: event.correlation_id,
+                            source_process_id: None,
+                            payload: EventPayload::TaskFailed {
+                                task_id: task.id,
+                                error: "cascade-failure: critical dependency failed or canceled".to_string(),
+                                retry_count: task.retry_count,
+                            },
+                        });
+                    }
+                }
                 continue;
             }
 
@@ -1184,11 +1217,12 @@ impl<T: TaskRepository + 'static, A: AgentRepository + 'static> EventHandler for
 pub struct A2APollHandler {
     command_bus: Arc<crate::services::command_bus::CommandBus>,
     a2a_gateway_url: String,
+    consecutive_failures: AtomicU64,
 }
 
 impl A2APollHandler {
     pub fn new(command_bus: Arc<crate::services::command_bus::CommandBus>, a2a_gateway_url: String) -> Self {
-        Self { command_bus, a2a_gateway_url }
+        Self { command_bus, a2a_gateway_url, consecutive_failures: AtomicU64::new(0) }
     }
 }
 
@@ -1225,18 +1259,54 @@ impl EventHandler for A2APollHandler {
         let response = match client.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
             Ok(resp) => resp,
             Err(e) => {
-                tracing::debug!("A2APollHandler: gateway unreachable: {}", e);
+                let failures = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                tracing::warn!("A2APollHandler: gateway unreachable (consecutive failures: {}): {}", failures, e);
+                if failures >= 3 {
+                    let diagnostic = UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: chrono::Utc::now(),
+                        severity: EventSeverity::Warning,
+                        category: EventCategory::Orchestrator,
+                        goal_id: None,
+                        task_id: None,
+                        correlation_id: None,
+                        source_process_id: None,
+                        payload: EventPayload::HumanEscalationNeeded {
+                            goal_id: None,
+                            task_id: None,
+                            reason: format!(
+                                "A2A gateway at {} has been unreachable for {} consecutive polls",
+                                self.a2a_gateway_url, failures
+                            ),
+                            urgency: "medium".to_string(),
+                            is_blocking: false,
+                        },
+                    };
+                    return Ok(Reaction::EmitEvents(vec![diagnostic]));
+                }
                 return Ok(Reaction::None);
             }
         };
 
         if !response.status().is_success() {
+            let failures = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            tracing::warn!(
+                "A2APollHandler: gateway returned non-success status {} (consecutive failures: {})",
+                response.status(), failures
+            );
             return Ok(Reaction::None);
         }
 
+        // Reset consecutive failure counter on success
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+
         let delegations: Vec<serde_json::Value> = match response.json().await {
             Ok(d) => d,
-            Err(_) => return Ok(Reaction::None),
+            Err(e) => {
+                tracing::warn!("A2APollHandler: failed to parse response: {}", e);
+                return Ok(Reaction::None);
+            }
         };
 
         for delegation in delegations {
@@ -1567,7 +1637,7 @@ impl<M: MemoryRepository + 'static> EventHandler for MemoryReconciliationHandler
             return Ok(Reaction::None);
         }
 
-        let (report, _events) = self.memory_service.run_maintenance().await
+        let (report, events) = self.memory_service.run_maintenance().await
             .map_err(|e| format!("Memory reconciliation failed: {}", e))?;
 
         tracing::info!(
@@ -1578,7 +1648,11 @@ impl<M: MemoryRepository + 'static> EventHandler for MemoryReconciliationHandler
             "MemoryReconciliationHandler: maintenance complete"
         );
 
-        Ok(Reaction::None)
+        if events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(events))
+        }
     }
 }
 
@@ -1884,6 +1958,8 @@ impl EventHandler for WatermarkAuditHandler {
         };
 
         let mut behind_count = 0u32;
+        let mut max_lag: u64 = 0;
+        let mut new_events = Vec::new();
 
         for name in &self.handler_names {
             let wm = self.event_store.get_watermark(name).await
@@ -1891,6 +1967,10 @@ impl EventHandler for WatermarkAuditHandler {
 
             let handler_seq = wm.map(|s| s.0).unwrap_or(0);
             let lag = latest_seq.saturating_sub(handler_seq);
+
+            if lag > max_lag {
+                max_lag = lag;
+            }
 
             if lag > 100 {
                 tracing::warn!(
@@ -1909,6 +1989,53 @@ impl EventHandler for WatermarkAuditHandler {
                 "WatermarkAudit: {} handler(s) significantly behind latest sequence {}",
                 behind_count, latest_seq
             );
+
+            // When lag > 100: trigger a catch-up sweep
+            if max_lag > 100 {
+                new_events.push(UnifiedEvent {
+                    id: EventId::new(),
+                    sequence: SequenceNumber(0),
+                    timestamp: chrono::Utc::now(),
+                    severity: EventSeverity::Info,
+                    category: EventCategory::Scheduler,
+                    goal_id: None,
+                    task_id: None,
+                    correlation_id: None,
+                    source_process_id: None,
+                    payload: EventPayload::ScheduledEventFired {
+                        schedule_id: uuid::Uuid::new_v4(),
+                        name: "trigger-rule-catchup".to_string(),
+                    },
+                });
+            }
+
+            // When lag > 500: emit a human escalation event
+            if max_lag > 500 {
+                new_events.push(UnifiedEvent {
+                    id: EventId::new(),
+                    sequence: SequenceNumber(0),
+                    timestamp: chrono::Utc::now(),
+                    severity: EventSeverity::Warning,
+                    category: EventCategory::Escalation,
+                    goal_id: None,
+                    task_id: None,
+                    correlation_id: None,
+                    source_process_id: None,
+                    payload: EventPayload::HumanEscalationRequired {
+                        goal_id: None,
+                        task_id: None,
+                        reason: format!(
+                            "Event processing critically behind: {} handler(s) lagging, max lag {} events",
+                            behind_count, max_lag
+                        ),
+                        urgency: "high".to_string(),
+                        questions: vec![
+                            "Event handlers are critically behind. Should the system be restarted or investigated?".to_string(),
+                        ],
+                        is_blocking: false,
+                    },
+                });
+            }
         } else {
             tracing::debug!(
                 "WatermarkAudit: all handlers within 100 events of sequence {}",
@@ -1916,7 +2043,11 @@ impl EventHandler for WatermarkAuditHandler {
             );
         }
 
-        Ok(Reaction::None)
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
     }
 }
 
@@ -2243,6 +2374,27 @@ impl EventHandler for DeadLetterRetryHandler {
         let mut events_to_replay = Vec::new();
 
         for entry in &entries {
+            // If this is the last attempt, resolve it before re-publishing
+            if entry.retry_count + 1 >= entry.max_retries {
+                tracing::info!(
+                    "DeadLetterRetry: max retries ({}) reached for handler '{}' on event seq {}, resolving",
+                    entry.max_retries, entry.handler_name, entry.event_sequence
+                );
+                if let Err(e) = self.event_store.resolve_dead_letter(&entry.id).await {
+                    tracing::warn!("DeadLetterRetry: failed to resolve entry {}: {}", entry.id, e);
+                }
+            } else {
+                // Increment retry count BEFORE re-publishing to prevent duplicates on crash.
+                // If re-publish fails, the DLQ entry still exists for next retry.
+                let backoff_secs = 2i64.pow((entry.retry_count + 1).min(10));
+                let next_retry = chrono::Utc::now() + chrono::Duration::seconds(backoff_secs);
+
+                if let Err(e) = self.event_store.increment_dead_letter_retry(&entry.id, next_retry).await {
+                    tracing::warn!("DeadLetterRetry: failed to increment retry for {}: {}", entry.id, e);
+                    continue; // Skip re-publish if we couldn't mark the retry
+                }
+            }
+
             // Re-fetch the original event from the store
             let original = self.event_store
                 .get_by_sequence(SequenceNumber(entry.event_sequence))
@@ -2252,14 +2404,6 @@ impl EventHandler for DeadLetterRetryHandler {
             match original {
                 Some(evt) => {
                     events_to_replay.push(evt);
-
-                    // Calculate next retry with exponential backoff
-                    let backoff_secs = 2i64.pow((entry.retry_count + 1).min(10));
-                    let next_retry = chrono::Utc::now() + chrono::Duration::seconds(backoff_secs);
-
-                    if let Err(e) = self.event_store.increment_dead_letter_retry(&entry.id, next_retry).await {
-                        tracing::warn!("DeadLetterRetry: failed to increment retry for {}: {}", entry.id, e);
-                    }
                 }
                 None => {
                     // Event no longer in store (pruned), resolve the DLQ entry
@@ -2270,17 +2414,6 @@ impl EventHandler for DeadLetterRetryHandler {
                     if let Err(e) = self.event_store.resolve_dead_letter(&entry.id).await {
                         tracing::warn!("DeadLetterRetry: failed to resolve entry {}: {}", entry.id, e);
                     }
-                }
-            }
-
-            // If retry_count + 1 >= max_retries, resolve it (this was the last attempt)
-            if entry.retry_count + 1 >= entry.max_retries {
-                tracing::info!(
-                    "DeadLetterRetry: max retries ({}) reached for handler '{}' on event seq {}, resolving",
-                    entry.max_retries, entry.handler_name, entry.event_sequence
-                );
-                if let Err(e) = self.event_store.resolve_dead_letter(&entry.id).await {
-                    tracing::warn!("DeadLetterRetry: failed to resolve entry {}: {}", entry.id, e);
                 }
             }
         }
@@ -3235,10 +3368,25 @@ impl<T: TaskRepository + 'static, G: GoalRepository + 'static> EventHandler for 
             }
         }
 
-        // 2. Count missed events (informational)
-        let latest_seq = self.event_store.latest_sequence().await
-            .map_err(|e| format!("StartupCatchUp: failed to get latest sequence: {}", e))?;
-        let missed_events_replayed = latest_seq.map(|s| s.0).unwrap_or(0).min(self.max_replay_events);
+        // 2. Replay missed events since the reactor's last-known watermark
+        let reactor_wm = self.event_store.get_watermark("EventReactor").await
+            .map_err(|e| format!("StartupCatchUp: failed to get reactor watermark: {}", e))?;
+
+        let since_seq = reactor_wm.unwrap_or(SequenceNumber(0));
+        let replayed_events = self.event_store.replay_since(since_seq).await
+            .map_err(|e| format!("StartupCatchUp: failed to replay events: {}", e))?;
+
+        // Bound replay to prevent flooding
+        let bounded_replay: Vec<_> = replayed_events.into_iter()
+            .take(self.max_replay_events as usize)
+            .filter(|evt| {
+                // Skip scheduler events to avoid retriggering periodic handlers
+                !matches!(&evt.payload, EventPayload::ScheduledEventFired { .. })
+            })
+            .collect();
+
+        let missed_events_replayed = bounded_replay.len() as u64;
+        new_events.extend(bounded_replay);
 
         // 3. Re-evaluate active goals
         let active_goals = self.goal_repo.get_active_with_constraints().await

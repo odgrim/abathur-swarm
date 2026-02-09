@@ -23,6 +23,7 @@ use crate::domain::ports::MemoryRepository;
 use crate::services::command_bus::{
     CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand, MemoryCommand,
 };
+use crate::services::event_bus::EventBus;
 use crate::services::MemoryService;
 
 /// Configuration for the memory HTTP server.
@@ -157,6 +158,7 @@ pub struct ErrorResponse {
 struct AppState<M: MemoryRepository> {
     service: MemoryService<M>,
     command_bus: Arc<CommandBus>,
+    event_bus: Option<Arc<EventBus>>,
 }
 
 /// Memory HTTP Server.
@@ -164,11 +166,18 @@ pub struct MemoryHttpServer<M: MemoryRepository + 'static> {
     config: MemoryHttpConfig,
     service: MemoryService<M>,
     command_bus: Arc<CommandBus>,
+    event_bus: Option<Arc<EventBus>>,
 }
 
 impl<M: MemoryRepository + Clone + Send + Sync + 'static> MemoryHttpServer<M> {
     pub fn new(service: MemoryService<M>, command_bus: Arc<CommandBus>, config: MemoryHttpConfig) -> Self {
-        Self { config, service, command_bus }
+        Self { config, service, command_bus, event_bus: None }
+    }
+
+    /// Set the event bus for publishing memory recall events.
+    pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(event_bus);
+        self
     }
 
     /// Build the router.
@@ -176,6 +185,7 @@ impl<M: MemoryRepository + Clone + Send + Sync + 'static> MemoryHttpServer<M> {
         let state = Arc::new(AppState {
             service: self.service,
             command_bus: self.command_bus,
+            event_bus: self.event_bus,
         });
 
         let app = Router::new()
@@ -339,7 +349,15 @@ async fn get_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
     Path(id): Path<Uuid>,
 ) -> Result<Json<MemoryResponse>, (StatusCode, Json<ErrorResponse>)> {
     match state.service.recall(id).await {
-        Ok((Some(memory), _events)) => Ok(Json(MemoryResponse::from(memory))),
+        Ok((Some(memory), events)) => {
+            // Publish recall events via EventBus
+            if let Some(ref bus) = state.event_bus {
+                for event in events {
+                    bus.publish(event).await;
+                }
+            }
+            Ok(Json(MemoryResponse::from(memory)))
+        }
         Ok((None, _)) => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -362,7 +380,15 @@ async fn get_by_key<M: MemoryRepository + Clone + Send + Sync + 'static>(
     Path((namespace, key)): Path<(String, String)>,
 ) -> Result<Json<MemoryResponse>, (StatusCode, Json<ErrorResponse>)> {
     match state.service.recall_by_key(&key, &namespace).await {
-        Ok((Some(memory), _events)) => Ok(Json(MemoryResponse::from(memory))),
+        Ok((Some(memory), events)) => {
+            // Publish recall events via EventBus
+            if let Some(ref bus) = state.event_bus {
+                for event in events {
+                    bus.publish(event).await;
+                }
+            }
+            Ok(Json(MemoryResponse::from(memory)))
+        }
         Ok((None, _)) => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -450,7 +476,15 @@ async fn update_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
 ) -> Result<Json<MemoryResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Get existing memory
     let memory = match state.service.recall(id).await {
-        Ok((Some(m), _events)) => m,
+        Ok((Some(m), events)) => {
+            // Publish recall events via EventBus
+            if let Some(ref bus) = state.event_bus {
+                for event in events {
+                    bus.publish(event).await;
+                }
+            }
+            m
+        }
         Ok((None, _)) => {
             return Err((
                 StatusCode::NOT_FOUND,
