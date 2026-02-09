@@ -11,10 +11,11 @@ use crate::domain::models::{
     RelevanceWeights, ScoredMemory,
 };
 use crate::domain::ports::MemoryRepository;
-use crate::services::command_bus::{CommandError, CommandResult, MemoryCommand, MemoryCommandHandler};
+use crate::services::command_bus::{CommandError, CommandOutcome, CommandResult, MemoryCommand, MemoryCommandHandler};
 use crate::services::event_bus::{
-    EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
+    EventCategory, EventPayload, EventSeverity, UnifiedEvent,
 };
+use crate::services::event_factory;
 
 /// Configuration for memory decay thresholds.
 #[derive(Debug, Clone)]
@@ -40,10 +41,10 @@ impl Default for DecayConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct MemoryService<R: MemoryRepository> {
     repository: Arc<R>,
     decay_config: DecayConfig,
-    event_bus: Arc<EventBus>,
 }
 
 impl<R: MemoryRepository> MemoryService<R> {
@@ -51,15 +52,6 @@ impl<R: MemoryRepository> MemoryService<R> {
         Self {
             repository,
             decay_config: DecayConfig::default(),
-            event_bus: Arc::new(EventBus::new(crate::services::event_bus::EventBusConfig::default())),
-        }
-    }
-
-    pub fn new_with_event_bus(repository: Arc<R>, event_bus: Arc<EventBus>) -> Self {
-        Self {
-            repository,
-            decay_config: DecayConfig::default(),
-            event_bus,
         }
     }
 
@@ -68,11 +60,16 @@ impl<R: MemoryRepository> MemoryService<R> {
         self
     }
 
-    async fn emit(&self, event: UnifiedEvent) {
-        self.event_bus.publish(event).await;
+    /// Helper to build a UnifiedEvent with standard fields.
+    fn make_event(
+        severity: EventSeverity,
+        category: EventCategory,
+        payload: EventPayload,
+    ) -> UnifiedEvent {
+        event_factory::make_event(severity, category, None, None, payload)
     }
 
-    /// Store a new memory.
+    /// Store a new memory. Returns the memory and events to be journaled.
     pub async fn store(
         &self,
         key: String,
@@ -81,7 +78,7 @@ impl<R: MemoryRepository> MemoryService<R> {
         tier: MemoryTier,
         memory_type: MemoryType,
         metadata: Option<MemoryMetadata>,
-    ) -> DomainResult<Memory> {
+    ) -> DomainResult<(Memory, Vec<UnifiedEvent>)> {
         let mut memory = match tier {
             MemoryTier::Working => Memory::working(key, content),
             MemoryTier::Episodic => Memory::episodic(key, content),
@@ -97,35 +94,28 @@ impl<R: MemoryRepository> MemoryService<R> {
         memory.validate().map_err(DomainError::ValidationFailed)?;
         self.repository.store(&memory).await?;
 
-        self.emit(UnifiedEvent {
-            id: EventId::new(),
-            sequence: SequenceNumber(0),
-            timestamp: chrono::Utc::now(),
-            severity: EventSeverity::Debug,
-            category: EventCategory::Memory,
-            goal_id: None,
-            task_id: None,
-            correlation_id: None,
-            source_process_id: None,
-            payload: EventPayload::MemoryStored {
+        let events = vec![Self::make_event(
+            EventSeverity::Debug,
+            EventCategory::Memory,
+            EventPayload::MemoryStored {
                 memory_id: memory.id,
                 key: memory.key.clone(),
                 namespace: memory.namespace.clone(),
                 tier: memory.tier.as_str().to_string(),
                 memory_type: memory.memory_type.as_str().to_string(),
             },
-        }).await;
+        )];
 
-        Ok(memory)
+        Ok((memory, events))
     }
 
-    /// Store a working memory (convenience method).
+    /// Store a working memory (convenience method). Returns the memory and events.
     pub async fn remember(
         &self,
         key: String,
         content: String,
         namespace: &str,
-    ) -> DomainResult<Memory> {
+    ) -> DomainResult<(Memory, Vec<UnifiedEvent>)> {
         self.store(
             key,
             content,
@@ -136,13 +126,13 @@ impl<R: MemoryRepository> MemoryService<R> {
         ).await
     }
 
-    /// Store a semantic memory (long-term).
+    /// Store a semantic memory (long-term). Returns the memory and events.
     pub async fn learn(
         &self,
         key: String,
         content: String,
         namespace: &str,
-    ) -> DomainResult<Memory> {
+    ) -> DomainResult<(Memory, Vec<UnifiedEvent>)> {
         self.store(
             key,
             content,
@@ -153,69 +143,57 @@ impl<R: MemoryRepository> MemoryService<R> {
         ).await
     }
 
-    /// Get a memory by ID and record the access.
-    pub async fn recall(&self, id: Uuid) -> DomainResult<Option<Memory>> {
+    /// Get a memory by ID and record the access. Returns the memory and events.
+    pub async fn recall(&self, id: Uuid) -> DomainResult<(Option<Memory>, Vec<UnifiedEvent>)> {
         let memory = self.repository.get(id).await?;
 
         if let Some(mut mem) = memory {
             mem.record_access();
             self.repository.update(&mem).await?;
 
-            self.emit(UnifiedEvent {
-                id: EventId::new(),
-                sequence: SequenceNumber(0),
-                timestamp: chrono::Utc::now(),
-                severity: EventSeverity::Debug,
-                category: EventCategory::Memory,
-                goal_id: None,
-                task_id: None,
-                correlation_id: None,
-                source_process_id: None,
-                payload: EventPayload::MemoryAccessed {
+            let mut events = vec![Self::make_event(
+                EventSeverity::Debug,
+                EventCategory::Memory,
+                EventPayload::MemoryAccessed {
                     memory_id: mem.id,
                     key: mem.key.clone(),
                     access_count: mem.access_count,
                 },
-            }).await;
+            )];
 
             // Check if should be promoted
-            self.check_promotion(&mut mem).await?;
+            let (_, promotion_events) = self.check_promotion(&mut mem).await?;
+            events.extend(promotion_events);
 
-            Ok(Some(mem))
+            Ok((Some(mem), events))
         } else {
-            Ok(None)
+            Ok((None, vec![]))
         }
     }
 
-    /// Get a memory by key and namespace.
-    pub async fn recall_by_key(&self, key: &str, namespace: &str) -> DomainResult<Option<Memory>> {
+    /// Get a memory by key and namespace. Returns the memory and events.
+    pub async fn recall_by_key(&self, key: &str, namespace: &str) -> DomainResult<(Option<Memory>, Vec<UnifiedEvent>)> {
         let memory = self.repository.get_by_key(key, namespace).await?;
 
         if let Some(mut mem) = memory {
             mem.record_access();
             self.repository.update(&mem).await?;
 
-            self.emit(UnifiedEvent {
-                id: EventId::new(),
-                sequence: SequenceNumber(0),
-                timestamp: chrono::Utc::now(),
-                severity: EventSeverity::Debug,
-                category: EventCategory::Memory,
-                goal_id: None,
-                task_id: None,
-                correlation_id: None,
-                source_process_id: None,
-                payload: EventPayload::MemoryAccessed {
+            let mut events = vec![Self::make_event(
+                EventSeverity::Debug,
+                EventCategory::Memory,
+                EventPayload::MemoryAccessed {
                     memory_id: mem.id,
                     key: mem.key.clone(),
                     access_count: mem.access_count,
                 },
-            }).await;
+            )];
 
-            self.check_promotion(&mut mem).await?;
-            Ok(Some(mem))
+            let (_, promotion_events) = self.check_promotion(&mut mem).await?;
+            events.extend(promotion_events);
+            Ok((Some(mem), events))
         } else {
-            Ok(None)
+            Ok((None, vec![]))
         }
     }
 
@@ -313,55 +291,43 @@ impl<R: MemoryRepository> MemoryService<R> {
         self.repository.get_for_goal(goal_id).await
     }
 
-    /// Delete a memory.
-    pub async fn forget(&self, id: Uuid) -> DomainResult<()> {
+    /// Delete a memory. Returns events to be journaled.
+    pub async fn forget(&self, id: Uuid) -> DomainResult<Vec<UnifiedEvent>> {
         // Fetch memory info before deleting for the event
         let memory = self.repository.get(id).await?;
         self.repository.delete(id).await?;
 
+        let mut events = Vec::new();
         if let Some(mem) = memory {
-            self.emit(UnifiedEvent {
-                id: EventId::new(),
-                sequence: SequenceNumber(0),
-                timestamp: chrono::Utc::now(),
-                severity: EventSeverity::Debug,
-                category: EventCategory::Memory,
-                goal_id: None,
-                task_id: None,
-                correlation_id: None,
-                source_process_id: None,
-                payload: EventPayload::MemoryDeleted {
+            events.push(Self::make_event(
+                EventSeverity::Debug,
+                EventCategory::Memory,
+                EventPayload::MemoryDeleted {
                     memory_id: id,
                     key: mem.key,
                     namespace: mem.namespace,
                 },
-            }).await;
+            ));
         }
 
-        Ok(())
+        Ok(events)
     }
 
-    /// Prune expired memories.
-    pub async fn prune_expired(&self) -> DomainResult<u64> {
+    /// Prune expired memories. Returns the count and events to be journaled.
+    pub async fn prune_expired(&self) -> DomainResult<(u64, Vec<UnifiedEvent>)> {
         let count = self.repository.prune_expired().await?;
+        let mut events = Vec::new();
         if count > 0 {
-            self.emit(UnifiedEvent {
-                id: EventId::new(),
-                sequence: SequenceNumber(0),
-                timestamp: chrono::Utc::now(),
-                severity: EventSeverity::Debug,
-                category: EventCategory::Memory,
-                goal_id: None,
-                task_id: None,
-                correlation_id: None,
-                source_process_id: None,
-                payload: EventPayload::MemoryPruned {
+            events.push(Self::make_event(
+                EventSeverity::Debug,
+                EventCategory::Memory,
+                EventPayload::MemoryPruned {
                     count,
                     reason: "expired".to_string(),
                 },
-            }).await;
+            ));
         }
-        Ok(count)
+        Ok((count, events))
     }
 
     /// Prune decayed memories (below threshold).
@@ -390,22 +356,29 @@ impl<R: MemoryRepository> MemoryService<R> {
     }
 
     /// Run full maintenance: prune expired and decayed, resolve conflicts.
-    pub async fn run_maintenance(&self) -> DomainResult<MaintenanceReport> {
-        let expired = self.prune_expired().await?;
+    /// Returns the report and all accumulated events.
+    pub async fn run_maintenance(&self) -> DomainResult<(MaintenanceReport, Vec<UnifiedEvent>)> {
+        let mut all_events = Vec::new();
+
+        let (expired, events) = self.prune_expired().await?;
+        all_events.extend(events);
+
         let decayed = self.prune_decayed().await?;
 
         // Check for promotion candidates
-        let promoted = self.check_all_promotions().await?;
+        let (promoted, events) = self.check_all_promotions().await?;
+        all_events.extend(events);
 
         // Detect and auto-resolve conflicts
-        let conflicts_resolved = self.auto_resolve_conflicts().await?;
+        let (conflicts_resolved, events) = self.auto_resolve_conflicts().await?;
+        all_events.extend(events);
 
-        Ok(MaintenanceReport {
+        Ok((MaintenanceReport {
             expired_pruned: expired,
             decayed_pruned: decayed,
             promoted,
             conflicts_resolved,
-        })
+        }, all_events))
     }
 
     /// Automatically detect and resolve memory conflicts.
@@ -413,8 +386,10 @@ impl<R: MemoryRepository> MemoryService<R> {
     /// This method scans all memories for conflicts and applies automatic
     /// resolution strategies (soft merge, prefer newer/higher confidence).
     /// Conflicts that cannot be automatically resolved are flagged for review.
-    pub async fn auto_resolve_conflicts(&self) -> DomainResult<u64> {
+    /// Returns the count and all accumulated events.
+    pub async fn auto_resolve_conflicts(&self) -> DomainResult<(u64, Vec<UnifiedEvent>)> {
         let mut resolved_count = 0;
+        let mut all_events = Vec::new();
 
         // Get all namespaces by querying distinct values
         // For efficiency, we'll scan working and episodic tiers (semantic is long-term stable)
@@ -431,24 +406,17 @@ impl<R: MemoryRepository> MemoryService<R> {
 
         // Resolve each conflict that has an automatic resolution
         for conflict in conflicts {
-            // Emit conflict detection event
-            self.emit(UnifiedEvent {
-                id: EventId::new(),
-                sequence: SequenceNumber(0),
-                timestamp: chrono::Utc::now(),
-                severity: EventSeverity::Warning,
-                category: EventCategory::Memory,
-                goal_id: None,
-                task_id: None,
-                correlation_id: None,
-                source_process_id: None,
-                payload: EventPayload::MemoryConflictDetected {
+            // Collect conflict detection event
+            all_events.push(Self::make_event(
+                EventSeverity::Warning,
+                EventCategory::Memory,
+                EventPayload::MemoryConflictDetected {
                     memory_a: conflict.memory_a,
                     memory_b: conflict.memory_b,
                     key: conflict.key.clone(),
                     similarity: conflict.similarity,
                 },
-            }).await;
+            ));
 
             if matches!(
                 &conflict.resolution,
@@ -456,18 +424,20 @@ impl<R: MemoryRepository> MemoryService<R> {
                     | Some(ConflictResolution::PreferHigherConfidence { .. })
                     | Some(ConflictResolution::SoftMerge { .. })
             ) {
-                if self.resolve_conflict(&conflict).await.is_ok() {
+                if let Ok(events) = self.resolve_conflict(&conflict).await {
+                    all_events.extend(events);
                     resolved_count += 1;
                 }
             } else if matches!(&conflict.resolution, Some(ConflictResolution::FlaggedForReview)) {
                 // Just flag these for review, count as "processed"
-                if self.resolve_conflict(&conflict).await.is_ok() {
+                if let Ok(events) = self.resolve_conflict(&conflict).await {
+                    all_events.extend(events);
                     // Don't count flagged as "resolved", but still process them
                 }
             }
         }
 
-        Ok(resolved_count)
+        Ok((resolved_count, all_events))
     }
 
     /// Get all memories flagged for review due to unresolved conflicts.
@@ -480,7 +450,8 @@ impl<R: MemoryRepository> MemoryService<R> {
     }
 
     /// Check if a memory should be promoted based on access patterns.
-    async fn check_promotion(&self, memory: &mut Memory) -> DomainResult<bool> {
+    /// Returns whether promotion happened and any events.
+    async fn check_promotion(&self, memory: &mut Memory) -> DomainResult<(bool, Vec<UnifiedEvent>)> {
         let should_promote = match memory.tier {
             MemoryTier::Working => {
                 memory.access_count >= self.decay_config.promote_to_episodic_threshold
@@ -497,53 +468,53 @@ impl<R: MemoryRepository> MemoryService<R> {
             let to_tier = memory.tier.as_str().to_string();
             self.repository.update(memory).await?;
 
-            self.emit(UnifiedEvent {
-                id: EventId::new(),
-                sequence: SequenceNumber(0),
-                timestamp: chrono::Utc::now(),
-                severity: EventSeverity::Info,
-                category: EventCategory::Memory,
-                goal_id: None,
-                task_id: None,
-                correlation_id: None,
-                source_process_id: None,
-                payload: EventPayload::MemoryPromoted {
+            let events = vec![Self::make_event(
+                EventSeverity::Info,
+                EventCategory::Memory,
+                EventPayload::MemoryPromoted {
                     memory_id: memory.id,
                     key: memory.key.clone(),
                     from_tier,
                     to_tier,
                 },
-            }).await;
+            )];
 
-            return Ok(true);
+            return Ok((true, events));
         }
 
-        Ok(false)
+        Ok((false, vec![]))
     }
 
-    /// Check all non-semantic memories for promotion.
-    async fn check_all_promotions(&self) -> DomainResult<u64> {
+    /// Check all non-semantic memories for promotion. Returns count and events.
+    async fn check_all_promotions(&self) -> DomainResult<(u64, Vec<UnifiedEvent>)> {
         let mut promoted = 0;
+        let mut all_events = Vec::new();
 
         // Check working memories
         let working = self.repository.list_by_tier(MemoryTier::Working).await?;
         for mut mem in working {
-            if mem.access_count >= self.decay_config.promote_to_episodic_threshold
-                && self.check_promotion(&mut mem).await? {
+            if mem.access_count >= self.decay_config.promote_to_episodic_threshold {
+                let (did_promote, events) = self.check_promotion(&mut mem).await?;
+                if did_promote {
                     promoted += 1;
                 }
+                all_events.extend(events);
+            }
         }
 
         // Check episodic memories
         let episodic = self.repository.list_by_tier(MemoryTier::Episodic).await?;
         for mut mem in episodic {
-            if mem.access_count >= self.decay_config.promote_to_semantic_threshold
-                && self.check_promotion(&mut mem).await? {
+            if mem.access_count >= self.decay_config.promote_to_semantic_threshold {
+                let (did_promote, events) = self.check_promotion(&mut mem).await?;
+                if did_promote {
                     promoted += 1;
                 }
+                all_events.extend(events);
+            }
         }
 
-        Ok(promoted)
+        Ok((promoted, all_events))
     }
 
     /// Get memory statistics.
@@ -844,11 +815,11 @@ impl<R: MemoryRepository> MemoryService<R> {
         merged.trim().to_string()
     }
 
-    /// Apply a conflict resolution.
+    /// Apply a conflict resolution. Returns events to be journaled.
     pub async fn resolve_conflict(
         &self,
         conflict: &MemoryConflict,
-    ) -> DomainResult<()> {
+    ) -> DomainResult<Vec<UnifiedEvent>> {
         let resolution_type = match &conflict.resolution {
             Some(ConflictResolution::PreferNewer { .. }) => "prefer_newer",
             Some(ConflictResolution::PreferHigherConfidence { .. }) => "prefer_higher_confidence",
@@ -900,30 +871,23 @@ impl<R: MemoryRepository> MemoryService<R> {
             }
         }
 
-        self.emit(UnifiedEvent {
-            id: EventId::new(),
-            sequence: SequenceNumber(0),
-            timestamp: chrono::Utc::now(),
-            severity: EventSeverity::Info,
-            category: EventCategory::Memory,
-            goal_id: None,
-            task_id: None,
-            correlation_id: None,
-            source_process_id: None,
-            payload: EventPayload::MemoryConflictResolved {
+        let events = vec![Self::make_event(
+            EventSeverity::Info,
+            EventCategory::Memory,
+            EventPayload::MemoryConflictResolved {
                 memory_a: conflict.memory_a,
                 memory_b: conflict.memory_b,
                 resolution_type: resolution_type.to_string(),
             },
-        }).await;
+        )];
 
-        Ok(())
+        Ok(events)
     }
 }
 
 #[async_trait]
 impl<R: MemoryRepository + 'static> MemoryCommandHandler for MemoryService<R> {
-    async fn handle(&self, cmd: MemoryCommand) -> Result<CommandResult, CommandError> {
+    async fn handle(&self, cmd: MemoryCommand) -> Result<CommandOutcome, CommandError> {
         match cmd {
             MemoryCommand::Store {
                 key,
@@ -933,30 +897,30 @@ impl<R: MemoryRepository + 'static> MemoryCommandHandler for MemoryService<R> {
                 memory_type,
                 metadata,
             } => {
-                let memory = self
+                let (memory, events) = self
                     .store(key, content, namespace, tier, memory_type, metadata)
                     .await?;
-                Ok(CommandResult::Memory(memory))
+                Ok(CommandOutcome { result: CommandResult::Memory(memory), events })
             }
             MemoryCommand::Recall { id } => {
-                let memory = self.recall(id).await?;
-                Ok(CommandResult::MemoryOpt(memory))
+                let (memory, events) = self.recall(id).await?;
+                Ok(CommandOutcome { result: CommandResult::MemoryOpt(memory), events })
             }
             MemoryCommand::RecallByKey { key, namespace } => {
-                let memory = self.recall_by_key(&key, &namespace).await?;
-                Ok(CommandResult::MemoryOpt(memory))
+                let (memory, events) = self.recall_by_key(&key, &namespace).await?;
+                Ok(CommandOutcome { result: CommandResult::MemoryOpt(memory), events })
             }
             MemoryCommand::Forget { id } => {
-                self.forget(id).await?;
-                Ok(CommandResult::Unit)
+                let events = self.forget(id).await?;
+                Ok(CommandOutcome { result: CommandResult::Unit, events })
             }
             MemoryCommand::PruneExpired => {
-                let count = self.prune_expired().await?;
-                Ok(CommandResult::PruneCount(count))
+                let (count, events) = self.prune_expired().await?;
+                Ok(CommandOutcome { result: CommandResult::PruneCount(count), events })
             }
             MemoryCommand::RunMaintenance => {
-                let report = self.run_maintenance().await?;
-                Ok(CommandResult::MaintenanceReport(report))
+                let (report, events) = self.run_maintenance().await?;
+                Ok(CommandOutcome { result: CommandResult::MaintenanceReport(report), events })
             }
         }
     }
@@ -977,7 +941,7 @@ mod tests {
     async fn test_remember_and_recall() {
         let service = setup_service().await;
 
-        let memory = service.remember(
+        let (memory, _) = service.remember(
             "test_key".to_string(),
             "test content".to_string(),
             "test",
@@ -985,7 +949,8 @@ mod tests {
 
         assert_eq!(memory.tier, MemoryTier::Working);
 
-        let recalled = service.recall(memory.id).await.unwrap().unwrap();
+        let (recalled, _) = service.recall(memory.id).await.unwrap();
+        let recalled = recalled.unwrap();
         assert_eq!(recalled.access_count, 1);
     }
 
@@ -993,7 +958,7 @@ mod tests {
     async fn test_learn_semantic() {
         let service = setup_service().await;
 
-        let memory = service.learn(
+        let (memory, _) = service.learn(
             "pattern_key".to_string(),
             "learned pattern".to_string(),
             "patterns",
@@ -1013,7 +978,7 @@ mod tests {
             "test",
         ).await.unwrap();
 
-        let found = service.recall_by_key("lookup", "test").await.unwrap();
+        let (found, _) = service.recall_by_key("lookup", "test").await.unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().content, "value to find");
     }
@@ -1040,7 +1005,7 @@ mod tests {
                 ..Default::default()
             });
 
-        let memory = service.remember(
+        let (memory, _) = service.remember(
             "promote_me".to_string(),
             "content".to_string(),
             "test",
@@ -1049,7 +1014,8 @@ mod tests {
         // Access multiple times to trigger promotion
         service.recall(memory.id).await.unwrap();
         service.recall(memory.id).await.unwrap();
-        let promoted = service.recall(memory.id).await.unwrap().unwrap();
+        let (promoted, _) = service.recall(memory.id).await.unwrap();
+        let promoted = promoted.unwrap();
 
         assert_eq!(promoted.tier, MemoryTier::Episodic);
     }
@@ -1147,7 +1113,7 @@ mod tests {
     async fn test_forget() {
         let service = setup_service().await;
 
-        let memory = service.remember(
+        let (memory, _) = service.remember(
             "forget_me".to_string(),
             "content".to_string(),
             "test",
@@ -1155,7 +1121,7 @@ mod tests {
 
         service.forget(memory.id).await.unwrap();
 
-        let recalled = service.recall(memory.id).await.unwrap();
+        let (recalled, _) = service.recall(memory.id).await.unwrap();
         assert!(recalled.is_none());
     }
 }

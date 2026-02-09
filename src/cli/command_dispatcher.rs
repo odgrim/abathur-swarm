@@ -27,13 +27,16 @@ impl CliCommandDispatcher {
     pub fn new(pool: SqlitePool, event_bus: Arc<EventBus>) -> Self {
         let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
         let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-        let memory_repo = Arc::new(SqliteMemoryRepository::new(pool));
+        let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
 
-        let task_service = Arc::new(TaskService::new(task_repo, event_bus.clone()));
-        let goal_service = Arc::new(GoalService::new(goal_repo, event_bus.clone()));
-        let memory_service = Arc::new(MemoryService::new_with_event_bus(memory_repo, event_bus));
+        let task_service = Arc::new(TaskService::new(task_repo));
+        let goal_service = Arc::new(GoalService::new(goal_repo));
+        let memory_service = Arc::new(MemoryService::new(memory_repo));
 
-        let command_bus = Arc::new(CommandBus::new(task_service, goal_service, memory_service));
+        let command_bus = Arc::new(
+            CommandBus::new(task_service, goal_service, memory_service, event_bus)
+                .with_pool(pool),
+        );
 
         Self { command_bus }
     }

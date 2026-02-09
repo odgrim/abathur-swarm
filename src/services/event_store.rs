@@ -234,6 +234,111 @@ pub trait EventStore: Send + Sync {
     async fn increment_dead_letter_retry(&self, _id: &str, _next_retry_at: DateTime<Utc>) -> Result<(), EventStoreError> {
         Ok(())
     }
+
+    // -- Circuit breaker persistence --
+
+    /// Load all persisted circuit breaker states.
+    async fn load_circuit_breaker_states(&self) -> Result<Vec<CircuitBreakerRecord>, EventStoreError> {
+        Ok(vec![])
+    }
+
+    /// Persist a circuit breaker state change.
+    async fn save_circuit_breaker_state(
+        &self,
+        _handler_name: &str,
+        _failure_count: u32,
+        _tripped: bool,
+        _tripped_at: Option<DateTime<Utc>>,
+        _last_failure: Option<DateTime<Utc>>,
+    ) -> Result<(), EventStoreError> {
+        Ok(())
+    }
+
+    // -- Dead letter queue management --
+
+    /// List dead letter entries with optional handler filter.
+    async fn list_dead_letters(
+        &self,
+        _handler_name: Option<&str>,
+        _limit: u32,
+    ) -> Result<Vec<DeadLetterEntry>, EventStoreError> {
+        Ok(vec![])
+    }
+
+    /// Purge resolved dead letter entries older than the given duration.
+    /// Returns the number of entries purged.
+    async fn purge_dead_letters(&self, _older_than: Duration) -> Result<u64, EventStoreError> {
+        Ok(0)
+    }
+
+    // -- Webhook management --
+
+    /// Create a webhook subscription.
+    async fn create_webhook(
+        &self,
+        _id: &str,
+        _url: &str,
+        _secret: Option<&str>,
+        _filter_json: &str,
+        _max_failures: u32,
+        _created_at: &str,
+    ) -> Result<(), EventStoreError> {
+        Err(EventStoreError::QueryError("Webhooks not supported".into()))
+    }
+
+    /// List all webhook subscriptions.
+    async fn list_webhooks(&self) -> Result<Vec<WebhookSubscription>, EventStoreError> {
+        Ok(vec![])
+    }
+
+    /// Get a webhook subscription by ID.
+    async fn get_webhook(&self, _id: &str) -> Result<Option<WebhookSubscription>, EventStoreError> {
+        Ok(None)
+    }
+
+    /// Delete a webhook subscription.
+    async fn delete_webhook(&self, _id: &str) -> Result<(), EventStoreError> {
+        Ok(())
+    }
+
+    /// List active webhooks matching a category filter.
+    async fn list_active_webhooks_for_category(&self, _category: &str) -> Result<Vec<WebhookSubscription>, EventStoreError> {
+        Ok(vec![])
+    }
+
+    /// Increment failure count for a webhook; deactivate if over max.
+    async fn record_webhook_failure(&self, _id: &str) -> Result<(), EventStoreError> {
+        Ok(())
+    }
+
+    /// Update the last delivered sequence for a webhook.
+    async fn update_webhook_sequence(&self, _id: &str, _sequence: u64) -> Result<(), EventStoreError> {
+        Ok(())
+    }
+}
+
+/// A webhook subscription record.
+#[derive(Debug, Clone)]
+pub struct WebhookSubscription {
+    pub id: String,
+    pub url: String,
+    pub secret: Option<String>,
+    pub filter_category: Option<String>,
+    pub active: bool,
+    pub failure_count: u32,
+    pub max_failures: u32,
+    pub last_delivered_sequence: u64,
+    pub created_at: String,
+}
+
+/// A persisted circuit breaker state record.
+#[derive(Debug, Clone)]
+pub struct CircuitBreakerRecord {
+    pub handler_name: String,
+    pub failure_count: u32,
+    pub tripped: bool,
+    pub tripped_at: Option<DateTime<Utc>>,
+    pub last_failure: Option<DateTime<Utc>>,
 }
 
 /// A dead letter queue entry representing a handler failure.

@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::services::event_bus::{
     EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
 };
-use crate::services::event_store::{DeadLetterEntry, EventQuery, EventStore, EventStoreError, EventStoreStats};
+use crate::services::event_store::{CircuitBreakerRecord, DeadLetterEntry, EventQuery, EventStore, EventStoreError, EventStoreStats, WebhookSubscription};
 
 /// SQLite-backed event repository.
 #[derive(Clone)]
@@ -332,6 +332,72 @@ impl EventStore for SqliteEventRepository {
         })
     }
 
+    async fn load_circuit_breaker_states(&self) -> Result<Vec<CircuitBreakerRecord>, EventStoreError> {
+        #[derive(sqlx::FromRow)]
+        struct CbRow {
+            handler_name: String,
+            failure_count: i64,
+            tripped: i64,
+            tripped_at: Option<String>,
+            last_failure: Option<String>,
+        }
+
+        let rows: Vec<CbRow> = sqlx::query_as(
+            "SELECT handler_name, failure_count, tripped, tripped_at, last_failure FROM circuit_breaker_state",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| CircuitBreakerRecord {
+                handler_name: r.handler_name,
+                failure_count: r.failure_count as u32,
+                tripped: r.tripped != 0,
+                tripped_at: r.tripped_at
+                    .as_ref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc)),
+                last_failure: r.last_failure
+                    .as_ref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc)),
+            })
+            .collect())
+    }
+
+    async fn save_circuit_breaker_state(
+        &self,
+        handler_name: &str,
+        failure_count: u32,
+        tripped: bool,
+        tripped_at: Option<DateTime<Utc>>,
+        last_failure: Option<DateTime<Utc>>,
+    ) -> Result<(), EventStoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO circuit_breaker_state (handler_name, failure_count, tripped, tripped_at, last_failure)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(handler_name) DO UPDATE SET
+                failure_count = excluded.failure_count,
+                tripped = excluded.tripped,
+                tripped_at = excluded.tripped_at,
+                last_failure = excluded.last_failure
+            "#,
+        )
+        .bind(handler_name)
+        .bind(failure_count as i64)
+        .bind(if tripped { 1i64 } else { 0 })
+        .bind(tripped_at.map(|t| t.to_rfc3339()))
+        .bind(last_failure.map(|t| t.to_rfc3339()))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
     async fn append_dead_letter(
         &self,
         event_id: &str,
@@ -436,6 +502,193 @@ impl EventStore for SqliteEventRepository {
 
         Ok(())
     }
+
+    async fn list_dead_letters(
+        &self,
+        handler_name: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<DeadLetterEntry>, EventStoreError> {
+        let rows: Vec<DeadLetterRow> = if let Some(handler) = handler_name {
+            sqlx::query_as(
+                r#"
+                SELECT id, event_id, event_sequence, handler_name, error_message,
+                       retry_count, max_retries, next_retry_at, created_at, resolved_at
+                FROM dead_letter_events
+                WHERE resolved_at IS NULL AND handler_name = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                "#,
+            )
+            .bind(handler)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await
+        } else {
+            sqlx::query_as(
+                r#"
+                SELECT id, event_id, event_sequence, handler_name, error_message,
+                       retry_count, max_retries, next_retry_at, created_at, resolved_at
+                FROM dead_letter_events
+                WHERE resolved_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT ?
+                "#,
+            )
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await
+        }
+        .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in rows {
+            entries.push(DeadLetterEntry {
+                id: row.id,
+                event_id: row.event_id,
+                event_sequence: row.event_sequence as u64,
+                handler_name: row.handler_name,
+                error_message: row.error_message,
+                retry_count: row.retry_count as u32,
+                max_retries: row.max_retries as u32,
+                next_retry_at: row.next_retry_at
+                    .as_ref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc)),
+                created_at: DateTime::parse_from_rfc3339(&row.created_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                resolved_at: None,
+            });
+        }
+
+        Ok(entries)
+    }
+
+    async fn purge_dead_letters(&self, older_than: std::time::Duration) -> Result<u64, EventStoreError> {
+        let cutoff = (Utc::now() - chrono::Duration::from_std(older_than).unwrap_or_default()).to_rfc3339();
+
+        let result = sqlx::query(
+            "DELETE FROM dead_letter_events WHERE resolved_at IS NOT NULL AND created_at < ?",
+        )
+        .bind(&cutoff)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::DatabaseError(e.to_string()))?;
+
+        Ok(result.rows_affected())
+    }
+
+    // -- Webhook management --
+
+    async fn create_webhook(
+        &self,
+        id: &str,
+        url: &str,
+        secret: Option<&str>,
+        filter_json: &str,
+        max_failures: u32,
+        created_at: &str,
+    ) -> Result<(), EventStoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO webhook_subscriptions (id, url, secret, filter_json, active, max_failures, failure_count, last_delivered_sequence, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 1, ?, 0, 0, ?, ?)
+            "#,
+        )
+        .bind(id)
+        .bind(url)
+        .bind(secret)
+        .bind(filter_json)
+        .bind(max_failures as i64)
+        .bind(created_at)
+        .bind(created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn list_webhooks(&self) -> Result<Vec<WebhookSubscription>, EventStoreError> {
+        let rows: Vec<WebhookRow> = sqlx::query_as(
+            "SELECT id, url, secret, filter_json, active, max_failures, failure_count, last_delivered_sequence, created_at FROM webhook_subscriptions ORDER BY created_at DESC"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
+    async fn get_webhook(&self, id: &str) -> Result<Option<WebhookSubscription>, EventStoreError> {
+        let row: Option<WebhookRow> = sqlx::query_as(
+            "SELECT id, url, secret, filter_json, active, max_failures, failure_count, last_delivered_sequence, created_at FROM webhook_subscriptions WHERE id = ?"
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+
+        Ok(row.map(|r| r.into()))
+    }
+
+    async fn delete_webhook(&self, id: &str) -> Result<(), EventStoreError> {
+        sqlx::query("DELETE FROM webhook_subscriptions WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| EventStoreError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn list_active_webhooks_for_category(&self, category: &str) -> Result<Vec<WebhookSubscription>, EventStoreError> {
+        let rows: Vec<WebhookRow> = sqlx::query_as(
+            r#"
+            SELECT id, url, secret, filter_json, active, max_failures, failure_count, last_delivered_sequence, created_at
+            FROM webhook_subscriptions
+            WHERE active = 1
+              AND (filter_json = '{}' OR filter_json LIKE '%"category":"' || ? || '"%' OR filter_json LIKE '%"category":null%')
+            "#
+        )
+        .bind(category)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+
+        Ok(rows.into_iter().map(|r| r.into()).collect())
+    }
+
+    async fn record_webhook_failure(&self, id: &str) -> Result<(), EventStoreError> {
+        sqlx::query(
+            r#"
+            UPDATE webhook_subscriptions
+            SET failure_count = failure_count + 1,
+                active = CASE WHEN failure_count + 1 >= max_failures THEN 0 ELSE active END,
+                updated_at = datetime('now')
+            WHERE id = ?
+            "#,
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn update_webhook_sequence(&self, id: &str, sequence: u64) -> Result<(), EventStoreError> {
+        sqlx::query(
+            "UPDATE webhook_subscriptions SET last_delivered_sequence = ?, failure_count = 0, updated_at = datetime('now') WHERE id = ?"
+        )
+        .bind(sequence as i64)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
 }
 
 impl SqliteEventRepository {
@@ -503,6 +756,39 @@ struct DeadLetterRow {
     next_retry_at: Option<String>,
     created_at: String,
     resolved_at: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct WebhookRow {
+    id: String,
+    url: String,
+    secret: Option<String>,
+    filter_json: String,
+    active: i64,
+    max_failures: i64,
+    failure_count: i64,
+    last_delivered_sequence: i64,
+    created_at: String,
+}
+
+impl From<WebhookRow> for WebhookSubscription {
+    fn from(row: WebhookRow) -> Self {
+        let filter_category = serde_json::from_str::<serde_json::Value>(&row.filter_json)
+            .ok()
+            .and_then(|v| v.get("category").and_then(|c| c.as_str().map(String::from)));
+
+        WebhookSubscription {
+            id: row.id,
+            url: row.url,
+            secret: row.secret,
+            filter_category,
+            active: row.active != 0,
+            failure_count: row.failure_count as u32,
+            max_failures: row.max_failures as u32,
+            last_delivered_sequence: row.last_delivered_sequence as u64,
+            created_at: row.created_at,
+        }
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]

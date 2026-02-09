@@ -232,7 +232,7 @@ impl<M: MemoryRepository + 'static> EventHandler for MemoryMaintenanceHandler<M>
     }
 
     async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
-        let report = self.memory_service.run_maintenance().await
+        let (report, _service_events) = self.memory_service.run_maintenance().await
             .map_err(|e| format!("Memory maintenance failed: {}", e))?;
 
         let mut events = Vec::new();
@@ -1469,7 +1469,7 @@ impl<M: MemoryRepository + 'static> EventHandler for MemoryReconciliationHandler
             return Ok(Reaction::None);
         }
 
-        let report = self.memory_service.run_maintenance().await
+        let (report, _events) = self.memory_service.run_maintenance().await
             .map_err(|e| format!("Memory reconciliation failed: {}", e))?;
 
         tracing::info!(

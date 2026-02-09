@@ -200,25 +200,21 @@ where
 
             let task_service = Arc::new(TaskService::new(
                 self.task_repo.clone(),
-                self.event_bus.clone(),
             ));
             let goal_service = Arc::new(GoalService::new(
                 self.goal_repo.clone(),
-                self.event_bus.clone(),
             ));
 
             let command_bus = if let Some(ref memory_repo) = self.memory_repo {
-                let memory_service = Arc::new(MemoryService::new_with_event_bus(
+                let memory_service = Arc::new(MemoryService::new(
                     memory_repo.clone(),
-                    self.event_bus.clone(),
                 ));
-                Arc::new(CommandBus::new(task_service, goal_service, memory_service))
+                Arc::new(CommandBus::new(task_service, goal_service, memory_service, self.event_bus.clone()))
             } else {
-                let null_memory = Arc::new(MemoryService::new_with_event_bus(
+                let null_memory = Arc::new(MemoryService::new(
                     Arc::new(NullMemoryRepository::new()),
-                    self.event_bus.clone(),
                 ));
-                Arc::new(CommandBus::new(task_service, goal_service, null_memory))
+                Arc::new(CommandBus::new(task_service, goal_service, null_memory, self.event_bus.clone()))
             };
 
             let mut engine_builder = TriggerRuleEngine::new(command_bus)

@@ -125,10 +125,10 @@ async fn test_goal_lifecycle_with_constraints() {
     let (goal_repo, _, _, _, _) = setup_test_environment().await;
 
     let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
-    let goal_service = GoalService::new(goal_repo.clone(), event_bus.clone());
+    let goal_service = GoalService::new(goal_repo.clone());
 
     // Create a goal with constraints
-    let goal = goal_service
+    let (goal, _events) = goal_service
         .create_goal(
             "Implement Authentication System".to_string(),
             "Build a complete auth system with login, logout, and session management".to_string(),
@@ -158,7 +158,7 @@ async fn test_goal_lifecycle_with_constraints() {
 
     // Test goal status transitions
     // Goals are NEVER completed - only Paused or Retired
-    goal_service
+    let (_, _events) = goal_service
         .transition_status(goal.id, GoalStatus::Paused)
         .await
         .expect("Failed to pause goal");
@@ -171,13 +171,13 @@ async fn test_goal_lifecycle_with_constraints() {
     assert_eq!(paused_goal.status, GoalStatus::Paused);
 
     // Resume the goal
-    goal_service
+    let (_, _events) = goal_service
         .transition_status(goal.id, GoalStatus::Active)
         .await
         .expect("Failed to resume goal");
 
     // Retire the goal when no longer relevant
-    goal_service
+    let (_, _events) = goal_service
         .transition_status(goal.id, GoalStatus::Retired)
         .await
         .expect("Failed to retire goal");
@@ -202,11 +202,11 @@ async fn test_task_dag_with_dependencies() {
     let (goal_repo, task_repo, _, _, _) = setup_test_environment().await;
 
     let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
-    let goal_service = GoalService::new(goal_repo.clone(), event_bus.clone());
-    let task_service = TaskService::new(task_repo.clone(), event_bus.clone());
+    let goal_service = GoalService::new(goal_repo.clone());
+    let task_service = TaskService::new(task_repo.clone());
 
     // Create a goal (aspirational context, not directly linked to tasks)
-    let _goal = goal_service
+    let (_goal, _events) = goal_service
         .create_goal(
             "Build API".to_string(),
             "Create REST API endpoints".to_string(),
@@ -232,7 +232,7 @@ async fn test_task_dag_with_dependencies() {
     //      |
     //   test (wave 4)
 
-    let setup_task = task_service
+    let (setup_task, _events) = task_service
         .submit_task(
             Some("Setup Project".to_string()),
             "Initialize project structure and dependencies".to_string(),
@@ -247,7 +247,7 @@ async fn test_task_dag_with_dependencies() {
         .await
         .expect("Failed to create setup task");
 
-    let auth_task = task_service
+    let (auth_task, _events) = task_service
         .submit_task(
             Some("Implement Auth".to_string()),
             "Create authentication middleware".to_string(),
@@ -262,7 +262,7 @@ async fn test_task_dag_with_dependencies() {
         .await
         .expect("Failed to create auth task");
 
-    let db_task = task_service
+    let (db_task, _events) = task_service
         .submit_task(
             Some("Setup Database".to_string()),
             "Configure database connection and migrations".to_string(),
@@ -277,7 +277,7 @@ async fn test_task_dag_with_dependencies() {
         .await
         .expect("Failed to create db task");
 
-    let api_task = task_service
+    let (api_task, _events) = task_service
         .submit_task(
             Some("Build API Endpoints".to_string()),
             "Create CRUD endpoints for all resources".to_string(),
@@ -292,7 +292,7 @@ async fn test_task_dag_with_dependencies() {
         .await
         .expect("Failed to create api task");
 
-    let test_task = task_service
+    let (test_task, _events) = task_service
         .submit_task(
             Some("Write Tests".to_string()),
             "Create integration tests for all endpoints".to_string(),
@@ -814,14 +814,14 @@ async fn test_full_end_to_end_workflow() {
 
     // 1. Create services
     let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
-    let goal_service = GoalService::new(goal_repo.clone(), event_bus.clone());
-    let task_service = TaskService::new(task_repo.clone(), event_bus.clone());
+    let goal_service = GoalService::new(goal_repo.clone());
+    let task_service = TaskService::new(task_repo.clone());
     let agent_service = AgentService::new(agent_repo.clone(), event_bus.clone());
     let memory_service = MemoryService::new(memory_repo.clone());
     let evolution_loop = Arc::new(EvolutionLoop::with_default_config());
 
     // 2. Create a goal with constraints
-    let goal = goal_service
+    let (goal, _events) = goal_service
         .create_goal(
             "Build User Service".to_string(),
             "Create a user management service with CRUD operations".to_string(),
@@ -839,7 +839,7 @@ async fn test_full_end_to_end_workflow() {
     println!("Created goal: {} ({})", goal.name, goal.id);
 
     // 3. Create tasks manually (goals no longer decompose into tasks)
-    let task1 = task_service
+    let (task1, _events) = task_service
         .submit_task(
             Some("Setup user service".to_string()),
             "Initialize user service structure".to_string(),
@@ -854,7 +854,7 @@ async fn test_full_end_to_end_workflow() {
         .await
         .expect("Failed to create task");
 
-    let _task2 = task_service
+    let (_task2, _events) = task_service
         .submit_task(
             Some("Implement user CRUD".to_string()),
             "Create CRUD endpoints for users".to_string(),
@@ -956,7 +956,7 @@ async fn test_full_end_to_end_workflow() {
     }
 
     // 7. Store some context in memory
-    memory_service
+    let (_, _events) = memory_service
         .remember(
             "user_service_schema".to_string(),
             "Users table: id, email, name, created_at".to_string(),
@@ -965,7 +965,7 @@ async fn test_full_end_to_end_workflow() {
         .await
         .expect("Failed to store memory");
 
-    memory_service
+    let (_, _events) = memory_service
         .learn(
             "user_validation_pattern".to_string(),
             "Always validate email format before storing".to_string(),
@@ -982,7 +982,7 @@ async fn test_full_end_to_end_workflow() {
     assert_eq!(memories.len(), 2);
 
     // 8. Complete the workflow - retire the goal
-    goal_service
+    let (_, _events) = goal_service
         .transition_status(goal.id, GoalStatus::Retired)
         .await
         .expect("Failed to retire goal");
@@ -1057,7 +1057,7 @@ async fn test_memory_system_integration() {
     let memory_service = MemoryService::new(memory_repo.clone());
 
     // Store memories in all three tiers
-    memory_service
+    let (_, _events) = memory_service
         .remember(
             "current_focus".to_string(),
             "Working on auth module".to_string(),
@@ -1066,7 +1066,7 @@ async fn test_memory_system_integration() {
         .await
         .expect("Failed to store working memory");
 
-    memory_service
+    let (_, _events) = memory_service
         .store(
             "login_bug_fix".to_string(),
             "Fixed null pointer in login handler".to_string(),
@@ -1078,7 +1078,7 @@ async fn test_memory_system_integration() {
         .await
         .expect("Failed to store episodic memory");
 
-    memory_service
+    let (_, _events) = memory_service
         .learn(
             "error_handling_pattern".to_string(),
             "Always use Result type for fallible operations".to_string(),
@@ -1111,7 +1111,7 @@ async fn test_memory_system_integration() {
     assert_eq!(semantic, 1, "Should have 1 semantic memory");
 
     // Test recall
-    let recalled = memory_service
+    let (recalled, _events) = memory_service
         .recall_by_key("error_handling_pattern", "session")
         .await
         .expect("Failed to recall");
@@ -1119,7 +1119,7 @@ async fn test_memory_system_integration() {
     assert!(recalled.unwrap().content.contains("Result type"));
 
     // Run maintenance
-    let _report = memory_service
+    let (_report, _events) = memory_service
         .run_maintenance()
         .await
         .expect("Failed to run maintenance");
@@ -1138,10 +1138,10 @@ async fn test_task_idempotency() {
     let (_goal_repo, task_repo, _, _, _) = setup_test_environment().await;
 
     let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
-    let task_service = TaskService::new(task_repo.clone(), event_bus.clone());
+    let task_service = TaskService::new(task_repo.clone());
 
     // Submit task with idempotency key
-    let task1 = task_service
+    let (task1, _events) = task_service
         .submit_task(
             Some("Unique Task".to_string()),
             "This task should only exist once".to_string(),
@@ -1157,7 +1157,7 @@ async fn test_task_idempotency() {
         .expect("First submission should succeed");
 
     // Submit again with same key but different content
-    let task2 = task_service
+    let (task2, _events) = task_service
         .submit_task(
             Some("Different Title".to_string()),
             "Different description".to_string(),
@@ -1205,8 +1205,8 @@ async fn test_e2e_all_critical_paths() {
 
     // 1. Goal Creation
     let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
-    let goal_service = GoalService::new(goal_repo.clone(), event_bus.clone());
-    let goal = goal_service
+    let goal_service = GoalService::new(goal_repo.clone());
+    let (goal, _events) = goal_service
         .create_goal(
             "E2E Test Goal".to_string(),
             "End to end test".to_string(),
@@ -1221,8 +1221,8 @@ async fn test_e2e_all_critical_paths() {
     println!("  ✓ Goal creation");
 
     // 2. Task Creation with Dependencies
-    let task_service = TaskService::new(task_repo.clone(), event_bus.clone());
-    let task1 = task_service
+    let task_service = TaskService::new(task_repo.clone());
+    let (task1, _events) = task_service
         .submit_task(
             Some("Task 1".to_string()),
             "First task".to_string(),
@@ -1237,7 +1237,7 @@ async fn test_e2e_all_critical_paths() {
         .await
         .expect("Task 1 creation failed");
 
-    let _task2 = task_service
+    let (_task2, _events) = task_service
         .submit_task(
             Some("Task 2".to_string()),
             "Second task".to_string(),
@@ -1316,11 +1316,11 @@ async fn test_e2e_all_critical_paths() {
 
     // 7. Memory Storage and Retrieval
     let memory_service = MemoryService::new(memory_repo.clone());
-    memory_service
+    let (_, _events) = memory_service
         .learn("test_key".to_string(), "test_value".to_string(), "e2e")
         .await
         .expect("Memory store failed");
-    let recalled = memory_service
+    let (recalled, _events) = memory_service
         .recall_by_key("test_key", "e2e")
         .await
         .expect("Memory recall failed");
@@ -1328,7 +1328,7 @@ async fn test_e2e_all_critical_paths() {
     println!("  ✓ Memory storage and retrieval");
 
     // 8. Goal Status Transition
-    goal_service
+    let (_, _events) = goal_service
         .transition_status(goal.id, GoalStatus::Retired)
         .await
         .expect("Goal transition failed");
@@ -1695,14 +1695,14 @@ async fn test_real_e2e_full_workflow() {
 
     // 1. Create services
     let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
-    let goal_service = GoalService::new(goal_repo.clone(), event_bus.clone());
-    let task_service = TaskService::new(task_repo.clone(), event_bus.clone());
+    let goal_service = GoalService::new(goal_repo.clone());
+    let task_service = TaskService::new(task_repo.clone());
     let agent_service = AgentService::new(agent_repo.clone(), event_bus.clone());
     let memory_service = MemoryService::new(memory_repo.clone());
     let evolution_loop = Arc::new(EvolutionLoop::with_default_config());
 
     // 2. Create a goal
-    let goal = goal_service
+    let (goal, _events) = goal_service
         .create_goal(
             "Real E2E Test Goal".to_string(),
             "Verify the complete system works with real agents".to_string(),
@@ -1719,7 +1719,7 @@ async fn test_real_e2e_full_workflow() {
     // 3. Create a simple task DAG
     //    task1 (setup) → task2 (verify)
 
-    let task1 = task_service
+    let (task1, _events) = task_service
         .submit_task(
             Some("Setup Task".to_string()),
             "This is the setup phase. Reply with: SETUP_COMPLETE".to_string(),
@@ -1734,7 +1734,7 @@ async fn test_real_e2e_full_workflow() {
         .await
         .expect("Failed to create task1");
 
-    let _task2 = task_service
+    let (_task2, _events) = task_service
         .submit_task(
             Some("Verify Task".to_string()),
             "This is the verification phase. Reply with: VERIFY_COMPLETE".to_string(),
@@ -1854,7 +1854,7 @@ async fn test_real_e2e_full_workflow() {
     );
 
     // 7. Store execution context in memory
-    memory_service
+    let (_, _events) = memory_service
         .learn(
             "e2e_test_result".to_string(),
             format!(
@@ -1869,7 +1869,7 @@ async fn test_real_e2e_full_workflow() {
     println!("✓ Stored execution context in memory");
 
     // 8. Retire the goal
-    goal_service
+    let (_, _events) = goal_service
         .transition_status(goal.id, GoalStatus::Retired)
         .await
         .expect("Failed to retire goal");

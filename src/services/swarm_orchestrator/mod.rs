@@ -412,6 +412,9 @@ where
         ).await;
         let reactor_handle = self.event_reactor.start();
 
+        // Load persistent scheduler state from DB before starting
+        self.event_scheduler.initialize_from_store().await;
+
         // Start EventScheduler
         self.audit_log.info(
             AuditCategory::System,
@@ -427,6 +430,9 @@ where
             AuditAction::SwarmStarted,
             "Registered built-in event handlers",
         ).await;
+
+        // Load persisted circuit breaker states (after handler registration)
+        self.event_reactor.load_circuit_breaker_states().await;
 
         self.register_builtin_schedules().await;
         self.audit_log.info(
@@ -453,6 +459,29 @@ where
                         AuditAction::SwarmStarted,
                         AuditActor::System,
                         format!("Failed to replay missed events (non-fatal): {}", e),
+                    ),
+                ).await;
+            }
+        }
+
+        // Run startup reconciliation to fix inconsistent state
+        match self.run_startup_reconciliation().await {
+            Ok(count) if count > 0 => {
+                self.audit_log.info(
+                    AuditCategory::System,
+                    AuditAction::SwarmStarted,
+                    format!("Startup reconciliation: {} corrections applied", count),
+                ).await;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Warning,
+                        AuditCategory::System,
+                        AuditAction::SwarmStarted,
+                        AuditActor::System,
+                        format!("Startup reconciliation failed (non-fatal): {}", e),
                     ),
                 ).await;
             }

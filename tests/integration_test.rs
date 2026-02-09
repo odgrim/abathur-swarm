@@ -45,10 +45,10 @@ async fn setup_test_repos() -> (
 async fn test_goal_lifecycle() {
     let (goal_repo, _, _, _, _) = setup_test_repos().await;
 
-    let goal_service = GoalService::new(goal_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
+    let goal_service = GoalService::new(goal_repo.clone());
 
     // Create a goal using the service
-    let goal = goal_service.create_goal(
+    let (goal, _events) = goal_service.create_goal(
         "Implement feature X".to_string(),
         "Add feature X to the system".to_string(),
         GoalPriority::High,
@@ -66,7 +66,7 @@ async fn test_goal_lifecycle() {
 
     // Update goal status - goals can be retired when no longer relevant
     // Note: Goals are never "completed" - they are convergent attractors
-    goal_service.transition_status(goal.id, GoalStatus::Retired)
+    let (_, _events) = goal_service.transition_status(goal.id, GoalStatus::Retired)
         .await.expect("Failed to retire goal");
 
     let updated = goal_service.get_goal(goal.id).await.expect("Failed to get goal");
@@ -79,10 +79,10 @@ async fn test_goal_lifecycle() {
 async fn test_task_lifecycle_with_dependencies() {
     let (_, task_repo, _, _, _) = setup_test_repos().await;
 
-    let task_service = TaskService::new(task_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
+    let task_service = TaskService::new(task_repo.clone());
 
     // Create a parent task using the service
-    let parent_task = task_service.submit_task(
+    let (parent_task, _events) = task_service.submit_task(
             Some("Setup".to_string()),
         "Set up the environment".to_string(),
         None,  // parent_id
@@ -95,7 +95,7 @@ async fn test_task_lifecycle_with_dependencies() {
     ).await.expect("Failed to submit parent task");
 
     // Create a dependent task
-    let child_task = task_service.submit_task(
+    let (child_task, _events) = task_service.submit_task(
             Some("Build".to_string()),
         "Build the application".to_string(),
         None,
@@ -116,10 +116,10 @@ async fn test_task_lifecycle_with_dependencies() {
     assert_eq!(child.status, TaskStatus::Pending);
 
     // Complete the parent task
-    let _ = task_service.claim_task(parent_task.id, "test-agent")
+    let (_, _events) = task_service.claim_task(parent_task.id, "test-agent")
         .await
         .expect("Failed to claim parent");
-    task_service.complete_task(parent_task.id)
+    let (_, _events) = task_service.complete_task(parent_task.id)
         .await
         .expect("Failed to complete parent task");
 
@@ -136,21 +136,21 @@ async fn test_memory_system_integration() {
     let memory_service = MemoryService::new(memory_repo.clone());
 
     // Store working memory using convenience method
-    memory_service.remember(
+    let (_, _events) = memory_service.remember(
         "current_task".to_string(),
         "Working on feature X".to_string(),
         "test_namespace",
     ).await.expect("Failed to store working memory");
 
     // Store semantic memory using convenience method
-    memory_service.learn(
+    let (_, _events) = memory_service.learn(
         "rust_best_practices".to_string(),
         "Use Result for error handling".to_string(),
         "test_namespace",
     ).await.expect("Failed to store semantic memory");
 
     // Store using full store method with explicit tier
-    memory_service.store(
+    let (_, _events) = memory_service.store(
         "event_001".to_string(),
         "Completed authentication module".to_string(),
         "test_namespace".to_string(),
@@ -321,10 +321,10 @@ async fn test_dag_execution_mock() {
 async fn test_task_idempotency() {
     let (_, task_repo, _, _, _) = setup_test_repos().await;
 
-    let task_service = TaskService::new(task_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
+    let task_service = TaskService::new(task_repo.clone());
 
     // First submission should succeed
-    let task1 = task_service.submit_task(
+    let (task1, _events) = task_service.submit_task(
             Some("Idempotent Task".to_string()),
         "Testing idempotency".to_string(),
         None,
@@ -337,7 +337,7 @@ async fn test_task_idempotency() {
     ).await.expect("First submit failed");
 
     // Second submission with same key should return the same task
-    let task2 = task_service.submit_task(
+    let (task2, _events) = task_service.submit_task(
             Some("Different name".to_string()),
         "Different description".to_string(),
         None,
@@ -365,9 +365,9 @@ async fn test_task_idempotency() {
 async fn test_task_retry_on_failure() {
     let (_, task_repo, _, _, _) = setup_test_repos().await;
 
-    let task_service = TaskService::new(task_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
+    let task_service = TaskService::new(task_repo.clone());
 
-    let task = task_service.submit_task(
+    let (task, _events) = task_service.submit_task(
             Some("Failing Task".to_string()),
         "A task that will fail".to_string(),
         None,
@@ -380,7 +380,7 @@ async fn test_task_retry_on_failure() {
     ).await.expect("Failed to submit");
 
     // Claim the task
-    task_service.claim_task(task.id, "test-agent")
+    let (_, _events) = task_service.claim_task(task.id, "test-agent")
         .await
         .expect("Failed to claim");
 
@@ -404,13 +404,13 @@ async fn test_memory_decay() {
     let memory_service = MemoryService::new(memory_repo.clone());
 
     // Create some memories
-    memory_service.remember(
+    let (_, _events) = memory_service.remember(
         "key1".to_string(),
         "Memory 1".to_string(),
         "decay_test",
     ).await.expect("Failed to store");
 
-    memory_service.store(
+    let (_, _events) = memory_service.store(
         "key2".to_string(),
         "Memory 2".to_string(),
         "decay_test".to_string(),
@@ -420,7 +420,7 @@ async fn test_memory_decay() {
     ).await.expect("Failed to store");
 
     // Run maintenance
-    let report = memory_service.run_maintenance().await.expect("Failed to run maintenance");
+    let (report, _events) = memory_service.run_maintenance().await.expect("Failed to run maintenance");
 
     // Maintenance should have run - verify the report has valid data
     // (expired_pruned, decayed_pruned, promoted are the available fields)
@@ -432,11 +432,11 @@ async fn test_memory_decay() {
 async fn test_goal_constraints() {
     let (goal_repo, _, _, _, _) = setup_test_repos().await;
 
-    let goal_service = GoalService::new(goal_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
+    let goal_service = GoalService::new(goal_repo.clone());
 
     use abathur::domain::models::GoalConstraint;
 
-    let goal = goal_service.create_goal(
+    let (goal, _events) = goal_service.create_goal(
         "Constrained Goal".to_string(),
         "A goal with constraints".to_string(),
         GoalPriority::High,

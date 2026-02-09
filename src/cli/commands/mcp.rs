@@ -12,11 +12,12 @@ use crate::adapters::mcp::{
     MemoryHttpServer, TasksHttpConfig, TasksHttpServer,
 };
 use crate::adapters::sqlite::{
-    all_embedded_migrations, create_pool, Migrator, SqliteAgentRepository, SqliteMemoryRepository,
-    SqliteTaskRepository,
+    all_embedded_migrations, create_pool, Migrator, SqliteAgentRepository, SqliteGoalRepository,
+    SqliteMemoryRepository, SqliteTaskRepository,
 };
 use crate::domain::models::a2a::A2AAgentCard;
-use crate::services::{AgentService, MemoryService, TaskService};
+use crate::services::command_bus::CommandBus;
+use crate::services::{AgentService, GoalService, MemoryService, TaskService};
 
 #[derive(Args, Debug)]
 pub struct McpArgs {
@@ -192,9 +193,21 @@ async fn start_memory_http(host: String, port: u16, enable_cors: bool, json_mode
         .run_embedded_migrations(all_embedded_migrations())
         .await?;
 
-    let repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
+    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
+    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
+
+    let memory_service = MemoryService::new(memory_repo);
+    let task_service = TaskService::new(task_repo);
+    let goal_service = GoalService::new(goal_repo);
+
     let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool);
-    let service = MemoryService::new_with_event_bus(repo, event_bus);
+    let command_bus = Arc::new(CommandBus::new(
+        Arc::new(task_service),
+        Arc::new(goal_service),
+        Arc::new(memory_service.clone()),
+        event_bus,
+    ));
 
     let config = MemoryHttpConfig {
         host: host.clone(),
@@ -219,7 +232,7 @@ async fn start_memory_http(host: String, port: u16, enable_cors: bool, json_mode
         println!();
     }
 
-    let server = MemoryHttpServer::new(service, config);
+    let server = MemoryHttpServer::new(memory_service, command_bus, config);
     server.serve().await.map_err(|e| anyhow::anyhow!("{}", e))?;
 
     Ok(())
@@ -234,8 +247,20 @@ async fn start_tasks_http(host: String, port: u16, enable_cors: bool, json_mode:
         .await?;
 
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
+    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
+
+    let task_service = TaskService::new(task_repo);
+    let goal_service = GoalService::new(goal_repo);
+    let memory_service = MemoryService::new(memory_repo);
+
     let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool);
-    let service = TaskService::new(task_repo, event_bus);
+    let command_bus = Arc::new(CommandBus::new(
+        Arc::new(task_service.clone()),
+        Arc::new(goal_service),
+        Arc::new(memory_service),
+        event_bus,
+    ));
 
     let config = TasksHttpConfig {
         host: host.clone(),
@@ -260,7 +285,7 @@ async fn start_tasks_http(host: String, port: u16, enable_cors: bool, json_mode:
         println!();
     }
 
-    let server = TasksHttpServer::new(service, config);
+    let server = TasksHttpServer::new(task_service, command_bus, config);
     server.serve().await.map_err(|e| anyhow::anyhow!("{}", e))?;
 
     Ok(())
@@ -406,13 +431,24 @@ async fn start_all(
     let shared_event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
 
     let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-    let memory_service = MemoryService::new_with_event_bus(memory_repo, shared_event_bus.clone());
+    let memory_service = MemoryService::new(memory_repo);
 
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let task_service = TaskService::new(task_repo, shared_event_bus.clone());
+    let task_service = TaskService::new(task_repo);
+
+    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
+    let goal_service = GoalService::new(goal_repo);
 
     let agent_repo = Arc::new(SqliteAgentRepository::new(pool));
-    let agent_service = AgentService::new(agent_repo, shared_event_bus);
+    let agent_service = AgentService::new(agent_repo, shared_event_bus.clone());
+
+    // Create shared CommandBus for mutation routing
+    let command_bus = Arc::new(CommandBus::new(
+        Arc::new(task_service.clone()),
+        Arc::new(goal_service),
+        Arc::new(memory_service.clone()),
+        shared_event_bus,
+    ));
 
     // Create servers
     let memory_config = MemoryHttpConfig {
@@ -420,14 +456,14 @@ async fn start_all(
         port: memory_port,
         enable_cors: true,
     };
-    let memory_server = MemoryHttpServer::new(memory_service, memory_config);
+    let memory_server = MemoryHttpServer::new(memory_service, command_bus.clone(), memory_config);
 
     let tasks_config = TasksHttpConfig {
         host: host.clone(),
         port: tasks_port,
         enable_cors: true,
     };
-    let tasks_server = TasksHttpServer::new(task_service, tasks_config);
+    let tasks_server = TasksHttpServer::new(task_service, command_bus, tasks_config);
 
     let agents_config = AgentsHttpConfig {
         host: host.clone(),
@@ -544,17 +580,26 @@ async fn start_stdio(db_path: String, task_id: Option<String>) -> Result<()> {
     let shared_event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
 
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let task_service = TaskService::new(task_repo, shared_event_bus.clone());
+    let task_service = TaskService::new(task_repo);
 
     let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
     let agent_service = AgentService::new(agent_repo, shared_event_bus.clone());
 
     let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-    let memory_service = MemoryService::new_with_event_bus(memory_repo, shared_event_bus);
+    let memory_service = MemoryService::new(memory_repo);
 
     let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
+    let goal_service = GoalService::new(goal_repo.clone());
 
-    let server = StdioServer::new(task_service, agent_service, memory_service, goal_repo, task_uuid);
+    // Create CommandBus for mutation routing
+    let command_bus = Arc::new(CommandBus::new(
+        Arc::new(task_service.clone()),
+        Arc::new(goal_service),
+        Arc::new(memory_service.clone()),
+        shared_event_bus,
+    ));
+
+    let server = StdioServer::new(task_service, agent_service, memory_service, goal_repo, command_bus, task_uuid);
     server.run().await?;
 
     Ok(())

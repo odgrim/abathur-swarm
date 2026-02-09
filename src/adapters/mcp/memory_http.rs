@@ -20,6 +20,9 @@ use uuid::Uuid;
 
 use crate::domain::models::{Memory, MemoryQuery, MemoryTier, MemoryType};
 use crate::domain::ports::MemoryRepository;
+use crate::services::command_bus::{
+    CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand, MemoryCommand,
+};
 use crate::services::MemoryService;
 
 /// Configuration for the memory HTTP server.
@@ -153,23 +156,26 @@ pub struct ErrorResponse {
 /// Shared state for the memory HTTP server.
 struct AppState<M: MemoryRepository> {
     service: MemoryService<M>,
+    command_bus: Arc<CommandBus>,
 }
 
 /// Memory HTTP Server.
 pub struct MemoryHttpServer<M: MemoryRepository + 'static> {
     config: MemoryHttpConfig,
     service: MemoryService<M>,
+    command_bus: Arc<CommandBus>,
 }
 
 impl<M: MemoryRepository + Clone + Send + Sync + 'static> MemoryHttpServer<M> {
-    pub fn new(service: MemoryService<M>, config: MemoryHttpConfig) -> Self {
-        Self { config, service }
+    pub fn new(service: MemoryService<M>, command_bus: Arc<CommandBus>, config: MemoryHttpConfig) -> Self {
+        Self { config, service, command_bus }
     }
 
     /// Build the router.
     fn build_router(self) -> Router {
         let state = Arc::new(AppState {
             service: self.service,
+            command_bus: self.command_bus,
         });
 
         let app = Router::new()
@@ -297,19 +303,27 @@ async fn store_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
         .and_then(|t| MemoryType::from_str(t))
         .unwrap_or(MemoryType::Fact);
 
-    match state
-        .service
-        .store(
-            req.key,
-            req.content,
-            namespace,
-            tier,
-            memory_type,
-            None,
-        )
-        .await
-    {
-        Ok(memory) => Ok((StatusCode::CREATED, Json(MemoryResponse::from(memory)))),
+    let cmd = DomainCommand::Memory(MemoryCommand::Store {
+        key: req.key,
+        content: req.content,
+        namespace,
+        tier,
+        memory_type,
+        metadata: None,
+    });
+    let envelope = CommandEnvelope::new(CommandSource::Mcp("memory-http".into()), cmd);
+
+    match state.command_bus.dispatch(envelope).await {
+        Ok(CommandResult::Memory(memory)) => {
+            Ok((StatusCode::CREATED, Json(MemoryResponse::from(memory))))
+        }
+        Ok(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Unexpected command result type".to_string(),
+                code: "INTERNAL_ERROR".to_string(),
+            }),
+        )),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -325,8 +339,8 @@ async fn get_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
     Path(id): Path<Uuid>,
 ) -> Result<Json<MemoryResponse>, (StatusCode, Json<ErrorResponse>)> {
     match state.service.recall(id).await {
-        Ok(Some(memory)) => Ok(Json(MemoryResponse::from(memory))),
-        Ok(None) => Err((
+        Ok((Some(memory), _events)) => Ok(Json(MemoryResponse::from(memory))),
+        Ok((None, _)) => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 error: format!("Memory {} not found", id),
@@ -348,8 +362,8 @@ async fn get_by_key<M: MemoryRepository + Clone + Send + Sync + 'static>(
     Path((namespace, key)): Path<(String, String)>,
 ) -> Result<Json<MemoryResponse>, (StatusCode, Json<ErrorResponse>)> {
     match state.service.recall_by_key(&key, &namespace).await {
-        Ok(Some(memory)) => Ok(Json(MemoryResponse::from(memory))),
-        Ok(None) => Err((
+        Ok((Some(memory), _events)) => Ok(Json(MemoryResponse::from(memory))),
+        Ok((None, _)) => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 error: format!("Memory with key '{}' in namespace '{}' not found", key, namespace),
@@ -436,8 +450,8 @@ async fn update_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
 ) -> Result<Json<MemoryResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Get existing memory
     let memory = match state.service.recall(id).await {
-        Ok(Some(m)) => m,
-        Ok(None) => {
+        Ok((Some(m), _events)) => m,
+        Ok((None, _)) => {
             return Err((
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
@@ -459,19 +473,27 @@ async fn update_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
 
     // Update content if provided
     if let Some(content) = req.content {
-        match state
-            .service
-            .store(
-                memory.key,
-                content,
-                memory.namespace,
-                memory.tier,
-                memory.memory_type,
-                Some(memory.metadata),
-            )
-            .await
-        {
-            Ok(updated) => return Ok(Json(MemoryResponse::from(updated))),
+        let cmd = DomainCommand::Memory(MemoryCommand::Store {
+            key: memory.key,
+            content,
+            namespace: memory.namespace,
+            tier: memory.tier,
+            memory_type: memory.memory_type,
+            metadata: Some(memory.metadata),
+        });
+        let envelope = CommandEnvelope::new(CommandSource::Mcp("memory-http".into()), cmd);
+
+        match state.command_bus.dispatch(envelope).await {
+            Ok(CommandResult::Memory(updated)) => return Ok(Json(MemoryResponse::from(updated))),
+            Ok(_) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Unexpected command result type".to_string(),
+                        code: "INTERNAL_ERROR".to_string(),
+                    }),
+                ))
+            }
             Err(e) => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -491,8 +513,11 @@ async fn delete_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
     State(state): State<Arc<AppState<M>>>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    match state.service.forget(id).await {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
+    let cmd = DomainCommand::Memory(MemoryCommand::Forget { id });
+    let envelope = CommandEnvelope::new(CommandSource::Mcp("memory-http".into()), cmd);
+
+    match state.command_bus.dispatch(envelope).await {
+        Ok(_) => Ok(StatusCode::NO_CONTENT),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {

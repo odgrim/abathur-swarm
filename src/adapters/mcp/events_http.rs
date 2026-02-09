@@ -4,16 +4,19 @@
 //! and replay capabilities via HTTP endpoints.
 
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{
+        Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
-        Json,
+        IntoResponse, Json,
     },
-    routing::get,
+    routing::{get, post, delete},
     Router,
 };
-use futures::stream::{self, Stream};
+use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -104,6 +107,10 @@ impl EventsHttpServer {
             .route("/events/replay", get(replay_events))
             .route("/events/history", get(query_history))
             .route("/events/stats", get(get_stats))
+            .route("/ws/events", get(ws_events))
+            .route("/api/v1/webhooks", post(create_webhook).get(list_webhooks))
+            .route("/api/v1/webhooks/{id}", delete(delete_webhook))
+            .route("/api/v1/webhooks/{id}/test", post(test_webhook))
             .route("/health", get(health_check))
             .with_state(self.state.clone())
             .layer(TraceLayer::new_for_http());
@@ -209,51 +216,115 @@ struct HistoryQuery {
     order: Option<String>,
 }
 
-/// SSE stream of all events.
+/// SSE stream of all events with `Last-Event-ID` replay support.
+///
+/// If the client sends a `Last-Event-ID` header (standard SSE reconnection),
+/// events since that sequence are replayed from the journal first, then the
+/// stream switches to live events.
 async fn stream_all_events(
     State(state): State<Arc<EventsState>>,
+    headers: HeaderMap,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let last_event_id = parse_last_event_id(&headers);
     let receiver = state.event_bus.subscribe();
     let heartbeat = Duration::from_millis(state.config.heartbeat_interval_ms);
 
-    let stream = create_event_stream(receiver, None, None);
+    let replay_events = get_replay_events(&state, last_event_id, None, None).await;
+    let stream = create_event_stream_with_replay(replay_events, receiver, None, None);
 
     Sse::new(stream).keep_alive(KeepAlive::new().interval(heartbeat))
 }
 
-/// SSE stream of events filtered by goal ID.
+/// SSE stream of events filtered by goal ID with `Last-Event-ID` support.
 async fn stream_goal_events(
     State(state): State<Arc<EventsState>>,
     Path(goal_id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let last_event_id = parse_last_event_id(&headers);
     let receiver = state.event_bus.subscribe();
     let heartbeat = Duration::from_millis(state.config.heartbeat_interval_ms);
 
-    let stream = create_event_stream(receiver, Some(goal_id), None);
+    let replay_events = get_replay_events(&state, last_event_id, Some(goal_id), None).await;
+    let stream = create_event_stream_with_replay(replay_events, receiver, Some(goal_id), None);
 
     Sse::new(stream).keep_alive(KeepAlive::new().interval(heartbeat))
 }
 
-/// SSE stream of events filtered by task ID.
+/// SSE stream of events filtered by task ID with `Last-Event-ID` support.
 async fn stream_task_events(
     State(state): State<Arc<EventsState>>,
     Path(task_id): Path<Uuid>,
+    headers: HeaderMap,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let last_event_id = parse_last_event_id(&headers);
     let receiver = state.event_bus.subscribe();
     let heartbeat = Duration::from_millis(state.config.heartbeat_interval_ms);
 
-    let stream = create_event_stream(receiver, None, Some(task_id));
+    let replay_events = get_replay_events(&state, last_event_id, None, Some(task_id)).await;
+    let stream = create_event_stream_with_replay(replay_events, receiver, None, Some(task_id));
 
     Sse::new(stream).keep_alive(KeepAlive::new().interval(heartbeat))
 }
 
-/// Create an SSE stream from a broadcast receiver with optional filtering.
-fn create_event_stream(
+/// Parse the `Last-Event-ID` header from an SSE reconnection.
+fn parse_last_event_id(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+/// Query the event store for events since `last_event_id` for replay.
+async fn get_replay_events(
+    state: &EventsState,
+    last_event_id: Option<u64>,
+    goal_filter: Option<Uuid>,
+    task_filter: Option<Uuid>,
+) -> Vec<UnifiedEvent> {
+    let since = match last_event_id {
+        Some(seq) => seq,
+        None => return Vec::new(),
+    };
+
+    let store = match &state.event_store {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    let mut query = EventQuery::new()
+        .since_sequence(SequenceNumber(since))
+        .limit(state.config.max_history_limit)
+        .ascending();
+
+    if let Some(goal_id) = goal_filter {
+        query = query.goal_id(goal_id);
+    }
+    if let Some(task_id) = task_filter {
+        query = query.task_id(task_id);
+    }
+
+    store.query(query).await.unwrap_or_default()
+}
+
+/// Create an SSE stream that replays missed events first, then streams live.
+fn create_event_stream_with_replay(
+    replay: Vec<UnifiedEvent>,
     receiver: broadcast::Receiver<UnifiedEvent>,
     goal_filter: Option<Uuid>,
     task_filter: Option<Uuid>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
-    stream::unfold(receiver, move |mut rx| {
+    // Phase 1: replay buffered events
+    let replay_stream = stream::iter(replay.into_iter().map(|event| {
+        let sse_event = Event::default()
+            .event(format!("{}", event.category))
+            .id(event.sequence.0.to_string())
+            .data(serde_json::to_string(&event).unwrap_or_default());
+        Ok(sse_event)
+    }));
+
+    // Phase 2: live events from broadcast
+    let live_stream = stream::unfold(receiver, move |mut rx| {
         let goal_filter = goal_filter;
         let task_filter = task_filter;
 
@@ -261,7 +332,6 @@ fn create_event_stream(
             loop {
                 match rx.recv().await {
                     Ok(event) => {
-                        // Apply filters
                         if let Some(goal_id) = goal_filter {
                             if event.goal_id != Some(goal_id) {
                                 continue;
@@ -273,7 +343,6 @@ fn create_event_stream(
                             }
                         }
 
-                        // Format SSE event
                         let sse_event = Event::default()
                             .event(format!("{}", event.category))
                             .id(event.sequence.0.to_string())
@@ -282,11 +351,9 @@ fn create_event_stream(
                         return Some((Ok(sse_event), rx));
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        // Channel closed, end stream
                         return None;
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        // Warn about missed events
                         let warning = Event::default()
                             .event("warning")
                             .data(format!("{{\"type\":\"lagged\",\"missed_events\":{}}}", n));
@@ -295,7 +362,332 @@ fn create_event_stream(
                 }
             }
         }
-    })
+    });
+
+    // Chain replay -> live
+    replay_stream.chain(live_stream)
+}
+
+// ============================================================================
+// WebSocket Streaming
+// ============================================================================
+
+/// Query parameters for WebSocket event stream.
+#[derive(Debug, Deserialize)]
+struct WsEventParams {
+    /// Filter by event category.
+    category: Option<String>,
+    /// Only events since this sequence number (for reconnection).
+    since_sequence: Option<u64>,
+}
+
+/// WebSocket event upgrade handler.
+async fn ws_events(
+    ws: WebSocketUpgrade,
+    Query(params): Query<WsEventParams>,
+    State(state): State<Arc<EventsState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws_events(socket, params, state))
+}
+
+/// Handle a WebSocket event stream connection.
+async fn handle_ws_events(
+    mut socket: WebSocket,
+    params: WsEventParams,
+    state: Arc<EventsState>,
+) {
+    let category_filter = params.category.as_deref().and_then(parse_category);
+
+    // Replay missed events if since_sequence is provided
+    if let Some(since) = params.since_sequence {
+        if let Some(ref store) = state.event_store {
+            let query = EventQuery::new()
+                .since_sequence(SequenceNumber(since))
+                .limit(state.config.max_history_limit)
+                .ascending();
+
+            if let Ok(events) = store.query(query).await {
+                for event in &events {
+                    if let Some(cat) = category_filter {
+                        if event.category != cat {
+                            continue;
+                        }
+                    }
+                    let json = serde_json::to_string(event).unwrap_or_default();
+                    if socket.send(Message::Text(json.into())).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // Stream live events
+    let mut receiver = state.event_bus.subscribe();
+
+    loop {
+        tokio::select! {
+            result = receiver.recv() => {
+                match result {
+                    Ok(event) => {
+                        if let Some(cat) = category_filter {
+                            if event.category != cat {
+                                continue;
+                            }
+                        }
+                        let json = serde_json::to_string(&event).unwrap_or_default();
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        let warning = format!("{{\"type\":\"lagged\",\"missed_events\":{}}}", n);
+                        if socket.send(Message::Text(warning.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        if socket.send(Message::Pong(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => {} // Ignore other messages
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Webhook Management
+// ============================================================================
+
+/// Request to create a webhook subscription.
+#[derive(Debug, Deserialize)]
+struct CreateWebhookRequest {
+    url: String,
+    secret: Option<String>,
+    filter_category: Option<String>,
+    max_failures: Option<u32>,
+}
+
+/// Webhook subscription response.
+#[derive(Debug, Serialize)]
+struct WebhookResponse {
+    id: String,
+    url: String,
+    filter_category: Option<String>,
+    active: bool,
+    failure_count: u32,
+    max_failures: u32,
+    created_at: String,
+}
+
+/// Create a webhook subscription.
+async fn create_webhook(
+    State(state): State<Arc<EventsState>>,
+    Json(req): Json<CreateWebhookRequest>,
+) -> Result<(StatusCode, Json<WebhookResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let store = state.event_store.as_ref().ok_or_else(|| {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorResponse {
+                error: "Event store not configured".to_string(),
+                code: "STORE_NOT_CONFIGURED".to_string(),
+            }),
+        )
+    })?;
+
+    let id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+    let filter_json = serde_json::json!({
+        "category": req.filter_category,
+    }).to_string();
+    let max_failures = req.max_failures.unwrap_or(10);
+
+    store.create_webhook(
+        &id.to_string(),
+        &req.url,
+        req.secret.as_deref(),
+        &filter_json,
+        max_failures,
+        &now.to_rfc3339(),
+    ).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+                code: "CREATE_ERROR".to_string(),
+            }),
+        )
+    })?;
+
+    Ok((StatusCode::CREATED, Json(WebhookResponse {
+        id: id.to_string(),
+        url: req.url,
+        filter_category: req.filter_category,
+        active: true,
+        failure_count: 0,
+        max_failures,
+        created_at: now.to_rfc3339(),
+    })))
+}
+
+/// List all webhook subscriptions.
+async fn list_webhooks(
+    State(state): State<Arc<EventsState>>,
+) -> Result<Json<Vec<WebhookResponse>>, (StatusCode, Json<ErrorResponse>)> {
+    let store = state.event_store.as_ref().ok_or_else(|| {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorResponse {
+                error: "Event store not configured".to_string(),
+                code: "STORE_NOT_CONFIGURED".to_string(),
+            }),
+        )
+    })?;
+
+    let webhooks = store.list_webhooks().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+                code: "LIST_ERROR".to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(webhooks.into_iter().map(|w| WebhookResponse {
+        id: w.id,
+        url: w.url,
+        filter_category: w.filter_category,
+        active: w.active,
+        failure_count: w.failure_count,
+        max_failures: w.max_failures,
+        created_at: w.created_at,
+    }).collect()))
+}
+
+/// Delete a webhook subscription.
+async fn delete_webhook(
+    State(state): State<Arc<EventsState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let store = state.event_store.as_ref().ok_or_else(|| {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorResponse {
+                error: "Event store not configured".to_string(),
+                code: "STORE_NOT_CONFIGURED".to_string(),
+            }),
+        )
+    })?;
+
+    store.delete_webhook(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+                code: "DELETE_ERROR".to_string(),
+            }),
+        )
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Send a test event to a webhook.
+async fn test_webhook(
+    State(state): State<Arc<EventsState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let store = state.event_store.as_ref().ok_or_else(|| {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorResponse {
+                error: "Event store not configured".to_string(),
+                code: "STORE_NOT_CONFIGURED".to_string(),
+            }),
+        )
+    })?;
+
+    let webhook = store.get_webhook(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+                code: "FETCH_ERROR".to_string(),
+            }),
+        )
+    })?;
+
+    let webhook = webhook.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Webhook not found".to_string(),
+                code: "NOT_FOUND".to_string(),
+            }),
+        )
+    })?;
+
+    // Send a test event
+    let test_payload = serde_json::json!({
+        "type": "test",
+        "webhook_id": id,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "message": "This is a test event from Abathur",
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+
+    let mut request = client.post(&webhook.url)
+        .header("Content-Type", "application/json")
+        .header("X-Abathur-Event", "test");
+
+    if let Some(ref secret) = webhook.secret {
+        let body = test_payload.to_string();
+        let signature = compute_hmac_signature(secret, &body);
+        request = request.header("X-Abathur-Signature", signature);
+    }
+
+    let response = request.json(&test_payload).send().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: format!("Failed to deliver test event: {}", e),
+                code: "DELIVERY_ERROR".to_string(),
+            }),
+        )
+    })?;
+
+    let status = response.status().as_u16();
+    Ok(Json(serde_json::json!({
+        "delivered": status >= 200 && status < 300,
+        "response_status": status,
+    })))
+}
+
+/// Compute HMAC-SHA256 signature for webhook payloads.
+fn compute_hmac_signature(secret: &str, body: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(body.as_bytes());
+    let result = mac.finalize();
+    format!("sha256={}", hex::encode(result.into_bytes()))
 }
 
 /// Replay events from a sequence number.

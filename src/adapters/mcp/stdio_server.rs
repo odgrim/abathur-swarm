@@ -13,6 +13,10 @@ use uuid::Uuid;
 
 use crate::domain::models::{GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::{AgentFilter, GoalFilter, GoalRepository, MemoryRepository, TaskRepository};
+use crate::services::command_bus::{
+    CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand, MemoryCommand,
+    TaskCommand,
+};
 use crate::services::{AgentService, MemoryService, TaskService};
 use crate::domain::ports::AgentRepository;
 
@@ -28,6 +32,7 @@ where
     agent_service: AgentService<A>,
     memory_service: MemoryService<M>,
     goal_repo: Arc<G>,
+    command_bus: Arc<CommandBus>,
     /// When set, task_submit auto-populates parent_id
     task_id: Option<Uuid>,
 }
@@ -44,6 +49,7 @@ where
         agent_service: AgentService<A>,
         memory_service: MemoryService<M>,
         goal_repo: Arc<G>,
+        command_bus: Arc<CommandBus>,
         task_id: Option<Uuid>,
     ) -> Self {
         Self {
@@ -51,6 +57,7 @@ where
             agent_service,
             memory_service,
             goal_repo,
+            command_bus,
             task_id,
         }
     }
@@ -375,21 +382,24 @@ where
         // Auto-populate parent_id from --task-id context
         let parent_id = self.task_id;
 
-        let task = self
-            .task_service
-            .submit_task(
-                title,
-                description,
-                parent_id,
-                priority,
-                agent_type,
-                depends_on,
-                None,
-                None,
-                TaskSource::Human,
-            )
-            .await
-            .map_err(|e| format!("Failed to submit task: {}", e))?;
+        let cmd = DomainCommand::Task(TaskCommand::Submit {
+            title,
+            description,
+            parent_id,
+            priority,
+            agent_type,
+            depends_on,
+            context: Box::new(None),
+            idempotency_key: None,
+            source: TaskSource::Human,
+        });
+        let envelope = CommandEnvelope::new(CommandSource::Mcp("stdio".into()), cmd);
+
+        let task = match self.command_bus.dispatch(envelope).await {
+            Ok(CommandResult::Task(task)) => task,
+            Ok(_) => return Err("Unexpected command result type".to_string()),
+            Err(e) => return Err(format!("Failed to submit task: {}", e)),
+        };
 
         let response = serde_json::json!({
             "id": task.id.to_string(),
@@ -482,20 +492,26 @@ where
             .and_then(|s| s.as_str())
             .ok_or("Missing required field: status")?;
 
-        let task = match status {
-            "complete" | "completed" => self
-                .task_service
-                .complete_task(id)
-                .await
-                .map_err(|e| format!("Failed to complete task: {}", e))?,
+        let cmd = match status {
+            "complete" | "completed" => DomainCommand::Task(TaskCommand::Complete {
+                task_id: id,
+                tokens_used: 0,
+            }),
             "failed" | "fail" => {
                 let error = args.get("error").and_then(|e| e.as_str()).map(|s| s.to_string());
-                self.task_service
-                    .fail_task(id, error)
-                    .await
-                    .map_err(|e| format!("Failed to fail task: {}", e))?
+                DomainCommand::Task(TaskCommand::Fail {
+                    task_id: id,
+                    error,
+                })
             }
             _ => return Err(format!("Invalid status '{}'. Use 'complete' or 'failed'.", status)),
+        };
+        let envelope = CommandEnvelope::new(CommandSource::Mcp("stdio".into()), cmd);
+
+        let task = match self.command_bus.dispatch(envelope).await {
+            Ok(CommandResult::Task(task)) => task,
+            Ok(_) => return Err("Unexpected command result type".to_string()),
+            Err(e) => return Err(format!("Failed to update task status: {}", e)),
         };
 
         let response = serde_json::json!({
@@ -701,11 +717,21 @@ where
             .and_then(MemoryTier::from_str)
             .unwrap_or(MemoryTier::Working);
 
-        let memory = self
-            .memory_service
-            .store(key, content, namespace, tier, memory_type, None)
-            .await
-            .map_err(|e| format!("Failed to store memory: {}", e))?;
+        let cmd = DomainCommand::Memory(MemoryCommand::Store {
+            key,
+            content,
+            namespace,
+            tier,
+            memory_type,
+            metadata: None,
+        });
+        let envelope = CommandEnvelope::new(CommandSource::Mcp("stdio".into()), cmd);
+
+        let memory = match self.command_bus.dispatch(envelope).await {
+            Ok(CommandResult::Memory(memory)) => memory,
+            Ok(_) => return Err("Unexpected command result type".to_string()),
+            Err(e) => return Err(format!("Failed to store memory: {}", e)),
+        };
 
         let response = serde_json::json!({
             "id": memory.id.to_string(),
@@ -722,11 +748,12 @@ where
             .ok_or("Missing required field: id")?;
         let id = Uuid::parse_str(id_str).map_err(|e| format!("Invalid UUID: {}", e))?;
 
-        let memory = self
+        let (memory_opt, _events) = self
             .memory_service
             .recall(id)
             .await
-            .map_err(|e| format!("Failed to get memory: {}", e))?
+            .map_err(|e| format!("Failed to get memory: {}", e))?;
+        let memory = memory_opt
             .ok_or_else(|| format!("Memory {} not found", id))?;
 
         let response = serde_json::json!({

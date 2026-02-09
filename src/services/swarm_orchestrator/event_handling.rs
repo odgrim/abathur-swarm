@@ -34,6 +34,7 @@ where
 
     /// Emit an event to the EventBus.
     /// This is a helper for publishing events without needing the mpsc channel.
+    #[allow(deprecated)]
     pub async fn emit_to_event_bus(&self, event: SwarmEvent) {
         self.event_bus.publish_swarm_event(event).await;
     }

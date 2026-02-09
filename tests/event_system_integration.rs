@@ -98,19 +98,10 @@ async fn wait_for_reactor_startup() {
 async fn test_task_mutation_emits_and_persists_event() {
     let pool = create_migrated_test_pool().await.expect("test pool");
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let event_store: Arc<dyn EventStore> = Arc::new(SqliteEventRepository::new(pool.clone()));
 
-    let event_bus = Arc::new(
-        EventBus::new(EventBusConfig {
-            persist_events: true,
-            ..Default::default()
-        })
-        .with_store(event_store.clone()),
-    );
+    let service = TaskService::new(task_repo);
 
-    let service = TaskService::new(task_repo, event_bus.clone());
-
-    let task = service
+    let (task, events) = service
         .submit_task(
             Some("Integration test task".to_string()),
             "Test description".to_string(),
@@ -124,13 +115,6 @@ async fn test_task_mutation_emits_and_persists_event() {
         )
         .await
         .expect("submit task");
-
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    let events = event_store
-        .query(EventQuery::new().task_id(task.id).ascending())
-        .await
-        .expect("query events");
 
     assert!(!events.is_empty(), "Expected at least one event for task");
 
@@ -161,19 +145,10 @@ async fn test_task_mutation_emits_and_persists_event() {
 async fn test_goal_mutation_emits_and_persists_event() {
     let pool = create_migrated_test_pool().await.expect("test pool");
     let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-    let event_store: Arc<dyn EventStore> = Arc::new(SqliteEventRepository::new(pool.clone()));
 
-    let event_bus = Arc::new(
-        EventBus::new(EventBusConfig {
-            persist_events: true,
-            ..Default::default()
-        })
-        .with_store(event_store.clone()),
-    );
+    let service = GoalService::new(goal_repo);
 
-    let service = GoalService::new(goal_repo, event_bus.clone());
-
-    let goal = service
+    let (goal, events) = service
         .create_goal(
             "Test goal".to_string(),
             "A test goal description".to_string(),
@@ -184,13 +159,6 @@ async fn test_goal_mutation_emits_and_persists_event() {
         )
         .await
         .expect("create goal");
-
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    let events = event_store
-        .query(EventQuery::new().goal_id(goal.id).ascending())
-        .await
-        .expect("query events");
 
     assert!(!events.is_empty(), "Expected at least one event for goal");
 
@@ -276,14 +244,15 @@ async fn test_trigger_rule_emits_event_on_match() {
     let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
 
     let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
-    let task_service = Arc::new(TaskService::new(task_repo, event_bus.clone()));
-    let goal_service = Arc::new(GoalService::new(goal_repo, event_bus.clone()));
-    let memory_service = Arc::new(MemoryService::new_with_event_bus(memory_repo, event_bus.clone()));
+    let task_service = Arc::new(TaskService::new(task_repo));
+    let goal_service = Arc::new(GoalService::new(goal_repo));
+    let memory_service = Arc::new(MemoryService::new(memory_repo));
 
     let command_bus = Arc::new(CommandBus::new(
         task_service as Arc<dyn TaskCommandHandler>,
         goal_service as Arc<dyn GoalCommandHandler>,
         memory_service as Arc<dyn MemoryCommandHandler>,
+        event_bus.clone(),
     ));
 
     let engine = TriggerRuleEngine::new(command_bus).with_event_bus(event_bus.clone());
@@ -419,14 +388,15 @@ async fn test_command_bus_routes_and_emits() {
         .with_store(event_store.clone()),
     );
 
-    let task_service = Arc::new(TaskService::new(task_repo, event_bus.clone()));
-    let goal_service = Arc::new(GoalService::new(goal_repo, event_bus.clone()));
-    let memory_service = Arc::new(MemoryService::new_with_event_bus(memory_repo, event_bus.clone()));
+    let task_service = Arc::new(TaskService::new(task_repo));
+    let goal_service = Arc::new(GoalService::new(goal_repo));
+    let memory_service = Arc::new(MemoryService::new(memory_repo));
 
     let command_bus = CommandBus::new(
         task_service as Arc<dyn TaskCommandHandler>,
         goal_service as Arc<dyn GoalCommandHandler>,
         memory_service as Arc<dyn MemoryCommandHandler>,
+        event_bus.clone(),
     );
 
     let envelope = CommandEnvelope::new(
@@ -472,6 +442,8 @@ async fn test_command_bus_routes_and_emits() {
 async fn test_e2e_mutation_persist_react() {
     let pool = create_migrated_test_pool().await.expect("test pool");
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
+    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
     let event_store: Arc<dyn EventStore> = Arc::new(SqliteEventRepository::new(pool.clone()));
 
     let event_bus = Arc::new(
@@ -491,21 +463,32 @@ async fn test_e2e_mutation_persist_react() {
     let handle = reactor.start();
     wait_for_reactor_startup().await;
 
-    let service = TaskService::new(task_repo, event_bus.clone());
-    let _task = service
-        .submit_task(
-            Some("E2E test task".to_string()),
-            "End to end test".to_string(),
-            None,
-            TaskPriority::Normal,
-            None,
-            vec![],
-            None,
-            None,
-            TaskSource::Human,
-        )
-        .await
-        .expect("submit task");
+    // Use CommandBus so events get journaled and broadcast
+    let task_service = Arc::new(TaskService::new(task_repo));
+    let goal_service = Arc::new(GoalService::new(goal_repo));
+    let memory_service = Arc::new(MemoryService::new(memory_repo));
+    let command_bus = CommandBus::new(
+        task_service as Arc<dyn TaskCommandHandler>,
+        goal_service as Arc<dyn GoalCommandHandler>,
+        memory_service as Arc<dyn MemoryCommandHandler>,
+        event_bus.clone(),
+    );
+
+    let envelope = CommandEnvelope::new(
+        CommandSource::Human,
+        DomainCommand::Task(TaskCommand::Submit {
+            title: Some("E2E test task".to_string()),
+            description: "End to end test".to_string(),
+            parent_id: None,
+            priority: TaskPriority::Normal,
+            agent_type: None,
+            depends_on: vec![],
+            context: Box::new(None),
+            idempotency_key: None,
+            source: TaskSource::Human,
+        }),
+    );
+    command_bus.dispatch(envelope).await.expect("dispatch");
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
@@ -574,14 +557,15 @@ async fn test_trigger_count_threshold() {
     let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
 
     let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
-    let task_service = Arc::new(TaskService::new(task_repo, event_bus.clone()));
-    let goal_service = Arc::new(GoalService::new(goal_repo, event_bus.clone()));
-    let memory_service = Arc::new(MemoryService::new_with_event_bus(memory_repo, event_bus.clone()));
+    let task_service = Arc::new(TaskService::new(task_repo));
+    let goal_service = Arc::new(GoalService::new(goal_repo));
+    let memory_service = Arc::new(MemoryService::new(memory_repo));
 
     let command_bus = Arc::new(CommandBus::new(
         task_service as Arc<dyn TaskCommandHandler>,
         goal_service as Arc<dyn GoalCommandHandler>,
         memory_service as Arc<dyn MemoryCommandHandler>,
+        event_bus.clone(),
     ));
 
     let engine = TriggerRuleEngine::new(command_bus).with_event_bus(event_bus.clone());

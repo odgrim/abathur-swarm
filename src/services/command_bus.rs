@@ -16,6 +16,7 @@ use crate::domain::models::{
     Goal, GoalConstraint, GoalPriority, GoalStatus, Memory, MemoryMetadata, MemoryTier,
     MemoryType, Task, TaskContext, TaskPriority, TaskSource, TaskStatus,
 };
+use crate::services::event_bus::{EventBus, UnifiedEvent};
 use crate::services::memory_service::MaintenanceReport;
 
 /// Unique identifier for a command.
@@ -53,6 +54,10 @@ pub enum CommandSource {
     Scheduler(String),
     /// Federated A2A delegation.
     A2A(String),
+    /// Webhook trigger.
+    Webhook(String),
+    /// MCP HTTP server.
+    Mcp(String),
 }
 
 impl fmt::Display for CommandSource {
@@ -63,6 +68,8 @@ impl fmt::Display for CommandSource {
             Self::EventHandler(name) => write!(f, "handler:{}", name),
             Self::Scheduler(name) => write!(f, "scheduler:{}", name),
             Self::A2A(swarm) => write!(f, "a2a:{}", swarm),
+            Self::Webhook(name) => write!(f, "webhook:{}", name),
+            Self::Mcp(server) => write!(f, "mcp:{}", server),
         }
     }
 }
@@ -210,6 +217,16 @@ pub enum CommandResult {
     Unit,
 }
 
+/// Outcome of a command handler: the business result plus any events produced.
+///
+/// The CommandBus journals and broadcasts the events after successful execution.
+/// Services no longer publish events directly; they return them here.
+#[derive(Debug)]
+pub struct CommandOutcome {
+    pub result: CommandResult,
+    pub events: Vec<UnifiedEvent>,
+}
+
 /// Errors that can occur during command dispatch.
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
@@ -236,19 +253,19 @@ pub enum CommandError {
 /// Handler for task commands.
 #[async_trait]
 pub trait TaskCommandHandler: Send + Sync {
-    async fn handle(&self, cmd: TaskCommand) -> Result<CommandResult, CommandError>;
+    async fn handle(&self, cmd: TaskCommand) -> Result<CommandOutcome, CommandError>;
 }
 
 /// Handler for goal commands.
 #[async_trait]
 pub trait GoalCommandHandler: Send + Sync {
-    async fn handle(&self, cmd: GoalCommand) -> Result<CommandResult, CommandError>;
+    async fn handle(&self, cmd: GoalCommand) -> Result<CommandOutcome, CommandError>;
 }
 
 /// Handler for memory commands.
 #[async_trait]
 pub trait MemoryCommandHandler: Send + Sync {
-    async fn handle(&self, cmd: MemoryCommand) -> Result<CommandResult, CommandError>;
+    async fn handle(&self, cmd: MemoryCommand) -> Result<CommandOutcome, CommandError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,14 +275,22 @@ pub trait MemoryCommandHandler: Send + Sync {
 /// Central command dispatcher.
 ///
 /// Holds one handler per domain and routes `DomainCommand` variants to them.
+/// Owns event journaling: after a handler returns a `CommandOutcome`, the bus
+/// writes all events to the EventStore (journal) and then broadcasts them
+/// in-memory via the EventBus.
+///
 /// Includes an LRU dedup cache to prevent duplicate command processing
 /// (important for replay scenarios).
 pub struct CommandBus {
     task_handler: Arc<dyn TaskCommandHandler>,
     goal_handler: Arc<dyn GoalCommandHandler>,
     memory_handler: Arc<dyn MemoryCommandHandler>,
-    /// Cache of recently processed command IDs for deduplication (capacity: 1000).
+    /// EventBus for journaling and broadcasting events produced by handlers.
+    event_bus: Arc<EventBus>,
+    /// In-memory cache of recently processed command IDs for fast deduplication.
     processed_commands: moka::future::Cache<CommandId, ()>,
+    /// Optional DB pool for persistent dedup across restarts.
+    pool: Option<sqlx::SqlitePool>,
 }
 
 impl CommandBus {
@@ -273,26 +298,55 @@ impl CommandBus {
         task_handler: Arc<dyn TaskCommandHandler>,
         goal_handler: Arc<dyn GoalCommandHandler>,
         memory_handler: Arc<dyn MemoryCommandHandler>,
+        event_bus: Arc<EventBus>,
     ) -> Self {
         Self {
             task_handler,
             goal_handler,
             memory_handler,
+            event_bus,
             processed_commands: moka::future::Cache::builder()
                 .max_capacity(1000)
                 .time_to_live(std::time::Duration::from_secs(3600))
                 .build(),
+            pool: None,
         }
     }
 
+    /// Enable persistent command deduplication via SQLite.
+    pub fn with_pool(mut self, pool: sqlx::SqlitePool) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
     /// Dispatch a command envelope to the appropriate handler.
+    ///
+    /// Flow: dedup check -> execute handler -> journal events -> broadcast events -> return result.
     pub async fn dispatch(
         &self,
         envelope: CommandEnvelope<DomainCommand>,
     ) -> Result<CommandResult, CommandError> {
-        // Check dedup cache
+        // 1. Check in-memory dedup cache
         if self.processed_commands.get(&envelope.id).await.is_some() {
             return Err(CommandError::DuplicateCommand(envelope.id));
+        }
+
+        // 1b. Check persistent dedup table
+        if let Some(ref pool) = self.pool {
+            let id_str = envelope.id.0.to_string();
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM processed_commands WHERE command_id = ?)",
+            )
+            .bind(&id_str)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(false);
+
+            if exists {
+                // Populate in-memory cache for future fast lookups
+                self.processed_commands.insert(envelope.id, ()).await;
+                return Err(CommandError::DuplicateCommand(envelope.id));
+            }
         }
 
         tracing::debug!(
@@ -302,18 +356,58 @@ impl CommandBus {
         );
 
         let command_id = envelope.id;
-        let result = match envelope.command {
-            DomainCommand::Task(cmd) => self.task_handler.handle(cmd).await,
-            DomainCommand::Goal(cmd) => self.goal_handler.handle(cmd).await,
-            DomainCommand::Memory(cmd) => self.memory_handler.handle(cmd).await,
+
+        // 2. Execute handler -> get CommandOutcome
+        let outcome = match envelope.command {
+            DomainCommand::Task(cmd) => self.task_handler.handle(cmd).await?,
+            DomainCommand::Goal(cmd) => self.goal_handler.handle(cmd).await?,
+            DomainCommand::Memory(cmd) => self.memory_handler.handle(cmd).await?,
         };
 
-        // Record in dedup cache on success
-        if result.is_ok() {
-            self.processed_commands.insert(command_id, ()).await;
+        // 3. Journal + broadcast events via EventBus (journal-first: EventBus
+        //    persists to the store before broadcasting to in-memory subscribers)
+        for event in outcome.events {
+            self.event_bus.publish(event).await;
         }
 
-        result
+        // 4. Record command ID in dedup cache (in-memory + persistent)
+        self.processed_commands.insert(command_id, ()).await;
+        if let Some(ref pool) = self.pool {
+            let id_str = command_id.0.to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            let _ = sqlx::query(
+                "INSERT OR IGNORE INTO processed_commands (command_id, processed_at) VALUES (?, ?)",
+            )
+            .bind(&id_str)
+            .bind(&now)
+            .execute(pool)
+            .await;
+        }
+
+        // 5. Return result
+        Ok(outcome.result)
+    }
+
+    /// Prune processed command entries older than the given duration.
+    pub async fn prune_old_commands(&self, older_than: std::time::Duration) -> u64 {
+        if let Some(ref pool) = self.pool {
+            let cutoff = (chrono::Utc::now()
+                - chrono::Duration::from_std(older_than).unwrap_or_default())
+            .to_rfc3339();
+            match sqlx::query("DELETE FROM processed_commands WHERE processed_at < ?")
+                .bind(&cutoff)
+                .execute(pool)
+                .await
+            {
+                Ok(result) => result.rows_affected(),
+                Err(e) => {
+                    tracing::warn!("Failed to prune processed commands: {}", e);
+                    0
+                }
+            }
+        } else {
+            0
+        }
     }
 }
 

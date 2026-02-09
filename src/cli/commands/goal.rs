@@ -190,7 +190,7 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
 
     let repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
     let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
-    let service = GoalService::new(repo, event_bus.clone());
+    let service = GoalService::new(repo);
     let dispatcher = CliCommandDispatcher::new(pool.clone(), event_bus);
 
     match args.command {

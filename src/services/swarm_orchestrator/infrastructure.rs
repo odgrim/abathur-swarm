@@ -405,4 +405,107 @@ where
     pub fn total_tokens(&self) -> u64 {
         self.total_tokens.load(Ordering::Relaxed)
     }
+
+    /// Run startup reconciliation to fix inconsistent state after a crash or restart.
+    ///
+    /// Checks for:
+    /// - Tasks stuck in `Running` status (stale agents) -> fail them
+    /// - Tasks in `Ready` status with incomplete dependencies -> move back to `Pending`
+    /// - Tasks in `Pending` status with all dependencies complete -> transition to `Ready`
+    pub async fn run_startup_reconciliation(&self) -> DomainResult<u64> {
+        let mut corrections: u64 = 0;
+
+        // 1. Fail stale Running tasks (started_at older than threshold).
+        //    On restart, any task that was Running has lost its agent.
+        let running_tasks = self.task_repo.list(crate::domain::ports::TaskFilter {
+            status: Some(TaskStatus::Running),
+            ..Default::default()
+        }).await?;
+
+        for task in &running_tasks {
+            tracing::info!(
+                "Startup reconciliation: failing stale running task {} ('{}')",
+                task.id, task.title
+            );
+            let mut task = task.clone();
+            task.status = TaskStatus::Failed;
+            if let Err(e) = self.task_repo.update(&task).await {
+                tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+            } else {
+                corrections += 1;
+            }
+        }
+
+        // 2. Check Ready tasks with incomplete dependencies -> move back to Pending
+        let ready_tasks = self.task_repo.list(crate::domain::ports::TaskFilter {
+            status: Some(TaskStatus::Ready),
+            ..Default::default()
+        }).await?;
+
+        for task in &ready_tasks {
+            if !task.depends_on.is_empty() {
+                let mut all_deps_complete = true;
+                for dep_id in &task.depends_on {
+                    if let Ok(Some(dep)) = self.task_repo.get(*dep_id).await {
+                        if dep.status != TaskStatus::Complete {
+                            all_deps_complete = false;
+                            break;
+                        }
+                    }
+                }
+                if !all_deps_complete {
+                    tracing::info!(
+                        "Startup reconciliation: moving task {} ('{}') back to Pending (incomplete deps)",
+                        task.id, task.title
+                    );
+                    let mut task = task.clone();
+                    task.status = TaskStatus::Pending;
+                    if let Err(e) = self.task_repo.update(&task).await {
+                        tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                    } else {
+                        corrections += 1;
+                    }
+                }
+            }
+        }
+
+        // 3. Check Pending tasks with all dependencies complete -> transition to Ready
+        let pending_tasks = self.task_repo.list(crate::domain::ports::TaskFilter {
+            status: Some(TaskStatus::Pending),
+            ..Default::default()
+        }).await?;
+
+        for task in &pending_tasks {
+            let should_promote = if task.depends_on.is_empty() {
+                true
+            } else {
+                let mut all_complete = true;
+                for dep_id in &task.depends_on {
+                    if let Ok(Some(dep)) = self.task_repo.get(*dep_id).await {
+                        if dep.status != TaskStatus::Complete {
+                            all_complete = false;
+                            break;
+                        }
+                    }
+                }
+                all_complete
+            };
+
+            if should_promote {
+                tracing::info!(
+                    "Startup reconciliation: promoting task {} ('{}') to Ready",
+                    task.id, task.title
+                );
+                let mut task = task.clone();
+                task.status = TaskStatus::Ready;
+                if let Err(e) = self.task_repo.update(&task).await {
+                    tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                } else {
+                    corrections += 1;
+                }
+            }
+        }
+
+        Ok(corrections)
+    }
 }

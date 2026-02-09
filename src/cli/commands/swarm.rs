@@ -51,7 +51,7 @@ async fn build_cli_orchestrator(config: SwarmConfig) -> Result<CliOrchestrator> 
         EventReactor::new(event_bus.clone(), ReactorConfig::default())
             .with_store(event_store),
     );
-    let event_scheduler = Arc::new(EventScheduler::new(event_bus.clone(), SchedulerConfig::default()));
+    let event_scheduler = Arc::new(EventScheduler::new(event_bus.clone(), SchedulerConfig::default()).with_pool(pool.clone()));
 
     let trigger_rule_repo = Arc::new(
         crate::adapters::sqlite::SqliteTriggerRuleRepository::new(pool.clone()),
@@ -544,7 +544,8 @@ async fn run_swarm_foreground(
         crate::services::EventScheduler::new(
             event_bus.clone(),
             crate::services::SchedulerConfig::default(),
-        ),
+        )
+        .with_pool(pool.clone()),
     );
 
     let trigger_rule_repo = Arc::new(
@@ -938,7 +939,8 @@ async fn start_mcp_servers(
 ) -> Result<McpServerHandles> {
     use crate::adapters::mcp::{MemoryHttpServer, MemoryHttpConfig, TasksHttpServer, TasksHttpConfig, A2AHttpGateway, A2AHttpConfig, EventsHttpServer, EventsHttpConfig};
     use crate::adapters::sqlite::SqliteEventRepository;
-    use crate::services::{MemoryService, TaskService, EventBus, EventBusConfig};
+    use crate::services::command_bus::CommandBus;
+    use crate::services::{GoalService, MemoryService, TaskService, EventBus, EventBusConfig};
 
     let mut handles = McpServerHandles {
         memory_handle: None,
@@ -947,17 +949,29 @@ async fn start_mcp_servers(
         events_handle: None,
     };
 
+    // Create shared CommandBus for MCP servers
+    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
+    let memory_service = MemoryService::new(memory_repo);
+    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+    let task_service = TaskService::new(task_repo);
+    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
+    let goal_service = GoalService::new(goal_repo);
+    let mcp_event_bus = Arc::new(EventBus::new(EventBusConfig { persist_events: true, ..Default::default() }));
+    let command_bus = Arc::new(CommandBus::new(
+        Arc::new(task_service.clone()),
+        Arc::new(goal_service),
+        Arc::new(memory_service.clone()),
+        mcp_event_bus,
+    ).with_pool(pool.clone()));
+
     // Start Memory HTTP server
     if let Some(ref url) = urls.memory_server {
         let port = extract_port(url).unwrap_or(9100);
-        let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-        let event_bus_memory = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
-        let memory_service = MemoryService::new_with_event_bus(memory_repo, event_bus_memory);
         let config = MemoryHttpConfig {
             port,
             ..Default::default()
         };
-        let server = MemoryHttpServer::new(memory_service, config);
+        let server = MemoryHttpServer::new(memory_service.clone(), command_bus.clone(), config);
 
         if !json_mode {
             println!("   Starting Memory server on port {}", port);
@@ -973,14 +987,11 @@ async fn start_mcp_servers(
     // Start Tasks HTTP server
     if let Some(ref url) = urls.tasks_server {
         let port = extract_port(url).unwrap_or(9101);
-        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let event_bus_tasks = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
-        let task_service = TaskService::new(task_repo, event_bus_tasks);
         let config = TasksHttpConfig {
             port,
             ..Default::default()
         };
-        let server = TasksHttpServer::new(task_service, config);
+        let server = TasksHttpServer::new(task_service, command_bus, config);
 
         if !json_mode {
             println!("   Starting Tasks server on port {}", port);

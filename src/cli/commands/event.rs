@@ -33,6 +33,41 @@ pub enum EventCommands {
         #[arg(short, long)]
         category: Option<String>,
     },
+    /// Manage dead letter queue entries
+    Dlq {
+        #[command(subcommand)]
+        command: DlqCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DlqCommands {
+    /// List unresolved dead letter entries
+    List {
+        /// Filter by handler name
+        #[arg(long)]
+        handler: Option<String>,
+        /// Maximum number of entries to show
+        #[arg(short, long, default_value = "20")]
+        limit: u32,
+    },
+    /// Retry a specific dead letter entry
+    Retry {
+        /// Dead letter entry ID
+        id: String,
+    },
+    /// Retry all unresolved entries, optionally filtered by handler
+    RetryAll {
+        /// Filter by handler name
+        #[arg(long)]
+        handler: Option<String>,
+    },
+    /// Purge resolved entries older than the specified duration (e.g., "7d", "24h")
+    Purge {
+        /// Duration threshold (e.g., "7d", "24h", "1h")
+        #[arg(long, default_value = "7d")]
+        older_than: String,
+    },
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -152,6 +187,93 @@ impl CommandOutput for EventListOutput {
     }
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct DlqListOutput {
+    pub entries: Vec<DlqEntry>,
+    pub total: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct DlqEntry {
+    pub id: String,
+    pub event_sequence: u64,
+    pub handler_name: String,
+    pub error_message: String,
+    pub retry_count: u32,
+    pub max_retries: u32,
+    pub created_at: String,
+}
+
+impl CommandOutput for DlqListOutput {
+    fn to_human(&self) -> String {
+        if self.entries.is_empty() {
+            return "No dead letter entries found.".to_string();
+        }
+
+        let mut lines = vec![format!("Showing {} DLQ entry(ies):\n", self.total)];
+        lines.push(format!(
+            "{:<38} {:<8} {:<20} {:<8} {:<40}",
+            "ID", "SEQ", "HANDLER", "RETRIES", "ERROR"
+        ));
+        lines.push("-".repeat(114));
+        for e in &self.entries {
+            let error_truncated = if e.error_message.len() > 40 {
+                format!("{}...", &e.error_message[..37])
+            } else {
+                e.error_message.clone()
+            };
+            lines.push(format!(
+                "{:<38} {:<8} {:<20} {}/{:<5} {:<40}",
+                e.id, e.event_sequence, e.handler_name, e.retry_count, e.max_retries, error_truncated
+            ));
+        }
+        lines.join("\n")
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct DlqActionOutput {
+    pub message: String,
+    pub count: u64,
+}
+
+impl CommandOutput for DlqActionOutput {
+    fn to_human(&self) -> String {
+        self.message.clone()
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+}
+
+fn parse_duration(s: &str) -> Result<std::time::Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("Empty duration string");
+    }
+    let (num_str, suffix) = if s.ends_with('d') {
+        (&s[..s.len() - 1], "d")
+    } else if s.ends_with('h') {
+        (&s[..s.len() - 1], "h")
+    } else if s.ends_with('m') {
+        (&s[..s.len() - 1], "m")
+    } else {
+        anyhow::bail!("Duration must end with 'd', 'h', or 'm' (e.g., '7d', '24h', '30m')");
+    };
+    let num: u64 = num_str.parse().context("Invalid number in duration")?;
+    match suffix {
+        "d" => Ok(std::time::Duration::from_secs(num * 86400)),
+        "h" => Ok(std::time::Duration::from_secs(num * 3600)),
+        "m" => Ok(std::time::Duration::from_secs(num * 60)),
+        _ => unreachable!(),
+    }
+}
+
 pub async fn execute(args: EventArgs, json_mode: bool) -> Result<()> {
     let pool = initialize_default_database()
         .await
@@ -252,6 +374,80 @@ pub async fn execute(args: EventArgs, json_mode: bool) -> Result<()> {
             };
             output(&out, json_mode);
         }
+
+        EventCommands::Dlq { command } => match command {
+            DlqCommands::List { handler, limit } => {
+                let entries = store
+                    .list_dead_letters(handler.as_deref(), limit)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to list DLQ entries: {}", e))?;
+
+                let dlq_entries: Vec<DlqEntry> = entries
+                    .iter()
+                    .map(|e| DlqEntry {
+                        id: e.id.clone(),
+                        event_sequence: e.event_sequence,
+                        handler_name: e.handler_name.clone(),
+                        error_message: e.error_message.clone(),
+                        retry_count: e.retry_count,
+                        max_retries: e.max_retries,
+                        created_at: e.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    })
+                    .collect();
+
+                let out = DlqListOutput {
+                    total: dlq_entries.len(),
+                    entries: dlq_entries,
+                };
+                output(&out, json_mode);
+            }
+            DlqCommands::Retry { id } => {
+                store
+                    .resolve_dead_letter(&id)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to resolve DLQ entry: {}", e))?;
+
+                let out = DlqActionOutput {
+                    message: format!("Resolved DLQ entry {}", id),
+                    count: 1,
+                };
+                output(&out, json_mode);
+            }
+            DlqCommands::RetryAll { handler } => {
+                let entries = store
+                    .list_dead_letters(handler.as_deref(), 1000)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to list DLQ entries: {}", e))?;
+
+                let mut resolved = 0u64;
+                for entry in &entries {
+                    if let Err(e) = store.resolve_dead_letter(&entry.id).await {
+                        tracing::warn!("Failed to resolve DLQ entry {}: {}", entry.id, e);
+                    } else {
+                        resolved += 1;
+                    }
+                }
+
+                let out = DlqActionOutput {
+                    message: format!("Resolved {} DLQ entries", resolved),
+                    count: resolved,
+                };
+                output(&out, json_mode);
+            }
+            DlqCommands::Purge { older_than } => {
+                let duration = parse_duration(&older_than)?;
+                let purged = store
+                    .purge_dead_letters(duration)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to purge DLQ entries: {}", e))?;
+
+                let out = DlqActionOutput {
+                    message: format!("Purged {} resolved DLQ entries", purged),
+                    count: purged,
+                };
+                output(&out, json_mode);
+            }
+        },
     }
 
     Ok(())

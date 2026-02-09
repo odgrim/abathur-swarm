@@ -282,7 +282,7 @@ where
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match result {
-            Ok(report) => {
+            Ok((report, _events)) => {
                 *consecutive_failures = 0;
 
                 {
@@ -317,7 +317,8 @@ where
 
     /// Run maintenance once (for testing or manual invocation).
     pub async fn run_once(&self) -> DomainResult<MaintenanceReport> {
-        self.memory_service.run_maintenance().await
+        let (report, _events) = self.memory_service.run_maintenance().await?;
+        Ok(report)
     }
 
     /// Get current status.

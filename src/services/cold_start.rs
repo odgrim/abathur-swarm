@@ -236,7 +236,7 @@ where
                 match self.analyze_with_llm(&report, substrate.as_ref()).await {
                     Ok(insights) => {
                         for (i, insight) in insights.iter().enumerate() {
-                            self.memory_service.learn(
+                            let (_memory, _events) = self.memory_service.learn(
                                 format!("project.llm_analysis.{}", i),
                                 insight.clone(),
                                 "project.llm_analysis",
@@ -737,7 +737,7 @@ where
             "project.type".to_string(),
             format!("Project type: {}", report.project_type),
             namespace,
-        ).await?;
+        ).await.map(|_| ())?;
         count += 1;
 
         // Store structure summary
@@ -745,7 +745,7 @@ where
             "project.structure".to_string(),
             report.structure_summary.clone(),
             namespace,
-        ).await?;
+        ).await.map(|_| ())?;
         count += 1;
 
         // Store conventions
@@ -754,7 +754,7 @@ where
                 format!("project.convention.{}", convention.name),
                 convention.description.clone(),
                 namespace,
-            ).await?;
+            ).await.map(|_| ())?;
             count += 1;
         }
 
@@ -781,7 +781,7 @@ where
                 "project.dependencies".to_string(),
                 format!("Key project dependencies:\n{}", deps_summary),
                 namespace,
-            ).await?;
+            ).await.map(|_| ())?;
             count += 1;
         }
 

@@ -8,10 +8,11 @@ use async_trait::async_trait;
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::{TaskFilter, TaskRepository};
-use crate::services::command_bus::{CommandError, CommandResult, TaskCommand, TaskCommandHandler};
+use crate::services::command_bus::{CommandError, CommandOutcome, CommandResult, TaskCommand, TaskCommandHandler};
 use crate::services::event_bus::{
-    EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
+    EventCategory, EventPayload, EventSeverity, UnifiedEvent,
 };
+use crate::services::event_factory;
 
 /// Configuration for spawn limits.
 #[derive(Debug, Clone)]
@@ -84,18 +85,17 @@ impl SpawnLimitType {
     }
 }
 
+#[derive(Clone)]
 pub struct TaskService<T: TaskRepository> {
     task_repo: Arc<T>,
     spawn_limits: SpawnLimitConfig,
-    event_bus: Arc<EventBus>,
 }
 
 impl<T: TaskRepository> TaskService<T> {
-    pub fn new(task_repo: Arc<T>, event_bus: Arc<EventBus>) -> Self {
+    pub fn new(task_repo: Arc<T>) -> Self {
         Self {
             task_repo,
             spawn_limits: SpawnLimitConfig::default(),
-            event_bus,
         }
     }
 
@@ -105,8 +105,15 @@ impl<T: TaskRepository> TaskService<T> {
         self
     }
 
-    async fn emit(&self, event: UnifiedEvent) {
-        self.event_bus.publish(event).await;
+    /// Helper to build a UnifiedEvent with standard fields.
+    fn make_event(
+        severity: EventSeverity,
+        category: EventCategory,
+        goal_id: Option<uuid::Uuid>,
+        task_id: Option<uuid::Uuid>,
+        payload: EventPayload,
+    ) -> UnifiedEvent {
+        event_factory::make_event(severity, category, goal_id, task_id, payload)
     }
 
     /// Check spawn limits for creating a subtask under a parent.
@@ -229,7 +236,7 @@ impl<T: TaskRepository> TaskService<T> {
         Ok(count)
     }
 
-    /// Submit a new task.
+    /// Submit a new task. Returns the task and events to be journaled.
     #[allow(clippy::too_many_arguments)]
     pub async fn submit_task(
         &self,
@@ -242,11 +249,13 @@ impl<T: TaskRepository> TaskService<T> {
         context: Option<TaskContext>,
         idempotency_key: Option<String>,
         source: TaskSource,
-    ) -> DomainResult<Task> {
+    ) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        let mut events = Vec::new();
+
         // Check for duplicate by idempotency key
         if let Some(ref key) = idempotency_key {
             if let Some(existing) = self.task_repo.get_by_idempotency_key(key).await? {
-                return Ok(existing);
+                return Ok((existing, events));
             }
         }
 
@@ -298,45 +307,35 @@ impl<T: TaskRepository> TaskService<T> {
         self.check_and_update_readiness(&mut task).await?;
         self.task_repo.update(&task).await?;
 
-        // Emit TaskSubmitted — use the task's parent goal_id from context if available
+        // Collect TaskSubmitted event
         let goal_id = task.parent_id.unwrap_or_else(Uuid::new_v4);
-        self.emit(UnifiedEvent {
-            id: EventId::new(),
-            sequence: SequenceNumber(0),
-            timestamp: chrono::Utc::now(),
-            severity: EventSeverity::Info,
-            category: EventCategory::Task,
-            goal_id: Some(goal_id),
-            task_id: Some(task.id),
-            correlation_id: None,
-            source_process_id: None,
-            payload: EventPayload::TaskSubmitted {
+        events.push(Self::make_event(
+            EventSeverity::Info,
+            EventCategory::Task,
+            Some(goal_id),
+            Some(task.id),
+            EventPayload::TaskSubmitted {
                 task_id: task.id,
                 task_title: task.title.clone(),
                 goal_id,
             },
-        }).await;
+        ));
 
-        // If the task is immediately ready (no deps), emit TaskReady for event-driven spawn
+        // If the task is immediately ready (no deps), collect TaskReady event
         if task.status == TaskStatus::Ready {
-            self.emit(UnifiedEvent {
-                id: EventId::new(),
-                sequence: SequenceNumber(0),
-                timestamp: chrono::Utc::now(),
-                severity: EventSeverity::Debug,
-                category: EventCategory::Task,
-                goal_id: Some(goal_id),
-                task_id: Some(task.id),
-                correlation_id: None,
-                source_process_id: None,
-                payload: EventPayload::TaskReady {
+            events.push(Self::make_event(
+                EventSeverity::Debug,
+                EventCategory::Task,
+                Some(goal_id),
+                Some(task.id),
+                EventPayload::TaskReady {
                     task_id: task.id,
                     task_title: task.title.clone(),
                 },
-            }).await;
+            ));
         }
 
-        Ok(task)
+        Ok((task, events))
     }
 
     /// Get a task by ID.
@@ -355,7 +354,7 @@ impl<T: TaskRepository> TaskService<T> {
     }
 
     /// Transition task to Running state (claim it).
-    pub async fn claim_task(&self, task_id: Uuid, agent_type: &str) -> DomainResult<Task> {
+    pub async fn claim_task(&self, task_id: Uuid, agent_type: &str) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
@@ -374,27 +373,22 @@ impl<T: TaskRepository> TaskService<T> {
 
         self.task_repo.update(&task).await?;
 
-        self.emit(UnifiedEvent {
-            id: EventId::new(),
-            sequence: SequenceNumber(0),
-            timestamp: chrono::Utc::now(),
-            severity: EventSeverity::Info,
-            category: EventCategory::Task,
-            goal_id: None,
-            task_id: Some(task_id),
-            correlation_id: None,
-            source_process_id: None,
-            payload: EventPayload::TaskClaimed {
+        let events = vec![Self::make_event(
+            EventSeverity::Info,
+            EventCategory::Task,
+            None,
+            Some(task_id),
+            EventPayload::TaskClaimed {
                 task_id,
                 agent_type: agent_type.to_string(),
             },
-        }).await;
+        )];
 
-        Ok(task)
+        Ok((task, events))
     }
 
     /// Mark task as complete.
-    pub async fn complete_task(&self, task_id: Uuid) -> DomainResult<Task> {
+    pub async fn complete_task(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
@@ -405,27 +399,22 @@ impl<T: TaskRepository> TaskService<T> {
 
         self.task_repo.update(&task).await?;
 
-        self.emit(UnifiedEvent {
-            id: EventId::new(),
-            sequence: SequenceNumber(0),
-            timestamp: chrono::Utc::now(),
-            severity: EventSeverity::Info,
-            category: EventCategory::Task,
-            goal_id: None,
-            task_id: Some(task_id),
-            correlation_id: None,
-            source_process_id: None,
-            payload: EventPayload::TaskCompleted {
+        let events = vec![Self::make_event(
+            EventSeverity::Info,
+            EventCategory::Task,
+            None,
+            Some(task_id),
+            EventPayload::TaskCompleted {
                 task_id,
                 tokens_used: 0,
             },
-        }).await;
+        )];
 
-        Ok(task)
+        Ok((task, events))
     }
 
     /// Mark task as failed.
-    pub async fn fail_task(&self, task_id: Uuid, error_message: Option<String>) -> DomainResult<Task> {
+    pub async fn fail_task(&self, task_id: Uuid, error_message: Option<String>) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
@@ -441,28 +430,23 @@ impl<T: TaskRepository> TaskService<T> {
 
         self.task_repo.update(&task).await?;
 
-        self.emit(UnifiedEvent {
-            id: EventId::new(),
-            sequence: SequenceNumber(0),
-            timestamp: chrono::Utc::now(),
-            severity: EventSeverity::Error,
-            category: EventCategory::Task,
-            goal_id: None,
-            task_id: Some(task_id),
-            correlation_id: None,
-            source_process_id: None,
-            payload: EventPayload::TaskFailed {
+        let events = vec![Self::make_event(
+            EventSeverity::Error,
+            EventCategory::Task,
+            None,
+            Some(task_id),
+            EventPayload::TaskFailed {
                 task_id,
                 error: error_str,
                 retry_count: task.retry_count,
             },
-        }).await;
+        )];
 
-        Ok(task)
+        Ok((task, events))
     }
 
     /// Retry a failed task.
-    pub async fn retry_task(&self, task_id: Uuid) -> DomainResult<Task> {
+    pub async fn retry_task(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
@@ -475,28 +459,23 @@ impl<T: TaskRepository> TaskService<T> {
         task.retry().map_err(DomainError::ValidationFailed)?;
         self.task_repo.update(&task).await?;
 
-        self.emit(UnifiedEvent {
-            id: EventId::new(),
-            sequence: SequenceNumber(0),
-            timestamp: chrono::Utc::now(),
-            severity: EventSeverity::Warning,
-            category: EventCategory::Task,
-            goal_id: None,
-            task_id: Some(task_id),
-            correlation_id: None,
-            source_process_id: None,
-            payload: EventPayload::TaskRetrying {
+        let events = vec![Self::make_event(
+            EventSeverity::Warning,
+            EventCategory::Task,
+            None,
+            Some(task_id),
+            EventPayload::TaskRetrying {
                 task_id,
                 attempt: task.retry_count,
                 max_attempts: task.max_retries,
             },
-        }).await;
+        )];
 
-        Ok(task)
+        Ok((task, events))
     }
 
     /// Cancel a task.
-    pub async fn cancel_task(&self, task_id: Uuid, reason: &str) -> DomainResult<Task> {
+    pub async fn cancel_task(&self, task_id: Uuid, reason: &str) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
@@ -513,23 +492,18 @@ impl<T: TaskRepository> TaskService<T> {
 
         self.task_repo.update(&task).await?;
 
-        self.emit(UnifiedEvent {
-            id: EventId::new(),
-            sequence: SequenceNumber(0),
-            timestamp: chrono::Utc::now(),
-            severity: EventSeverity::Warning,
-            category: EventCategory::Task,
-            goal_id: None,
-            task_id: Some(task_id),
-            correlation_id: None,
-            source_process_id: None,
-            payload: EventPayload::TaskCanceled {
+        let events = vec![Self::make_event(
+            EventSeverity::Warning,
+            EventCategory::Task,
+            None,
+            Some(task_id),
+            EventPayload::TaskCanceled {
                 task_id,
                 reason: reason.to_string(),
             },
-        }).await;
+        )];
 
-        Ok(task)
+        Ok((task, events))
     }
 
     /// Get task status counts.
@@ -576,7 +550,7 @@ impl<T: TaskRepository> TaskService<T> {
 
 #[async_trait]
 impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
-    async fn handle(&self, cmd: TaskCommand) -> Result<CommandResult, CommandError> {
+    async fn handle(&self, cmd: TaskCommand) -> Result<CommandOutcome, CommandError> {
         match cmd {
             TaskCommand::Submit {
                 title,
@@ -589,7 +563,7 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                 idempotency_key,
                 source,
             } => {
-                let task = self
+                let (task, events) = self
                     .submit_task(
                         title,
                         description,
@@ -602,30 +576,30 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                         source,
                     )
                     .await?;
-                Ok(CommandResult::Task(task))
+                Ok(CommandOutcome { result: CommandResult::Task(task), events })
             }
             TaskCommand::Claim {
                 task_id,
                 agent_type,
             } => {
-                let task = self.claim_task(task_id, &agent_type).await?;
-                Ok(CommandResult::Task(task))
+                let (task, events) = self.claim_task(task_id, &agent_type).await?;
+                Ok(CommandOutcome { result: CommandResult::Task(task), events })
             }
             TaskCommand::Complete { task_id, .. } => {
-                let task = self.complete_task(task_id).await?;
-                Ok(CommandResult::Task(task))
+                let (task, events) = self.complete_task(task_id).await?;
+                Ok(CommandOutcome { result: CommandResult::Task(task), events })
             }
             TaskCommand::Fail { task_id, error } => {
-                let task = self.fail_task(task_id, error).await?;
-                Ok(CommandResult::Task(task))
+                let (task, events) = self.fail_task(task_id, error).await?;
+                Ok(CommandOutcome { result: CommandResult::Task(task), events })
             }
             TaskCommand::Retry { task_id } => {
-                let task = self.retry_task(task_id).await?;
-                Ok(CommandResult::Task(task))
+                let (task, events) = self.retry_task(task_id).await?;
+                Ok(CommandOutcome { result: CommandResult::Task(task), events })
             }
             TaskCommand::Cancel { task_id, reason } => {
-                let task = self.cancel_task(task_id, &reason).await?;
-                Ok(CommandResult::Task(task))
+                let (task, events) = self.cancel_task(task_id, &reason).await?;
+                Ok(CommandOutcome { result: CommandResult::Task(task), events })
             }
             TaskCommand::Transition {
                 task_id,
@@ -645,7 +619,8 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                 })?;
                 self.task_repo.update(&task).await?;
 
-                // Emit event for the transition so handlers can react
+                // Collect event for the transition so handlers can react
+                let mut events = Vec::new();
                 let payload = match new_status {
                     TaskStatus::Ready => Some(EventPayload::TaskReady {
                         task_id,
@@ -667,22 +642,16 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                     _ => None,
                 };
                 if let Some(payload) = payload {
-                    self.emit(UnifiedEvent {
-                        id: EventId::new(),
-                        sequence: SequenceNumber(0),
-                        timestamp: chrono::Utc::now(),
-                        severity: EventSeverity::Info,
-                        category: EventCategory::Task,
-                        goal_id: None,
-                        task_id: Some(task_id),
-                        correlation_id: None,
-                        source_process_id: None,
+                    events.push(Self::make_event(
+                        EventSeverity::Info,
+                        EventCategory::Task,
+                        None,
+                        Some(task_id),
                         payload,
-                    })
-                    .await;
+                    ));
                 }
 
-                Ok(CommandResult::Task(task))
+                Ok(CommandOutcome { result: CommandResult::Task(task), events })
             }
         }
     }
@@ -692,20 +661,18 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
 mod tests {
     use super::*;
     use crate::adapters::sqlite::{create_migrated_test_pool, SqliteTaskRepository};
-    use crate::services::event_bus::EventBusConfig;
 
     async fn setup_service() -> TaskService<SqliteTaskRepository> {
         let pool = create_migrated_test_pool().await.unwrap();
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
-        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
-        TaskService::new(task_repo, event_bus)
+        TaskService::new(task_repo)
     }
 
     #[tokio::test]
     async fn test_submit_task() {
         let service = setup_service().await;
 
-        let task = service.submit_task(
+        let (task, events) = service.submit_task(
             Some("Test Task".to_string()),
             "Description".to_string(),
             None,
@@ -719,6 +686,7 @@ mod tests {
 
         assert_eq!(task.title, "Test Task");
         assert_eq!(task.status, TaskStatus::Ready); // No deps, should be ready
+        assert!(!events.is_empty());
     }
 
     #[tokio::test]
@@ -726,7 +694,7 @@ mod tests {
         let service = setup_service().await;
 
         // Create a dependency task
-        let dep = service.submit_task(
+        let (dep, _) = service.submit_task(
             Some("Dependency".to_string()),
             "Must complete first".to_string(),
             None,
@@ -739,7 +707,7 @@ mod tests {
         ).await.unwrap();
 
         // Create main task that depends on it
-        let main = service.submit_task(
+        let (main, _) = service.submit_task(
             Some("Main Task".to_string()),
             "Depends on first".to_string(),
             None,
@@ -770,7 +738,7 @@ mod tests {
     async fn test_idempotency() {
         let service = setup_service().await;
 
-        let task1 = service.submit_task(
+        let (task1, _) = service.submit_task(
             Some("Task".to_string()),
             "Description".to_string(),
             None,
@@ -782,7 +750,7 @@ mod tests {
             TaskSource::Human,
         ).await.unwrap();
 
-        let task2 = service.submit_task(
+        let (task2, _) = service.submit_task(
             Some("Different Task".to_string()),
             "Different Description".to_string(),
             None,
@@ -803,7 +771,7 @@ mod tests {
     async fn test_claim_and_complete() {
         let service = setup_service().await;
 
-        let task = service.submit_task(
+        let (task, _) = service.submit_task(
             Some("Test".to_string()),
             "Desc".to_string(),
             None,
@@ -815,11 +783,11 @@ mod tests {
             TaskSource::Human,
         ).await.unwrap();
 
-        let claimed = service.claim_task(task.id, "test-agent").await.unwrap();
+        let (claimed, _) = service.claim_task(task.id, "test-agent").await.unwrap();
         assert_eq!(claimed.status, TaskStatus::Running);
         assert_eq!(claimed.agent_type, Some("test-agent".to_string()));
 
-        let completed = service.complete_task(task.id).await.unwrap();
+        let (completed, _) = service.complete_task(task.id).await.unwrap();
         assert_eq!(completed.status, TaskStatus::Complete);
         assert!(completed.completed_at.is_some());
     }
@@ -828,7 +796,7 @@ mod tests {
     async fn test_fail_and_retry() {
         let service = setup_service().await;
 
-        let task = service.submit_task(
+        let (task, _) = service.submit_task(
             Some("Test".to_string()),
             "Desc".to_string(),
             None,
@@ -841,10 +809,10 @@ mod tests {
         ).await.unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
-        let failed = service.fail_task(task.id, Some("Test error".to_string())).await.unwrap();
+        let (failed, _) = service.fail_task(task.id, Some("Test error".to_string())).await.unwrap();
         assert_eq!(failed.status, TaskStatus::Failed);
 
-        let retried = service.retry_task(task.id).await.unwrap();
+        let (retried, _) = service.retry_task(task.id).await.unwrap();
         assert_eq!(retried.status, TaskStatus::Ready);
         assert_eq!(retried.retry_count, 1);
     }

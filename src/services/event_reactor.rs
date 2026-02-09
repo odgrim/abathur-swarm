@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use super::event_bus::{EventBus, EventCategory, EventSeverity, SequenceNumber, UnifiedEvent};
+use super::event_bus::{EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent};
 use super::event_store::EventStore;
 
 /// Unique identifier for a registered handler.
@@ -370,6 +370,8 @@ impl EventReactor {
             let mut dedup: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
             // Chain depth tracking: correlation_id -> depth
             let mut chain_depths: HashMap<Uuid, u32> = HashMap::new();
+            // Track last successfully processed sequence for lag recovery
+            let mut last_processed_sequence: u64 = 0;
 
             while running.load(Ordering::SeqCst) {
                 let event = match tokio::time::timeout(
@@ -378,7 +380,45 @@ impl EventReactor {
                 ).await {
                     Ok(Ok(event)) => event,
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
-                        tracing::warn!("EventReactor lagged, missed {} events", n);
+                        tracing::warn!("EventReactor lagged, missed {} events - triggering catchup", n);
+                        // Recover missed events from the journal
+                        if let Some(ref store) = event_store {
+                            match store.replay_since(SequenceNumber(last_processed_sequence)).await {
+                                Ok(missed) => {
+                                    tracing::info!("EventReactor: recovering {} events from journal", missed.len());
+                                    let hs = handlers.read().await;
+                                    for missed_event in &missed {
+                                        if dedup.contains(&missed_event.sequence.0) {
+                                            continue;
+                                        }
+                                        for handler in hs.iter() {
+                                            let meta = handler.metadata();
+                                            if !meta.filter.matches(missed_event) {
+                                                continue;
+                                            }
+                                            let ctx = HandlerContext {
+                                                chain_depth: 0,
+                                                correlation_id: missed_event.correlation_id,
+                                            };
+                                            let _ = tokio::time::timeout(
+                                                Duration::from_millis(config.handler_timeout_ms),
+                                                handler.handle(missed_event, &ctx),
+                                            ).await;
+                                        }
+                                        if missed_event.sequence.0 > last_processed_sequence {
+                                            last_processed_sequence = missed_event.sequence.0;
+                                        }
+                                        dedup.push_back(missed_event.sequence.0);
+                                        if dedup.len() > config.dedup_set_capacity {
+                                            dedup.pop_front();
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("EventReactor: failed to recover from lag: {}", e);
+                                }
+                            }
+                        }
                         continue;
                     }
                     Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
@@ -438,6 +478,8 @@ impl EventReactor {
                 // Dispatch to matching handlers
                 let handlers_snapshot = handlers.read().await;
                 let mut reactions: Vec<UnifiedEvent> = Vec::new();
+                // Track handlers that successfully processed this event (for watermark updates)
+                let mut successful_handlers: Vec<String> = Vec::new();
 
                 for handler in handlers_snapshot.iter() {
                     let meta = handler.metadata();
@@ -472,9 +514,11 @@ impl EventReactor {
                     match result {
                         Ok(Ok(Reaction::EmitEvents(events))) if !suppress_reactions => {
                             reactions.extend(events);
+                            successful_handlers.push(meta.name.clone());
                         }
                         Ok(Ok(_)) => {
-                            // Reaction::None or suppressed
+                            // Reaction::None or suppressed — still a successful invocation
+                            successful_handlers.push(meta.name.clone());
                         }
                         Ok(Err(e)) => {
                             tracing::warn!("EventReactor: handler '{}' error: {}", meta.name, e);
@@ -490,6 +534,7 @@ impl EventReactor {
                                     tracing::warn!("EventReactor: failed to write DLQ entry: {}", dlq_err);
                                 }
                             }
+                            let mut tripped = false;
                             if meta.error_strategy == ErrorStrategy::CircuitBreak {
                                 let mut cbs = circuit_breakers.write().await;
                                 if let Some(cb) = cbs.get_mut(&meta.id) {
@@ -497,8 +542,28 @@ impl EventReactor {
                                         config.circuit_breaker_threshold,
                                         Duration::from_secs(config.circuit_breaker_window_secs),
                                     );
+                                    tripped = cb.is_tripped(Duration::from_secs(config.circuit_breaker_cooldown_secs));
                                 }
                             }
+                            // Emit HandlerError event for monitoring
+                            reactions.push(UnifiedEvent {
+                                id: EventId::new(),
+                                sequence: SequenceNumber(0),
+                                timestamp: chrono::Utc::now(),
+                                severity: if tripped { EventSeverity::Error } else { EventSeverity::Warning },
+                                category: EventCategory::Orchestrator,
+                                goal_id: None,
+                                task_id: None,
+                                correlation_id: event.correlation_id,
+                                source_process_id: None,
+                                payload: EventPayload::HandlerError {
+                                    handler_name: meta.name.clone(),
+                                    event_sequence: event.sequence.0,
+                                    error: e.clone(),
+                                    circuit_breaker_tripped: tripped,
+                                },
+                            });
+                            // Do NOT advance watermark for failed handlers
                         }
                         Err(_) => {
                             let timeout_msg = format!("handler timed out after {}ms", config.handler_timeout_ms);
@@ -525,20 +590,23 @@ impl EventReactor {
                                     Duration::from_secs(config.circuit_breaker_window_secs),
                                 );
                             }
+                            // Do NOT advance watermark for timed-out handlers
                         }
                     }
                 }
 
                 events_processed.fetch_add(1, Ordering::Relaxed);
 
-                // Buffer watermark updates for handlers that processed this event
+                // Track last processed sequence for lag recovery
+                if event.sequence.0 > last_processed_sequence {
+                    last_processed_sequence = event.sequence.0;
+                }
+
+                // Buffer watermark updates only for handlers that successfully processed this event
                 if event_store.is_some() {
                     let mut wm_buf = watermark_buffer.write().await;
-                    for handler in handlers_snapshot.iter() {
-                        let meta = handler.metadata();
-                        if meta.filter.matches(&event) {
-                            wm_buf.insert(meta.name.clone(), event.sequence);
-                        }
+                    for handler_name in &successful_handlers {
+                        wm_buf.insert(handler_name.clone(), event.sequence);
                     }
 
                     // Flush watermarks every 10 seconds or 100 events
@@ -555,6 +623,28 @@ impl EventReactor {
                             for (name, seq) in &to_flush {
                                 if let Err(e) = store.set_watermark(name, *seq).await {
                                     tracing::warn!("Failed to flush watermark for {}: {}", name, e);
+                                }
+                            }
+
+                            // Flush circuit breaker states alongside watermarks
+                            let cbs = circuit_breakers.read().await;
+                            let hs = handlers.read().await;
+                            for handler in hs.iter() {
+                                let meta = handler.metadata();
+                                if let Some(cb) = cbs.get(&meta.id) {
+                                    if cb.failure_count > 0 || cb.tripped {
+                                        let tripped_at = cb.tripped_at.map(|_| chrono::Utc::now());
+                                        let last_failure_at = cb.last_failure.map(|_| chrono::Utc::now());
+                                        if let Err(e) = store.save_circuit_breaker_state(
+                                            &meta.name,
+                                            cb.failure_count,
+                                            cb.tripped,
+                                            tripped_at,
+                                            last_failure_at,
+                                        ).await {
+                                            tracing::warn!("Failed to flush CB state for {}: {}", meta.name, e);
+                                        }
+                                    }
                                 }
                             }
                         } else {
@@ -598,6 +688,41 @@ impl EventReactor {
     pub async fn handler_names(&self) -> Vec<String> {
         let handlers = self.handlers.read().await;
         handlers.iter().map(|h| h.metadata().name).collect()
+    }
+
+    /// Load persisted circuit breaker states from the event store.
+    /// Call this after registering handlers and before starting the reactor.
+    pub async fn load_circuit_breaker_states(&self) {
+        let store = match &self.event_store {
+            Some(s) => s.clone(),
+            None => return,
+        };
+
+        match store.load_circuit_breaker_states().await {
+            Ok(records) => {
+                let handlers = self.handlers.read().await;
+                let mut cbs = self.circuit_breakers.write().await;
+                for record in records {
+                    // Find the handler by name to get its HandlerId
+                    if let Some(handler) = handlers.iter().find(|h| h.metadata().name == record.handler_name) {
+                        let id = handler.metadata().id;
+                        let cb = cbs.entry(id).or_insert_with(CircuitBreakerState::new);
+                        cb.failure_count = record.failure_count;
+                        cb.tripped = record.tripped;
+                        // We can't restore exact Instant from DateTime, but we can approximate
+                        // by checking if the tripped state is recent enough to still matter
+                        if record.tripped {
+                            // Use current instant as "tripped_at" to give it the full cooldown
+                            cb.tripped_at = Some(Instant::now());
+                        }
+                    }
+                }
+                tracing::info!("Loaded circuit breaker states for {} handlers", handlers.len());
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load circuit breaker states: {}", e);
+            }
+        }
     }
 
     /// Replay events that handlers missed during downtime.

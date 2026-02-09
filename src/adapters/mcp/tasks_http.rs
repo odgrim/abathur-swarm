@@ -20,6 +20,9 @@ use uuid::Uuid;
 
 use crate::domain::models::{Task, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::TaskRepository;
+use crate::services::command_bus::{
+    CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand, TaskCommand,
+};
 use crate::services::TaskService;
 
 /// Configuration for the tasks HTTP server.
@@ -158,25 +161,28 @@ pub struct ErrorResponse {
 /// Shared state for the tasks HTTP server.
 struct AppState<T: TaskRepository> {
     service: TaskService<T>,
+    command_bus: Arc<CommandBus>,
 }
 
 /// Tasks HTTP Server.
 pub struct TasksHttpServer<T: TaskRepository + 'static> {
     config: TasksHttpConfig,
     service: TaskService<T>,
+    command_bus: Arc<CommandBus>,
 }
 
 impl<T: TaskRepository + Clone + Send + Sync + 'static>
     TasksHttpServer<T>
 {
-    pub fn new(service: TaskService<T>, config: TasksHttpConfig) -> Self {
-        Self { config, service }
+    pub fn new(service: TaskService<T>, command_bus: Arc<CommandBus>, config: TasksHttpConfig) -> Self {
+        Self { config, service, command_bus }
     }
 
     /// Build the router.
     fn build_router(self) -> Router {
         let state = Arc::new(AppState {
             service: self.service,
+            command_bus: self.command_bus,
         });
 
         let app = Router::new()
@@ -284,24 +290,28 @@ async fn submit_task<T: TaskRepository + Clone + Send + Sync + 'static>(
         .and_then(|p| TaskPriority::from_str(p))
         .unwrap_or(TaskPriority::Normal);
 
-    let source = TaskSource::Human;
+    let cmd = DomainCommand::Task(TaskCommand::Submit {
+        title: req.title,
+        description: req.prompt,
+        parent_id: req.parent_id,
+        priority,
+        agent_type: req.agent_type,
+        depends_on: req.depends_on,
+        context: Box::new(None),
+        idempotency_key: req.idempotency_key,
+        source: TaskSource::Human,
+    });
+    let envelope = CommandEnvelope::new(CommandSource::Mcp("tasks-http".into()), cmd);
 
-    match state
-        .service
-        .submit_task(
-            req.title,
-            req.prompt,
-            req.parent_id,
-            priority,
-            req.agent_type,
-            req.depends_on,
-            None,
-            req.idempotency_key,
-            source,
-        )
-        .await
-    {
-        Ok(task) => Ok((StatusCode::CREATED, Json(TaskResponse::from(task)))),
+    match state.command_bus.dispatch(envelope).await {
+        Ok(CommandResult::Task(task)) => Ok((StatusCode::CREATED, Json(TaskResponse::from(task)))),
+        Ok(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Unexpected command result type".to_string(),
+                code: "INTERNAL_ERROR".to_string(),
+            }),
+        )),
         Err(e) => Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -340,8 +350,21 @@ async fn claim_task<T: TaskRepository + Clone + Send + Sync + 'static>(
     Path(id): Path<Uuid>,
     Json(req): Json<ClaimTaskRequest>,
 ) -> Result<Json<TaskResponse>, (StatusCode, Json<ErrorResponse>)> {
-    match state.service.claim_task(id, &req.agent_type).await {
-        Ok(task) => Ok(Json(TaskResponse::from(task))),
+    let cmd = DomainCommand::Task(TaskCommand::Claim {
+        task_id: id,
+        agent_type: req.agent_type,
+    });
+    let envelope = CommandEnvelope::new(CommandSource::Mcp("tasks-http".into()), cmd);
+
+    match state.command_bus.dispatch(envelope).await {
+        Ok(CommandResult::Task(task)) => Ok(Json(TaskResponse::from(task))),
+        Ok(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Unexpected command result type".to_string(),
+                code: "INTERNAL_ERROR".to_string(),
+            }),
+        )),
         Err(e) => Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -356,8 +379,21 @@ async fn complete_task<T: TaskRepository + Clone + Send + Sync + 'static>(
     State(state): State<Arc<AppState<T>>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TaskResponse>, (StatusCode, Json<ErrorResponse>)> {
-    match state.service.complete_task(id).await {
-        Ok(task) => Ok(Json(TaskResponse::from(task))),
+    let cmd = DomainCommand::Task(TaskCommand::Complete {
+        task_id: id,
+        tokens_used: 0,
+    });
+    let envelope = CommandEnvelope::new(CommandSource::Mcp("tasks-http".into()), cmd);
+
+    match state.command_bus.dispatch(envelope).await {
+        Ok(CommandResult::Task(task)) => Ok(Json(TaskResponse::from(task))),
+        Ok(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Unexpected command result type".to_string(),
+                code: "INTERNAL_ERROR".to_string(),
+            }),
+        )),
         Err(e) => Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -373,8 +409,21 @@ async fn fail_task<T: TaskRepository + Clone + Send + Sync + 'static>(
     Path(id): Path<Uuid>,
     Json(req): Json<FailTaskRequest>,
 ) -> Result<Json<TaskResponse>, (StatusCode, Json<ErrorResponse>)> {
-    match state.service.fail_task(id, req.error).await {
-        Ok(task) => Ok(Json(TaskResponse::from(task))),
+    let cmd = DomainCommand::Task(TaskCommand::Fail {
+        task_id: id,
+        error: req.error,
+    });
+    let envelope = CommandEnvelope::new(CommandSource::Mcp("tasks-http".into()), cmd);
+
+    match state.command_bus.dispatch(envelope).await {
+        Ok(CommandResult::Task(task)) => Ok(Json(TaskResponse::from(task))),
+        Ok(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Unexpected command result type".to_string(),
+                code: "INTERNAL_ERROR".to_string(),
+            }),
+        )),
         Err(e) => Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -389,8 +438,18 @@ async fn retry_task<T: TaskRepository + Clone + Send + Sync + 'static>(
     State(state): State<Arc<AppState<T>>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TaskResponse>, (StatusCode, Json<ErrorResponse>)> {
-    match state.service.retry_task(id).await {
-        Ok(task) => Ok(Json(TaskResponse::from(task))),
+    let cmd = DomainCommand::Task(TaskCommand::Retry { task_id: id });
+    let envelope = CommandEnvelope::new(CommandSource::Mcp("tasks-http".into()), cmd);
+
+    match state.command_bus.dispatch(envelope).await {
+        Ok(CommandResult::Task(task)) => Ok(Json(TaskResponse::from(task))),
+        Ok(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Unexpected command result type".to_string(),
+                code: "INTERNAL_ERROR".to_string(),
+            }),
+        )),
         Err(e) => Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {

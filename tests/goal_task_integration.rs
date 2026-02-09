@@ -42,9 +42,9 @@ async fn setup_repos() -> (Arc<SqliteGoalRepository>, Arc<SqliteTaskRepository>)
 #[tokio::test]
 async fn test_goal_creation_with_domains() {
     let (goal_repo, _) = setup_repos().await;
-    let goal_service = GoalService::new(goal_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
+    let goal_service = GoalService::new(goal_repo.clone());
 
-    let goal = goal_service
+    let (goal, _events) = goal_service
         .create_goal(
             "Code should be well-tested".to_string(),
             "All production code should have comprehensive test coverage".to_string(),
@@ -80,10 +80,10 @@ async fn test_goal_creation_with_domains() {
 #[tokio::test]
 async fn test_find_goals_by_domains() {
     let (goal_repo, _) = setup_repos().await;
-    let goal_service = GoalService::new(goal_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
+    let goal_service = GoalService::new(goal_repo.clone());
 
     // Create goals with different domains
-    let _testing_goal = goal_service
+    let (_testing_goal, _events) = goal_service
         .create_goal(
             "Testing goal".to_string(),
             "Everything should be tested".to_string(),
@@ -95,7 +95,7 @@ async fn test_find_goals_by_domains() {
         .await
         .unwrap();
 
-    let _security_goal = goal_service
+    let (_security_goal, _events) = goal_service
         .create_goal(
             "Security goal".to_string(),
             "Code should be secure".to_string(),
@@ -107,7 +107,7 @@ async fn test_find_goals_by_domains() {
         .await
         .unwrap();
 
-    let _perf_goal = goal_service
+    let (_perf_goal, _events) = goal_service
         .create_goal(
             "Performance goal".to_string(),
             "System should be fast".to_string(),
@@ -157,9 +157,9 @@ async fn test_find_goals_by_domains() {
 #[tokio::test]
 async fn test_task_creation_with_human_source() {
     let (_, task_repo) = setup_repos().await;
-    let task_service = TaskService::new(task_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
+    let task_service = TaskService::new(task_repo.clone());
 
-    let task = task_service
+    let (task, _events) = task_service
         .submit_task(
             Some("Implement user authentication".to_string()),
             "Build login and registration endpoints".to_string(),
@@ -182,9 +182,9 @@ async fn test_task_creation_with_human_source() {
 #[tokio::test]
 async fn test_task_creation_with_system_source() {
     let (_, task_repo) = setup_repos().await;
-    let task_service = TaskService::new(task_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
+    let task_service = TaskService::new(task_repo.clone());
 
-    let task = task_service
+    let (task, _events) = task_service
         .submit_task(
             Some("Run diagnostics".to_string()),
             "System-triggered diagnostic check".to_string(),
@@ -341,11 +341,11 @@ async fn test_infer_task_domains_multiple() {
 #[tokio::test]
 async fn test_get_goals_for_task() {
     let (goal_repo, _) = setup_repos().await;
-    let goal_service = GoalService::new(goal_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
+    let goal_service = GoalService::new(goal_repo.clone());
     let ctx_service = GoalContextService::new(goal_repo.clone());
 
     // Create goals with different domains
-    goal_service
+    let (_, _events) = goal_service
         .create_goal(
             "Well-tested code".to_string(),
             "All code should have tests".to_string(),
@@ -357,7 +357,7 @@ async fn test_get_goals_for_task() {
         .await
         .unwrap();
 
-    goal_service
+    let (_, _events) = goal_service
         .create_goal(
             "Secure code".to_string(),
             "No security vulnerabilities".to_string(),
@@ -369,7 +369,7 @@ async fn test_get_goals_for_task() {
         .await
         .unwrap();
 
-    goal_service
+    let (_, _events) = goal_service
         .create_goal(
             "Fast infrastructure".to_string(),
             "Quick deployments".to_string(),
@@ -418,10 +418,10 @@ async fn test_get_goals_for_task() {
 #[tokio::test]
 async fn test_retired_goals_not_returned() {
     let (goal_repo, _) = setup_repos().await;
-    let goal_service = GoalService::new(goal_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
+    let goal_service = GoalService::new(goal_repo.clone());
     let ctx_service = GoalContextService::new(goal_repo.clone());
 
-    let goal = goal_service
+    let (goal, _events) = goal_service
         .create_goal(
             "Retired testing goal".to_string(),
             "This goal is retired".to_string(),
@@ -434,7 +434,7 @@ async fn test_retired_goals_not_returned() {
         .unwrap();
 
     // Retire the goal
-    goal_service
+    let (_, _events) = goal_service
         .transition_status(goal.id, GoalStatus::Retired)
         .await
         .unwrap();

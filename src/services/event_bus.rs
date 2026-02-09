@@ -517,6 +517,14 @@ pub enum EventPayload {
         promoted: u64,
         conflicts_resolved: u64,
     },
+
+    // Handler error events (emitted by reactor for monitoring)
+    HandlerError {
+        handler_name: String,
+        event_sequence: u64,
+        error: String,
+        circuit_breaker_tripped: bool,
+    },
 }
 
 impl EventPayload {
@@ -601,6 +609,7 @@ impl EventPayload {
             Self::TriggerRuleToggled { .. } => "TriggerRuleToggled",
             Self::TriggerRuleDeleted { .. } => "TriggerRuleDeleted",
             Self::MemoryMaintenanceCompleted { .. } => "MemoryMaintenanceCompleted",
+            Self::HandlerError { .. } => "HandlerError",
         }
     }
 }
@@ -1205,11 +1214,19 @@ impl EventBus {
     }
 
     /// Publish a SwarmEvent (converts to UnifiedEvent).
+    ///
+    /// **Deprecated**: Prefer constructing `UnifiedEvent` directly using
+    /// `event_factory::make_event()` or dispatching through the `CommandBus`.
+    #[deprecated(note = "Use event_factory::make_event() or dispatch through CommandBus")]
     pub async fn publish_swarm_event(&self, event: SwarmEvent) {
         self.publish(event.into()).await;
     }
 
     /// Publish an ExecutionEvent (converts to UnifiedEvent).
+    ///
+    /// **Deprecated**: Prefer constructing `UnifiedEvent` directly using
+    /// `event_factory::make_event()` or dispatching through the `CommandBus`.
+    #[deprecated(note = "Use event_factory::make_event() or dispatch through CommandBus")]
     pub async fn publish_execution_event(&self, event: ExecutionEvent) {
         self.publish(event.into()).await;
     }
@@ -1277,6 +1294,7 @@ impl EventBus {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
