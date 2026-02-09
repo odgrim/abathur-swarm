@@ -1072,21 +1072,21 @@ impl<T: TaskRepository + 'static, A: AgentRepository + 'static> EventHandler for
 // ============================================================================
 
 /// Triggered by the "a2a-poll" scheduled event (15s).
-/// Polls the A2A gateway for pending inbound delegations, creates tasks,
-/// and emits TaskSubmitted for each.
-pub struct A2APollHandler<T: TaskRepository> {
-    task_repo: Arc<T>,
+/// Polls the A2A gateway for pending inbound delegations and submits tasks
+/// through the CommandBus so they go through validation, dedup, and event journaling.
+pub struct A2APollHandler {
+    command_bus: Arc<crate::services::command_bus::CommandBus>,
     a2a_gateway_url: String,
 }
 
-impl<T: TaskRepository> A2APollHandler<T> {
-    pub fn new(task_repo: Arc<T>, a2a_gateway_url: String) -> Self {
-        Self { task_repo, a2a_gateway_url }
+impl A2APollHandler {
+    pub fn new(command_bus: Arc<crate::services::command_bus::CommandBus>, a2a_gateway_url: String) -> Self {
+        Self { command_bus, a2a_gateway_url }
     }
 }
 
 #[async_trait]
-impl<T: TaskRepository + 'static> EventHandler for A2APollHandler<T> {
+impl EventHandler for A2APollHandler {
     fn metadata(&self) -> HandlerMetadata {
         HandlerMetadata {
             id: HandlerId::new(),
@@ -1107,7 +1107,10 @@ impl<T: TaskRepository + 'static> EventHandler for A2APollHandler<T> {
         }
     }
 
-    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+    async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        use crate::services::command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand};
+        use crate::domain::models::TaskPriority;
+
         // Poll A2A gateway for pending inbound delegations
         let url = format!("{}/tasks/pending", self.a2a_gateway_url);
         let client = reqwest::Client::new();
@@ -1129,8 +1132,6 @@ impl<T: TaskRepository + 'static> EventHandler for A2APollHandler<T> {
             Err(_) => return Ok(Reaction::None),
         };
 
-        let mut new_events = Vec::new();
-
         for delegation in delegations {
             let title = delegation.get("title")
                 .and_then(|v| v.as_str())
@@ -1141,39 +1142,28 @@ impl<T: TaskRepository + 'static> EventHandler for A2APollHandler<T> {
                 .unwrap_or("")
                 .to_string();
 
-            let mut task = Task::new(&description);
-            task.title = title.clone();
-            task.source = crate::domain::models::TaskSource::System;
+            let envelope = CommandEnvelope::new(
+                CommandSource::A2A("inbound-delegation".to_string()),
+                DomainCommand::Task(TaskCommand::Submit {
+                    title: Some(title.clone()),
+                    description,
+                    parent_id: None,
+                    priority: TaskPriority::Normal,
+                    agent_type: None,
+                    depends_on: vec![],
+                    context: Box::new(None),
+                    idempotency_key: None,
+                    source: crate::domain::models::TaskSource::System,
+                }),
+            );
 
-            if let Err(e) = self.task_repo.create(&task).await {
-                tracing::warn!("A2APollHandler: failed to create task: {}", e);
-                continue;
+            if let Err(e) = self.command_bus.dispatch(envelope).await {
+                tracing::warn!("A2APollHandler: failed to submit task '{}': {}", title, e);
             }
-
-            let goal_id = uuid::Uuid::new_v4(); // Placeholder for A2A delegations
-            new_events.push(UnifiedEvent {
-                id: EventId::new(),
-                sequence: SequenceNumber(0),
-                timestamp: chrono::Utc::now(),
-                severity: EventSeverity::Info,
-                category: EventCategory::Task,
-                goal_id: Some(goal_id),
-                task_id: Some(task.id),
-                correlation_id: event.correlation_id,
-                source_process_id: None,
-                payload: EventPayload::TaskSubmitted {
-                    task_id: task.id,
-                    task_title: title,
-                    goal_id,
-                },
-            });
         }
 
-        if new_events.is_empty() {
-            Ok(Reaction::None)
-        } else {
-            Ok(Reaction::EmitEvents(new_events))
-        }
+        // Events are emitted by the CommandBus pipeline; no manual emission needed.
+        Ok(Reaction::None)
     }
 }
 

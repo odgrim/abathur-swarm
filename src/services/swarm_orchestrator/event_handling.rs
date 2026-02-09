@@ -32,13 +32,6 @@ where
         &self.event_bus
     }
 
-    /// Emit an event to the EventBus.
-    /// This is a helper for publishing events without needing the mpsc channel.
-    #[allow(deprecated)]
-    pub async fn emit_to_event_bus(&self, event: SwarmEvent) {
-        self.event_bus.publish_swarm_event(event).await;
-    }
-
     // ========================================================================
     // Human Escalation Management
     // ========================================================================
@@ -48,12 +41,36 @@ where
         self.escalation_store.read().await.clone()
     }
 
+    /// Build a CommandBus from the orchestrator's repos and event bus.
+    fn build_command_bus(&self) -> Arc<crate::services::command_bus::CommandBus> {
+        use crate::domain::ports::NullMemoryRepository;
+        use crate::services::command_bus::CommandBus;
+        use crate::services::goal_service::GoalService;
+        use crate::services::memory_service::MemoryService;
+        use crate::services::task_service::TaskService;
+
+        let task_service = Arc::new(TaskService::new(self.task_repo.clone()));
+        let goal_service = Arc::new(GoalService::new(self.goal_repo.clone()));
+
+        if let Some(ref memory_repo) = self.memory_repo {
+            let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
+            Arc::new(CommandBus::new(task_service, goal_service, memory_service, self.event_bus.clone()))
+        } else {
+            let null_memory = Arc::new(MemoryService::new(Arc::new(NullMemoryRepository::new())));
+            Arc::new(CommandBus::new(task_service, goal_service, null_memory, self.event_bus.clone()))
+        }
+    }
+
     /// Respond to a human escalation event.
     pub async fn respond_to_escalation(
         &self,
         response: HumanEscalationResponse,
         event_tx: Option<&mpsc::Sender<SwarmEvent>>,
     ) -> DomainResult<()> {
+        use crate::services::command_bus::{
+            CommandEnvelope, CommandSource, DomainCommand, GoalCommand, TaskCommand,
+        };
+
         // Find and remove the escalation from the store
         let escalation = {
             let mut store = self.escalation_store.write().await;
@@ -69,16 +86,23 @@ where
             }
         };
 
+        let command_bus = self.build_command_bus();
+
         match &response.decision {
             EscalationDecision::Accept => {
                 // Unblock associated task if it was blocked
                 if let Some(task_id) = escalation.task_id {
                     if let Ok(Some(task)) = self.task_repo.get(task_id).await {
                         if task.status == TaskStatus::Blocked {
-                            let mut unblocked = task.clone();
-                            if unblocked.transition_to(TaskStatus::Ready).is_ok() {
-                                self.task_repo.update(&unblocked).await?;
-                            }
+                            let envelope = CommandEnvelope::new(
+                                CommandSource::Human,
+                                DomainCommand::Task(TaskCommand::Transition {
+                                    task_id,
+                                    new_status: TaskStatus::Ready,
+                                }),
+                            );
+                            command_bus.dispatch(envelope).await
+                                .map_err(|e| DomainError::ExecutionFailed(format!("Command dispatch failed: {}", e)))?;
                         }
                     }
                 }
@@ -86,31 +110,46 @@ where
             EscalationDecision::Reject => {
                 // Fail the associated task
                 if let Some(task_id) = escalation.task_id {
-                    if let Ok(Some(task)) = self.task_repo.get(task_id).await {
-                        let mut failed = task.clone();
-                        let _ = failed.transition_to(TaskStatus::Failed);
-                        self.task_repo.update(&failed).await?;
-                    }
+                    let envelope = CommandEnvelope::new(
+                        CommandSource::Human,
+                        DomainCommand::Task(TaskCommand::Fail {
+                            task_id,
+                            error: Some("Escalation rejected by human".to_string()),
+                        }),
+                    );
+                    command_bus.dispatch(envelope).await
+                        .map_err(|e| DomainError::ExecutionFailed(format!("Command dispatch failed: {}", e)))?;
                 }
             }
             EscalationDecision::Clarify { clarification } => {
-                // Append clarification to task description and unblock
+                // Append clarification to task description, then unblock via CommandBus
                 if let Some(task_id) = escalation.task_id {
                     if let Ok(Some(task)) = self.task_repo.get(task_id).await {
+                        // Update description directly (no command for description updates)
                         let mut updated = task.clone();
                         updated.description = format!(
                             "{}\n\n## Human Clarification\n\n{}",
                             updated.description, clarification
                         );
-                        if updated.status == TaskStatus::Blocked {
-                            let _ = updated.transition_to(TaskStatus::Ready);
-                        }
                         self.task_repo.update(&updated).await?;
+
+                        // Transition via CommandBus for proper event emission
+                        if updated.status == TaskStatus::Blocked {
+                            let envelope = CommandEnvelope::new(
+                                CommandSource::Human,
+                                DomainCommand::Task(TaskCommand::Transition {
+                                    task_id,
+                                    new_status: TaskStatus::Ready,
+                                }),
+                            );
+                            command_bus.dispatch(envelope).await
+                                .map_err(|e| DomainError::ExecutionFailed(format!("Command dispatch failed: {}", e)))?;
+                        }
                     }
                 }
             }
             EscalationDecision::ModifyIntent { new_requirements, removed_requirements } => {
-                // Update goal constraints
+                // Update goal description directly (no command for description updates)
                 if let Some(goal_id) = escalation.goal_id {
                     if let Ok(Some(mut goal)) = self.goal_repo.get(goal_id).await {
                         for req in new_requirements {
@@ -129,29 +168,39 @@ where
                         self.goal_repo.update(&goal).await?;
                     }
                 }
-                // Unblock associated task
+                // Unblock associated task via CommandBus
                 if let Some(task_id) = escalation.task_id {
                     if let Ok(Some(task)) = self.task_repo.get(task_id).await {
                         if task.status == TaskStatus::Blocked {
-                            let mut unblocked = task.clone();
-                            if unblocked.transition_to(TaskStatus::Ready).is_ok() {
-                                self.task_repo.update(&unblocked).await?;
-                            }
+                            let envelope = CommandEnvelope::new(
+                                CommandSource::Human,
+                                DomainCommand::Task(TaskCommand::Transition {
+                                    task_id,
+                                    new_status: TaskStatus::Ready,
+                                }),
+                            );
+                            command_bus.dispatch(envelope).await
+                                .map_err(|e| DomainError::ExecutionFailed(format!("Command dispatch failed: {}", e)))?;
                         }
                     }
                 }
             }
             EscalationDecision::Abort => {
-                // Suspend the goal
+                // Suspend the goal via CommandBus
                 if let Some(goal_id) = escalation.goal_id {
-                    if let Ok(Some(mut goal)) = self.goal_repo.get(goal_id).await {
-                        let _ = goal.transition_to(GoalStatus::Paused);
-                        self.goal_repo.update(&goal).await?;
-                    }
+                    let envelope = CommandEnvelope::new(
+                        CommandSource::Human,
+                        DomainCommand::Goal(GoalCommand::TransitionStatus {
+                            goal_id,
+                            new_status: GoalStatus::Paused,
+                        }),
+                    );
+                    command_bus.dispatch(envelope).await
+                        .map_err(|e| DomainError::ExecutionFailed(format!("Command dispatch failed: {}", e)))?;
                 }
             }
             EscalationDecision::Defer { revisit_after } => {
-                // Put the escalation back with a deadline
+                // Put the escalation back with a deadline (no mutation, no command needed)
                 let mut deferred = escalation.clone();
                 if let Some(deadline) = revisit_after {
                     deferred.escalation.deadline = Some(*deadline);
@@ -172,11 +221,17 @@ where
             }).await;
         }
 
-        self.emit_to_event_bus(SwarmEvent::HumanResponseReceived {
-            escalation_id: response.event_id,
-            decision: decision_str,
-            allows_continuation,
-        }).await;
+        self.event_bus.publish(crate::services::event_factory::make_event(
+            crate::services::event_bus::EventSeverity::Info,
+            crate::services::event_bus::EventCategory::Escalation,
+            None,
+            None,
+            crate::services::event_bus::EventPayload::HumanResponseReceived {
+                escalation_id: response.event_id,
+                decision: decision_str,
+                allows_continuation,
+            },
+        )).await;
 
         self.audit_log.info(
             AuditCategory::Goal,

@@ -272,7 +272,10 @@ where
             *status = OrchestratorStatus::Running;
         }
         let _ = event_tx.send(SwarmEvent::Started).await;
-        self.emit_to_event_bus(SwarmEvent::Started).await;
+        self.event_bus.publish(crate::services::event_factory::orchestrator_event(
+            crate::services::event_bus::EventSeverity::Info,
+            crate::services::event_bus::EventPayload::OrchestratorStarted,
+        )).await;
 
         // Log swarm startup
         self.audit_log.info(
@@ -397,14 +400,36 @@ where
                 ),
             ).await;
             let _ = event_tx.send(SwarmEvent::Stopped).await;
-            self.emit_to_event_bus(SwarmEvent::Stopped).await;
+            self.event_bus.publish(crate::services::event_factory::orchestrator_event(
+                crate::services::event_bus::EventSeverity::Info,
+                crate::services::event_bus::EventPayload::OrchestratorStopped,
+            )).await;
             return Err(e);
         }
 
         // Initialize EventBus sequence from store to prevent overlap after restart
         self.event_bus.initialize_sequence_from_store().await;
 
-        // Start EventReactor
+        // Register built-in event handlers and schedules BEFORE starting
+        // the reactor, so handlers are ready when it begins subscribing.
+        self.register_builtin_handlers().await;
+        self.audit_log.info(
+            AuditCategory::System,
+            AuditAction::SwarmStarted,
+            "Registered built-in event handlers",
+        ).await;
+
+        // Load persisted circuit breaker states (after handler registration)
+        self.event_reactor.load_circuit_breaker_states().await;
+
+        self.register_builtin_schedules().await;
+        self.audit_log.info(
+            AuditCategory::System,
+            AuditAction::SwarmStarted,
+            "Registered built-in scheduled events",
+        ).await;
+
+        // Start EventReactor (handlers are already registered)
         self.audit_log.info(
             AuditCategory::System,
             AuditAction::SwarmStarted,
@@ -422,24 +447,6 @@ where
             "Starting EventScheduler for time-based events",
         ).await;
         let scheduler_handle = self.event_scheduler.start();
-
-        // Register built-in event handlers and schedules
-        self.register_builtin_handlers().await;
-        self.audit_log.info(
-            AuditCategory::System,
-            AuditAction::SwarmStarted,
-            "Registered built-in event handlers",
-        ).await;
-
-        // Load persisted circuit breaker states (after handler registration)
-        self.event_reactor.load_circuit_breaker_states().await;
-
-        self.register_builtin_schedules().await;
-        self.audit_log.info(
-            AuditCategory::System,
-            AuditAction::SwarmStarted,
-            "Registered built-in scheduled events",
-        ).await;
 
         // Replay missed events from the event store
         match self.event_reactor.replay_missed_events().await {
@@ -549,7 +556,10 @@ where
         self.stop_embedded_mcp_servers().await;
 
         let _ = event_tx.send(SwarmEvent::Stopped).await;
-        self.emit_to_event_bus(SwarmEvent::Stopped).await;
+        self.event_bus.publish(crate::services::event_factory::orchestrator_event(
+            crate::services::event_bus::EventSeverity::Info,
+            crate::services::event_bus::EventPayload::OrchestratorStopped,
+        )).await;
         Ok(())
     }
 
