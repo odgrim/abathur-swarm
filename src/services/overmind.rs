@@ -317,7 +317,7 @@ impl OvermindService {
         request_type: &str,
     ) -> DomainResult<OvermindDecision> {
         // Try to extract JSON from the response
-        let json_str = self.extract_json(response);
+        let json_str = super::extract_json_from_response(response);
 
         debug!("Parsing Overmind response for {}: {}", request_type, json_str);
 
@@ -337,26 +337,6 @@ impl OvermindService {
     }
 
     /// Extract JSON from a response that might have surrounding text.
-    fn extract_json(&self, response: &str) -> String {
-        let trimmed = response.trim();
-
-        // If it already looks like JSON, use it directly
-        if trimmed.starts_with('{') && trimmed.ends_with('}') {
-            return trimmed.to_string();
-        }
-
-        // Try to find JSON object in the response
-        if let Some(start) = trimmed.find('{') {
-            if let Some(end) = trimmed.rfind('}') {
-                if end > start {
-                    return trimmed[start..=end].to_string();
-                }
-            }
-        }
-
-        // Return as-is if no JSON found
-        trimmed.to_string()
-    }
 
     // ========================================================================
     // Configuration
@@ -571,15 +551,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_json_extraction() {
-        let service = OvermindService::with_defaults(Arc::new(MockSubstrate::default()));
-
         // Plain JSON
         let json = r#"{"key": "value"}"#;
-        assert_eq!(service.extract_json(json), json);
+        assert_eq!(crate::services::extract_json_from_response(json), json);
 
         // JSON with surrounding text
         let with_text = r#"Here is the response: {"key": "value"} and some more text"#;
-        assert_eq!(service.extract_json(with_text), r#"{"key": "value"}"#);
+        assert_eq!(crate::services::extract_json_from_response(with_text), r#"{"key": "value"}"#);
 
         // JSON with whitespace
         let with_whitespace = r#"
@@ -587,7 +565,7 @@ mod tests {
             {"key": "value"}
 
         "#;
-        assert_eq!(service.extract_json(with_whitespace), r#"{"key": "value"}"#);
+        assert_eq!(crate::services::extract_json_from_response(with_whitespace), r#"{"key": "value"}"#);
     }
 
     #[tokio::test]

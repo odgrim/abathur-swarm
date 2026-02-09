@@ -5,9 +5,8 @@
 
 use std::sync::Arc;
 use abathur::adapters::sqlite::{
-    create_test_pool, SqliteGoalRepository, SqliteTaskRepository,
+    create_migrated_test_pool, SqliteGoalRepository, SqliteTaskRepository,
     SqliteMemoryRepository, SqliteAgentRepository, SqliteWorktreeRepository,
-    Migrator, all_embedded_migrations,
 };
 use abathur::adapters::substrates::SubstrateRegistry;
 use abathur::domain::models::{
@@ -30,11 +29,7 @@ async fn setup_test_repos() -> (
     Arc<SqliteAgentRepository>,
     Arc<SqliteWorktreeRepository>,
 ) {
-    let pool = create_test_pool().await.expect("Failed to create test pool");
-    let migrator = Migrator::new(pool.clone());
-    migrator.run_embedded_migrations(all_embedded_migrations())
-        .await
-        .expect("Failed to run migrations");
+    let pool = create_migrated_test_pool().await.expect("Failed to create test pool");
 
     (
         Arc::new(SqliteGoalRepository::new(pool.clone())),
@@ -50,7 +45,7 @@ async fn setup_test_repos() -> (
 async fn test_goal_lifecycle() {
     let (goal_repo, _, _, _, _) = setup_test_repos().await;
 
-    let goal_service = GoalService::new(goal_repo.clone());
+    let goal_service = GoalService::new(goal_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
 
     // Create a goal using the service
     let goal = goal_service.create_goal(
@@ -84,7 +79,7 @@ async fn test_goal_lifecycle() {
 async fn test_task_lifecycle_with_dependencies() {
     let (_, task_repo, _, _, _) = setup_test_repos().await;
 
-    let task_service = TaskService::new(task_repo.clone());
+    let task_service = TaskService::new(task_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
 
     // Create a parent task using the service
     let parent_task = task_service.submit_task(
@@ -185,7 +180,8 @@ async fn test_memory_system_integration() {
 async fn test_agent_system_integration() {
     let (_, _, _, agent_repo, _) = setup_test_repos().await;
 
-    let agent_service = AgentService::new(agent_repo.clone());
+    let event_bus = Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default()));
+    let agent_service = AgentService::new(agent_repo.clone(), event_bus);
 
     // Register an agent template using the service method
     let template = agent_service.register_template(
@@ -265,6 +261,10 @@ async fn test_swarm_orchestrator_basic() {
     let mut config = SwarmConfig::default();
     config.use_worktrees = false; // Disable worktrees for test
 
+    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let event_reactor = Arc::new(abathur::services::EventReactor::new(event_bus.clone(), abathur::services::ReactorConfig::default()));
+    let event_scheduler = Arc::new(abathur::services::EventScheduler::new(event_bus.clone(), abathur::services::SchedulerConfig::default()));
+
     let orchestrator: SwarmOrchestrator<_, _, _, _, NullMemoryRepository> = SwarmOrchestrator::new(
         goal_repo.clone(),
         task_repo.clone(),
@@ -272,6 +272,9 @@ async fn test_swarm_orchestrator_basic() {
         agent_repo.clone(),
         substrate,
         config,
+        event_bus,
+        event_reactor,
+        event_scheduler,
     );
 
     // Run a tick (should complete without errors)
@@ -318,7 +321,7 @@ async fn test_dag_execution_mock() {
 async fn test_task_idempotency() {
     let (_, task_repo, _, _, _) = setup_test_repos().await;
 
-    let task_service = TaskService::new(task_repo.clone());
+    let task_service = TaskService::new(task_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
 
     // First submission should succeed
     let task1 = task_service.submit_task(
@@ -362,7 +365,7 @@ async fn test_task_idempotency() {
 async fn test_task_retry_on_failure() {
     let (_, task_repo, _, _, _) = setup_test_repos().await;
 
-    let task_service = TaskService::new(task_repo.clone());
+    let task_service = TaskService::new(task_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
 
     let task = task_service.submit_task(
             Some("Failing Task".to_string()),
@@ -429,7 +432,7 @@ async fn test_memory_decay() {
 async fn test_goal_constraints() {
     let (goal_repo, _, _, _, _) = setup_test_repos().await;
 
-    let goal_service = GoalService::new(goal_repo.clone());
+    let goal_service = GoalService::new(goal_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
 
     use abathur::domain::models::GoalConstraint;
 

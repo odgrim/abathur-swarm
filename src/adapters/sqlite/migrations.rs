@@ -122,6 +122,22 @@ pub fn goal_task_rebuild_migration() -> Migration {
     }
 }
 
+pub fn event_architecture_migration() -> Migration {
+    Migration {
+        version: 7,
+        description: "Event architecture: handler watermarks".to_string(),
+        sql: include_str!("../../../migrations/007_event_architecture.sql").to_string(),
+    }
+}
+
+pub fn event_consistency_migration() -> Migration {
+    Migration {
+        version: 8,
+        description: "Event consistency: scheduled events persistence".to_string(),
+        sql: include_str!("../../../migrations/008_event_consistency.sql").to_string(),
+    }
+}
+
 pub fn all_embedded_migrations() -> Vec<Migration> {
     vec![
         initial_schema_migration(),
@@ -130,5 +146,7 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
         fix_worktrees_fk_migration(),
         add_events_table_migration(),
         goal_task_rebuild_migration(),
+        event_architecture_migration(),
+        event_consistency_migration(),
     ]
 }

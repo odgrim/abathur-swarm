@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use std::sync::Arc;
 
-use crate::adapters::sqlite::{goal_repository::SqliteGoalRepository, initialize_database};
+use crate::adapters::sqlite::{goal_repository::SqliteGoalRepository, initialize_default_database};
 use crate::cli::id_resolver::resolve_goal_id;
-use crate::cli::output::{output, CommandOutput};
+use crate::cli::output::{output, truncate, CommandOutput};
 use crate::domain::models::{Goal, GoalConstraint, GoalPriority, GoalStatus};
 use crate::domain::ports::GoalFilter;
 use crate::services::GoalService;
@@ -182,12 +182,13 @@ impl CommandOutput for GoalActionOutput {
 }
 
 pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
-    let pool = initialize_database("sqlite:.abathur/abathur.db")
+    let pool = initialize_default_database()
         .await
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
     let repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-    let service = GoalService::new(repo);
+    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
+    let service = GoalService::new(repo, event_bus);
 
     match args.command {
         GoalCommands::Set { name, description, priority, parent, constraint } => {
@@ -299,10 +300,3 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
     Ok(())
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len - 3])
-    }
-}

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
-use crate::domain::models::{GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource};
+use crate::domain::models::{GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::{AgentFilter, GoalFilter, GoalRepository, MemoryRepository, TaskRepository};
 use crate::services::{AgentService, MemoryService, TaskService};
 use crate::domain::ports::AgentRepository;
@@ -359,7 +359,7 @@ where
         let priority = args
             .get("priority")
             .and_then(|p| p.as_str())
-            .and_then(parse_priority)
+            .and_then(TaskPriority::from_str)
             .unwrap_or(TaskPriority::Normal);
 
         let depends_on: Vec<Uuid> = args
@@ -409,7 +409,7 @@ where
         let status_filter = args.get("status").and_then(|s| s.as_str());
 
         let tasks = if let Some(status_str) = status_filter {
-            let status = parse_task_status(status_str)
+            let status = TaskStatus::from_str(status_str)
                 .ok_or_else(|| format!("Invalid status: {}", status_str))?;
             use crate::domain::ports::TaskFilter;
             self.task_service
@@ -693,12 +693,12 @@ where
         let memory_type = args
             .get("memory_type")
             .and_then(|t| t.as_str())
-            .and_then(parse_memory_type)
+            .and_then(MemoryType::from_str)
             .unwrap_or(MemoryType::Fact);
         let tier = args
             .get("tier")
             .and_then(|t| t.as_str())
-            .and_then(parse_memory_tier)
+            .and_then(MemoryTier::from_str)
             .unwrap_or(MemoryTier::Working);
 
         let memory = self
@@ -803,95 +803,3 @@ where
     }
 }
 
-// ========================================================================
-// Helpers
-// ========================================================================
-
-fn parse_priority(s: &str) -> Option<TaskPriority> {
-    match s.to_lowercase().as_str() {
-        "low" => Some(TaskPriority::Low),
-        "normal" => Some(TaskPriority::Normal),
-        "high" => Some(TaskPriority::High),
-        "critical" => Some(TaskPriority::Critical),
-        _ => None,
-    }
-}
-
-fn parse_task_status(s: &str) -> Option<crate::domain::models::TaskStatus> {
-    match s.to_lowercase().as_str() {
-        "pending" => Some(crate::domain::models::TaskStatus::Pending),
-        "ready" => Some(crate::domain::models::TaskStatus::Ready),
-        "running" => Some(crate::domain::models::TaskStatus::Running),
-        "complete" | "completed" => Some(crate::domain::models::TaskStatus::Complete),
-        "failed" => Some(crate::domain::models::TaskStatus::Failed),
-        "blocked" => Some(crate::domain::models::TaskStatus::Blocked),
-        _ => None,
-    }
-}
-
-fn parse_memory_type(s: &str) -> Option<MemoryType> {
-    match s.to_lowercase().as_str() {
-        "fact" => Some(MemoryType::Fact),
-        "code" => Some(MemoryType::Code),
-        "decision" => Some(MemoryType::Decision),
-        "error" => Some(MemoryType::Error),
-        "pattern" => Some(MemoryType::Pattern),
-        "reference" => Some(MemoryType::Reference),
-        "context" => Some(MemoryType::Context),
-        _ => None,
-    }
-}
-
-fn parse_memory_tier(s: &str) -> Option<MemoryTier> {
-    match s.to_lowercase().as_str() {
-        "working" => Some(MemoryTier::Working),
-        "episodic" => Some(MemoryTier::Episodic),
-        "semantic" => Some(MemoryTier::Semantic),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_priority() {
-        assert_eq!(parse_priority("low"), Some(TaskPriority::Low));
-        assert_eq!(parse_priority("NORMAL"), Some(TaskPriority::Normal));
-        assert_eq!(parse_priority("High"), Some(TaskPriority::High));
-        assert_eq!(parse_priority("critical"), Some(TaskPriority::Critical));
-        assert_eq!(parse_priority("invalid"), None);
-    }
-
-    #[test]
-    fn test_parse_task_status() {
-        assert_eq!(
-            parse_task_status("pending"),
-            Some(crate::domain::models::TaskStatus::Pending)
-        );
-        assert_eq!(
-            parse_task_status("complete"),
-            Some(crate::domain::models::TaskStatus::Complete)
-        );
-        assert_eq!(
-            parse_task_status("completed"),
-            Some(crate::domain::models::TaskStatus::Complete)
-        );
-        assert_eq!(parse_task_status("invalid"), None);
-    }
-
-    #[test]
-    fn test_parse_memory_type() {
-        assert_eq!(parse_memory_type("fact"), Some(MemoryType::Fact));
-        assert_eq!(parse_memory_type("CODE"), Some(MemoryType::Code));
-        assert_eq!(parse_memory_type("invalid"), None);
-    }
-
-    #[test]
-    fn test_parse_memory_tier() {
-        assert_eq!(parse_memory_tier("working"), Some(MemoryTier::Working));
-        assert_eq!(parse_memory_tier("SEMANTIC"), Some(MemoryTier::Semantic));
-        assert_eq!(parse_memory_tier("invalid"), None);
-    }
-}

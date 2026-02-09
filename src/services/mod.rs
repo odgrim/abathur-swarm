@@ -5,9 +5,16 @@ pub mod audit_log;
 pub mod circuit_breaker;
 pub mod cold_start;
 pub mod config;
+pub mod context_truncation;
+pub mod context_window;
+pub mod cost_tracker;
 pub mod dag_executor;
 pub mod dag_restructure;
+pub mod embedding_service;
+pub mod builtin_handlers;
 pub mod event_bus;
+pub mod event_reactor;
+pub mod event_scheduler;
 pub mod event_store;
 pub mod evolution_loop;
 pub mod goal_context_service;
@@ -17,6 +24,7 @@ pub mod integration_verifier;
 pub mod intent_verifier;
 pub mod llm_planner;
 pub mod memory_decay_daemon;
+pub mod model_router;
 pub mod memory_service;
 pub mod merge_queue;
 pub mod meta_planner; // Rust service module for decomposition planning
@@ -30,8 +38,13 @@ pub use audit_log::{AuditAction, AuditActor, AuditCategory, AuditEntry, AuditFil
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerService, CircuitCheckResult, CircuitScope, CircuitState, CircuitStats as CircuitBreakerStats, CircuitTrippedEvent, RecoveryAction, RecoveryPolicy};
 pub use cold_start::{ColdStartConfig, ColdStartReport, ColdStartService, Convention, ConventionCategory, Dependency, ProjectType};
 pub use config::{Config, ConfigError, A2AFederationConfig, TrustedSwarmConfig, TrustLevel, FederationAuthMethod, SwarmIdentityConfig};
+pub use context_truncation::{TruncationConfig, estimate_tokens, truncate_section, truncate_to_token_budget, truncate_context_sections};
+pub use context_window::{ContextWindowGuard, ContextWindowGuardConfig, ContextWindowCheck, model_context_window};
+pub use cost_tracker::{CostTracker, CostSummary, ModelPricing, get_model_pricing, estimate_cost, estimate_cost_cents};
+pub use model_router::{ModelRouter, ModelRoutingConfig, ModelSelection, AgentTierHint};
 pub use dag_executor::{DagExecutor, ExecutorConfig, ExecutionEvent, ExecutionResults, ExecutionStatus, TaskResult};
 pub use dag_restructure::{DagRestructureService, FailedAttempt, NewTaskSpec, RestructureConfig, RestructureContext, RestructureDecision, RestructureTrigger, TaskPriorityModifier};
+pub use embedding_service::{EmbeddingService, EmbeddingServiceConfig, BatchEmbeddingReport};
 pub use evolution_loop::{EvolutionAction, EvolutionConfig, EvolutionEvent, EvolutionLoop, EvolutionTrigger, RefinementRequest, RefinementSeverity, TaskExecution, TaskOutcome, TemplateStats};
 pub use goal_context_service::GoalContextService;
 pub use goal_service::GoalService;
@@ -48,4 +61,48 @@ pub use swarm_orchestrator::{ConvergenceLoopConfig, McpServerConfig, Orchestrato
 pub use task_service::{TaskService, SpawnLimitConfig, SpawnLimitResult, SpawnLimitType};
 pub use worktree_service::{WorktreeConfig, WorktreeService, WorktreeStats};
 pub use event_bus::{EventBus, EventBusConfig, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent};
+pub use event_reactor::{EventReactor, ReactorConfig, EventHandler, EventFilter, HandlerId, HandlerPriority, Reaction, HandlerContext, HandlerMetadata, ErrorStrategy};
+pub use event_scheduler::{EventScheduler, SchedulerConfig, ScheduledEvent, ScheduleType};
 pub use event_store::{EventQuery, EventStore, EventStoreError, EventStoreStats, InMemoryEventStore};
+
+/// Extract a JSON object from LLM text output.
+///
+/// Handles markdown code blocks (```json...```) and JSON embedded in prose text.
+pub fn extract_json_from_response(response: &str) -> String {
+    let trimmed = response.trim();
+
+    // Handle ```json ... ``` blocks
+    if trimmed.starts_with("```json") {
+        if let Some(end) = trimmed.rfind("```") {
+            if end > 7 {
+                return trimmed[7..end].trim().to_string();
+            }
+        }
+    }
+
+    // Handle ``` ... ``` blocks
+    if trimmed.starts_with("```") {
+        if let Some(end) = trimmed.rfind("```") {
+            let start = if trimmed.starts_with("```\n") { 4 } else { 3 };
+            if end > start {
+                return trimmed[start..end].trim().to_string();
+            }
+        }
+    }
+
+    // If it already looks like a JSON object, use it directly
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        return trimmed.to_string();
+    }
+
+    // Try to find a JSON object embedded in text
+    if let Some(start) = trimmed.find('{') {
+        if let Some(end) = trimmed.rfind('}') {
+            if end > start {
+                return trimmed[start..=end].to_string();
+            }
+        }
+    }
+
+    trimmed.to_string()
+}

@@ -103,100 +103,6 @@ where
     A: AgentRepository + 'static,
     M: MemoryRepository + 'static,
 {
-    /// Update task readiness based on dependency completion.
-    pub(super) async fn update_task_readiness(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
-        // Get all pending tasks
-        let pending_tasks = self.task_repo.list_by_status(TaskStatus::Pending).await?;
-
-        for task in pending_tasks {
-            // Check if any dependencies have permanently failed
-            if self.has_failed_dependencies(&task).await? {
-                // Transition to Blocked since upstream failed
-                let mut updated_task = task.clone();
-                if updated_task.transition_to(TaskStatus::Blocked).is_ok() {
-                    self.task_repo.update(&updated_task).await?;
-                    let _ = event_tx.send(SwarmEvent::TaskFailed {
-                        task_id: task.id,
-                        error: "Upstream dependency failed".to_string(),
-                        retry_count: 0,
-                    }).await;
-                }
-            } else if self.are_dependencies_met(&task).await? {
-                // Transition to Ready
-                let mut updated_task = task.clone();
-                if updated_task.transition_to(TaskStatus::Ready).is_ok() {
-                    self.task_repo.update(&updated_task).await?;
-                    let _ = event_tx.send(SwarmEvent::TaskReady {
-                        task_id: task.id,
-                        task_title: task.title.clone(),
-                    }).await;
-                }
-            }
-        }
-
-        // Check for blocked tasks that can become ready (after upstream completion)
-        let blocked_tasks = self.task_repo.list_by_status(TaskStatus::Blocked).await?;
-
-        for task in blocked_tasks {
-            // Skip if dependencies still failing
-            if self.has_failed_dependencies(&task).await? {
-                continue;
-            }
-
-            if self.are_dependencies_met(&task).await? {
-                let mut updated_task = task.clone();
-                if updated_task.transition_to(TaskStatus::Ready).is_ok() {
-                    self.task_repo.update(&updated_task).await?;
-                    let _ = event_tx.send(SwarmEvent::TaskReady {
-                        task_id: task.id,
-                        task_title: task.title.clone(),
-                    }).await;
-                }
-            }
-        }
-
-        // Also check Ready tasks - they may need to be blocked if a dependency failed
-        let ready_tasks = self.task_repo.list_by_status(TaskStatus::Ready).await?;
-
-        for task in ready_tasks {
-            if self.has_failed_dependencies(&task).await? {
-                let mut updated_task = task.clone();
-                if updated_task.transition_to(TaskStatus::Blocked).is_ok() {
-                    self.task_repo.update(&updated_task).await?;
-                    let _ = event_tx.send(SwarmEvent::TaskFailed {
-                        task_id: task.id,
-                        error: "Upstream dependency failed".to_string(),
-                        retry_count: 0,
-                    }).await;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Check if all dependencies for a task are complete.
-    pub(super) async fn are_dependencies_met(&self, task: &Task) -> DomainResult<bool> {
-        if task.depends_on.is_empty() {
-            return Ok(true);
-        }
-
-        let dependencies = self.task_repo.get_dependencies(task.id).await?;
-
-        // All dependencies must be complete
-        Ok(dependencies.iter().all(|dep| dep.status == TaskStatus::Complete))
-    }
-
-    /// Check if any dependencies failed (would block this task).
-    pub(super) async fn has_failed_dependencies(&self, task: &Task) -> DomainResult<bool> {
-        if task.depends_on.is_empty() {
-            return Ok(false);
-        }
-
-        let dependencies = self.task_repo.get_dependencies(task.id).await?;
-        Ok(dependencies.iter().any(|dep| dep.status == TaskStatus::Failed))
-    }
-
     /// Process ready tasks by spawning agents for them.
     ///
     /// Goals no longer decompose into tasks. Tasks are created independently
@@ -292,7 +198,7 @@ where
     /// Before execution, routes the task to the appropriate agent, loads
     /// relevant goals via GoalContextService, and prepends goal guidance
     /// to the task description.
-    async fn spawn_task_agent(
+    pub(super) async fn spawn_task_agent(
         &self,
         task: &Task,
         event_tx: &mpsc::Sender<SwarmEvent>,
@@ -801,37 +707,4 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
         Ok(())
     }
 
-    /// Process retry logic for failed tasks.
-    pub(super) async fn process_retries(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
-        let failed_tasks = self.task_repo.list_by_status(TaskStatus::Failed).await?;
-
-        for task in failed_tasks {
-            // Check if we should retry
-            if task.retry_count < self.config.max_task_retries {
-                // Check if dependencies are still met (they might have changed)
-                let deps_met = self.are_dependencies_met(&task).await?;
-                let deps_failed = self.has_failed_dependencies(&task).await?;
-
-                if deps_failed {
-                    // Mark as blocked - can't retry until upstream is fixed
-                    let mut blocked_task = task.clone();
-                    let _ = blocked_task.transition_to(TaskStatus::Blocked);
-                    self.task_repo.update(&blocked_task).await?;
-                } else if deps_met {
-                    // Transition back to Ready for retry
-                    let mut retry_task = task.clone();
-                    if retry_task.transition_to(TaskStatus::Ready).is_ok() {
-                        self.task_repo.update(&retry_task).await?;
-                        let _ = event_tx.send(SwarmEvent::TaskRetrying {
-                            task_id: task.id,
-                            attempt: task.retry_count + 1,
-                            max_attempts: self.config.max_task_retries,
-                        }).await;
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
 }

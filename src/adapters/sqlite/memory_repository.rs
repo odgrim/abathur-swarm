@@ -371,8 +371,7 @@ impl TryFrom<MemoryRow> for Memory {
     type Error = DomainError;
 
     fn try_from(row: MemoryRow) -> Result<Self, Self::Error> {
-        let id = Uuid::parse_str(&row.id)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
+        let id = super::parse_uuid(&row.id)?;
 
         let tier = row.tier
             .as_deref()
@@ -382,29 +381,12 @@ impl TryFrom<MemoryRow> for Memory {
         let memory_type = MemoryType::from_str(&row.memory_type)
             .unwrap_or(MemoryType::Fact);
 
-        let metadata: MemoryMetadata = row.metadata
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .unwrap_or_default();
+        let metadata: MemoryMetadata = super::parse_json_or_default(row.metadata)?;
 
-        let created_at = chrono::DateTime::parse_from_rfc3339(&row.created_at)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .with_timezone(&chrono::Utc);
-
-        let updated_at = chrono::DateTime::parse_from_rfc3339(&row.updated_at)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .with_timezone(&chrono::Utc);
-
-        let last_accessed = chrono::DateTime::parse_from_rfc3339(&row.last_accessed_at)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .with_timezone(&chrono::Utc);
-
-        let expires_at = row.expires_at
-            .map(|s| chrono::DateTime::parse_from_rfc3339(&s).map(|d| d.with_timezone(&chrono::Utc)))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
+        let created_at = super::parse_datetime(&row.created_at)?;
+        let updated_at = super::parse_datetime(&row.updated_at)?;
+        let last_accessed = super::parse_datetime(&row.last_accessed_at)?;
+        let expires_at = super::parse_optional_datetime(row.expires_at)?;
 
         // Use content if available, fall back to value
         let content = row.content.unwrap_or(row.value);
@@ -423,6 +405,7 @@ impl TryFrom<MemoryRow> for Memory {
             updated_at,
             expires_at,
             version: row.version as u64,
+            embedding: None,
         })
     }
 }
@@ -430,12 +413,10 @@ impl TryFrom<MemoryRow> for Memory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{create_test_pool, Migrator, all_embedded_migrations};
+    use crate::adapters::sqlite::create_migrated_test_pool;
 
     async fn setup_test_repo() -> SqliteMemoryRepository {
-        let pool = create_test_pool().await.unwrap();
-        let migrator = Migrator::new(pool.clone());
-        migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
+        let pool = create_migrated_test_pool().await.unwrap();
         SqliteMemoryRepository::new(pool)
     }
 

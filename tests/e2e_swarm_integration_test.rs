@@ -33,7 +33,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use abathur::adapters::sqlite::{
-    all_embedded_migrations, create_test_pool, Migrator, SqliteAgentRepository,
+    create_migrated_test_pool, SqliteAgentRepository,
     SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
     SqliteWorktreeRepository,
 };
@@ -61,14 +61,9 @@ async fn setup_test_environment() -> (
     Arc<SqliteAgentRepository>,
     Arc<SqliteWorktreeRepository>,
 ) {
-    let pool = create_test_pool()
+    let pool = create_migrated_test_pool()
         .await
         .expect("Failed to create test pool");
-    let migrator = Migrator::new(pool.clone());
-    migrator
-        .run_embedded_migrations(all_embedded_migrations())
-        .await
-        .expect("Failed to run migrations");
 
     (
         Arc::new(SqliteGoalRepository::new(pool.clone())),
@@ -94,6 +89,10 @@ async fn test_swarm_orchestrator_initialization_and_tick() {
     let mut config = SwarmConfig::default();
     config.use_worktrees = false; // Disable for test simplicity
 
+    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let event_reactor = Arc::new(abathur::services::EventReactor::new(event_bus.clone(), abathur::services::ReactorConfig::default()));
+    let event_scheduler = Arc::new(abathur::services::EventScheduler::new(event_bus.clone(), abathur::services::SchedulerConfig::default()));
+
     let orchestrator: SwarmOrchestrator<_, _, _, _, NullMemoryRepository> = SwarmOrchestrator::new(
         goal_repo.clone(),
         task_repo.clone(),
@@ -101,6 +100,9 @@ async fn test_swarm_orchestrator_initialization_and_tick() {
         agent_repo.clone(),
         substrate,
         config,
+        event_bus,
+        event_reactor,
+        event_scheduler,
     );
 
     // Run a tick with no goals - should complete without error
@@ -122,7 +124,8 @@ async fn test_swarm_orchestrator_initialization_and_tick() {
 async fn test_goal_lifecycle_with_constraints() {
     let (goal_repo, _, _, _, _) = setup_test_environment().await;
 
-    let goal_service = GoalService::new(goal_repo.clone());
+    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let goal_service = GoalService::new(goal_repo.clone(), event_bus.clone());
 
     // Create a goal with constraints
     let goal = goal_service
@@ -198,8 +201,9 @@ async fn test_goal_lifecycle_with_constraints() {
 async fn test_task_dag_with_dependencies() {
     let (goal_repo, task_repo, _, _, _) = setup_test_environment().await;
 
-    let goal_service = GoalService::new(goal_repo.clone());
-    let task_service = TaskService::new(task_repo.clone());
+    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let goal_service = GoalService::new(goal_repo.clone(), event_bus.clone());
+    let task_service = TaskService::new(task_repo.clone(), event_bus.clone());
 
     // Create a goal (aspirational context, not directly linked to tasks)
     let _goal = goal_service
@@ -377,7 +381,8 @@ async fn test_task_dag_with_dependencies() {
 async fn test_agent_template_and_instance_management() {
     let (_, _, _, agent_repo, _) = setup_test_environment().await;
 
-    let agent_service = AgentService::new(agent_repo.clone());
+    let event_bus = Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default()));
+    let agent_service = AgentService::new(agent_repo.clone(), event_bus.clone());
 
     // Register different agent tiers
     let worker_template = agent_service
@@ -808,9 +813,10 @@ async fn test_full_end_to_end_workflow() {
         setup_test_environment().await;
 
     // 1. Create services
-    let goal_service = GoalService::new(goal_repo.clone());
-    let task_service = TaskService::new(task_repo.clone());
-    let agent_service = AgentService::new(agent_repo.clone());
+    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let goal_service = GoalService::new(goal_repo.clone(), event_bus.clone());
+    let task_service = TaskService::new(task_repo.clone(), event_bus.clone());
+    let agent_service = AgentService::new(agent_repo.clone(), event_bus.clone());
     let memory_service = MemoryService::new(memory_repo.clone());
     let evolution_loop = Arc::new(EvolutionLoop::with_default_config());
 
@@ -1003,6 +1009,10 @@ async fn test_swarm_orchestrator_goal_execution() {
     config.use_llm_decomposition = false;
     config.track_evolution = true;
 
+    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let event_reactor = Arc::new(abathur::services::EventReactor::new(event_bus.clone(), abathur::services::ReactorConfig::default()));
+    let event_scheduler = Arc::new(abathur::services::EventScheduler::new(event_bus.clone(), abathur::services::SchedulerConfig::default()));
+
     let orchestrator: SwarmOrchestrator<_, _, _, _, NullMemoryRepository> = SwarmOrchestrator::new(
         goal_repo.clone(),
         task_repo.clone(),
@@ -1010,6 +1020,9 @@ async fn test_swarm_orchestrator_goal_execution() {
         agent_repo.clone(),
         substrate,
         config,
+        event_bus,
+        event_reactor,
+        event_scheduler,
     );
 
     // Create a goal
@@ -1124,7 +1137,8 @@ async fn test_memory_system_integration() {
 async fn test_task_idempotency() {
     let (_goal_repo, task_repo, _, _, _) = setup_test_environment().await;
 
-    let task_service = TaskService::new(task_repo.clone());
+    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let task_service = TaskService::new(task_repo.clone(), event_bus.clone());
 
     // Submit task with idempotency key
     let task1 = task_service
@@ -1190,7 +1204,8 @@ async fn test_e2e_all_critical_paths() {
         setup_test_environment().await;
 
     // 1. Goal Creation
-    let goal_service = GoalService::new(goal_repo.clone());
+    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let goal_service = GoalService::new(goal_repo.clone(), event_bus.clone());
     let goal = goal_service
         .create_goal(
             "E2E Test Goal".to_string(),
@@ -1206,7 +1221,7 @@ async fn test_e2e_all_critical_paths() {
     println!("  ✓ Goal creation");
 
     // 2. Task Creation with Dependencies
-    let task_service = TaskService::new(task_repo.clone());
+    let task_service = TaskService::new(task_repo.clone(), event_bus.clone());
     let task1 = task_service
         .submit_task(
             Some("Task 1".to_string()),
@@ -1249,7 +1264,7 @@ async fn test_e2e_all_critical_paths() {
     println!("  ✓ DAG construction and wave calculation");
 
     // 4. Agent Template Registration
-    let agent_service = AgentService::new(agent_repo.clone());
+    let agent_service = AgentService::new(agent_repo.clone(), event_bus.clone());
     let _template = agent_service
         .register_template(
             "e2e-worker".to_string(),
@@ -1679,9 +1694,10 @@ async fn test_real_e2e_full_workflow() {
         setup_test_environment().await;
 
     // 1. Create services
-    let goal_service = GoalService::new(goal_repo.clone());
-    let task_service = TaskService::new(task_repo.clone());
-    let agent_service = AgentService::new(agent_repo.clone());
+    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let goal_service = GoalService::new(goal_repo.clone(), event_bus.clone());
+    let task_service = TaskService::new(task_repo.clone(), event_bus.clone());
+    let agent_service = AgentService::new(agent_repo.clone(), event_bus.clone());
     let memory_service = MemoryService::new(memory_repo.clone());
     let evolution_loop = Arc::new(EvolutionLoop::with_default_config());
 

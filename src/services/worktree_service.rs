@@ -428,13 +428,10 @@ impl<W: WorktreeRepository> WorktreeService<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{create_test_pool, SqliteWorktreeRepository, Migrator, all_embedded_migrations};
+    use crate::adapters::sqlite::{create_migrated_test_pool, SqliteWorktreeRepository};
 
     async fn setup_service() -> WorktreeService<SqliteWorktreeRepository> {
-        let pool = create_test_pool().await.unwrap();
-        let migrator = Migrator::new(pool.clone());
-        migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
-
+        let pool = create_migrated_test_pool().await.unwrap();
         let repo = Arc::new(SqliteWorktreeRepository::new(pool));
         let config = WorktreeConfig::default();
         WorktreeService::new(repo, config)

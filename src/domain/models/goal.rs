@@ -320,86 +320,6 @@ impl Goal {
     }
 }
 
-/// Builder for creating goals with a fluent API.
-#[derive(Debug, Default)]
-pub struct GoalBuilder {
-    name: Option<String>,
-    description: Option<String>,
-    priority: GoalPriority,
-    parent_id: Option<Uuid>,
-    constraints: Vec<GoalConstraint>,
-    tags: Vec<String>,
-    applicability_domains: Vec<String>,
-}
-
-impl GoalBuilder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn name(mut self, name: impl Into<String>) -> Self {
-        self.name = Some(name.into());
-        self
-    }
-
-    pub fn description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-
-    pub fn priority(mut self, priority: GoalPriority) -> Self {
-        self.priority = priority;
-        self
-    }
-
-    pub fn parent(mut self, parent_id: Uuid) -> Self {
-        self.parent_id = Some(parent_id);
-        self
-    }
-
-    pub fn constraint(mut self, constraint: GoalConstraint) -> Self {
-        self.constraints.push(constraint);
-        self
-    }
-
-    pub fn tag(mut self, tag: impl Into<String>) -> Self {
-        self.tags.push(tag.into());
-        self
-    }
-
-    pub fn applicability_domain(mut self, domain: impl Into<String>) -> Self {
-        self.applicability_domains.push(domain.into());
-        self
-    }
-
-    pub fn build(self) -> Result<Goal, String> {
-        let name = self.name.ok_or("Goal name is required")?;
-        let description = self.description.unwrap_or_default();
-
-        let mut goal = Goal::new(name, description)
-            .with_priority(self.priority);
-
-        if let Some(parent_id) = self.parent_id {
-            goal = goal.with_parent(parent_id);
-        }
-
-        for constraint in self.constraints {
-            goal = goal.with_constraint(constraint);
-        }
-
-        for tag in self.tags {
-            goal = goal.with_tag(tag);
-        }
-
-        for domain in self.applicability_domains {
-            goal = goal.with_applicability_domain(domain);
-        }
-
-        goal.validate()?;
-        Ok(goal)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,23 +371,6 @@ mod tests {
         assert!(GoalStatus::from_str("completed").is_none());
         assert!(GoalStatus::from_str("suspended").is_none());
         assert!(GoalStatus::from_str("failed").is_none());
-    }
-
-    #[test]
-    fn test_goal_builder() {
-        let goal = GoalBuilder::new()
-            .name("Built Goal")
-            .description("Built description")
-            .priority(GoalPriority::High)
-            .tag("test")
-            .constraint(GoalConstraint::invariant("Safety", "Must be safe"))
-            .build()
-            .unwrap();
-
-        assert_eq!(goal.name, "Built Goal");
-        assert_eq!(goal.priority, GoalPriority::High);
-        assert_eq!(goal.metadata.tags.len(), 1);
-        assert_eq!(goal.constraints.len(), 1);
     }
 
     #[test]

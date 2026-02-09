@@ -1,0 +1,1586 @@
+//! Built-in reactive event handlers.
+//!
+//! All handlers are **idempotent** — safe to run even if the poll loop already
+//! handled the same state change. They check current state before acting.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use async_trait::async_trait;
+use tokio::sync::{RwLock, Semaphore};
+
+use crate::domain::models::{Goal, HumanEscalationEvent, Task, TaskStatus};
+use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
+use crate::services::event_store::EventStore;
+use crate::services::goal_context_service::GoalContextService;
+use crate::services::event_bus::{
+    EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber,
+    SwarmStatsPayload, UnifiedEvent,
+};
+use crate::services::event_reactor::{
+    ErrorStrategy, EventFilter, EventHandler, HandlerContext, HandlerId, HandlerMetadata,
+    HandlerPriority, Reaction,
+};
+use crate::services::memory_service::MemoryService;
+use crate::services::swarm_orchestrator::SwarmStats;
+
+// ============================================================================
+// TaskCompletedReadinessHandler
+// ============================================================================
+
+/// When a task completes, check its dependents and transition Pending/Blocked → Ready
+/// if all their dependencies are now complete.
+pub struct TaskCompletedReadinessHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+}
+
+impl<T: TaskRepository> TaskCompletedReadinessHandler<T> {
+    pub fn new(task_repo: Arc<T>) -> Self {
+        Self { task_repo }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for TaskCompletedReadinessHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "TaskCompletedReadinessHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Task])
+                .payload_types(vec![
+                    "TaskCompleted".to_string(),
+                    "TaskCompletedWithResult".to_string(),
+                ]),
+            priority: HandlerPriority::SYSTEM,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let task_id = match &event.payload {
+            EventPayload::TaskCompleted { task_id, .. } => *task_id,
+            EventPayload::TaskCompletedWithResult { task_id, .. } => *task_id,
+            _ => return Ok(Reaction::None),
+        };
+
+        let dependents = self.task_repo.get_dependents(task_id).await
+            .map_err(|e| format!("Failed to get dependents: {}", e))?;
+
+        let mut new_events = Vec::new();
+
+        for dep in dependents {
+            // Idempotency: only act if still in a state that needs updating
+            if dep.status != TaskStatus::Pending && dep.status != TaskStatus::Blocked {
+                continue;
+            }
+
+            let all_deps = self.task_repo.get_dependencies(dep.id).await
+                .map_err(|e| format!("Failed to get dependencies: {}", e))?;
+
+            if all_deps.iter().all(|d| d.status == TaskStatus::Complete) {
+                let mut updated = dep.clone();
+                if updated.transition_to(TaskStatus::Ready).is_ok() {
+                    self.task_repo.update(&updated).await
+                        .map_err(|e| format!("Failed to update task: {}", e))?;
+
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: chrono::Utc::now(),
+                        severity: EventSeverity::Debug,
+                        category: EventCategory::Task,
+                        goal_id: event.goal_id,
+                        task_id: Some(dep.id),
+                        correlation_id: event.correlation_id,
+                        payload: EventPayload::TaskReady {
+                            task_id: dep.id,
+                            task_title: dep.title.clone(),
+                        },
+                    });
+                }
+            }
+        }
+
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
+    }
+}
+
+// ============================================================================
+// TaskFailedBlockHandler
+// ============================================================================
+
+/// When a task fails with retries exhausted, block its dependent tasks.
+pub struct TaskFailedBlockHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+}
+
+impl<T: TaskRepository> TaskFailedBlockHandler<T> {
+    pub fn new(task_repo: Arc<T>) -> Self {
+        Self { task_repo }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for TaskFailedBlockHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "TaskFailedBlockHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Task])
+                .payload_types(vec!["TaskFailed".to_string(), "TaskCanceled".to_string()]),
+            priority: HandlerPriority::SYSTEM,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let (task_id, retry_count) = match &event.payload {
+            EventPayload::TaskFailed { task_id, retry_count, .. } => (*task_id, *retry_count),
+            EventPayload::TaskCanceled { task_id, .. } => {
+                // For canceled tasks, always block dependents (retries don't apply)
+                let dependents = self.task_repo.get_dependents(*task_id).await
+                    .map_err(|e| format!("Failed to get dependents: {}", e))?;
+
+                for dep in dependents {
+                    if dep.status == TaskStatus::Blocked || dep.status.is_terminal() {
+                        continue;
+                    }
+                    let mut updated = dep.clone();
+                    if updated.transition_to(TaskStatus::Blocked).is_ok() {
+                        self.task_repo.update(&updated).await
+                            .map_err(|e| format!("Failed to update task: {}", e))?;
+                    }
+                }
+                return Ok(Reaction::None);
+            }
+            _ => return Ok(Reaction::None),
+        };
+
+        // Only block dependents if retries are exhausted.
+        // Fetch the actual task to check max_retries.
+        let task = self.task_repo.get(task_id).await
+            .map_err(|e| format!("Failed to get task: {}", e))?
+            .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+        if retry_count < task.max_retries {
+            return Ok(Reaction::None);
+        }
+
+        let dependents = self.task_repo.get_dependents(task_id).await
+            .map_err(|e| format!("Failed to get dependents: {}", e))?;
+
+        for dep in dependents {
+            // Idempotency: only block if not already blocked or terminal
+            if dep.status == TaskStatus::Blocked || dep.status.is_terminal() {
+                continue;
+            }
+
+            let mut updated = dep.clone();
+            if updated.transition_to(TaskStatus::Blocked).is_ok() {
+                self.task_repo.update(&updated).await
+                    .map_err(|e| format!("Failed to update task: {}", e))?;
+            }
+        }
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// MemoryMaintenanceHandler
+// ============================================================================
+
+/// Triggered by the "memory-maintenance" scheduled event. Runs full
+/// maintenance (prune expired/decayed, check promotions, resolve conflicts).
+pub struct MemoryMaintenanceHandler<M: MemoryRepository> {
+    memory_service: Arc<MemoryService<M>>,
+}
+
+impl<M: MemoryRepository> MemoryMaintenanceHandler<M> {
+    pub fn new(memory_service: Arc<MemoryService<M>>) -> Self {
+        Self { memory_service }
+    }
+}
+
+#[async_trait]
+impl<M: MemoryRepository + 'static> EventHandler for MemoryMaintenanceHandler<M> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "MemoryMaintenanceHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "memory-maintenance"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let report = self.memory_service.run_maintenance().await
+            .map_err(|e| format!("Memory maintenance failed: {}", e))?;
+
+        let total_pruned = report.expired_pruned + report.decayed_pruned;
+        if total_pruned > 0 {
+            let prune_event = UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: chrono::Utc::now(),
+                severity: EventSeverity::Info,
+                category: EventCategory::Memory,
+                goal_id: None,
+                task_id: None,
+                correlation_id: event.correlation_id,
+                payload: EventPayload::MemoryPruned {
+                    count: total_pruned,
+                    reason: format!(
+                        "Scheduled maintenance: {} expired, {} decayed, {} promoted, {} conflicts resolved",
+                        report.expired_pruned, report.decayed_pruned,
+                        report.promoted, report.conflicts_resolved,
+                    ),
+                },
+            };
+            return Ok(Reaction::EmitEvents(vec![prune_event]));
+        }
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// GoalRetiredHandler
+// ============================================================================
+
+/// When a goal is retired, log the event and refresh caches.
+///
+/// Design constraint: Goals and tasks are intentionally decoupled.
+/// Goals do NOT trigger task creation or cancellation. The Task model
+/// does not carry a goal_id field. This handler only logs the retirement
+/// event for observability.
+pub struct GoalRetiredHandler {
+    _placeholder: (),
+}
+
+impl GoalRetiredHandler {
+    pub fn new() -> Self {
+        Self { _placeholder: () }
+    }
+}
+
+#[async_trait]
+impl EventHandler for GoalRetiredHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "GoalRetiredHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Goal],
+                payload_types: vec!["GoalStatusChanged".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::GoalStatusChanged { to_status, .. } if to_status == "retired"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::HIGH,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        if let Some(goal_id) = event.goal_id {
+            tracing::info!("GoalRetiredHandler: goal {} retired", goal_id);
+        }
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// EscalationTimeoutHandler
+// ============================================================================
+
+/// Triggered by the "escalation-check" scheduled event. Emits a notification
+/// that escalation deadlines should be checked. The actual timeout logic is
+/// handled by the poll-based `check_escalation_deadlines` in the orchestrator,
+/// since escalation state lives in the orchestrator's in-memory store.
+///
+/// This handler provides a fast-path signal: when it fires, the orchestrator
+/// can immediately check deadlines rather than waiting for the next poll tick.
+pub struct EscalationTimeoutHandler {
+    #[allow(dead_code)]
+    event_bus: Arc<EventBus>,
+    escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>,
+}
+
+impl EscalationTimeoutHandler {
+    pub fn new(event_bus: Arc<EventBus>, escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>) -> Self {
+        Self { event_bus, escalation_store }
+    }
+}
+
+#[async_trait]
+impl EventHandler for EscalationTimeoutHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "EscalationTimeoutHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "escalation-check"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        // Check escalation deadlines from the shared store
+        let now = chrono::Utc::now();
+        let store = self.escalation_store.read().await;
+        let timed_out_count = store.iter()
+            .filter(|e| e.escalation.deadline.map_or(false, |d| now > d))
+            .count();
+        drop(store);
+
+        if timed_out_count > 0 {
+            tracing::info!("EscalationTimeoutHandler: {} escalation(s) past deadline", timed_out_count);
+        }
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// TaskFailedRetryHandler
+// ============================================================================
+
+/// When a task fails with retries remaining, transition it back to Ready.
+/// Runs at NORMAL priority (after SYSTEM-priority TaskFailedBlockHandler).
+pub struct TaskFailedRetryHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+    max_retries: u32,
+}
+
+impl<T: TaskRepository> TaskFailedRetryHandler<T> {
+    pub fn new(task_repo: Arc<T>, max_retries: u32) -> Self {
+        Self { task_repo, max_retries }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "TaskFailedRetryHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Task])
+                .payload_types(vec!["TaskFailed".to_string()]),
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let (task_id, retry_count) = match &event.payload {
+            EventPayload::TaskFailed { task_id, retry_count, .. } => (*task_id, *retry_count),
+            _ => return Ok(Reaction::None),
+        };
+
+        if retry_count >= self.max_retries {
+            return Ok(Reaction::None);
+        }
+
+        // Re-fetch task to check it's still Failed (idempotency)
+        let task = self.task_repo.get(task_id).await
+            .map_err(|e| format!("Failed to get task: {}", e))?
+            .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+        if task.status != TaskStatus::Failed {
+            return Ok(Reaction::None);
+        }
+
+        let mut updated = task.clone();
+        if updated.transition_to(TaskStatus::Ready).is_ok() {
+            self.task_repo.update(&updated).await
+                .map_err(|e| format!("Failed to update task: {}", e))?;
+
+            let events = vec![
+                UnifiedEvent {
+                    id: EventId::new(),
+                    sequence: SequenceNumber(0),
+                    timestamp: chrono::Utc::now(),
+                    severity: EventSeverity::Warning,
+                    category: EventCategory::Task,
+                    goal_id: event.goal_id,
+                    task_id: Some(task_id),
+                    correlation_id: event.correlation_id,
+                    payload: EventPayload::TaskRetrying {
+                        task_id,
+                        attempt: retry_count + 1,
+                        max_attempts: self.max_retries,
+                    },
+                },
+                UnifiedEvent {
+                    id: EventId::new(),
+                    sequence: SequenceNumber(0),
+                    timestamp: chrono::Utc::now(),
+                    severity: EventSeverity::Debug,
+                    category: EventCategory::Task,
+                    goal_id: event.goal_id,
+                    task_id: Some(task_id),
+                    correlation_id: event.correlation_id,
+                    payload: EventPayload::TaskReady {
+                        task_id,
+                        task_title: updated.title.clone(),
+                    },
+                },
+            ];
+            return Ok(Reaction::EmitEvents(events));
+        }
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// GoalCreatedHandler
+// ============================================================================
+
+/// When a goal starts, refresh the active goals cache.
+pub struct GoalCreatedHandler<G: GoalRepository> {
+    goal_repo: Arc<G>,
+    active_goals_cache: Arc<RwLock<Vec<Goal>>>,
+}
+
+impl<G: GoalRepository> GoalCreatedHandler<G> {
+    pub fn new(goal_repo: Arc<G>, active_goals_cache: Arc<RwLock<Vec<Goal>>>) -> Self {
+        Self { goal_repo, active_goals_cache }
+    }
+}
+
+#[async_trait]
+impl<G: GoalRepository + 'static> EventHandler for GoalCreatedHandler<G> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "GoalCreatedHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Goal])
+                .payload_types(vec!["GoalStarted".to_string()]),
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let goals = self.goal_repo.get_active_with_constraints().await
+            .map_err(|e| format!("Failed to get active goals: {}", e))?;
+
+        let mut cache = self.active_goals_cache.write().await;
+        *cache = goals;
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// StatsUpdateHandler
+// ============================================================================
+
+/// Triggered by the "stats-update" scheduled event. Refreshes swarm statistics.
+pub struct StatsUpdateHandler<G: GoalRepository, T: TaskRepository, W: WorktreeRepository> {
+    goal_repo: Arc<G>,
+    task_repo: Arc<T>,
+    worktree_repo: Arc<W>,
+    stats: Arc<RwLock<SwarmStats>>,
+    agent_semaphore: Arc<Semaphore>,
+    max_agents: usize,
+    total_tokens: Arc<AtomicU64>,
+}
+
+impl<G: GoalRepository, T: TaskRepository, W: WorktreeRepository> StatsUpdateHandler<G, T, W> {
+    pub fn new(
+        goal_repo: Arc<G>,
+        task_repo: Arc<T>,
+        worktree_repo: Arc<W>,
+        stats: Arc<RwLock<SwarmStats>>,
+        agent_semaphore: Arc<Semaphore>,
+        max_agents: usize,
+        total_tokens: Arc<AtomicU64>,
+    ) -> Self {
+        Self { goal_repo, task_repo, worktree_repo, stats, agent_semaphore, max_agents, total_tokens }
+    }
+}
+
+#[async_trait]
+impl<G: GoalRepository + 'static, T: TaskRepository + 'static, W: WorktreeRepository + 'static> EventHandler for StatsUpdateHandler<G, T, W> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "StatsUpdateHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "stats-update"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::LOW,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let task_counts = self.task_repo.count_by_status().await
+            .map_err(|e| format!("Failed to count tasks: {}", e))?;
+        let active_worktrees = self.worktree_repo.list_active().await
+            .map_err(|e| format!("Failed to list worktrees: {}", e))?
+            .len();
+
+        let active_goals = self.goal_repo.list(crate::domain::ports::GoalFilter {
+            status: Some(crate::domain::models::GoalStatus::Active),
+            ..Default::default()
+        }).await.map_err(|e| format!("Failed to list goals: {}", e))?.len();
+
+        let new_stats = SwarmStats {
+            active_goals,
+            pending_tasks: *task_counts.get(&TaskStatus::Pending).unwrap_or(&0) as usize,
+            ready_tasks: *task_counts.get(&TaskStatus::Ready).unwrap_or(&0) as usize,
+            running_tasks: *task_counts.get(&TaskStatus::Running).unwrap_or(&0) as usize,
+            completed_tasks: *task_counts.get(&TaskStatus::Complete).unwrap_or(&0) as usize,
+            failed_tasks: *task_counts.get(&TaskStatus::Failed).unwrap_or(&0) as usize,
+            active_agents: self.max_agents - self.agent_semaphore.available_permits(),
+            active_worktrees,
+            total_tokens_used: self.total_tokens.load(Ordering::Relaxed),
+        };
+
+        {
+            let mut s = self.stats.write().await;
+            *s = new_stats.clone();
+        }
+
+        let status_event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Debug,
+            category: EventCategory::Orchestrator,
+            goal_id: None,
+            task_id: None,
+            correlation_id: event.correlation_id,
+            payload: EventPayload::StatusUpdate(SwarmStatsPayload::from(new_stats)),
+        };
+
+        Ok(Reaction::EmitEvents(vec![status_event]))
+    }
+}
+
+// ============================================================================
+// ReconciliationHandler
+// ============================================================================
+
+/// Triggered by the "reconciliation" scheduled event. Scans for missed state
+/// transitions, detects stale running tasks, and corrects them (safety net
+/// for the event-driven system).
+pub struct ReconciliationHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+    /// Tasks stuck in Running longer than this are considered stale (seconds).
+    stale_task_timeout_secs: u64,
+}
+
+impl<T: TaskRepository> ReconciliationHandler<T> {
+    pub fn new(task_repo: Arc<T>) -> Self {
+        Self { task_repo, stale_task_timeout_secs: 7200 } // 2 hours default
+    }
+
+    pub fn with_stale_timeout(mut self, secs: u64) -> Self {
+        self.stale_task_timeout_secs = secs;
+        self
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "ReconciliationHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "reconciliation"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::LOW,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let mut corrections: u32 = 0;
+        let mut new_events = Vec::new();
+
+        // Check Pending tasks
+        let pending = self.task_repo.list_by_status(TaskStatus::Pending).await
+            .map_err(|e| format!("Failed to list pending tasks: {}", e))?;
+
+        for task in &pending {
+            let deps = self.task_repo.get_dependencies(task.id).await
+                .map_err(|e| format!("Failed to get deps: {}", e))?;
+
+            if deps.iter().any(|d| d.status == TaskStatus::Failed || d.status == TaskStatus::Canceled) {
+                let mut updated = task.clone();
+                if updated.transition_to(TaskStatus::Blocked).is_ok() {
+                    self.task_repo.update(&updated).await
+                        .map_err(|e| format!("Failed to update: {}", e))?;
+                    corrections += 1;
+                }
+            } else if deps.iter().all(|d| d.status == TaskStatus::Complete) {
+                let mut updated = task.clone();
+                if updated.transition_to(TaskStatus::Ready).is_ok() {
+                    self.task_repo.update(&updated).await
+                        .map_err(|e| format!("Failed to update: {}", e))?;
+                    corrections += 1;
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: chrono::Utc::now(),
+                        severity: EventSeverity::Debug,
+                        category: EventCategory::Task,
+                        goal_id: None,
+                        task_id: Some(task.id),
+                        correlation_id: event.correlation_id,
+                        payload: EventPayload::TaskReady {
+                            task_id: task.id,
+                            task_title: task.title.clone(),
+                        },
+                    });
+                }
+            }
+        }
+
+        // Check Blocked tasks that might now be unblocked
+        let blocked = self.task_repo.list_by_status(TaskStatus::Blocked).await
+            .map_err(|e| format!("Failed to list blocked tasks: {}", e))?;
+
+        for task in &blocked {
+            let deps = self.task_repo.get_dependencies(task.id).await
+                .map_err(|e| format!("Failed to get deps: {}", e))?;
+
+            if deps.iter().any(|d| d.status == TaskStatus::Failed || d.status == TaskStatus::Canceled) {
+                continue;
+            }
+
+            if deps.iter().all(|d| d.status == TaskStatus::Complete) {
+                let mut updated = task.clone();
+                if updated.transition_to(TaskStatus::Ready).is_ok() {
+                    self.task_repo.update(&updated).await
+                        .map_err(|e| format!("Failed to update: {}", e))?;
+                    corrections += 1;
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: chrono::Utc::now(),
+                        severity: EventSeverity::Debug,
+                        category: EventCategory::Task,
+                        goal_id: None,
+                        task_id: Some(task.id),
+                        correlation_id: event.correlation_id,
+                        payload: EventPayload::TaskReady {
+                            task_id: task.id,
+                            task_title: task.title.clone(),
+                        },
+                    });
+                }
+            }
+        }
+
+        // Stale-task detection: tasks stuck in Running for > stale_task_timeout_secs
+        let running = self.task_repo.list_by_status(TaskStatus::Running).await
+            .map_err(|e| format!("Failed to list running tasks: {}", e))?;
+
+        let now = chrono::Utc::now();
+        let timeout = chrono::Duration::seconds(self.stale_task_timeout_secs as i64);
+
+        for task in &running {
+            if let Some(started_at) = task.started_at {
+                if now - started_at > timeout {
+                    let mut updated = task.clone();
+                    updated.retry_count += 1;
+                    if updated.transition_to(TaskStatus::Failed).is_ok() {
+                        self.task_repo.update(&updated).await
+                            .map_err(|e| format!("Failed to update stale task: {}", e))?;
+                        corrections += 1;
+
+                        new_events.push(UnifiedEvent {
+                            id: EventId::new(),
+                            sequence: SequenceNumber(0),
+                            timestamp: chrono::Utc::now(),
+                            severity: EventSeverity::Warning,
+                            category: EventCategory::Task,
+                            goal_id: None,
+                            task_id: Some(task.id),
+                            correlation_id: event.correlation_id,
+                            payload: EventPayload::TaskFailed {
+                                task_id: task.id,
+                                error: format!("stale-timeout: task running for > {}s", self.stale_task_timeout_secs),
+                                retry_count: updated.retry_count,
+                            },
+                        });
+
+                        tracing::warn!(
+                            "ReconciliationHandler: stale task {} failed after {}s (started: {})",
+                            task.id, self.stale_task_timeout_secs, started_at
+                        );
+                    }
+                }
+            }
+        }
+
+        // Emit reconciliation completed event
+        new_events.push(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Debug,
+            category: EventCategory::Orchestrator,
+            goal_id: None,
+            task_id: None,
+            correlation_id: event.correlation_id,
+            payload: EventPayload::ReconciliationCompleted { corrections_made: corrections },
+        });
+
+        if corrections > 0 {
+            tracing::info!("ReconciliationHandler: made {} corrections", corrections);
+        }
+
+        Ok(Reaction::EmitEvents(new_events))
+    }
+}
+
+// ============================================================================
+// RetryProcessingHandler
+// ============================================================================
+
+/// Triggered by the "retry-check" scheduled event. Supplements TaskFailedRetryHandler
+/// for cases where the inline handler missed a retry.
+pub struct RetryProcessingHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+    max_retries: u32,
+}
+
+impl<T: TaskRepository> RetryProcessingHandler<T> {
+    pub fn new(task_repo: Arc<T>, max_retries: u32) -> Self {
+        Self { task_repo, max_retries }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for RetryProcessingHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "RetryProcessingHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "retry-check"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let failed = self.task_repo.list_by_status(TaskStatus::Failed).await
+            .map_err(|e| format!("Failed to list failed tasks: {}", e))?;
+
+        let mut new_events = Vec::new();
+
+        for task in failed {
+            if task.retry_count < self.max_retries {
+                let mut updated = task.clone();
+                if updated.transition_to(TaskStatus::Ready).is_ok() {
+                    self.task_repo.update(&updated).await
+                        .map_err(|e| format!("Failed to update: {}", e))?;
+
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: chrono::Utc::now(),
+                        severity: EventSeverity::Debug,
+                        category: EventCategory::Task,
+                        goal_id: None,
+                        task_id: Some(task.id),
+                        correlation_id: event.correlation_id,
+                        payload: EventPayload::TaskReady {
+                            task_id: task.id,
+                            task_title: updated.title.clone(),
+                        },
+                    });
+                }
+            }
+        }
+
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
+    }
+}
+
+// ============================================================================
+// SpecialistCheckHandler
+// ============================================================================
+
+/// Triggered by the "specialist-check" scheduled event (30s).
+/// Scans tasks in `Failed` status with retries exhausted and signals the
+/// orchestrator to trigger specialist processing via a shared channel.
+pub struct SpecialistCheckHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+    specialist_tx: tokio::sync::mpsc::Sender<uuid::Uuid>,
+    max_retries: u32,
+}
+
+impl<T: TaskRepository> SpecialistCheckHandler<T> {
+    pub fn new(task_repo: Arc<T>, specialist_tx: tokio::sync::mpsc::Sender<uuid::Uuid>, max_retries: u32) -> Self {
+        Self { task_repo, specialist_tx, max_retries }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for SpecialistCheckHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "SpecialistCheckHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "specialist-check"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let failed = self.task_repo.list_by_status(TaskStatus::Failed).await
+            .map_err(|e| format!("Failed to list failed tasks: {}", e))?;
+
+        for task in failed {
+            if task.retry_count >= self.max_retries {
+                // Signal orchestrator to evaluate specialist intervention
+                let _ = self.specialist_tx.try_send(task.id);
+            }
+        }
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// EvolutionEvaluationHandler
+// ============================================================================
+
+/// Triggered by the "evolution-evaluation" scheduled event (120s).
+/// Queries recently completed/failed tasks, computes per-agent-type success
+/// rates, and emits EvolutionTriggered when refinement is warranted.
+pub struct EvolutionEvaluationHandler<T: TaskRepository, A: AgentRepository> {
+    task_repo: Arc<T>,
+    #[allow(dead_code)]
+    agent_repo: Arc<A>,
+}
+
+impl<T: TaskRepository, A: AgentRepository> EvolutionEvaluationHandler<T, A> {
+    pub fn new(task_repo: Arc<T>, agent_repo: Arc<A>) -> Self {
+        Self { task_repo, agent_repo }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static, A: AgentRepository + 'static> EventHandler for EvolutionEvaluationHandler<T, A> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "EvolutionEvaluationHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "evolution-evaluation"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        use std::collections::HashMap;
+
+        // Get recently completed and failed tasks
+        let completed = self.task_repo.list_by_status(TaskStatus::Complete).await
+            .map_err(|e| format!("Failed to list completed tasks: {}", e))?;
+        let failed = self.task_repo.list_by_status(TaskStatus::Failed).await
+            .map_err(|e| format!("Failed to list failed tasks: {}", e))?;
+
+        // Compute per-agent-type success rates
+        let mut agent_stats: HashMap<String, (u32, u32)> = HashMap::new(); // (success, total)
+
+        for task in &completed {
+            let agent = task.agent_type.as_deref().unwrap_or("unknown");
+            let entry = agent_stats.entry(agent.to_string()).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += 1;
+        }
+
+        for task in &failed {
+            if task.retry_count >= task.max_retries {
+                let agent = task.agent_type.as_deref().unwrap_or("unknown");
+                let entry = agent_stats.entry(agent.to_string()).or_insert((0, 0));
+                entry.1 += 1;
+            }
+        }
+
+        let mut new_events = Vec::new();
+
+        // Emit EvolutionTriggered for agents with low success rates
+        for (agent_name, (successes, total)) in &agent_stats {
+            if *total >= 5 {
+                let success_rate = *successes as f64 / *total as f64;
+                if success_rate < 0.6 {
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: chrono::Utc::now(),
+                        severity: EventSeverity::Info,
+                        category: EventCategory::Agent,
+                        goal_id: None,
+                        task_id: None,
+                        correlation_id: event.correlation_id,
+                        payload: EventPayload::EvolutionTriggered {
+                            template_name: agent_name.clone(),
+                            trigger: format!("Low success rate: {:.0}% ({}/{})", success_rate * 100.0, successes, total),
+                        },
+                    });
+                }
+            }
+        }
+
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
+    }
+}
+
+// ============================================================================
+// A2APollHandler
+// ============================================================================
+
+/// Triggered by the "a2a-poll" scheduled event (15s).
+/// Polls the A2A gateway for pending inbound delegations, creates tasks,
+/// and emits TaskSubmitted for each.
+pub struct A2APollHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+    a2a_gateway_url: String,
+}
+
+impl<T: TaskRepository> A2APollHandler<T> {
+    pub fn new(task_repo: Arc<T>, a2a_gateway_url: String) -> Self {
+        Self { task_repo, a2a_gateway_url }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for A2APollHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "A2APollHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "a2a-poll"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        // Poll A2A gateway for pending inbound delegations
+        let url = format!("{}/tasks/pending", self.a2a_gateway_url);
+        let client = reqwest::Client::new();
+
+        let response = match client.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::debug!("A2APollHandler: gateway unreachable: {}", e);
+                return Ok(Reaction::None);
+            }
+        };
+
+        if !response.status().is_success() {
+            return Ok(Reaction::None);
+        }
+
+        let delegations: Vec<serde_json::Value> = match response.json().await {
+            Ok(d) => d,
+            Err(_) => return Ok(Reaction::None),
+        };
+
+        let mut new_events = Vec::new();
+
+        for delegation in delegations {
+            let title = delegation.get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("A2A Delegated Task")
+                .to_string();
+            let description = delegation.get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let mut task = Task::new(&description);
+            task.title = title.clone();
+            task.source = crate::domain::models::TaskSource::System;
+
+            if let Err(e) = self.task_repo.create(&task).await {
+                tracing::warn!("A2APollHandler: failed to create task: {}", e);
+                continue;
+            }
+
+            let goal_id = uuid::Uuid::new_v4(); // Placeholder for A2A delegations
+            new_events.push(UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: chrono::Utc::now(),
+                severity: EventSeverity::Info,
+                category: EventCategory::Task,
+                goal_id: Some(goal_id),
+                task_id: Some(task.id),
+                correlation_id: event.correlation_id,
+                payload: EventPayload::TaskSubmitted {
+                    task_id: task.id,
+                    task_title: title,
+                    goal_id,
+                },
+            });
+        }
+
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
+    }
+}
+
+// ============================================================================
+// GoalEvaluationHandler
+// ============================================================================
+
+/// Triggered by the "goal-evaluation" scheduled event (60s).
+/// Observes task/memory state independently and emits signal events about
+/// goal progress. This is a read-only observer that never modifies goals,
+/// tasks, or memories.
+pub struct GoalEvaluationHandler<G: GoalRepository, T: TaskRepository, M: MemoryRepository> {
+    goal_repo: Arc<G>,
+    task_repo: Arc<T>,
+    #[allow(dead_code)]
+    memory_repo: Arc<M>,
+    #[allow(dead_code)]
+    event_store: Option<Arc<dyn EventStore>>,
+}
+
+impl<G: GoalRepository, T: TaskRepository, M: MemoryRepository> GoalEvaluationHandler<G, T, M> {
+    pub fn new(
+        goal_repo: Arc<G>,
+        task_repo: Arc<T>,
+        memory_repo: Arc<M>,
+        event_store: Option<Arc<dyn EventStore>>,
+    ) -> Self {
+        Self { goal_repo, task_repo, memory_repo, event_store }
+    }
+}
+
+#[async_trait]
+impl<G: GoalRepository + 'static, T: TaskRepository + 'static, M: MemoryRepository + 'static>
+    EventHandler for GoalEvaluationHandler<G, T, M>
+{
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "GoalEvaluationHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "goal-evaluation"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        // Load all active goals
+        let goals = self.goal_repo.get_active_with_constraints().await
+            .map_err(|e| format!("Failed to get active goals: {}", e))?;
+
+        if goals.is_empty() {
+            return Ok(Reaction::None);
+        }
+
+        // Get recent tasks (completed and failed)
+        let completed = self.task_repo.list_by_status(TaskStatus::Complete).await
+            .map_err(|e| format!("Failed to list completed tasks: {}", e))?;
+        let failed = self.task_repo.list_by_status(TaskStatus::Failed).await
+            .map_err(|e| format!("Failed to list failed tasks: {}", e))?;
+        let running = self.task_repo.list_by_status(TaskStatus::Running).await
+            .map_err(|e| format!("Failed to list running tasks: {}", e))?;
+
+        let mut new_events = Vec::new();
+
+        for goal in &goals {
+            let goal_domains = &goal.applicability_domains;
+            if goal_domains.is_empty() {
+                continue;
+            }
+
+            // Find tasks whose inferred domains overlap with this goal's domains
+            let relevant_completed: Vec<&Task> = completed.iter()
+                .filter(|t| {
+                    let task_domains = GoalContextService::<G>::infer_task_domains(t);
+                    task_domains.iter().any(|d| goal_domains.contains(d))
+                })
+                .collect();
+
+            let relevant_failed: Vec<&Task> = failed.iter()
+                .filter(|t| {
+                    let task_domains = GoalContextService::<G>::infer_task_domains(t);
+                    task_domains.iter().any(|d| goal_domains.contains(d))
+                })
+                .collect();
+
+            let _relevant_running: Vec<&Task> = running.iter()
+                .filter(|t| {
+                    let task_domains = GoalContextService::<G>::infer_task_domains(t);
+                    task_domains.iter().any(|d| goal_domains.contains(d))
+                })
+                .collect();
+
+            // Emit GoalIterationCompleted if there are completed tasks in matching domains
+            if !relevant_completed.is_empty() {
+                new_events.push(UnifiedEvent {
+                    id: EventId::new(),
+                    sequence: SequenceNumber(0),
+                    timestamp: chrono::Utc::now(),
+                    severity: EventSeverity::Info,
+                    category: EventCategory::Goal,
+                    goal_id: Some(goal.id),
+                    task_id: None,
+                    correlation_id: event.correlation_id,
+                    payload: EventPayload::GoalIterationCompleted {
+                        goal_id: goal.id,
+                        tasks_completed: relevant_completed.len(),
+                    },
+                });
+            }
+
+            // Check for constraint violations in failures
+            for constraint in &goal.constraints {
+                let violation_count = relevant_failed.iter()
+                    .filter(|t| {
+                        // Check if failures relate to constraint violations
+                        let hints = t.context.hints.join(" ").to_lowercase();
+                        hints.contains(&constraint.name.to_lowercase())
+                    })
+                    .count();
+
+                if violation_count > 0 {
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: chrono::Utc::now(),
+                        severity: EventSeverity::Warning,
+                        category: EventCategory::Goal,
+                        goal_id: Some(goal.id),
+                        task_id: None,
+                        correlation_id: event.correlation_id,
+                        payload: EventPayload::GoalConstraintViolated {
+                            goal_id: goal.id,
+                            constraint_name: constraint.name.clone(),
+                            violation: format!("{} task(s) failed with constraint-related errors", violation_count),
+                        },
+                    });
+                }
+            }
+
+            // Check for semantic drift: recurring failure patterns
+            if relevant_failed.len() >= 3 {
+                // Group failures by common error patterns
+                let mut failure_hints: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                for task in &relevant_failed {
+                    for hint in &task.context.hints {
+                        if hint.starts_with("Error:") {
+                            let pattern = hint.chars().take(80).collect::<String>();
+                            *failure_hints.entry(pattern).or_insert(0) += 1;
+                        }
+                    }
+                }
+
+                let recurring_gaps: Vec<String> = failure_hints.into_iter()
+                    .filter(|(_, count)| *count >= 2)
+                    .map(|(pattern, _)| pattern)
+                    .collect();
+
+                if !recurring_gaps.is_empty() {
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: chrono::Utc::now(),
+                        severity: EventSeverity::Warning,
+                        category: EventCategory::Goal,
+                        goal_id: Some(goal.id),
+                        task_id: None,
+                        correlation_id: event.correlation_id,
+                        payload: EventPayload::SemanticDriftDetected {
+                            goal_id: goal.id,
+                            recurring_gaps,
+                            iterations: relevant_failed.len() as u32,
+                        },
+                    });
+                }
+            }
+        }
+
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
+    }
+}
+
+// ============================================================================
+// TaskReadySpawnHandler
+// ============================================================================
+
+/// When a TaskReady event fires, push the task_id into a channel for the
+/// orchestrator to spawn an agent. Validates the task is still Ready
+/// (idempotent).
+pub struct TaskReadySpawnHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+    ready_tx: tokio::sync::mpsc::Sender<uuid::Uuid>,
+}
+
+impl<T: TaskRepository> TaskReadySpawnHandler<T> {
+    pub fn new(task_repo: Arc<T>, ready_tx: tokio::sync::mpsc::Sender<uuid::Uuid>) -> Self {
+        Self { task_repo, ready_tx }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for TaskReadySpawnHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "TaskReadySpawnHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Task])
+                .payload_types(vec!["TaskReady".to_string()]),
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let task_id = match &event.payload {
+            EventPayload::TaskReady { task_id, .. } => *task_id,
+            _ => return Ok(Reaction::None),
+        };
+
+        // Validate task is still Ready (idempotent)
+        let task = self.task_repo.get(task_id).await
+            .map_err(|e| format!("Failed to get task: {}", e))?;
+
+        match task {
+            Some(t) if t.status == TaskStatus::Ready => {
+                let _ = self.ready_tx.try_send(task_id);
+            }
+            _ => {
+                // Task no longer Ready, skip
+            }
+        }
+
+        Ok(Reaction::None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::sqlite::{
+        create_migrated_test_pool, task_repository::SqliteTaskRepository,
+    };
+    use crate::domain::models::{Task, TaskStatus};
+
+    async fn setup_task_repo() -> Arc<SqliteTaskRepository> {
+        let pool = create_migrated_test_pool().await.unwrap();
+        Arc::new(SqliteTaskRepository::new(pool))
+    }
+
+    #[tokio::test]
+    async fn test_task_completed_readiness_handler() {
+        let repo = setup_task_repo().await;
+        let handler = TaskCompletedReadinessHandler::new(repo.clone());
+
+        // Create upstream task
+        let mut upstream = Task::new("Upstream task");
+        upstream.transition_to(TaskStatus::Ready).unwrap();
+        upstream.transition_to(TaskStatus::Running).unwrap();
+        upstream.transition_to(TaskStatus::Complete).unwrap();
+        repo.create(&upstream).await.unwrap();
+
+        // Create downstream task that depends on upstream
+        let downstream = Task::new("Downstream task");
+        repo.create(&downstream).await.unwrap();
+        repo.add_dependency(downstream.id, upstream.id).await.unwrap();
+
+        // Fire the handler with a TaskCompleted event
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(upstream.id),
+            correlation_id: None,
+            payload: EventPayload::TaskCompleted {
+                task_id: upstream.id,
+                tokens_used: 100,
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should have emitted a TaskReady event
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                assert_eq!(events.len(), 1);
+                assert!(matches!(events[0].payload, EventPayload::TaskReady { .. }));
+            }
+            Reaction::None => panic!("Expected EmitEvents reaction"),
+        }
+
+        // Verify downstream task is now Ready
+        let updated = repo.get(downstream.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn test_task_completed_readiness_handler_idempotent() {
+        let repo = setup_task_repo().await;
+        let handler = TaskCompletedReadinessHandler::new(repo.clone());
+
+        // Create upstream and downstream
+        let mut upstream = Task::new("Upstream");
+        upstream.transition_to(TaskStatus::Ready).unwrap();
+        upstream.transition_to(TaskStatus::Running).unwrap();
+        upstream.transition_to(TaskStatus::Complete).unwrap();
+        repo.create(&upstream).await.unwrap();
+
+        let mut downstream = Task::new("Downstream");
+        downstream.transition_to(TaskStatus::Ready).unwrap(); // Already ready
+        repo.create(&downstream).await.unwrap();
+        repo.add_dependency(downstream.id, upstream.id).await.unwrap();
+
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(upstream.id),
+            correlation_id: None,
+            payload: EventPayload::TaskCompleted {
+                task_id: upstream.id,
+                tokens_used: 100,
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        // Second call should be a no-op since downstream is already Ready
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::None));
+    }
+
+    #[tokio::test]
+    async fn test_task_failed_block_handler() {
+        let repo = setup_task_repo().await;
+        let handler = TaskFailedBlockHandler::new(repo.clone());
+
+        // Create upstream task that has exhausted retries
+        let mut upstream = Task::new("Upstream");
+        upstream.max_retries = 2;
+        upstream.retry_count = 2;
+        upstream.transition_to(TaskStatus::Ready).unwrap();
+        upstream.transition_to(TaskStatus::Running).unwrap();
+        upstream.transition_to(TaskStatus::Failed).unwrap();
+        repo.create(&upstream).await.unwrap();
+
+        // Create downstream task
+        let downstream = Task::new("Downstream");
+        repo.create(&downstream).await.unwrap();
+        repo.add_dependency(downstream.id, upstream.id).await.unwrap();
+
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Error,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(upstream.id),
+            correlation_id: None,
+            payload: EventPayload::TaskFailed {
+                task_id: upstream.id,
+                error: "test failure".to_string(),
+                retry_count: 2,
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        handler.handle(&event, &ctx).await.unwrap();
+
+        // Verify downstream is now Blocked
+        let updated = repo.get(downstream.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Blocked);
+    }
+
+    #[tokio::test]
+    async fn test_task_failed_block_handler_retries_remaining() {
+        let repo = setup_task_repo().await;
+        let handler = TaskFailedBlockHandler::new(repo.clone());
+
+        // Create upstream task that still has retries remaining
+        let mut upstream = Task::new("Upstream");
+        upstream.max_retries = 3;
+        upstream.retry_count = 1;
+        upstream.transition_to(TaskStatus::Ready).unwrap();
+        upstream.transition_to(TaskStatus::Running).unwrap();
+        upstream.transition_to(TaskStatus::Failed).unwrap();
+        repo.create(&upstream).await.unwrap();
+
+        let downstream = Task::new("Downstream");
+        repo.create(&downstream).await.unwrap();
+        repo.add_dependency(downstream.id, upstream.id).await.unwrap();
+
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Error,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(upstream.id),
+            correlation_id: None,
+            payload: EventPayload::TaskFailed {
+                task_id: upstream.id,
+                error: "test failure".to_string(),
+                retry_count: 1,
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        handler.handle(&event, &ctx).await.unwrap();
+
+        // Downstream should NOT be blocked since retries remain
+        let updated = repo.get(downstream.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Pending);
+    }
+}

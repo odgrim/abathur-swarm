@@ -211,13 +211,8 @@ impl TryFrom<GoalRow> for Goal {
     type Error = DomainError;
 
     fn try_from(row: GoalRow) -> Result<Self, Self::Error> {
-        let id = Uuid::parse_str(&row.id)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
-
-        let parent_id = row.parent_id
-            .map(|s| Uuid::parse_str(&s))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
+        let id = super::parse_uuid(&row.id)?;
+        let parent_id = super::parse_optional_uuid(row.parent_id)?;
 
         let status = GoalStatus::from_str(&row.status)
             .ok_or_else(|| DomainError::SerializationError(format!("Invalid status: {}", row.status)))?;
@@ -225,38 +220,14 @@ impl TryFrom<GoalRow> for Goal {
         let priority = GoalPriority::from_str(&row.priority)
             .ok_or_else(|| DomainError::SerializationError(format!("Invalid priority: {}", row.priority)))?;
 
-        let constraints: Vec<GoalConstraint> = row.constraints
-            .map(|s| serde_json::from_str(&s))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .unwrap_or_default();
-
-        let metadata: GoalMetadata = row.metadata
-            .map(|s| serde_json::from_str(&s))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .unwrap_or_default();
-
-        let applicability_domains: Vec<String> = row.applicability_domains
-            .map(|s| serde_json::from_str(&s))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .unwrap_or_default();
-
+        let constraints: Vec<GoalConstraint> = super::parse_json_or_default(row.constraints)?;
+        let metadata: GoalMetadata = super::parse_json_or_default(row.metadata)?;
+        let applicability_domains: Vec<String> = super::parse_json_or_default(row.applicability_domains)?;
         // evaluation_criteria column is kept for DB compatibility but no longer used
-        let _evaluation_criteria: Vec<String> = row.evaluation_criteria
-            .map(|s| serde_json::from_str(&s))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .unwrap_or_default();
+        let _evaluation_criteria: Vec<String> = super::parse_json_or_default(row.evaluation_criteria)?;
 
-        let created_at = chrono::DateTime::parse_from_rfc3339(&row.created_at)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .with_timezone(&chrono::Utc);
-
-        let updated_at = chrono::DateTime::parse_from_rfc3339(&row.updated_at)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .with_timezone(&chrono::Utc);
+        let created_at = super::parse_datetime(&row.created_at)?;
+        let updated_at = super::parse_datetime(&row.updated_at)?;
 
         Ok(Goal {
             id,
@@ -278,12 +249,10 @@ impl TryFrom<GoalRow> for Goal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{create_test_pool, Migrator, all_embedded_migrations};
+    use crate::adapters::sqlite::create_migrated_test_pool;
 
     async fn setup_test_repo() -> SqliteGoalRepository {
-        let pool = create_test_pool().await.unwrap();
-        let migrator = Migrator::new(pool.clone());
-        migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
+        let pool = create_migrated_test_pool().await.unwrap();
         SqliteGoalRepository::new(pool)
     }
 

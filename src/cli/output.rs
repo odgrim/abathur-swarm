@@ -14,3 +14,12 @@ pub fn output<T: CommandOutput>(result: &T, json_mode: bool) {
         println!("{}", result.to_human());
     }
 }
+
+/// Truncate a string to a maximum length, appending "..." if truncated.
+pub fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
+}

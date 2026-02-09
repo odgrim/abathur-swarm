@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use std::sync::Arc;
 
-use crate::adapters::sqlite::{SqliteWorktreeRepository, initialize_database};
+use crate::adapters::sqlite::{SqliteWorktreeRepository, initialize_default_database};
 use crate::cli::id_resolver::{resolve_task_id, resolve_worktree_id};
-use crate::cli::output::{output, CommandOutput};
+use crate::cli::output::{output, truncate, CommandOutput};
 use crate::domain::models::WorktreeStatus;
 use crate::services::{WorktreeConfig, WorktreeService, WorktreeStats};
 
@@ -250,7 +250,7 @@ impl CommandOutput for SyncOutput {
 }
 
 pub async fn execute(args: WorktreeArgs, json_mode: bool) -> Result<()> {
-    let pool = initialize_database("sqlite:.abathur/abathur.db")
+    let pool = initialize_default_database()
         .await
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
@@ -389,10 +389,3 @@ pub async fn execute(args: WorktreeArgs, json_mode: bool) -> Result<()> {
     Ok(())
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
-    }
-}

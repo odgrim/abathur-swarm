@@ -4,7 +4,52 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 use tokio::sync::mpsc;
 
+use std::sync::Arc;
+
+use crate::adapters::sqlite::{
+    SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
+    SqliteWorktreeRepository,
+};
 use crate::services::{SwarmConfig, SwarmOrchestrator, SwarmEvent};
+
+type CliOrchestrator = SwarmOrchestrator<
+    SqliteGoalRepository,
+    SqliteTaskRepository,
+    SqliteWorktreeRepository,
+    SqliteAgentRepository,
+    SqliteMemoryRepository,
+>;
+
+/// Build an orchestrator with mock substrate for CLI commands.
+async fn build_cli_orchestrator(config: SwarmConfig) -> Result<CliOrchestrator> {
+    use crate::adapters::sqlite::{
+        create_pool, Migrator, all_embedded_migrations,
+    };
+    use crate::adapters::substrates::SubstrateRegistry;
+    use crate::services::{EventBus, EventBusConfig, EventReactor, ReactorConfig, EventScheduler, SchedulerConfig};
+
+    let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
+    let migrator = Migrator::new(pool.clone());
+    migrator.run_embedded_migrations(all_embedded_migrations()).await?;
+
+    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
+    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+    let worktree_repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
+    let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
+
+    let substrate: Arc<dyn crate::domain::ports::Substrate> =
+        Arc::from(SubstrateRegistry::mock_substrate());
+
+    let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    let event_reactor = Arc::new(EventReactor::new(event_bus.clone(), ReactorConfig::default()));
+    let event_scheduler = Arc::new(EventScheduler::new(event_bus.clone(), SchedulerConfig::default()));
+
+    Ok(SwarmOrchestrator::new(
+        goal_repo, task_repo, worktree_repo, agent_repo, substrate, config,
+        event_bus, event_reactor, event_scheduler,
+    ).with_memory_repo(memory_repo))
+}
 
 #[derive(Args, Debug)]
 pub struct SwarmArgs {
@@ -19,10 +64,6 @@ pub enum SwarmCommand {
         /// Maximum concurrent agents
         #[arg(long, default_value = "4")]
         max_agents: usize,
-
-        /// Poll interval in milliseconds
-        #[arg(long, default_value = "5000")]
-        poll_interval_ms: u64,
 
         /// Run in dry-run mode (no actual execution)
         #[arg(long)]
@@ -86,7 +127,6 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
     match args.command {
         SwarmCommand::Start {
             max_agents,
-            poll_interval_ms,
             dry_run,
             max_goals,
             foreground,
@@ -98,7 +138,6 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
         } => {
             start_swarm(
                 max_agents,
-                poll_interval_ms,
                 dry_run,
                 max_goals,
                 foreground,
@@ -198,7 +237,6 @@ struct McpServerUrls {
 
 async fn start_swarm(
     max_agents: usize,
-    poll_interval_ms: u64,
     dry_run: bool,
     _max_goals: Option<usize>,
     foreground: bool,
@@ -244,16 +282,15 @@ async fn start_swarm(
 
     if foreground {
         // Run in foreground (original behavior)
-        run_swarm_foreground(max_agents, poll_interval_ms, dry_run, json_mode, mcp_urls, with_mcp_servers).await
+        run_swarm_foreground(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers).await
     } else {
         // Background the swarm
-        start_swarm_background(max_agents, poll_interval_ms, dry_run, json_mode, mcp_urls, with_mcp_servers)
+        start_swarm_background(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers)
     }
 }
 
 fn start_swarm_background(
     max_agents: usize,
-    poll_interval_ms: u64,
     dry_run: bool,
     json_mode: bool,
     mcp_urls: McpServerUrls,
@@ -268,9 +305,7 @@ fn start_swarm_background(
     let mut cmd = Command::new(&exe);
     cmd.args(["swarm", "start", "--foreground"])
         .arg("--max-agents")
-        .arg(max_agents.to_string())
-        .arg("--poll-interval-ms")
-        .arg(poll_interval_ms.to_string());
+        .arg(max_agents.to_string());
 
     if dry_run {
         cmd.arg("--dry-run");
@@ -338,7 +373,7 @@ fn start_swarm_background(
         println!("   PID: {}", pid);
         println!("   Log: {}", LOG_FILE);
         println!("   Max agents: {}", max_agents);
-        println!("   Poll interval: {}ms", poll_interval_ms);
+        println!("   Architecture: event-driven");
         if dry_run {
             println!("   Mode: DRY RUN (using mock substrate)");
         }
@@ -407,20 +442,17 @@ async fn stop_swarm(json_mode: bool) -> Result<()> {
 
 async fn run_swarm_foreground(
     max_agents: usize,
-    poll_interval_ms: u64,
     dry_run: bool,
     json_mode: bool,
     mcp_urls: McpServerUrls,
     with_mcp_servers: bool,
 ) -> Result<()> {
     use crate::adapters::sqlite::{
-        create_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
-        SqliteWorktreeRepository, Migrator, all_embedded_migrations,
+        create_pool, Migrator, all_embedded_migrations,
     };
     use crate::adapters::substrates::SubstrateRegistry;
     use crate::domain::models::SubstrateType;
     use crate::services::McpServerConfig;
-    use std::sync::Arc;
 
     // Write PID file for foreground mode too (so status works)
     write_pid_file(std::process::id())?;
@@ -471,10 +503,26 @@ async fn run_swarm_foreground(
 
     let config = SwarmConfig {
         max_agents,
-        poll_interval_ms,
         mcp_servers: mcp_server_config,
         ..Default::default()
     };
+
+    // Create shared EventBus for reactive event system
+    let event_bus = Arc::new(crate::services::EventBus::new(crate::services::EventBusConfig::default()));
+
+    // Create EventReactor and EventScheduler.
+    // Built-in handlers and schedules are registered by the orchestrator
+    // in its run() method via register_builtin_handlers/register_builtin_schedules.
+    let reactor = Arc::new(
+        crate::services::EventReactor::new(event_bus.clone(), crate::services::ReactorConfig::default()),
+    );
+
+    let scheduler = Arc::new(
+        crate::services::EventScheduler::new(
+            event_bus.clone(),
+            crate::services::SchedulerConfig::default(),
+        ),
+    );
 
     let orchestrator = SwarmOrchestrator::new(
         goal_repo,
@@ -483,12 +531,16 @@ async fn run_swarm_foreground(
         agent_repo,
         substrate,
         config.clone(),
-    ).with_memory_repo(memory_repo);
+        event_bus.clone(),
+        reactor,
+        scheduler,
+    )
+    .with_memory_repo(memory_repo);
 
     if !json_mode {
         println!("Starting Abathur Swarm Orchestrator");
         println!("   Max agents: {}", max_agents);
-        println!("   Poll interval: {}ms", poll_interval_ms);
+        println!("   Architecture: event-driven");
         if dry_run {
             println!("   Mode: DRY RUN (using mock substrate)");
         }
@@ -793,6 +845,21 @@ async fn run_swarm_foreground(
                         }
                     }
                 }
+                SwarmEvent::TaskClaimed { task_id, agent_type } => {
+                    if !json_mode {
+                        println!("  Task claimed: {} by agent '{}'", task_id, agent_type);
+                    }
+                }
+                SwarmEvent::AgentInstanceCompleted { instance_id, task_id, tokens_used } => {
+                    if !json_mode {
+                        println!("  Agent instance completed: {} for task {} ({} tokens)", instance_id, task_id, tokens_used);
+                    }
+                }
+                SwarmEvent::ReconciliationCompleted { corrections_made } => {
+                    if !json_mode && *corrections_made > 0 {
+                        println!("  Reconciliation: {} corrections made", corrections_made);
+                    }
+                }
             }
         }
     });
@@ -842,9 +909,8 @@ async fn start_mcp_servers(
     json_mode: bool,
 ) -> Result<McpServerHandles> {
     use crate::adapters::mcp::{MemoryHttpServer, MemoryHttpConfig, TasksHttpServer, TasksHttpConfig, A2AHttpGateway, A2AHttpConfig, EventsHttpServer, EventsHttpConfig};
-    use crate::adapters::sqlite::{SqliteMemoryRepository, SqliteTaskRepository, SqliteEventRepository};
+    use crate::adapters::sqlite::SqliteEventRepository;
     use crate::services::{MemoryService, TaskService, EventBus, EventBusConfig};
-    use std::sync::Arc;
 
     let mut handles = McpServerHandles {
         memory_handle: None,
@@ -857,7 +923,8 @@ async fn start_mcp_servers(
     if let Some(ref url) = urls.memory_server {
         let port = extract_port(url).unwrap_or(9100);
         let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-        let memory_service = MemoryService::new(memory_repo);
+        let event_bus_memory = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
+        let memory_service = MemoryService::new_with_event_bus(memory_repo, event_bus_memory);
         let config = MemoryHttpConfig {
             port,
             ..Default::default()
@@ -879,7 +946,8 @@ async fn start_mcp_servers(
     if let Some(ref url) = urls.tasks_server {
         let port = extract_port(url).unwrap_or(9101);
         let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-        let task_service = TaskService::new(task_repo);
+        let event_bus_tasks = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
+        let task_service = TaskService::new(task_repo, event_bus_tasks);
         let config = TasksHttpConfig {
             port,
             ..Default::default()
@@ -967,10 +1035,7 @@ fn stop_mcp_servers(handles: McpServerHandles) {
 }
 
 async fn show_status(json_mode: bool) -> Result<()> {
-    use crate::adapters::sqlite::{
-        create_pool, SqliteGoalRepository, SqliteTaskRepository, SqliteWorktreeRepository,
-    };
-    use std::sync::Arc;
+    use crate::adapters::sqlite::create_pool;
     use crate::domain::models::{GoalStatus, TaskStatus, WorktreeStatus};
     use crate::domain::ports::{GoalRepository, GoalFilter, TaskRepository, WorktreeRepository};
 
@@ -1024,10 +1089,7 @@ async fn show_status(json_mode: bool) -> Result<()> {
 }
 
 async fn show_active(json_mode: bool) -> Result<()> {
-    use crate::adapters::sqlite::{
-        create_pool, SqliteGoalRepository, SqliteTaskRepository,
-    };
-    use std::sync::Arc;
+    use crate::adapters::sqlite::create_pool;
     use crate::domain::models::{GoalStatus, TaskStatus};
     use crate::domain::ports::{GoalRepository, GoalFilter, TaskRepository};
 
@@ -1080,10 +1142,10 @@ async fn show_config(json_mode: bool) -> Result<()> {
             "max_agents": config.max_agents,
             "default_max_turns": config.default_max_turns,
             "use_worktrees": config.use_worktrees,
-            "poll_interval_ms": config.poll_interval_ms,
             "goal_timeout_secs": config.goal_timeout_secs,
             "auto_retry": config.auto_retry,
-            "max_task_retries": config.max_task_retries
+            "max_task_retries": config.max_task_retries,
+            "reconciliation_interval_secs": config.reconciliation_interval_secs
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -1092,40 +1154,17 @@ async fn show_config(json_mode: bool) -> Result<()> {
         println!("Max agents:         {}", config.max_agents);
         println!("Default max turns:  {}", config.default_max_turns);
         println!("Use worktrees:      {}", config.use_worktrees);
-        println!("Poll interval (ms): {}", config.poll_interval_ms);
         println!("Goal timeout (s):   {}", config.goal_timeout_secs);
         println!("Auto-retry:         {}", config.auto_retry);
         println!("Max task retries:   {}", config.max_task_retries);
+        println!("Reconciliation (s): {:?}", config.reconciliation_interval_secs);
     }
 
     Ok(())
 }
 
 async fn show_escalations(json_mode: bool) -> Result<()> {
-    use crate::adapters::sqlite::{
-        create_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
-        SqliteWorktreeRepository, Migrator, all_embedded_migrations,
-    };
-    use crate::adapters::substrates::SubstrateRegistry;
-    use std::sync::Arc;
-
-    let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
-    let migrator = Migrator::new(pool.clone());
-    migrator.run_embedded_migrations(all_embedded_migrations()).await?;
-
-    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let worktree_repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
-    let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-
-    let substrate: std::sync::Arc<dyn crate::domain::ports::Substrate> =
-        std::sync::Arc::from(SubstrateRegistry::mock_substrate());
-
-    let config = SwarmConfig::default();
-    let orchestrator = SwarmOrchestrator::new(
-        goal_repo, task_repo, worktree_repo, agent_repo, substrate, config,
-    ).with_memory_repo(memory_repo);
+    let orchestrator = build_cli_orchestrator(SwarmConfig::default()).await?;
 
     let escalations = orchestrator.list_pending_escalations().await;
 
@@ -1175,13 +1214,7 @@ async fn show_escalations(json_mode: bool) -> Result<()> {
 }
 
 async fn respond_to_escalation(id: &str, decision: &str, message: Option<&str>, json_mode: bool) -> Result<()> {
-    use crate::adapters::sqlite::{
-        create_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
-        SqliteWorktreeRepository, Migrator, all_embedded_migrations,
-    };
-    use crate::adapters::substrates::SubstrateRegistry;
     use crate::domain::models::{EscalationDecision, HumanEscalationResponse};
-    use std::sync::Arc;
     use uuid::Uuid;
 
     let event_id: Uuid = id.parse()
@@ -1209,23 +1242,7 @@ async fn respond_to_escalation(id: &str, decision: &str, message: Option<&str>, 
         responded_at: chrono::Utc::now(),
     };
 
-    let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
-    let migrator = Migrator::new(pool.clone());
-    migrator.run_embedded_migrations(all_embedded_migrations()).await?;
-
-    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let worktree_repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
-    let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-
-    let substrate: std::sync::Arc<dyn crate::domain::ports::Substrate> =
-        std::sync::Arc::from(SubstrateRegistry::mock_substrate());
-
-    let config = SwarmConfig::default();
-    let orchestrator = SwarmOrchestrator::new(
-        goal_repo, task_repo, worktree_repo, agent_repo, substrate, config,
-    ).with_memory_repo(memory_repo);
+    let orchestrator = build_cli_orchestrator(SwarmConfig::default()).await?;
 
     match orchestrator.respond_to_escalation(response, None).await {
         Ok(()) => {
@@ -1255,37 +1272,10 @@ async fn respond_to_escalation(id: &str, decision: &str, message: Option<&str>, 
 }
 
 async fn run_tick(json_mode: bool) -> Result<()> {
-    use crate::adapters::sqlite::{
-        create_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
-        SqliteWorktreeRepository, Migrator, all_embedded_migrations,
-    };
-    use crate::adapters::substrates::SubstrateRegistry;
-    use std::sync::Arc;
-
-    let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
-    let migrator = Migrator::new(pool.clone());
-    migrator.run_embedded_migrations(all_embedded_migrations()).await?;
-
-    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let worktree_repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
-    let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-
-    let substrate: std::sync::Arc<dyn crate::domain::ports::Substrate> =
-        std::sync::Arc::from(SubstrateRegistry::mock_substrate());
-
     let mut config = SwarmConfig::default();
     config.use_worktrees = false; // Disable worktrees for tick command
 
-    let orchestrator = SwarmOrchestrator::new(
-        goal_repo,
-        task_repo,
-        worktree_repo,
-        agent_repo,
-        substrate,
-        config,
-    ).with_memory_repo(memory_repo);
+    let orchestrator = build_cli_orchestrator(config).await?;
 
     let stats = orchestrator.tick().await?;
 

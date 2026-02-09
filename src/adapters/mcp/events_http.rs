@@ -467,6 +467,8 @@ fn parse_category(s: &str) -> Option<EventCategory> {
         "agent" => Some(EventCategory::Agent),
         "verification" => Some(EventCategory::Verification),
         "escalation" => Some(EventCategory::Escalation),
+        "memory" => Some(EventCategory::Memory),
+        "scheduler" => Some(EventCategory::Scheduler),
         _ => None,
     }
 }

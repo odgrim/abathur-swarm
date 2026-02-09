@@ -19,7 +19,7 @@ pub struct LlmPlannerConfig {
     pub use_claude_code: bool,
     /// Maximum tokens for the response.
     pub max_tokens: u32,
-    /// Model to use (e.g., "claude-sonnet-4-20250514").
+    /// Model to use (e.g., "claude-opus-4-6-20250616").
     pub model: String,
     /// Temperature for generation (0.0-1.0).
     pub temperature: f32,
@@ -34,7 +34,7 @@ impl Default for LlmPlannerConfig {
         Self {
             use_claude_code: true,
             max_tokens: 4096,
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-opus-4-6-20250616".to_string(),
             temperature: 0.3,
             claude_code_path: None,
             api_key: None,
@@ -267,7 +267,7 @@ IMPORTANT: Output ONLY the JSON object, no other text."#,
     /// Parse the LLM response into a decomposition.
     fn parse_decomposition(&self, response: &str) -> DomainResult<LlmDecomposition> {
         // Try to extract JSON from the response
-        let json_str = self.extract_json(response);
+        let json_str = super::extract_json_from_response(response);
 
         serde_json::from_str(&json_str).map_err(|e| {
             DomainError::ValidationFailed(format!(
@@ -278,29 +278,6 @@ IMPORTANT: Output ONLY the JSON object, no other text."#,
     }
 
     /// Extract JSON from the response (handles markdown code blocks).
-    fn extract_json(&self, response: &str) -> String {
-        // Remove markdown code block markers if present
-        let trimmed = response.trim();
-
-        // Handle ```json ... ``` blocks
-        if trimmed.starts_with("```json") {
-            if let Some(end) = trimmed.rfind("```") {
-                return trimmed[7..end].trim().to_string();
-            }
-        }
-
-        // Handle ``` ... ``` blocks
-        if trimmed.starts_with("```") {
-            if let Some(end) = trimmed.rfind("```") {
-                let start = if trimmed.starts_with("```\n") { 4 } else { 3 };
-                return trimmed[start..end].trim().to_string();
-            }
-        }
-
-        // Already JSON
-        trimmed.to_string()
-    }
-
     /// Convert LLM decomposition to internal TaskSpec format.
     pub fn to_task_specs(&self, decomposition: &LlmDecomposition) -> Vec<TaskSpec> {
         // Build task index map for dependencies
@@ -400,16 +377,14 @@ mod tests {
 
     #[test]
     fn test_extract_json_plain() {
-        let planner = LlmPlanner::with_default_config();
         let input = r#"{"analysis": "test"}"#;
-        assert_eq!(planner.extract_json(input), r#"{"analysis": "test"}"#);
+        assert_eq!(crate::services::extract_json_from_response(input), r#"{"analysis": "test"}"#);
     }
 
     #[test]
     fn test_extract_json_code_block() {
-        let planner = LlmPlanner::with_default_config();
         let input = "```json\n{\"analysis\": \"test\"}\n```";
-        assert_eq!(planner.extract_json(input), r#"{"analysis": "test"}"#);
+        assert_eq!(crate::services::extract_json_from_response(input), r#"{"analysis": "test"}"#);
     }
 
     #[test]

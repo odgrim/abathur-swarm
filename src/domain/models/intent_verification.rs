@@ -1301,6 +1301,10 @@ impl ConvergenceState {
     }
 
     /// Build context about the convergence state for agent prompts.
+    ///
+    /// Uses progressive history pruning: the last 2 iterations get full
+    /// gap details, older iterations only get one-line summaries. This
+    /// keeps the iteration context compact for longer convergence loops.
     pub fn build_iteration_context(&self) -> IterationContext {
         let recurring = self.recurring_gaps();
         let recurring_descriptions: Vec<String> = recurring
@@ -1313,15 +1317,48 @@ impl ConvergenceState {
             ))
             .collect();
 
+        let history_len = self.verification_history.len();
+        let detail_cutoff = history_len.saturating_sub(2); // Last 2 get full details
+
+        // Older iterations: one-line summaries only
         let previous_attempts: Vec<String> = self.verification_history
             .iter()
-            .map(|r| format!(
-                "Iteration {}: {} (confidence: {:.0}%, {} gaps)",
-                r.iteration,
-                r.satisfaction.as_str(),
-                r.confidence * 100.0,
-                r.gaps.len()
-            ))
+            .enumerate()
+            .map(|(i, r)| {
+                if i < detail_cutoff {
+                    // Compact summary for older iterations
+                    format!(
+                        "Iteration {}: {} (confidence: {:.0}%, {} gaps)",
+                        r.iteration,
+                        r.satisfaction.as_str(),
+                        r.confidence * 100.0,
+                        r.gaps.len()
+                    )
+                } else {
+                    // Detailed summary for recent iterations (last 2)
+                    let mut detail = format!(
+                        "Iteration {}: {} (confidence: {:.0}%, {} gaps)",
+                        r.iteration,
+                        r.satisfaction.as_str(),
+                        r.confidence * 100.0,
+                        r.gaps.len()
+                    );
+                    if !r.gaps.is_empty() {
+                        detail.push_str("\n  Gaps:");
+                        for gap in &r.gaps {
+                            detail.push_str(&format!(
+                                "\n  - [{}] {}",
+                                gap.severity.as_str(),
+                                gap.description
+                            ));
+                            if let Some(ref action) = gap.suggested_action {
+                                detail.push_str(&format!(" (action: {})", action));
+                            }
+                        }
+                    }
+                    detail
+                }
+            })
             .collect();
 
         IterationContext {

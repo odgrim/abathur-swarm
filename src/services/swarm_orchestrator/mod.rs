@@ -14,6 +14,7 @@ pub mod types;
 mod event_handling;
 mod agent_lifecycle;
 mod goal_processing;
+mod handler_registration;
 mod specialist_triggers;
 mod infrastructure;
 pub(crate) mod helpers;
@@ -41,6 +42,8 @@ use crate::services::{
     DaemonHandle, EvolutionLoop,
     IntentVerifierConfig, IntentVerifierService,
     dag_restructure::DagRestructureService,
+    event_reactor::EventReactor,
+    event_scheduler::EventScheduler,
     guardrails::{Guardrails, GuardrailsConfig},
 };
 
@@ -81,7 +84,13 @@ where
     pub(super) mcp_shutdown_tx: Arc<RwLock<Option<tokio::sync::broadcast::Sender<()>>>>,
     pub(super) intent_verifier: Option<Arc<IntentVerifierService<G, T>>>,
     pub(super) overmind: Option<Arc<crate::services::OvermindService>>,
-    pub(super) event_bus: Option<Arc<crate::services::event_bus::EventBus>>,
+    pub(super) event_bus: Arc<crate::services::event_bus::EventBus>,
+    pub(super) event_reactor: Arc<EventReactor>,
+    pub(super) event_scheduler: Arc<EventScheduler>,
+    pub(super) ready_task_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<uuid::Uuid>>>,
+    pub(super) ready_task_tx: tokio::sync::mpsc::Sender<uuid::Uuid>,
+    pub(super) specialist_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<uuid::Uuid>>>,
+    pub(super) specialist_tx: tokio::sync::mpsc::Sender<uuid::Uuid>,
     pub(super) escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>,
     pub(super) federation_client: Option<Arc<crate::adapters::mcp::FederationClient>>,
 }
@@ -105,8 +114,13 @@ where
         agent_repo: Arc<A>,
         substrate: Arc<dyn Substrate>,
         config: SwarmConfig,
+        event_bus: Arc<crate::services::event_bus::EventBus>,
+        event_reactor: Arc<EventReactor>,
+        event_scheduler: Arc<EventScheduler>,
     ) -> Self {
         let max_agents = config.max_agents;
+        let (ready_tx, ready_rx) = tokio::sync::mpsc::channel(256);
+        let (specialist_tx, specialist_rx) = tokio::sync::mpsc::channel(64);
         Self {
             goal_repo,
             task_repo,
@@ -129,9 +143,15 @@ where
             mcp_shutdown_tx: Arc::new(RwLock::new(None)),
             intent_verifier: None,
             overmind: None,
-            event_bus: None,
+            event_bus,
+            event_reactor,
+            event_scheduler,
             escalation_store: Arc::new(RwLock::new(Vec::new())),
             federation_client: None,
+            ready_task_rx: Arc::new(tokio::sync::Mutex::new(ready_rx)),
+            ready_task_tx: ready_tx,
+            specialist_rx: Arc::new(tokio::sync::Mutex::new(specialist_rx)),
+            specialist_tx,
         }
     }
 
@@ -140,12 +160,6 @@ where
     /// Create orchestrator with a federation client for cross-swarm task delegation.
     pub fn with_federation(mut self, federation_client: Arc<crate::adapters::mcp::FederationClient>) -> Self {
         self.federation_client = Some(federation_client);
-        self
-    }
-
-    /// Create orchestrator with an EventBus for unified event streaming.
-    pub fn with_event_bus(mut self, event_bus: Arc<crate::services::event_bus::EventBus>) -> Self {
-        self.event_bus = Some(event_bus);
         self
     }
 
@@ -320,7 +334,7 @@ where
         // Seed baseline agent templates (DB is sole source, hardcoded as bootstrap)
         {
             use crate::services::AgentService;
-            let agent_service = AgentService::new(self.agent_repo.clone());
+            let agent_service = AgentService::new(self.agent_repo.clone(), self.event_bus.clone());
             match agent_service.seed_baseline_agents().await {
                 Ok(seeded) if !seeded.is_empty() => {
                     self.audit_log.info(
@@ -379,6 +393,69 @@ where
             return Err(e);
         }
 
+        // Initialize EventBus sequence from store to prevent overlap after restart
+        self.event_bus.initialize_sequence_from_store().await;
+
+        // Start EventReactor
+        self.audit_log.info(
+            AuditCategory::System,
+            AuditAction::SwarmStarted,
+            "Starting EventReactor for reactive event handling",
+        ).await;
+        let reactor_handle = self.event_reactor.start();
+
+        // Start EventScheduler
+        self.audit_log.info(
+            AuditCategory::System,
+            AuditAction::SwarmStarted,
+            "Starting EventScheduler for time-based events",
+        ).await;
+        let scheduler_handle = self.event_scheduler.start();
+
+        // Register built-in event handlers and schedules
+        self.register_builtin_handlers().await;
+        self.audit_log.info(
+            AuditCategory::System,
+            AuditAction::SwarmStarted,
+            "Registered built-in event handlers",
+        ).await;
+
+        self.register_builtin_schedules().await;
+        self.audit_log.info(
+            AuditCategory::System,
+            AuditAction::SwarmStarted,
+            "Registered built-in scheduled events",
+        ).await;
+
+        // Replay missed events from the event store
+        match self.event_reactor.replay_missed_events().await {
+            Ok(count) if count > 0 => {
+                self.audit_log.info(
+                    AuditCategory::System,
+                    AuditAction::SwarmStarted,
+                    format!("Replayed {} missed events from event store", count),
+                ).await;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                self.audit_log.log(
+                    AuditEntry::new(
+                        AuditLevel::Warning,
+                        AuditCategory::System,
+                        AuditAction::SwarmStarted,
+                        AuditActor::System,
+                        format!("Failed to replay missed events (non-fatal): {}", e),
+                    ),
+                ).await;
+            }
+        }
+
+        // The main loop runs at reconciliation cadence as a safety net.
+        // Handlers do the fast-path work (task cascades, retries, stats).
+        // The loop handles draining the ready-task channel and spawning agents.
+        let reconciliation_secs = self.config.reconciliation_interval_secs.unwrap_or(30);
+        let loop_interval = tokio::time::Duration::from_secs(reconciliation_secs);
+
         // Main orchestration loop
         loop {
             let current_status = self.status.read().await.clone();
@@ -388,45 +465,38 @@ where
                     break;
                 }
                 OrchestratorStatus::Paused => {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(self.config.poll_interval_ms)).await;
+                    tokio::time::sleep(loop_interval).await;
                     continue;
                 }
                 _ => {}
             }
 
-            // Update task readiness based on dependencies
-            self.update_task_readiness(&event_tx).await?;
+            // Event-driven mode: handlers manage task cascades, retries,
+            // stats, escalation checks, and reconciliation via scheduled
+            // events. The loop drains the ready-task channel and handles
+            // operations that require full orchestrator context.
 
-            // Process active goals
-            self.process_goals(&event_tx).await?;
+            // Drain ready-task channel and spawn agents
+            self.drain_ready_tasks(&event_tx).await?;
 
-            // Handle retries for failed tasks
-            if self.config.auto_retry {
-                self.process_retries(&event_tx).await?;
-            }
+            // Drain specialist channel and process specialist triggers
+            self.drain_specialist_tasks(&event_tx).await?;
 
-            // Process pending evolution refinements
             if self.config.track_evolution {
                 self.process_evolution_refinements(&event_tx).await?;
             }
 
-            // Process specialist agent triggers (conflicts, persistent failures, etc.)
-            self.process_specialist_triggers(&event_tx).await?;
-
-            // Process A2A delegation requests from agents
-            if self.config.mcp_servers.a2a_gateway.is_some() {
-                self.process_a2a_delegations(&event_tx).await?;
-            }
-
-            // Check escalation deadlines
-            self.check_escalation_deadlines(&event_tx).await?;
-
-            // Update stats
-            self.update_stats(&event_tx).await?;
-
             // Wait before next iteration
-            tokio::time::sleep(tokio::time::Duration::from_millis(self.config.poll_interval_ms)).await;
+            tokio::time::sleep(loop_interval).await;
         }
+
+        // Stop EventReactor
+        self.event_reactor.stop();
+        reactor_handle.abort();
+
+        // Stop EventScheduler
+        self.event_scheduler.stop();
+        scheduler_handle.abort();
 
         // Log swarm shutdown
         self.audit_log.info(
@@ -450,21 +520,55 @@ where
     pub async fn tick(&self) -> DomainResult<SwarmStats> {
         let (tx, _rx) = mpsc::channel(100);
 
-        // Update task readiness
-        self.update_task_readiness(&tx).await?;
-
-        // Process goals
-        self.process_goals(&tx).await?;
-
-        // Handle retries
-        if self.config.auto_retry {
-            self.process_retries(&tx).await?;
-        }
+        // Drain ready-task channel and spawn agents
+        self.drain_ready_tasks(&tx).await?;
 
         // Update stats
         self.update_stats(&tx).await?;
 
         Ok(self.stats().await)
+    }
+
+    /// Drain the ready-task channel and spawn agents for each ready task.
+    async fn drain_ready_tasks(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
+        let mut rx = self.ready_task_rx.lock().await;
+        let mut spawned = 0;
+
+        while let Ok(task_id) = rx.try_recv() {
+            // Fetch and validate task is still Ready
+            if let Ok(Some(task)) = self.task_repo.get(task_id).await {
+                if task.status == crate::domain::models::TaskStatus::Ready {
+                    self.spawn_task_agent(&task, event_tx).await?;
+                    spawned += 1;
+                }
+            }
+        }
+
+        // Also pick up any ready tasks not yet signaled via the channel
+        // (e.g., tasks that became ready before the handler was registered)
+        if spawned == 0 {
+            self.process_goals(event_tx).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Drain the specialist channel and trigger specialist processing.
+    async fn drain_specialist_tasks(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
+        let mut rx = self.specialist_rx.lock().await;
+
+        while let Ok(task_id) = rx.try_recv() {
+            // Validate task is still in a state that warrants specialist attention
+            if let Ok(Some(task)) = self.task_repo.get(task_id).await {
+                if task.status == crate::domain::models::TaskStatus::Failed {
+                    // Delegate to existing specialist processing
+                    self.process_specialist_triggers(event_tx).await?;
+                    break; // process_specialist_triggers handles all pending specialists
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -476,8 +580,8 @@ where
 mod tests {
     use super::*;
     use crate::adapters::sqlite::{
-        create_test_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository,
-        SqliteTaskRepository, SqliteWorktreeRepository, Migrator, all_embedded_migrations,
+        create_migrated_test_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository,
+        SqliteTaskRepository, SqliteWorktreeRepository,
     };
     use crate::adapters::substrates::MockSubstrate;
 
@@ -488,9 +592,11 @@ mod tests {
         SqliteAgentRepository,
         SqliteMemoryRepository,
     > {
-        let pool = create_test_pool().await.unwrap();
-        let migrator = Migrator::new(pool.clone());
-        migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
+        use crate::services::event_bus::{EventBus, EventBusConfig};
+        use crate::services::event_reactor::{EventReactor, ReactorConfig};
+        use crate::services::event_scheduler::{EventScheduler, SchedulerConfig};
+
+        let pool = create_migrated_test_pool().await.unwrap();
 
         let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
         let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
@@ -501,7 +607,11 @@ mod tests {
         let mut config = SwarmConfig::default();
         config.use_worktrees = false; // Disable worktrees for tests
 
-        SwarmOrchestrator::new(goal_repo, task_repo, worktree_repo, agent_repo, substrate, config)
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let event_reactor = Arc::new(EventReactor::new(event_bus.clone(), ReactorConfig::default()));
+        let event_scheduler = Arc::new(EventScheduler::new(event_bus.clone(), SchedulerConfig::default()));
+
+        SwarmOrchestrator::new(goal_repo, task_repo, worktree_repo, agent_repo, substrate, config, event_bus, event_reactor, event_scheduler)
             .with_memory_repo(memory_repo)
     }
 

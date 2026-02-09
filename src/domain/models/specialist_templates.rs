@@ -7,14 +7,6 @@ use crate::domain::models::agent::{
     AgentConstraint, AgentTemplate, AgentTier, ToolCapability,
 };
 
-/// Create baseline specialist templates.
-///
-/// Returns an empty list. All specialists are now created dynamically
-/// by the Overmind at runtime when capability gaps are detected.
-pub fn create_baseline_specialists() -> Vec<AgentTemplate> {
-    vec![]
-}
-
 /// Create all baseline agents.
 ///
 /// Returns only the Overmind - the sole pre-packaged agent.
@@ -254,12 +246,6 @@ arguments:
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_create_baseline_specialists() {
-        let specialists = create_baseline_specialists();
-        assert_eq!(specialists.len(), 0);
-    }
 
     #[test]
     fn test_create_baseline_agents() {

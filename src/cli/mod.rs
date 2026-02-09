@@ -1,6 +1,7 @@
 //! Command-line interface module for Abathur.
 
 pub mod commands;
+pub mod event_helpers;
 pub mod id_resolver;
 mod output;
 

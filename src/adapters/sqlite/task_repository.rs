@@ -380,13 +380,8 @@ impl TryFrom<TaskRow> for Task {
     type Error = DomainError;
 
     fn try_from(row: TaskRow) -> Result<Self, Self::Error> {
-        let id = Uuid::parse_str(&row.id)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
-
-        let parent_id = row.parent_id
-            .map(|s| Uuid::parse_str(&s))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
+        let id = super::parse_uuid(&row.id)?;
+        let parent_id = super::parse_optional_uuid(row.parent_id)?;
 
         let status = TaskStatus::from_str(&row.status)
             .ok_or_else(|| DomainError::SerializationError(format!("Invalid status: {}", row.status)))?;
@@ -394,41 +389,14 @@ impl TryFrom<TaskRow> for Task {
         let priority = TaskPriority::from_str(&row.priority)
             .ok_or_else(|| DomainError::SerializationError(format!("Invalid priority: {}", row.priority)))?;
 
-        let routing_hints: RoutingHints = row.routing
-            .map(|s| serde_json::from_str(&s))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .unwrap_or_default();
+        let routing_hints: RoutingHints = super::parse_json_or_default(row.routing)?;
+        let artifacts: Vec<ArtifactRef> = super::parse_json_or_default(row.artifacts)?;
+        let context: TaskContext = super::parse_json_or_default(row.context)?;
 
-        let artifacts: Vec<ArtifactRef> = row.artifacts
-            .map(|s| serde_json::from_str(&s))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .unwrap_or_default();
-
-        let context: TaskContext = row.context
-            .map(|s| serde_json::from_str(&s))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .unwrap_or_default();
-
-        let created_at = chrono::DateTime::parse_from_rfc3339(&row.created_at)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .with_timezone(&chrono::Utc);
-
-        let updated_at = chrono::DateTime::parse_from_rfc3339(&row.updated_at)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .with_timezone(&chrono::Utc);
-
-        let started_at = row.started_at
-            .map(|s| chrono::DateTime::parse_from_rfc3339(&s).map(|d| d.with_timezone(&chrono::Utc)))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
-
-        let completed_at = row.completed_at
-            .map(|s| chrono::DateTime::parse_from_rfc3339(&s).map(|d| d.with_timezone(&chrono::Utc)))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
+        let created_at = super::parse_datetime(&row.created_at)?;
+        let updated_at = super::parse_datetime(&row.updated_at)?;
+        let started_at = super::parse_optional_datetime(row.started_at)?;
+        let completed_at = super::parse_optional_datetime(row.completed_at)?;
 
         let source = deserialize_task_source(row.source_type.as_deref(), row.source_ref.as_deref())?;
 
@@ -495,12 +463,10 @@ fn deserialize_task_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{create_test_pool, Migrator, all_embedded_migrations};
+    use crate::adapters::sqlite::create_migrated_test_pool;
 
     async fn setup_test_repo() -> SqliteTaskRepository {
-        let pool = create_test_pool().await.unwrap();
-        let migrator = Migrator::new(pool.clone());
-        migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
+        let pool = create_migrated_test_pool().await.unwrap();
         SqliteTaskRepository::new(pool)
     }
 

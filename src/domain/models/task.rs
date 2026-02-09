@@ -57,7 +57,7 @@ impl TaskStatus {
             "blocked" => Some(Self::Blocked),
             "running" => Some(Self::Running),
             "validating" => Some(Self::Validating),
-            "complete" => Some(Self::Complete),
+            "complete" | "completed" => Some(Self::Complete),
             "failed" => Some(Self::Failed),
             "canceled" | "cancelled" => Some(Self::Canceled),
             _ => None,
@@ -164,6 +164,64 @@ impl Default for Complexity {
     }
 }
 
+/// Controls which system prompt sections are included for a task.
+///
+/// Simpler tiers skip expensive context sections (goals, project context,
+/// iteration context) to reduce input tokens for cheap/simple tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptTier {
+    /// All context sections included.
+    Full,
+    /// Skip project context, goal context, and iteration context.
+    Standard,
+    /// Minimal: base prompt only, skip constraints, artifacts, MCP URLs too.
+    Minimal,
+}
+
+impl Default for PromptTier {
+    fn default() -> Self {
+        Self::Full
+    }
+}
+
+impl PromptTier {
+    /// Whether this tier includes goal context.
+    pub fn include_goal_context(&self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    /// Whether this tier includes project context.
+    pub fn include_project_context(&self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    /// Whether this tier includes agent constraints.
+    pub fn include_constraints(&self) -> bool {
+        matches!(self, Self::Full | Self::Standard)
+    }
+
+    /// Whether this tier includes upstream artifacts.
+    pub fn include_upstream_artifacts(&self) -> bool {
+        matches!(self, Self::Full | Self::Standard)
+    }
+
+    /// Whether this tier includes MCP URLs.
+    pub fn include_mcp_urls(&self) -> bool {
+        matches!(self, Self::Full | Self::Standard)
+    }
+
+    /// Whether this tier includes iteration context.
+    pub fn include_iteration_context(&self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    /// Whether this tier includes git instructions.
+    pub fn include_git_instructions(&self) -> bool {
+        matches!(self, Self::Full | Self::Standard)
+    }
+}
+
 /// Hints for agent routing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutingHints {
@@ -173,6 +231,8 @@ pub struct RoutingHints {
     pub required_tools: Vec<String>,
     /// Estimated complexity
     pub complexity: Complexity,
+    /// Prompt tier for context assembly
+    pub prompt_tier: PromptTier,
 }
 
 /// Type of artifact produced.

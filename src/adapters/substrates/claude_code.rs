@@ -43,7 +43,7 @@ impl Default for ClaudeCodeConfig {
     fn default() -> Self {
         Self {
             binary_path: "claude".to_string(),
-            default_model: "sonnet".to_string(),
+            default_model: "opus".to_string(),
             default_max_turns: 25,
             session_dir: PathBuf::from(".abathur/sessions"),
             print_mode: true,
@@ -899,7 +899,7 @@ mod tests {
     fn test_config_defaults() {
         let config = ClaudeCodeConfig::default();
         assert_eq!(config.binary_path, "claude");
-        assert_eq!(config.default_model, "sonnet");
+        assert_eq!(config.default_model, "opus");
         assert_eq!(config.default_max_turns, 25);
         assert!(config.print_mode);
         assert_eq!(config.output_format, "stream-json");

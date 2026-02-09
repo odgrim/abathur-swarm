@@ -291,37 +291,17 @@ impl TryFrom<TemplateRow> for AgentTemplate {
     type Error = DomainError;
 
     fn try_from(row: TemplateRow) -> Result<Self, Self::Error> {
-        let id = Uuid::parse_str(&row.id)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
+        let id = super::parse_uuid(&row.id)?;
 
         let tier = AgentTier::parse_str(&row.tier)
             .ok_or_else(|| DomainError::SerializationError(format!("Invalid tier: {}", row.tier)))?;
 
-        let tools: Vec<ToolCapability> = row.tools
-            .map(|s| serde_json::from_str(&s))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .unwrap_or_default();
+        let tools: Vec<ToolCapability> = super::parse_json_or_default(row.tools)?;
+        let constraints: Vec<AgentConstraint> = super::parse_json_or_default(row.constraints)?;
+        let handoff_targets: Vec<String> = super::parse_json_or_default(row.handoff_targets)?;
 
-        let constraints: Vec<AgentConstraint> = row.constraints
-            .map(|s| serde_json::from_str(&s))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .unwrap_or_default();
-
-        let handoff_targets: Vec<String> = row.handoff_targets
-            .map(|s| serde_json::from_str(&s))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .unwrap_or_default();
-
-        let created_at = chrono::DateTime::parse_from_rfc3339(&row.created_at)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .with_timezone(&chrono::Utc);
-
-        let updated_at = chrono::DateTime::parse_from_rfc3339(&row.updated_at)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .with_timezone(&chrono::Utc);
+        let created_at = super::parse_datetime(&row.created_at)?;
+        let updated_at = super::parse_datetime(&row.updated_at)?;
 
         let status = if row.is_active != 0 {
             AgentStatus::Active
@@ -366,28 +346,15 @@ impl TryFrom<InstanceRow> for AgentInstance {
     type Error = DomainError;
 
     fn try_from(row: InstanceRow) -> Result<Self, Self::Error> {
-        let id = Uuid::parse_str(&row.id)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
-
-        let template_id = Uuid::parse_str(&row.template_id)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
-
-        let current_task_id = row.current_task_id
-            .map(|s| Uuid::parse_str(&s))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
+        let id = super::parse_uuid(&row.id)?;
+        let template_id = super::parse_uuid(&row.template_id)?;
+        let current_task_id = super::parse_optional_uuid(row.current_task_id)?;
 
         let status = InstanceStatus::parse_str(&row.status)
             .ok_or_else(|| DomainError::SerializationError(format!("Invalid status: {}", row.status)))?;
 
-        let started_at = chrono::DateTime::parse_from_rfc3339(&row.started_at)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?
-            .with_timezone(&chrono::Utc);
-
-        let completed_at = row.completed_at
-            .map(|s| chrono::DateTime::parse_from_rfc3339(&s).map(|d| d.with_timezone(&chrono::Utc)))
-            .transpose()
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
+        let started_at = super::parse_datetime(&row.started_at)?;
+        let completed_at = super::parse_optional_datetime(row.completed_at)?;
 
         Ok(AgentInstance {
             id,
@@ -405,12 +372,10 @@ impl TryFrom<InstanceRow> for AgentInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{create_test_pool, Migrator, all_embedded_migrations};
+    use crate::adapters::sqlite::create_migrated_test_pool;
 
     async fn setup_test_repo() -> SqliteAgentRepository {
-        let pool = create_test_pool().await.unwrap();
-        let migrator = Migrator::new(pool.clone());
-        migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
+        let pool = create_migrated_test_pool().await.unwrap();
         SqliteAgentRepository::new(pool)
     }
 

@@ -86,6 +86,8 @@ pub enum EventCategory {
     Agent,
     Verification,
     Escalation,
+    Memory,
+    Scheduler,
 }
 
 impl std::fmt::Display for EventCategory {
@@ -98,6 +100,8 @@ impl std::fmt::Display for EventCategory {
             Self::Agent => write!(f, "agent"),
             Self::Verification => write!(f, "verification"),
             Self::Escalation => write!(f, "escalation"),
+            Self::Memory => write!(f, "memory"),
+            Self::Scheduler => write!(f, "scheduler"),
         }
     }
 }
@@ -326,6 +330,145 @@ pub enum EventPayload {
         dependents_can_proceed: bool,
     },
 
+    // Memory events
+    MemoryStored {
+        memory_id: Uuid,
+        key: String,
+        namespace: String,
+        tier: String,
+        memory_type: String,
+    },
+    MemoryPromoted {
+        memory_id: Uuid,
+        key: String,
+        from_tier: String,
+        to_tier: String,
+    },
+    MemoryPruned {
+        count: u64,
+        reason: String,
+    },
+    MemoryAccessed {
+        memory_id: Uuid,
+        key: String,
+        access_count: u32,
+    },
+
+    // Goal status events
+    GoalStatusChanged {
+        goal_id: Uuid,
+        from_status: String,
+        to_status: String,
+    },
+    GoalConstraintViolated {
+        goal_id: Uuid,
+        constraint_name: String,
+        violation: String,
+    },
+
+    // Task claim event
+    TaskClaimed {
+        task_id: Uuid,
+        agent_type: String,
+    },
+
+    // Task cancellation event
+    TaskCanceled {
+        task_id: Uuid,
+        reason: String,
+    },
+
+    // Scheduler events
+    ScheduledEventFired {
+        schedule_id: Uuid,
+        name: String,
+    },
+    ScheduledEventRegistered {
+        schedule_id: Uuid,
+        name: String,
+        schedule_type: String,
+    },
+    ScheduledEventCanceled {
+        schedule_id: Uuid,
+        name: String,
+    },
+
+    // Agent events
+    AgentInstanceCompleted {
+        instance_id: Uuid,
+        task_id: Uuid,
+        tokens_used: u64,
+    },
+
+    // Goal domain/constraint events
+    GoalDomainsUpdated {
+        goal_id: Uuid,
+        old_domains: Vec<String>,
+        new_domains: Vec<String>,
+    },
+    GoalDeleted {
+        goal_id: Uuid,
+        goal_name: String,
+    },
+    GoalConstraintsUpdated {
+        goal_id: Uuid,
+    },
+
+    // Agent template/instance lifecycle events
+    AgentTemplateRegistered {
+        template_name: String,
+        tier: String,
+        version: u32,
+    },
+    AgentTemplateStatusChanged {
+        template_name: String,
+        from_status: String,
+        to_status: String,
+    },
+    AgentInstanceSpawned {
+        instance_id: Uuid,
+        template_name: String,
+        tier: String,
+    },
+    AgentInstanceAssigned {
+        instance_id: Uuid,
+        task_id: Uuid,
+        template_name: String,
+    },
+    AgentInstanceFailed {
+        instance_id: Uuid,
+        task_id: Option<Uuid>,
+        template_name: String,
+    },
+
+    // Memory conflict events
+    MemoryDeleted {
+        memory_id: Uuid,
+        key: String,
+        namespace: String,
+    },
+    MemoryConflictDetected {
+        memory_a: Uuid,
+        memory_b: Uuid,
+        key: String,
+        similarity: f64,
+    },
+    MemoryConflictResolved {
+        memory_a: Uuid,
+        memory_b: Uuid,
+        resolution_type: String,
+    },
+
+    // Task validation event
+    TaskValidating {
+        task_id: Uuid,
+    },
+
+    // Reconciliation events
+    ReconciliationCompleted {
+        corrections_made: u32,
+    },
+
     // Escalation events
     HumanEscalationRequired {
         goal_id: Option<Uuid>,
@@ -347,6 +490,88 @@ pub enum EventPayload {
         decision: String,
         allows_continuation: bool,
     },
+}
+
+impl EventPayload {
+    /// Return the discriminant name of this payload variant as a static string.
+    /// Used by EventFilter for matching payload types.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::OrchestratorStarted => "OrchestratorStarted",
+            Self::OrchestratorPaused => "OrchestratorPaused",
+            Self::OrchestratorResumed => "OrchestratorResumed",
+            Self::OrchestratorStopped => "OrchestratorStopped",
+            Self::StatusUpdate(_) => "StatusUpdate",
+            Self::GoalStarted { .. } => "GoalStarted",
+            Self::GoalDecomposed { .. } => "GoalDecomposed",
+            Self::GoalIterationCompleted { .. } => "GoalIterationCompleted",
+            Self::GoalPaused { .. } => "GoalPaused",
+            Self::ConvergenceCompleted { .. } => "ConvergenceCompleted",
+            Self::SemanticDriftDetected { .. } => "SemanticDriftDetected",
+            Self::TaskSubmitted { .. } => "TaskSubmitted",
+            Self::TaskReady { .. } => "TaskReady",
+            Self::TaskSpawned { .. } => "TaskSpawned",
+            Self::TaskStarted { .. } => "TaskStarted",
+            Self::TaskCompleted { .. } => "TaskCompleted",
+            Self::TaskCompletedWithResult { .. } => "TaskCompletedWithResult",
+            Self::TaskFailed { .. } => "TaskFailed",
+            Self::TaskRetrying { .. } => "TaskRetrying",
+            Self::TaskVerified { .. } => "TaskVerified",
+            Self::TaskQueuedForMerge { .. } => "TaskQueuedForMerge",
+            Self::PullRequestCreated { .. } => "PullRequestCreated",
+            Self::TaskMerged { .. } => "TaskMerged",
+            Self::WorktreeCreated { .. } => "WorktreeCreated",
+            Self::ExecutionStarted { .. } => "ExecutionStarted",
+            Self::ExecutionCompleted { .. } => "ExecutionCompleted",
+            Self::WaveStarted { .. } => "WaveStarted",
+            Self::WaveCompleted { .. } => "WaveCompleted",
+            Self::RestructureTriggered { .. } => "RestructureTriggered",
+            Self::RestructureDecision { .. } => "RestructureDecision",
+            Self::AgentCreated { .. } => "AgentCreated",
+            Self::SpecialistSpawned { .. } => "SpecialistSpawned",
+            Self::EvolutionTriggered { .. } => "EvolutionTriggered",
+            Self::SpawnLimitExceeded { .. } => "SpawnLimitExceeded",
+            Self::GoalAlignmentEvaluated { .. } => "GoalAlignmentEvaluated",
+            Self::IntentVerificationStarted { .. } => "IntentVerificationStarted",
+            Self::IntentVerificationCompleted { .. } => "IntentVerificationCompleted",
+            Self::IntentVerificationRequested { .. } => "IntentVerificationRequested",
+            Self::IntentVerificationResult { .. } => "IntentVerificationResult",
+            Self::WaveVerificationRequested { .. } => "WaveVerificationRequested",
+            Self::WaveVerificationResult { .. } => "WaveVerificationResult",
+            Self::BranchVerificationStarted { .. } => "BranchVerificationStarted",
+            Self::BranchVerificationRequested { .. } => "BranchVerificationRequested",
+            Self::BranchVerificationCompleted { .. } => "BranchVerificationCompleted",
+            Self::BranchVerificationResult { .. } => "BranchVerificationResult",
+            Self::MemoryStored { .. } => "MemoryStored",
+            Self::MemoryPromoted { .. } => "MemoryPromoted",
+            Self::MemoryPruned { .. } => "MemoryPruned",
+            Self::MemoryAccessed { .. } => "MemoryAccessed",
+            Self::GoalStatusChanged { .. } => "GoalStatusChanged",
+            Self::GoalConstraintViolated { .. } => "GoalConstraintViolated",
+            Self::TaskClaimed { .. } => "TaskClaimed",
+            Self::TaskCanceled { .. } => "TaskCanceled",
+            Self::ScheduledEventFired { .. } => "ScheduledEventFired",
+            Self::ScheduledEventRegistered { .. } => "ScheduledEventRegistered",
+            Self::ScheduledEventCanceled { .. } => "ScheduledEventCanceled",
+            Self::AgentInstanceCompleted { .. } => "AgentInstanceCompleted",
+            Self::GoalDomainsUpdated { .. } => "GoalDomainsUpdated",
+            Self::GoalDeleted { .. } => "GoalDeleted",
+            Self::GoalConstraintsUpdated { .. } => "GoalConstraintsUpdated",
+            Self::AgentTemplateRegistered { .. } => "AgentTemplateRegistered",
+            Self::AgentTemplateStatusChanged { .. } => "AgentTemplateStatusChanged",
+            Self::AgentInstanceSpawned { .. } => "AgentInstanceSpawned",
+            Self::AgentInstanceAssigned { .. } => "AgentInstanceAssigned",
+            Self::AgentInstanceFailed { .. } => "AgentInstanceFailed",
+            Self::MemoryDeleted { .. } => "MemoryDeleted",
+            Self::MemoryConflictDetected { .. } => "MemoryConflictDetected",
+            Self::MemoryConflictResolved { .. } => "MemoryConflictResolved",
+            Self::TaskValidating { .. } => "TaskValidating",
+            Self::ReconciliationCompleted { .. } => "ReconciliationCompleted",
+            Self::HumanEscalationRequired { .. } => "HumanEscalationRequired",
+            Self::HumanEscalationNeeded { .. } => "HumanEscalationNeeded",
+            Self::HumanResponseReceived { .. } => "HumanResponseReceived",
+        }
+    }
 }
 
 /// Serializable version of SwarmStats.
@@ -609,6 +834,27 @@ impl From<SwarmEvent> for UnifiedEvent {
                 None,
                 Some(task_id),
                 EventPayload::WorktreeCreated { task_id, path },
+            ),
+            SwarmEvent::TaskClaimed { task_id, agent_type } => (
+                EventSeverity::Info,
+                EventCategory::Task,
+                None,
+                Some(task_id),
+                EventPayload::TaskClaimed { task_id, agent_type },
+            ),
+            SwarmEvent::AgentInstanceCompleted { instance_id, task_id, tokens_used } => (
+                EventSeverity::Info,
+                EventCategory::Agent,
+                None,
+                Some(task_id),
+                EventPayload::AgentInstanceCompleted { instance_id, task_id, tokens_used },
+            ),
+            SwarmEvent::ReconciliationCompleted { corrections_made } => (
+                EventSeverity::Debug,
+                EventCategory::Orchestrator,
+                None,
+                None,
+                EventPayload::ReconciliationCompleted { corrections_made },
             ),
             SwarmEvent::EvolutionTriggered { template_name, trigger } => (
                 EventSeverity::Info,
@@ -958,6 +1204,28 @@ impl EventBus {
     /// Get the number of active subscribers.
     pub fn subscriber_count(&self) -> usize {
         self.sender.receiver_count()
+    }
+
+    /// Initialize the sequence counter from the event store.
+    ///
+    /// Reads the latest sequence number from the store and sets the atomic
+    /// counter to `latest + 1` to prevent sequence overlap after restart.
+    /// Must be called during startup before reactor/scheduler start.
+    pub async fn initialize_sequence_from_store(&self) {
+        if let Some(ref store) = self.store {
+            match store.latest_sequence().await {
+                Ok(Some(latest)) => {
+                    self.sequence.store(latest.0 + 1, Ordering::SeqCst);
+                    tracing::info!("EventBus: initialized sequence from store at {}", latest.0 + 1);
+                }
+                Ok(None) => {
+                    // Empty store, start from 0
+                }
+                Err(e) => {
+                    tracing::warn!("EventBus: failed to read latest sequence from store: {}", e);
+                }
+            }
+        }
     }
 }
 

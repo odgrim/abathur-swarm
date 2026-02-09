@@ -364,14 +364,11 @@ where
 mod tests {
     use super::*;
     use crate::adapters::sqlite::{
-        create_test_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
-        Migrator, all_embedded_migrations,
+        create_migrated_test_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
     };
 
     async fn setup_meta_planner() -> MetaPlanner<SqliteGoalRepository, SqliteTaskRepository, SqliteAgentRepository> {
-        let pool = create_test_pool().await.unwrap();
-        let migrator = Migrator::new(pool.clone());
-        migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
+        let pool = create_migrated_test_pool().await.unwrap();
 
         let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
         let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));

@@ -9,6 +9,9 @@ use crate::domain::models::{
     RelevanceWeights, ScoredMemory,
 };
 use crate::domain::ports::MemoryRepository;
+use crate::services::event_bus::{
+    EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
+};
 
 /// Configuration for memory decay thresholds.
 #[derive(Debug, Clone)]
@@ -37,6 +40,7 @@ impl Default for DecayConfig {
 pub struct MemoryService<R: MemoryRepository> {
     repository: Arc<R>,
     decay_config: DecayConfig,
+    event_bus: Arc<EventBus>,
 }
 
 impl<R: MemoryRepository> MemoryService<R> {
@@ -44,12 +48,25 @@ impl<R: MemoryRepository> MemoryService<R> {
         Self {
             repository,
             decay_config: DecayConfig::default(),
+            event_bus: Arc::new(EventBus::new(crate::services::event_bus::EventBusConfig::default())),
+        }
+    }
+
+    pub fn new_with_event_bus(repository: Arc<R>, event_bus: Arc<EventBus>) -> Self {
+        Self {
+            repository,
+            decay_config: DecayConfig::default(),
+            event_bus,
         }
     }
 
     pub fn with_decay_config(mut self, config: DecayConfig) -> Self {
         self.decay_config = config;
         self
+    }
+
+    async fn emit(&self, event: UnifiedEvent) {
+        self.event_bus.publish(event).await;
     }
 
     /// Store a new memory.
@@ -76,6 +93,24 @@ impl<R: MemoryRepository> MemoryService<R> {
 
         memory.validate().map_err(DomainError::ValidationFailed)?;
         self.repository.store(&memory).await?;
+
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Debug,
+            category: EventCategory::Memory,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            payload: EventPayload::MemoryStored {
+                memory_id: memory.id,
+                key: memory.key.clone(),
+                namespace: memory.namespace.clone(),
+                tier: memory.tier.as_str().to_string(),
+                memory_type: memory.memory_type.as_str().to_string(),
+            },
+        }).await;
 
         Ok(memory)
     }
@@ -122,6 +157,22 @@ impl<R: MemoryRepository> MemoryService<R> {
             mem.record_access();
             self.repository.update(&mem).await?;
 
+            self.emit(UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: chrono::Utc::now(),
+                severity: EventSeverity::Debug,
+                category: EventCategory::Memory,
+                goal_id: None,
+                task_id: None,
+                correlation_id: None,
+                payload: EventPayload::MemoryAccessed {
+                    memory_id: mem.id,
+                    key: mem.key.clone(),
+                    access_count: mem.access_count,
+                },
+            }).await;
+
             // Check if should be promoted
             self.check_promotion(&mut mem).await?;
 
@@ -138,6 +189,23 @@ impl<R: MemoryRepository> MemoryService<R> {
         if let Some(mut mem) = memory {
             mem.record_access();
             self.repository.update(&mem).await?;
+
+            self.emit(UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: chrono::Utc::now(),
+                severity: EventSeverity::Debug,
+                category: EventCategory::Memory,
+                goal_id: None,
+                task_id: None,
+                correlation_id: None,
+                payload: EventPayload::MemoryAccessed {
+                    memory_id: mem.id,
+                    key: mem.key.clone(),
+                    access_count: mem.access_count,
+                },
+            }).await;
+
             self.check_promotion(&mut mem).await?;
             Ok(Some(mem))
         } else {
@@ -241,12 +309,51 @@ impl<R: MemoryRepository> MemoryService<R> {
 
     /// Delete a memory.
     pub async fn forget(&self, id: Uuid) -> DomainResult<()> {
-        self.repository.delete(id).await
+        // Fetch memory info before deleting for the event
+        let memory = self.repository.get(id).await?;
+        self.repository.delete(id).await?;
+
+        if let Some(mem) = memory {
+            self.emit(UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: chrono::Utc::now(),
+                severity: EventSeverity::Debug,
+                category: EventCategory::Memory,
+                goal_id: None,
+                task_id: None,
+                correlation_id: None,
+                payload: EventPayload::MemoryDeleted {
+                    memory_id: id,
+                    key: mem.key,
+                    namespace: mem.namespace,
+                },
+            }).await;
+        }
+
+        Ok(())
     }
 
     /// Prune expired memories.
     pub async fn prune_expired(&self) -> DomainResult<u64> {
-        self.repository.prune_expired().await
+        let count = self.repository.prune_expired().await?;
+        if count > 0 {
+            self.emit(UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: chrono::Utc::now(),
+                severity: EventSeverity::Debug,
+                category: EventCategory::Memory,
+                goal_id: None,
+                task_id: None,
+                correlation_id: None,
+                payload: EventPayload::MemoryPruned {
+                    count,
+                    reason: "expired".to_string(),
+                },
+            }).await;
+        }
+        Ok(count)
     }
 
     /// Prune decayed memories (below threshold).
@@ -316,6 +423,24 @@ impl<R: MemoryRepository> MemoryService<R> {
 
         // Resolve each conflict that has an automatic resolution
         for conflict in conflicts {
+            // Emit conflict detection event
+            self.emit(UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: chrono::Utc::now(),
+                severity: EventSeverity::Warning,
+                category: EventCategory::Memory,
+                goal_id: None,
+                task_id: None,
+                correlation_id: None,
+                payload: EventPayload::MemoryConflictDetected {
+                    memory_a: conflict.memory_a,
+                    memory_b: conflict.memory_b,
+                    key: conflict.key.clone(),
+                    similarity: conflict.similarity,
+                },
+            }).await;
+
             if matches!(
                 &conflict.resolution,
                 Some(ConflictResolution::PreferNewer { .. })
@@ -358,8 +483,28 @@ impl<R: MemoryRepository> MemoryService<R> {
         };
 
         if should_promote {
+            let from_tier = memory.tier.as_str().to_string();
             memory.promote().map_err(DomainError::ValidationFailed)?;
+            let to_tier = memory.tier.as_str().to_string();
             self.repository.update(memory).await?;
+
+            self.emit(UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: chrono::Utc::now(),
+                severity: EventSeverity::Info,
+                category: EventCategory::Memory,
+                goal_id: None,
+                task_id: None,
+                correlation_id: None,
+                payload: EventPayload::MemoryPromoted {
+                    memory_id: memory.id,
+                    key: memory.key.clone(),
+                    from_tier,
+                    to_tier,
+                },
+            }).await;
+
             return Ok(true);
         }
 
@@ -694,6 +839,14 @@ impl<R: MemoryRepository> MemoryService<R> {
         &self,
         conflict: &MemoryConflict,
     ) -> DomainResult<()> {
+        let resolution_type = match &conflict.resolution {
+            Some(ConflictResolution::PreferNewer { .. }) => "prefer_newer",
+            Some(ConflictResolution::PreferHigherConfidence { .. }) => "prefer_higher_confidence",
+            Some(ConflictResolution::SoftMerge { .. }) => "soft_merge",
+            Some(ConflictResolution::FlaggedForReview) => "flagged_for_review",
+            None => "none",
+        };
+
         match &conflict.resolution {
             Some(ConflictResolution::PreferNewer { deprecated_id, .. })
             | Some(ConflictResolution::PreferHigherConfidence { deprecated_id, .. }) => {
@@ -737,6 +890,22 @@ impl<R: MemoryRepository> MemoryService<R> {
             }
         }
 
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Memory,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            payload: EventPayload::MemoryConflictResolved {
+                memory_a: conflict.memory_a,
+                memory_b: conflict.memory_b,
+                resolution_type: resolution_type.to_string(),
+            },
+        }).await;
+
         Ok(())
     }
 }
@@ -744,12 +913,10 @@ impl<R: MemoryRepository> MemoryService<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{create_test_pool, SqliteMemoryRepository, Migrator, all_embedded_migrations};
+    use crate::adapters::sqlite::{create_migrated_test_pool, SqliteMemoryRepository};
 
     async fn setup_service() -> MemoryService<SqliteMemoryRepository> {
-        let pool = create_test_pool().await.unwrap();
-        let migrator = Migrator::new(pool.clone());
-        migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
+        let pool = create_migrated_test_pool().await.unwrap();
         let repo = Arc::new(SqliteMemoryRepository::new(pool));
         MemoryService::new(repo)
     }

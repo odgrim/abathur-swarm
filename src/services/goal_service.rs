@@ -6,14 +6,25 @@ use uuid::Uuid;
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{Goal, GoalConstraint, GoalPriority, GoalStatus};
 use crate::domain::ports::{GoalFilter, GoalRepository};
+use crate::services::event_bus::{
+    EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
+};
 
 pub struct GoalService<R: GoalRepository> {
     repository: Arc<R>,
+    event_bus: Arc<EventBus>,
 }
 
 impl<R: GoalRepository> GoalService<R> {
-    pub fn new(repository: Arc<R>) -> Self {
-        Self { repository }
+    pub fn new(repository: Arc<R>, event_bus: Arc<EventBus>) -> Self {
+        Self {
+            repository,
+            event_bus,
+        }
+    }
+
+    async fn emit(&self, event: UnifiedEvent) {
+        self.event_bus.publish(event).await;
     }
 
     /// Create a new goal.
@@ -51,6 +62,21 @@ impl<R: GoalRepository> GoalService<R> {
         goal.validate().map_err(DomainError::ValidationFailed)?;
         self.repository.create(&goal).await?;
 
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Goal,
+            goal_id: Some(goal.id),
+            task_id: None,
+            correlation_id: None,
+            payload: EventPayload::GoalStarted {
+                goal_id: goal.id,
+                goal_name: goal.name.clone(),
+            },
+        }).await;
+
         Ok(goal)
     }
 
@@ -69,12 +95,30 @@ impl<R: GoalRepository> GoalService<R> {
         let mut goal = self.repository.get(id).await?
             .ok_or(DomainError::GoalNotFound(id))?;
 
+        let from_status = goal.status;
         goal.transition_to(new_status).map_err(|_| DomainError::InvalidStateTransition {
-            from: goal.status.as_str().to_string(),
+            from: from_status.as_str().to_string(),
             to: new_status.as_str().to_string(),
         })?;
 
         self.repository.update(&goal).await?;
+
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Goal,
+            goal_id: Some(goal.id),
+            task_id: None,
+            correlation_id: None,
+            payload: EventPayload::GoalStatusChanged {
+                goal_id: goal.id,
+                from_status: from_status.as_str().to_string(),
+                to_status: new_status.as_str().to_string(),
+            },
+        }).await;
+
         Ok(goal)
     }
 
@@ -100,11 +144,29 @@ impl<R: GoalRepository> GoalService<R> {
         let mut goal = self.repository.get(id).await?
             .ok_or(DomainError::GoalNotFound(id))?;
 
-        goal.applicability_domains = domains;
+        let old_domains = goal.applicability_domains.clone();
+        goal.applicability_domains = domains.clone();
         goal.updated_at = chrono::Utc::now();
         goal.version += 1;
 
         self.repository.update(&goal).await?;
+
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Goal,
+            goal_id: Some(goal.id),
+            task_id: None,
+            correlation_id: None,
+            payload: EventPayload::GoalDomainsUpdated {
+                goal_id: goal.id,
+                old_domains,
+                new_domains: domains,
+            },
+        }).await;
+
         Ok(goal)
     }
 
@@ -123,21 +185,42 @@ impl<R: GoalRepository> GoalService<R> {
             ));
         }
 
-        self.repository.delete(id).await
+        let goal = self.repository.get(id).await?
+            .ok_or(DomainError::GoalNotFound(id))?;
+        let goal_name = goal.name.clone();
+
+        self.repository.delete(id).await?;
+
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Goal,
+            goal_id: Some(id),
+            task_id: None,
+            correlation_id: None,
+            payload: EventPayload::GoalDeleted {
+                goal_id: id,
+                goal_name,
+            },
+        }).await;
+
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{create_test_pool, goal_repository::SqliteGoalRepository, Migrator, all_embedded_migrations};
+    use crate::adapters::sqlite::{create_migrated_test_pool, goal_repository::SqliteGoalRepository};
+    use crate::services::event_bus::EventBusConfig;
 
     async fn setup_service() -> GoalService<SqliteGoalRepository> {
-        let pool = create_test_pool().await.unwrap();
-        let migrator = Migrator::new(pool.clone());
-        migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
+        let pool = create_migrated_test_pool().await.unwrap();
         let repo = Arc::new(SqliteGoalRepository::new(pool));
-        GoalService::new(repo)
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        GoalService::new(repo, event_bus)
     }
 
     #[tokio::test]

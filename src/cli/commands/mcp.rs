@@ -192,8 +192,9 @@ async fn start_memory_http(host: String, port: u16, enable_cors: bool, json_mode
         .run_embedded_migrations(all_embedded_migrations())
         .await?;
 
-    let repo = Arc::new(SqliteMemoryRepository::new(pool));
-    let service = MemoryService::new(repo);
+    let repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
+    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool);
+    let service = MemoryService::new_with_event_bus(repo, event_bus);
 
     let config = MemoryHttpConfig {
         host: host.clone(),
@@ -232,8 +233,9 @@ async fn start_tasks_http(host: String, port: u16, enable_cors: bool, json_mode:
         .run_embedded_migrations(all_embedded_migrations())
         .await?;
 
-    let task_repo = Arc::new(SqliteTaskRepository::new(pool));
-    let service = TaskService::new(task_repo);
+    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool);
+    let service = TaskService::new(task_repo, event_bus);
 
     let config = TasksHttpConfig {
         host: host.clone(),
@@ -272,8 +274,9 @@ async fn start_agents_http(host: String, port: u16, enable_cors: bool, json_mode
         .run_embedded_migrations(all_embedded_migrations())
         .await?;
 
-    let agent_repo = Arc::new(SqliteAgentRepository::new(pool));
-    let service = AgentService::new(agent_repo);
+    let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
+    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool);
+    let service = AgentService::new(agent_repo, event_bus);
 
     let config = AgentsHttpConfig {
         host: host.clone(),
@@ -399,15 +402,17 @@ async fn start_all(
         println!();
     }
 
-    // Create services
+    // Create services with shared persistent EventBus
+    let shared_event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
+
     let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-    let memory_service = MemoryService::new(memory_repo);
+    let memory_service = MemoryService::new_with_event_bus(memory_repo, shared_event_bus.clone());
 
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let task_service = TaskService::new(task_repo);
+    let task_service = TaskService::new(task_repo, shared_event_bus.clone());
 
     let agent_repo = Arc::new(SqliteAgentRepository::new(pool));
-    let agent_service = AgentService::new(agent_repo);
+    let agent_service = AgentService::new(agent_repo, shared_event_bus);
 
     // Create servers
     let memory_config = MemoryHttpConfig {
@@ -535,15 +540,17 @@ async fn start_stdio(db_path: String, task_id: Option<String>) -> Result<()> {
         .run_embedded_migrations(all_embedded_migrations())
         .await?;
 
-    // Create repositories and services
+    // Create repositories and services with shared persistent EventBus
+    let shared_event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
+
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let task_service = TaskService::new(task_repo);
+    let task_service = TaskService::new(task_repo, shared_event_bus.clone());
 
     let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-    let agent_service = AgentService::new(agent_repo);
+    let agent_service = AgentService::new(agent_repo, shared_event_bus.clone());
 
     let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-    let memory_service = MemoryService::new(memory_repo);
+    let memory_service = MemoryService::new_with_event_bus(memory_repo, shared_event_bus);
 
     let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
 

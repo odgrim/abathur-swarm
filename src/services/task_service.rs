@@ -6,6 +6,9 @@ use uuid::Uuid;
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::{TaskFilter, TaskRepository};
+use crate::services::event_bus::{
+    EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
+};
 
 /// Configuration for spawn limits.
 #[derive(Debug, Clone)]
@@ -81,13 +84,15 @@ impl SpawnLimitType {
 pub struct TaskService<T: TaskRepository> {
     task_repo: Arc<T>,
     spawn_limits: SpawnLimitConfig,
+    event_bus: Arc<EventBus>,
 }
 
 impl<T: TaskRepository> TaskService<T> {
-    pub fn new(task_repo: Arc<T>) -> Self {
+    pub fn new(task_repo: Arc<T>, event_bus: Arc<EventBus>) -> Self {
         Self {
             task_repo,
             spawn_limits: SpawnLimitConfig::default(),
+            event_bus,
         }
     }
 
@@ -95,6 +100,10 @@ impl<T: TaskRepository> TaskService<T> {
     pub fn with_spawn_limits(mut self, limits: SpawnLimitConfig) -> Self {
         self.spawn_limits = limits;
         self
+    }
+
+    async fn emit(&self, event: UnifiedEvent) {
+        self.event_bus.publish(event).await;
     }
 
     /// Check spawn limits for creating a subtask under a parent.
@@ -286,6 +295,42 @@ impl<T: TaskRepository> TaskService<T> {
         self.check_and_update_readiness(&mut task).await?;
         self.task_repo.update(&task).await?;
 
+        // Emit TaskSubmitted — use the task's parent goal_id from context if available
+        let goal_id = task.parent_id.unwrap_or_else(Uuid::new_v4);
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Task,
+            goal_id: Some(goal_id),
+            task_id: Some(task.id),
+            correlation_id: None,
+            payload: EventPayload::TaskSubmitted {
+                task_id: task.id,
+                task_title: task.title.clone(),
+                goal_id,
+            },
+        }).await;
+
+        // If the task is immediately ready (no deps), emit TaskReady for event-driven spawn
+        if task.status == TaskStatus::Ready {
+            self.emit(UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: chrono::Utc::now(),
+                severity: EventSeverity::Debug,
+                category: EventCategory::Task,
+                goal_id: Some(goal_id),
+                task_id: Some(task.id),
+                correlation_id: None,
+                payload: EventPayload::TaskReady {
+                    task_id: task.id,
+                    task_title: task.title.clone(),
+                },
+            }).await;
+        }
+
         Ok(task)
     }
 
@@ -323,6 +368,22 @@ impl<T: TaskRepository> TaskService<T> {
         })?;
 
         self.task_repo.update(&task).await?;
+
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(task_id),
+            correlation_id: None,
+            payload: EventPayload::TaskClaimed {
+                task_id,
+                agent_type: agent_type.to_string(),
+            },
+        }).await;
+
         Ok(task)
     }
 
@@ -338,8 +399,20 @@ impl<T: TaskRepository> TaskService<T> {
 
         self.task_repo.update(&task).await?;
 
-        // Update dependent tasks that might now be ready
-        self.update_dependents_readiness(task_id).await?;
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(task_id),
+            correlation_id: None,
+            payload: EventPayload::TaskCompleted {
+                task_id,
+                tokens_used: 0,
+            },
+        }).await;
 
         Ok(task)
     }
@@ -354,14 +427,28 @@ impl<T: TaskRepository> TaskService<T> {
             to: "failed".to_string(),
         })?;
 
+        let error_str = error_message.clone().unwrap_or_default();
         if let Some(msg) = error_message {
             task.context.hints.push(format!("Error: {}", msg));
         }
 
         self.task_repo.update(&task).await?;
 
-        // Mark dependent tasks as blocked
-        self.mark_dependents_blocked(task_id).await?;
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Error,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(task_id),
+            correlation_id: None,
+            payload: EventPayload::TaskFailed {
+                task_id,
+                error: error_str,
+                retry_count: task.retry_count,
+            },
+        }).await;
 
         Ok(task)
     }
@@ -380,8 +467,21 @@ impl<T: TaskRepository> TaskService<T> {
         task.retry().map_err(DomainError::ValidationFailed)?;
         self.task_repo.update(&task).await?;
 
-        // Unblock dependents
-        self.update_dependents_readiness(task_id).await?;
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Warning,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(task_id),
+            correlation_id: None,
+            payload: EventPayload::TaskRetrying {
+                task_id,
+                attempt: task.retry_count,
+                max_attempts: task.max_retries,
+            },
+        }).await;
 
         Ok(task)
     }
@@ -404,8 +504,20 @@ impl<T: TaskRepository> TaskService<T> {
 
         self.task_repo.update(&task).await?;
 
-        // Mark dependent tasks as blocked
-        self.mark_dependents_blocked(task_id).await?;
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Warning,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(task_id),
+            correlation_id: None,
+            payload: EventPayload::TaskCanceled {
+                task_id,
+                reason: "user-requested".to_string(),
+            },
+        }).await;
 
         Ok(task)
     }
@@ -450,49 +562,19 @@ impl<T: TaskRepository> TaskService<T> {
         Ok(())
     }
 
-    /// Update readiness of tasks that depend on a given task.
-    async fn update_dependents_readiness(&self, task_id: Uuid) -> DomainResult<()> {
-        let dependents = self.task_repo.get_dependents(task_id).await?;
-
-        for mut dep in dependents {
-            if dep.status == TaskStatus::Pending || dep.status == TaskStatus::Blocked {
-                self.check_and_update_readiness(&mut dep).await?;
-                self.task_repo.update(&dep).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Mark dependent tasks as blocked.
-    async fn mark_dependents_blocked(&self, task_id: Uuid) -> DomainResult<()> {
-        let dependents = self.task_repo.get_dependents(task_id).await?;
-
-        for mut dep in dependents {
-            if dep.status == TaskStatus::Pending || dep.status == TaskStatus::Ready {
-                dep.transition_to(TaskStatus::Blocked).ok();
-                self.task_repo.update(&dep).await?;
-            }
-        }
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{
-        create_test_pool, SqliteTaskRepository, Migrator, all_embedded_migrations
-    };
+    use crate::adapters::sqlite::{create_migrated_test_pool, SqliteTaskRepository};
+    use crate::services::event_bus::EventBusConfig;
 
     async fn setup_service() -> TaskService<SqliteTaskRepository> {
-        let pool = create_test_pool().await.unwrap();
-        let migrator = Migrator::new(pool.clone());
-        migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
-
+        let pool = create_migrated_test_pool().await.unwrap();
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
-        TaskService::new(task_repo)
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        TaskService::new(task_repo, event_bus)
     }
 
     #[tokio::test]
@@ -552,9 +634,12 @@ mod tests {
         service.claim_task(dep.id, "test-agent").await.unwrap();
         service.complete_task(dep.id).await.unwrap();
 
-        // Check main task - should now be ready
+        // TaskService emits a TaskCompleted event; readiness cascading is handled
+        // by the TaskCompletedReadinessHandler in the event reactor, not by
+        // TaskService directly. In this unit test (no reactor), the dependent
+        // task stays Pending. Full cascade is tested in integration tests.
         let main_updated = service.get_task(main.id).await.unwrap().unwrap();
-        assert_eq!(main_updated.status, TaskStatus::Ready);
+        assert_eq!(main_updated.status, TaskStatus::Pending);
     }
 
     #[tokio::test]

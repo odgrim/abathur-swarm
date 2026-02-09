@@ -9,14 +9,25 @@ use crate::domain::models::{
     InstanceStatus, ToolCapability, specialist_templates,
 };
 use crate::domain::ports::{AgentFilter, AgentRepository};
+use crate::services::event_bus::{
+    EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
+};
 
 pub struct AgentService<R: AgentRepository> {
     repository: Arc<R>,
+    event_bus: Arc<EventBus>,
 }
 
 impl<R: AgentRepository> AgentService<R> {
-    pub fn new(repository: Arc<R>) -> Self {
-        Self { repository }
+    pub fn new(repository: Arc<R>, event_bus: Arc<EventBus>) -> Self {
+        Self {
+            repository,
+            event_bus,
+        }
+    }
+
+    async fn emit(&self, event: UnifiedEvent) {
+        self.event_bus.publish(event).await;
     }
 
     /// Register a new agent template.
@@ -50,6 +61,23 @@ impl<R: AgentRepository> AgentService<R> {
 
             template.validate().map_err(DomainError::ValidationFailed)?;
             self.repository.create_template(&template).await?;
+
+            self.emit(UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: chrono::Utc::now(),
+                severity: EventSeverity::Info,
+                category: EventCategory::Agent,
+                goal_id: None,
+                task_id: None,
+                correlation_id: None,
+                payload: EventPayload::AgentTemplateRegistered {
+                    template_name: template.name.clone(),
+                    tier: format!("{:?}", template.tier),
+                    version: template.version,
+                },
+            }).await;
+
             return Ok(template);
         }
 
@@ -68,6 +96,22 @@ impl<R: AgentRepository> AgentService<R> {
 
         template.validate().map_err(DomainError::ValidationFailed)?;
         self.repository.create_template(&template).await?;
+
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Agent,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            payload: EventPayload::AgentTemplateRegistered {
+                template_name: template.name.clone(),
+                tier: format!("{:?}", template.tier),
+                version: template.version,
+            },
+        }).await;
 
         Ok(template)
     }
@@ -92,38 +136,31 @@ impl<R: AgentRepository> AgentService<R> {
         self.repository.list_by_tier(tier).await
     }
 
-    /// Disable a template.
-    pub async fn disable_template(&self, name: &str) -> DomainResult<AgentTemplate> {
+    /// Set a template's status (active, disabled, deprecated).
+    pub async fn set_template_status(&self, name: &str, status: AgentStatus) -> DomainResult<AgentTemplate> {
         let mut template = self.repository.get_template_by_name(name).await?
             .ok_or_else(|| DomainError::AgentNotFound(name.to_string()))?;
 
-        template.status = AgentStatus::Disabled;
+        let from_status = format!("{:?}", template.status);
+        template.status = status;
         template.updated_at = chrono::Utc::now();
         self.repository.update_template(&template).await?;
 
-        Ok(template)
-    }
-
-    /// Enable a template.
-    pub async fn enable_template(&self, name: &str) -> DomainResult<AgentTemplate> {
-        let mut template = self.repository.get_template_by_name(name).await?
-            .ok_or_else(|| DomainError::AgentNotFound(name.to_string()))?;
-
-        template.status = AgentStatus::Active;
-        template.updated_at = chrono::Utc::now();
-        self.repository.update_template(&template).await?;
-
-        Ok(template)
-    }
-
-    /// Deprecate a template (no new tasks, existing can complete).
-    pub async fn deprecate_template(&self, name: &str) -> DomainResult<AgentTemplate> {
-        let mut template = self.repository.get_template_by_name(name).await?
-            .ok_or_else(|| DomainError::AgentNotFound(name.to_string()))?;
-
-        template.status = AgentStatus::Deprecated;
-        template.updated_at = chrono::Utc::now();
-        self.repository.update_template(&template).await?;
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Agent,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            payload: EventPayload::AgentTemplateStatusChanged {
+                template_name: name.to_string(),
+                from_status,
+                to_status: format!("{:?}", status),
+            },
+        }).await;
 
         Ok(template)
     }
@@ -150,6 +187,22 @@ impl<R: AgentRepository> AgentService<R> {
         let instance = AgentInstance::from_template(&template);
         self.repository.create_instance(&instance).await?;
 
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Agent,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            payload: EventPayload::AgentInstanceSpawned {
+                instance_id: instance.id,
+                template_name: template.name.clone(),
+                tier: format!("{:?}", template.tier),
+            },
+        }).await;
+
         Ok(instance)
     }
 
@@ -166,6 +219,22 @@ impl<R: AgentRepository> AgentService<R> {
 
         instance.assign_task(task_id);
         self.repository.update_instance(&instance).await?;
+
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Debug,
+            category: EventCategory::Agent,
+            goal_id: None,
+            task_id: Some(task_id),
+            correlation_id: None,
+            payload: EventPayload::AgentInstanceAssigned {
+                instance_id: instance.id,
+                task_id,
+                template_name: instance.template_name.clone(),
+            },
+        }).await;
 
         Ok(instance)
     }
@@ -189,6 +258,22 @@ impl<R: AgentRepository> AgentService<R> {
         instance.complete();
         self.repository.update_instance(&instance).await?;
 
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Agent,
+            goal_id: None,
+            task_id: instance.current_task_id,
+            correlation_id: None,
+            payload: EventPayload::AgentInstanceCompleted {
+                instance_id: instance.id,
+                task_id: instance.current_task_id.unwrap_or(Uuid::nil()),
+                tokens_used: 0,
+            },
+        }).await;
+
         Ok(instance)
     }
 
@@ -199,6 +284,22 @@ impl<R: AgentRepository> AgentService<R> {
 
         instance.fail();
         self.repository.update_instance(&instance).await?;
+
+        self.emit(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Error,
+            category: EventCategory::Agent,
+            goal_id: None,
+            task_id: instance.current_task_id,
+            correlation_id: None,
+            payload: EventPayload::AgentInstanceFailed {
+                instance_id: instance.id,
+                task_id: instance.current_task_id,
+                template_name: instance.template_name.clone(),
+            },
+        }).await;
 
         Ok(instance)
     }
@@ -251,31 +352,6 @@ impl<R: AgentRepository> AgentService<R> {
         Ok(None)
     }
 
-    /// Load baseline specialist templates.
-    ///
-    /// Returns the number of templates created (skips existing ones).
-    /// Currently returns 0 since all specialists are created dynamically
-    /// by the Overmind at runtime.
-    pub async fn load_baseline_specialists(&self) -> DomainResult<usize> {
-        let specialists = specialist_templates::create_baseline_specialists();
-        let mut created = 0;
-
-        for template in specialists {
-            // Check if already exists
-            if self.repository.get_template_by_name(&template.name).await?.is_none() {
-                self.repository.create_template(&template).await?;
-                created += 1;
-                tracing::info!("Registered baseline specialist: {}", template.name);
-            }
-        }
-
-        if created > 0 {
-            tracing::info!("Loaded {} baseline specialist templates", created);
-        }
-
-        Ok(created)
-    }
-
     /// Get a specialist by capability.
     pub async fn get_specialist_by_capability(
         &self,
@@ -297,26 +373,6 @@ impl<R: AgentRepository> AgentService<R> {
         }
 
         Ok(None)
-    }
-
-    /// Seed all baseline specialist templates if they don't exist.
-    ///
-    /// Currently a no-op since all specialists are created dynamically
-    /// by the Overmind at runtime.
-    pub async fn seed_baseline_specialists(&self) -> DomainResult<Vec<String>> {
-        let baseline = specialist_templates::create_baseline_specialists();
-        let mut seeded = Vec::new();
-
-        for template in baseline {
-            // Check if template already exists
-            if self.repository.get_template_by_name(&template.name).await?.is_none() {
-                // Create the template
-                self.repository.create_template(&template).await?;
-                seeded.push(template.name.clone());
-            }
-        }
-
-        Ok(seeded)
     }
 
     /// Seed baseline agent templates from hardcoded definitions.
@@ -375,14 +431,13 @@ impl<R: AgentRepository> AgentService<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{create_test_pool, SqliteAgentRepository, Migrator, all_embedded_migrations};
+    use crate::adapters::sqlite::{create_migrated_test_pool, SqliteAgentRepository};
 
     async fn setup_service() -> AgentService<SqliteAgentRepository> {
-        let pool = create_test_pool().await.unwrap();
-        let migrator = Migrator::new(pool.clone());
-        migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
+        let pool = create_migrated_test_pool().await.unwrap();
         let repo = Arc::new(SqliteAgentRepository::new(pool));
-        AgentService::new(repo)
+        let event_bus = Arc::new(EventBus::new(crate::services::event_bus::EventBusConfig::default()));
+        AgentService::new(repo, event_bus)
     }
 
     #[tokio::test]
@@ -542,14 +597,14 @@ mod tests {
             None,
         ).await.unwrap();
 
-        let disabled = service.disable_template("toggleable").await.unwrap();
+        let disabled = service.set_template_status("toggleable", AgentStatus::Disabled).await.unwrap();
         assert_eq!(disabled.status, AgentStatus::Disabled);
 
         // Should fail to spawn when disabled
         let spawn_result = service.spawn_instance("toggleable").await;
         assert!(spawn_result.is_err());
 
-        let enabled = service.enable_template("toggleable").await.unwrap();
+        let enabled = service.set_template_status("toggleable", AgentStatus::Active).await.unwrap();
         assert_eq!(enabled.status, AgentStatus::Active);
 
         // Should succeed now

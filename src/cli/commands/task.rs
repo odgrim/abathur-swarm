@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use std::sync::Arc;
 
-use crate::adapters::sqlite::{SqliteTaskRepository, initialize_database};
+use crate::adapters::sqlite::{SqliteTaskRepository, initialize_default_database};
 use crate::cli::id_resolver::resolve_task_id;
-use crate::cli::output::{output, CommandOutput};
+use crate::cli::output::{output, truncate, CommandOutput};
 use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::TaskFilter;
 use crate::services::TaskService;
@@ -253,12 +253,13 @@ impl CommandOutput for TaskStatusOutput {
 }
 
 pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
-    let pool = initialize_database("sqlite:.abathur/abathur.db")
+    let pool = initialize_default_database()
         .await
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let service = TaskService::new(task_repo);
+    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
+    let service = TaskService::new(task_repo, event_bus);
 
     match args.command {
         TaskCommands::Submit {
@@ -400,10 +401,3 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
     Ok(())
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len - 3])
-    }
-}

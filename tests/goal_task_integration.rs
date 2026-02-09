@@ -15,8 +15,7 @@
 use std::sync::Arc;
 
 use abathur::adapters::sqlite::{
-    all_embedded_migrations, create_test_pool, Migrator, SqliteGoalRepository,
-    SqliteTaskRepository,
+    create_migrated_test_pool, SqliteGoalRepository, SqliteTaskRepository,
 };
 use abathur::domain::models::{
     Goal, GoalConstraint, GoalPriority, GoalStatus, Task, TaskPriority, TaskSource, TaskStatus,
@@ -28,12 +27,7 @@ use abathur::services::{
 
 /// Set up in-memory SQLite repos with all migrations applied.
 async fn setup_repos() -> (Arc<SqliteGoalRepository>, Arc<SqliteTaskRepository>) {
-    let pool = create_test_pool().await.expect("Failed to create test pool");
-    let migrator = Migrator::new(pool.clone());
-    migrator
-        .run_embedded_migrations(all_embedded_migrations())
-        .await
-        .expect("Failed to run migrations");
+    let pool = create_migrated_test_pool().await.expect("Failed to create test pool");
 
     (
         Arc::new(SqliteGoalRepository::new(pool.clone())),
@@ -48,7 +42,7 @@ async fn setup_repos() -> (Arc<SqliteGoalRepository>, Arc<SqliteTaskRepository>)
 #[tokio::test]
 async fn test_goal_creation_with_domains() {
     let (goal_repo, _) = setup_repos().await;
-    let goal_service = GoalService::new(goal_repo.clone());
+    let goal_service = GoalService::new(goal_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
 
     let goal = goal_service
         .create_goal(
@@ -86,7 +80,7 @@ async fn test_goal_creation_with_domains() {
 #[tokio::test]
 async fn test_find_goals_by_domains() {
     let (goal_repo, _) = setup_repos().await;
-    let goal_service = GoalService::new(goal_repo.clone());
+    let goal_service = GoalService::new(goal_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
 
     // Create goals with different domains
     let _testing_goal = goal_service
@@ -163,7 +157,7 @@ async fn test_find_goals_by_domains() {
 #[tokio::test]
 async fn test_task_creation_with_human_source() {
     let (_, task_repo) = setup_repos().await;
-    let task_service = TaskService::new(task_repo.clone());
+    let task_service = TaskService::new(task_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
 
     let task = task_service
         .submit_task(
@@ -188,7 +182,7 @@ async fn test_task_creation_with_human_source() {
 #[tokio::test]
 async fn test_task_creation_with_system_source() {
     let (_, task_repo) = setup_repos().await;
-    let task_service = TaskService::new(task_repo.clone());
+    let task_service = TaskService::new(task_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
 
     let task = task_service
         .submit_task(
@@ -347,7 +341,7 @@ async fn test_infer_task_domains_multiple() {
 #[tokio::test]
 async fn test_get_goals_for_task() {
     let (goal_repo, _) = setup_repos().await;
-    let goal_service = GoalService::new(goal_repo.clone());
+    let goal_service = GoalService::new(goal_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
     let ctx_service = GoalContextService::new(goal_repo.clone());
 
     // Create goals with different domains
@@ -424,7 +418,7 @@ async fn test_get_goals_for_task() {
 #[tokio::test]
 async fn test_retired_goals_not_returned() {
     let (goal_repo, _) = setup_repos().await;
-    let goal_service = GoalService::new(goal_repo.clone());
+    let goal_service = GoalService::new(goal_repo.clone(), Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default())));
     let ctx_service = GoalContextService::new(goal_repo.clone());
 
     let goal = goal_service

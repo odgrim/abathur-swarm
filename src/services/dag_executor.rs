@@ -11,6 +11,10 @@ use crate::domain::models::{
     Goal, ConstraintType, SessionStatus, SubstrateConfig, SubstrateRequest, SubstrateSession, TaskDag, TaskStatus,
 };
 use crate::domain::ports::{AgentRepository, GoalRepository, Substrate, TaskRepository};
+use crate::services::context_truncation::{TruncationConfig, truncate_section};
+use crate::services::context_window::{ContextWindowGuard, ContextWindowCheck};
+use crate::services::cost_tracker;
+use crate::services::model_router::ModelRouter;
 use crate::services::guardrails::{GuardrailResult, Guardrails};
 use crate::services::circuit_breaker::{CircuitBreakerService, CircuitScope};
 use crate::services::dag_restructure::DagRestructureService;
@@ -797,14 +801,46 @@ where
         ctx
     };
 
-    // Build enhanced system prompt with goal context, project context, constraints, artifacts, MCP services, and iteration context
-    let goal_context = build_goal_context(&active_goals, goal_id);
-    let mcp_context = build_mcp_context(&config);
-    let project_context = config.project_context.as_ref().map_or(String::new(), |ctx| {
-        format!("\n\n## Project Context\n\n{}", ctx)
-    });
-    let iteration_context = config.iteration_context.as_ref()
-        .map_or(String::new(), |ctx| ctx.format_for_prompt());
+    // Build enhanced system prompt with goal context, project context, constraints, artifacts, MCP services, and iteration context.
+    // Apply context truncation to prevent any single section from consuming too much of the context window.
+    // Apply prompt tier to skip unnecessary sections for simpler tasks.
+    let truncation_config = TruncationConfig::default();
+    let prompt_tier = task.routing_hints.prompt_tier;
+
+    let goal_context = if prompt_tier.include_goal_context() {
+        truncate_section(&build_goal_context(&active_goals, goal_id), &truncation_config)
+    } else {
+        String::new()
+    };
+    let mcp_context = if prompt_tier.include_mcp_urls() {
+        build_mcp_context(&config)
+    } else {
+        String::new()
+    };
+    let project_context = if prompt_tier.include_project_context() {
+        config.project_context.as_ref().map_or(String::new(), |ctx| {
+            let raw = format!("\n\n## Project Context\n\n{}", ctx);
+            truncate_section(&raw, &truncation_config)
+        })
+    } else {
+        String::new()
+    };
+    let constraints_context = if prompt_tier.include_constraints() {
+        constraints_context
+    } else {
+        String::new()
+    };
+    let upstream_artifacts_context = if prompt_tier.include_upstream_artifacts() {
+        truncate_section(&upstream_artifacts_context, &truncation_config)
+    } else {
+        String::new()
+    };
+    let iteration_context = if prompt_tier.include_iteration_context() {
+        config.iteration_context.as_ref()
+            .map_or(String::new(), |ctx| ctx.format_for_prompt())
+    } else {
+        String::new()
+    };
     let system_prompt = format!(
         "{}{}{}{}{}{}{}",
         base_system_prompt,
@@ -835,6 +871,48 @@ where
         substrate_config = substrate_config.with_working_dir(wt_path.clone());
     }
 
+    // Pre-flight context window check
+    let context_guard = ContextWindowGuard::with_defaults();
+    let model_for_guard = substrate_config.model.as_deref().unwrap_or("opus");
+    match context_guard.check(model_for_guard, &system_prompt, &task.description) {
+        ContextWindowCheck::Block { estimated_prompt_tokens, remaining_tokens, context_window } => {
+            tracing::error!(
+                "Context window exceeded for task {}: ~{}K prompt tokens, {}K remaining ({}K window)",
+                task_id,
+                estimated_prompt_tokens / 1000,
+                remaining_tokens / 1000,
+                context_window / 1000,
+            );
+            if let Some(ref g) = guardrails {
+                g.register_task_end(task_id, false).await;
+            }
+            return TaskResult {
+                task_id,
+                status: TaskStatus::Failed,
+                session: None,
+                error: Some(format!(
+                    "Context window exceeded: ~{}K prompt tokens, only {}K remaining",
+                    estimated_prompt_tokens / 1000,
+                    remaining_tokens / 1000,
+                )),
+                duration_secs: start.elapsed().as_secs(),
+                retry_count: 0,
+            };
+        }
+        ContextWindowCheck::Warn { estimated_prompt_tokens, remaining_tokens } => {
+            tracing::warn!(
+                "Context window low for task {}: ~{}K prompt tokens, {}K remaining",
+                task_id,
+                estimated_prompt_tokens / 1000,
+                remaining_tokens / 1000,
+            );
+        }
+        ContextWindowCheck::Ok { .. } => {}
+    }
+
+    // Model router for cost-effective model selection
+    let model_router = ModelRouter::with_defaults();
+
     // Execute with retries
     let mut last_error = None;
     let mut last_session = None;
@@ -855,13 +933,28 @@ where
             let _ = task_repo.update(&retry_task).await;
         }
 
+        // Select model based on task complexity and retry attempt
+        let selection = model_router.select_model(
+            task.routing_hints.complexity,
+            None, // Agent tier hint not available in DAG executor path
+            attempt,
+        );
+        let mut attempt_config = substrate_config.clone();
+        attempt_config.model = Some(selection.model.clone());
+        if selection.escalated {
+            tracing::info!(
+                "Task {} model escalated: {} ({})",
+                task_id, selection.model, selection.reason,
+            );
+        }
+
         // Build request with enhanced context
         let request = SubstrateRequest::new(
             task_id,
             agent_type,
             &system_prompt,
             &task.description,
-        ).with_config(substrate_config.clone());
+        ).with_config(attempt_config);
 
         // Execute with timeout
         let execution_result = timeout(
@@ -878,11 +971,32 @@ where
                     *tokens += tokens_used;
                 }
 
+                // Estimate cost from model pricing if not already set by substrate
+                let model_name = session.config.model.as_deref().unwrap_or("opus");
+                let estimated_cost_cents = session.cost_cents.or_else(|| {
+                    cost_tracker::estimate_cost_cents(
+                        model_name,
+                        session.input_tokens,
+                        session.output_tokens,
+                        session.cache_read_tokens,
+                        session.cache_write_tokens,
+                    )
+                });
+
+                if session.cache_read_tokens > 0 || session.cache_write_tokens > 0 {
+                    tracing::debug!(
+                        "Task {} cache stats: read={}K, write={}K (model={})",
+                        task_id,
+                        session.cache_read_tokens / 1000,
+                        session.cache_write_tokens / 1000,
+                        model_name,
+                    );
+                }
+
                 // Record tokens with guardrails
                 if let Some(ref g) = guardrails {
                     g.record_tokens(tokens_used);
-                    // Also record cost if available
-                    if let Some(cost_cents) = session.cost_cents {
+                    if let Some(cost_cents) = estimated_cost_cents {
                         g.record_cost(cost_cents);
                     }
                 }
@@ -974,14 +1088,12 @@ where
 mod tests {
     use super::*;
     use crate::adapters::sqlite::{
-        create_test_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository, Migrator, all_embedded_migrations,
+        create_migrated_test_pool, SqliteAgentRepository, SqliteGoalRepository, SqliteTaskRepository,
     };
     use crate::adapters::substrates::MockSubstrate;
 
     async fn setup_executor() -> DagExecutor<SqliteTaskRepository, SqliteAgentRepository, SqliteGoalRepository> {
-        let pool = create_test_pool().await.unwrap();
-        let migrator = Migrator::new(pool.clone());
-        migrator.run_embedded_migrations(all_embedded_migrations()).await.unwrap();
+        let pool = create_migrated_test_pool().await.unwrap();
 
         let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
         let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));

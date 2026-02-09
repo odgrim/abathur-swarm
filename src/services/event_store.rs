@@ -188,6 +188,24 @@ pub trait EventStore: Send + Sync {
     async fn replay_since(&self, sequence: SequenceNumber) -> Result<Vec<UnifiedEvent>, EventStoreError> {
         self.query(EventQuery::new().since_sequence(sequence).ascending()).await
     }
+
+    /// Get the last processed sequence number for a handler.
+    async fn get_watermark(&self, _handler_name: &str) -> Result<Option<SequenceNumber>, EventStoreError> {
+        Ok(None)
+    }
+
+    /// Set the last processed sequence number for a handler.
+    async fn set_watermark(&self, _handler_name: &str, _seq: SequenceNumber) -> Result<(), EventStoreError> {
+        Ok(())
+    }
+
+    /// Detect gaps in the sequence number range [from, to].
+    ///
+    /// Returns a list of (gap_start, gap_end) pairs representing missing
+    /// sequence ranges. Used by ReconciliationHandler to detect lost events.
+    async fn detect_sequence_gaps(&self, _from: u64, _to: u64) -> Result<Vec<(u64, u64)>, EventStoreError> {
+        Ok(vec![])
+    }
 }
 
 /// In-memory event store for testing.

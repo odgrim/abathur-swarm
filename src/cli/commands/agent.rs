@@ -6,9 +6,9 @@ use sqlx::SqlitePool;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::adapters::sqlite::{initialize_database, SqliteAgentRepository};
+use crate::adapters::sqlite::{initialize_default_database, SqliteAgentRepository};
 use crate::cli::id_resolver::resolve_task_id;
-use crate::cli::output::{output, CommandOutput};
+use crate::cli::output::{output, truncate, CommandOutput};
 use crate::domain::models::a2a::{A2AAgentCard, A2AMessage, MessageType};
 use crate::domain::models::{AgentTemplate, AgentTier, ToolCapability};
 use crate::domain::ports::AgentFilter;
@@ -494,12 +494,13 @@ impl CommandOutput for ExportOutput {
 }
 
 pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
-    let pool = initialize_database("sqlite:.abathur/abathur.db")
+    let pool = initialize_default_database()
         .await
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
     let repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-    let service = AgentService::new(repo.clone());
+    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
+    let service = AgentService::new(repo.clone(), event_bus);
 
     match args.command {
         AgentCommands::Register { name, description, tier, prompt, tool, max_turns } => {
@@ -587,7 +588,7 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
         }
 
         AgentCommands::Disable { name } => {
-            let agent = service.disable_template(&name).await?;
+            let agent = service.set_template_status(&name, crate::domain::models::AgentStatus::Disabled).await?;
 
             let out = AgentActionOutput {
                 success: true,
@@ -598,7 +599,7 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
         }
 
         AgentCommands::Enable { name } => {
-            let agent = service.enable_template(&name).await?;
+            let agent = service.set_template_status(&name, crate::domain::models::AgentStatus::Active).await?;
 
             let out = AgentActionOutput {
                 success: true,
@@ -973,10 +974,3 @@ async fn handle_cards_command(command: CardsCommands, json_mode: bool) -> Result
     Ok(())
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len - 3])
-    }
-}

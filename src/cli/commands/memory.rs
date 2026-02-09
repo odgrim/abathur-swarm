@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use std::sync::Arc;
 
-use crate::adapters::sqlite::{SqliteMemoryRepository, initialize_database};
+use crate::adapters::sqlite::{SqliteMemoryRepository, initialize_default_database};
 use crate::cli::id_resolver::resolve_memory_id;
-use crate::cli::output::{output, CommandOutput};
+use crate::cli::output::{output, truncate, CommandOutput};
 use crate::domain::models::{Memory, MemoryQuery, MemoryTier, MemoryType};
 use crate::services::MemoryService;
 
@@ -252,12 +252,13 @@ impl CommandOutput for PruneOutput {
 }
 
 pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
-    let pool = initialize_database("sqlite:.abathur/abathur.db")
+    let pool = initialize_default_database()
         .await
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
     let repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-    let service = MemoryService::new(repo);
+    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
+    let service = MemoryService::new_with_event_bus(repo, event_bus);
 
     match args.command {
         MemoryCommands::Store { key, content, namespace, tier, memory_type } => {
@@ -391,10 +392,3 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
     Ok(())
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len - 3])
-    }
-}

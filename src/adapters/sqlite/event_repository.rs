@@ -51,6 +51,8 @@ impl SqliteEventRepository {
             EventCategory::Agent => "agent",
             EventCategory::Verification => "verification",
             EventCategory::Escalation => "escalation",
+            EventCategory::Memory => "memory",
+            EventCategory::Scheduler => "scheduler",
         }
     }
 
@@ -63,6 +65,8 @@ impl SqliteEventRepository {
             "agent" => EventCategory::Agent,
             "verification" => EventCategory::Verification,
             "escalation" => EventCategory::Escalation,
+            "memory" => EventCategory::Memory,
+            "scheduler" => EventCategory::Scheduler,
             _ => EventCategory::Task,
         }
     }
@@ -220,6 +224,68 @@ impl EventStore for SqliteEventRepository {
             .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
 
         Ok(result.rows_affected())
+    }
+
+    async fn get_watermark(&self, handler_name: &str) -> Result<Option<SequenceNumber>, EventStoreError> {
+        let result: Option<(i64,)> = sqlx::query_as(
+            "SELECT last_sequence FROM handler_watermarks WHERE handler_name = ?"
+        )
+        .bind(handler_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+
+        Ok(result.map(|(seq,)| SequenceNumber(seq as u64)))
+    }
+
+    async fn set_watermark(&self, handler_name: &str, seq: SequenceNumber) -> Result<(), EventStoreError> {
+        sqlx::query(
+            r#"
+            INSERT INTO handler_watermarks (handler_name, last_sequence, updated_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(handler_name) DO UPDATE SET
+                last_sequence = excluded.last_sequence,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(handler_name)
+        .bind(seq.0 as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn detect_sequence_gaps(&self, from: u64, to: u64) -> Result<Vec<(u64, u64)>, EventStoreError> {
+        // Query all sequence numbers in the range
+        let rows: Vec<(i64,)> = sqlx::query_as(
+            "SELECT sequence FROM events WHERE sequence >= ? AND sequence <= ? ORDER BY sequence ASC"
+        )
+        .bind(from as i64)
+        .bind(to as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+
+        let sequences: Vec<u64> = rows.into_iter().map(|(s,)| s as u64).collect();
+
+        let mut gaps = Vec::new();
+        let mut expected = from;
+
+        for seq in &sequences {
+            if *seq > expected {
+                gaps.push((expected, *seq - 1));
+            }
+            expected = *seq + 1;
+        }
+
+        // Check for gap at the end
+        if expected <= to {
+            gaps.push((expected, to));
+        }
+
+        Ok(gaps)
     }
 
     async fn stats(&self) -> Result<EventStoreStats, EventStoreError> {

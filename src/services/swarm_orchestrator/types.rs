@@ -15,8 +15,6 @@ pub struct SwarmConfig {
     pub default_max_turns: u32,
     /// Whether to use worktrees for task isolation.
     pub use_worktrees: bool,
-    /// Poll interval for goal progress (ms).
-    pub poll_interval_ms: u64,
     /// Maximum execution time per goal (seconds).
     pub goal_timeout_secs: u64,
     /// Whether to auto-retry failed tasks.
@@ -49,6 +47,8 @@ pub struct SwarmConfig {
     pub enable_intent_verification: bool,
     /// Configuration for convergence behavior.
     pub convergence: ConvergenceLoopConfig,
+    /// Interval in seconds for the reconciliation safety-net loop (default: 30).
+    pub reconciliation_interval_secs: Option<u64>,
 }
 
 /// Configuration for the convergence loop behavior.
@@ -141,7 +141,6 @@ impl Default for SwarmConfig {
             max_agents: 4,
             default_max_turns: 25,
             use_worktrees: true,
-            poll_interval_ms: 1000,
             goal_timeout_secs: 3600,
             auto_retry: true,
             max_task_retries: 3,
@@ -157,6 +156,7 @@ impl Default for SwarmConfig {
             spawn_limits: crate::services::config::SpawnLimitsConfig::default(),
             enable_intent_verification: true,
             convergence: ConvergenceLoopConfig::default(),
+            reconciliation_interval_secs: None,
         }
     }
 }
@@ -205,8 +205,14 @@ pub enum SwarmEvent {
     TaskQueuedForMerge { task_id: Uuid, stage: String },
     /// Pull request created for completed task.
     PullRequestCreated { task_id: Uuid, pr_url: String, branch: String },
+    /// Task claimed by an agent.
+    TaskClaimed { task_id: Uuid, agent_type: String },
     /// Task merged successfully.
     TaskMerged { task_id: Uuid, commit_sha: String },
+    /// Agent instance completed.
+    AgentInstanceCompleted { instance_id: Uuid, task_id: Uuid, tokens_used: u64 },
+    /// Reconciliation completed.
+    ReconciliationCompleted { corrections_made: u32 },
     /// Evolution event triggered.
     EvolutionTriggered { template_name: String, trigger: String },
     /// Specialist agent spawned for special handling.

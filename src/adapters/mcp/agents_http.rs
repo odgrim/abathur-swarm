@@ -280,7 +280,7 @@ async fn disable_agent<A: AgentRepository + Clone + Send + Sync + 'static>(
     State(state): State<Arc<AppState<A>>>,
     Path(name): Path<String>,
 ) -> Result<Json<AgentResponse>, (StatusCode, Json<ErrorResponse>)> {
-    match state.service.disable_template(&name).await {
+    match state.service.set_template_status(&name, crate::domain::models::agent::AgentStatus::Disabled).await {
         Ok(template) => Ok(Json(to_response(&template))),
         Err(e) => Err((
             StatusCode::BAD_REQUEST,

@@ -41,7 +41,7 @@ impl Default for AnthropicApiConfig {
         Self {
             api_key: None,
             base_url: "https://api.anthropic.com".to_string(),
-            default_model: "claude-sonnet-4-20250514".to_string(),
+            default_model: "claude-opus-4-6-20250616".to_string(),
             api_version: "2023-06-01".to_string(),
             timeout_secs: 300,
             max_tokens: 4096,
@@ -77,6 +77,49 @@ pub enum MessageRole {
     Assistant,
 }
 
+/// Cache control marker for Anthropic prompt caching.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub control_type: String,
+}
+
+impl CacheControl {
+    pub fn ephemeral() -> Self {
+        Self { control_type: "ephemeral".to_string() }
+    }
+}
+
+/// System prompt content block with optional cache_control.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemContentBlock {
+    #[serde(rename = "type")]
+    pub block_type: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+impl SystemContentBlock {
+    /// Create a text block without caching.
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            block_type: "text".to_string(),
+            text: content.into(),
+            cache_control: None,
+        }
+    }
+
+    /// Create a text block with ephemeral cache_control.
+    pub fn cached_text(content: impl Into<String>) -> Self {
+        Self {
+            block_type: "text".to_string(),
+            text: content.into(),
+            cache_control: Some(CacheControl::ephemeral()),
+        }
+    }
+}
+
 /// Content block in a message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -110,8 +153,9 @@ pub struct Message {
 pub struct MessagesRequest {
     pub model: String,
     pub max_tokens: u32,
+    /// System prompt as content block array (supports cache_control markers).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<Vec<SystemContentBlock>>,
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
@@ -225,6 +269,10 @@ impl AnthropicApiSubstrate {
     }
 
     /// Build the Messages API request from a substrate request.
+    ///
+    /// The system prompt is sent as a content block array with `cache_control`
+    /// markers for prompt caching. The stable base prompt gets a cache breakpoint
+    /// so subsequent calls with the same prefix get ~90% input token savings.
     fn build_request(&self, request: &SubstrateRequest) -> MessagesRequest {
         let model = request.config.model.clone()
             .unwrap_or_else(|| self.config.default_model.clone());
@@ -239,7 +287,11 @@ impl AnthropicApiSubstrate {
         let system = if request.system_prompt.is_empty() {
             None
         } else {
-            Some(request.system_prompt.clone())
+            // Send system prompt as content block array with cache_control.
+            // The entire system prompt is marked as cacheable (ephemeral).
+            // On subsequent calls with the same system prompt prefix,
+            // Anthropic will serve from cache (~90% input token savings).
+            Some(vec![SystemContentBlock::cached_text(&request.system_prompt)])
         };
 
         MessagesRequest {

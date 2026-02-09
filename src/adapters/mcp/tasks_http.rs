@@ -256,7 +256,7 @@ async fn list_tasks<T: TaskRepository + Clone + Send + Sync + 'static>(
 
             // Filter by status if specified
             if let Some(status_str) = &params.status {
-                if let Some(status) = parse_status(status_str) {
+                if let Some(status) = TaskStatus::from_str(status_str) {
                     tasks.retain(|t| t.status == status.as_str());
                 }
             }
@@ -281,7 +281,7 @@ async fn submit_task<T: TaskRepository + Clone + Send + Sync + 'static>(
     let priority = req
         .priority
         .as_ref()
-        .and_then(|p| parse_priority(p))
+        .and_then(|p| TaskPriority::from_str(p))
         .unwrap_or(TaskPriority::Normal);
 
     let source = TaskSource::Human;
@@ -434,28 +434,6 @@ async fn get_stats<T: TaskRepository + Clone + Send + Sync + 'static>(
     }))
 }
 
-fn parse_status(s: &str) -> Option<TaskStatus> {
-    match s.to_lowercase().as_str() {
-        "pending" => Some(TaskStatus::Pending),
-        "ready" => Some(TaskStatus::Ready),
-        "running" => Some(TaskStatus::Running),
-        "complete" | "completed" => Some(TaskStatus::Complete),
-        "failed" => Some(TaskStatus::Failed),
-        "blocked" => Some(TaskStatus::Blocked),
-        "canceled" | "cancelled" => Some(TaskStatus::Canceled),
-        _ => None,
-    }
-}
-
-fn parse_priority(s: &str) -> Option<TaskPriority> {
-    match s.to_lowercase().as_str() {
-        "low" => Some(TaskPriority::Low),
-        "normal" => Some(TaskPriority::Normal),
-        "high" => Some(TaskPriority::High),
-        "critical" => Some(TaskPriority::Critical),
-        _ => None,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -467,26 +445,6 @@ mod tests {
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.port, 9101);
         assert!(config.enable_cors);
-    }
-
-    #[test]
-    fn test_parse_status() {
-        assert_eq!(parse_status("pending"), Some(TaskStatus::Pending));
-        assert_eq!(parse_status("READY"), Some(TaskStatus::Ready));
-        assert_eq!(parse_status("Running"), Some(TaskStatus::Running));
-        assert_eq!(parse_status("complete"), Some(TaskStatus::Complete));
-        assert_eq!(parse_status("completed"), Some(TaskStatus::Complete));
-        assert_eq!(parse_status("failed"), Some(TaskStatus::Failed));
-        assert_eq!(parse_status("invalid"), None);
-    }
-
-    #[test]
-    fn test_parse_priority() {
-        assert_eq!(parse_priority("low"), Some(TaskPriority::Low));
-        assert_eq!(parse_priority("NORMAL"), Some(TaskPriority::Normal));
-        assert_eq!(parse_priority("High"), Some(TaskPriority::High));
-        assert_eq!(parse_priority("critical"), Some(TaskPriority::Critical));
-        assert_eq!(parse_priority("invalid"), None);
     }
 
     #[test]

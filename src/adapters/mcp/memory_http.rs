@@ -248,7 +248,7 @@ async fn list_memories<M: MemoryRepository + Clone + Send + Sync + 'static>(
         query = query.namespace(ns);
     }
     if let Some(t) = &params.tier {
-        if let Some(tier) = parse_tier(t) {
+        if let Some(tier) = MemoryTier::from_str(t) {
             query = query.tier(tier);
         }
     }
@@ -289,12 +289,12 @@ async fn store_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
     let tier = req
         .tier
         .as_ref()
-        .and_then(|t| parse_tier(t))
+        .and_then(|t| MemoryTier::from_str(t))
         .unwrap_or(MemoryTier::Working);
     let memory_type = req
         .memory_type
         .as_ref()
-        .and_then(|t| parse_memory_type(t))
+        .and_then(|t| MemoryType::from_str(t))
         .unwrap_or(MemoryType::Fact);
 
     match state
@@ -523,27 +523,6 @@ async fn get_stats<M: MemoryRepository + Clone + Send + Sync + 'static>(
     }
 }
 
-fn parse_memory_type(s: &str) -> Option<MemoryType> {
-    match s.to_lowercase().as_str() {
-        "fact" => Some(MemoryType::Fact),
-        "code" => Some(MemoryType::Code),
-        "decision" => Some(MemoryType::Decision),
-        "error" => Some(MemoryType::Error),
-        "pattern" => Some(MemoryType::Pattern),
-        "reference" => Some(MemoryType::Reference),
-        "context" => Some(MemoryType::Context),
-        _ => None,
-    }
-}
-
-fn parse_tier(s: &str) -> Option<MemoryTier> {
-    match s.to_lowercase().as_str() {
-        "working" => Some(MemoryTier::Working),
-        "episodic" => Some(MemoryTier::Episodic),
-        "semantic" => Some(MemoryTier::Semantic),
-        _ => None,
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -555,22 +534,6 @@ mod tests {
         assert_eq!(config.host, "127.0.0.1");
         assert_eq!(config.port, 9100);
         assert!(config.enable_cors);
-    }
-
-    #[test]
-    fn test_parse_memory_type() {
-        assert_eq!(parse_memory_type("fact"), Some(MemoryType::Fact));
-        assert_eq!(parse_memory_type("CODE"), Some(MemoryType::Code));
-        assert_eq!(parse_memory_type("Pattern"), Some(MemoryType::Pattern));
-        assert_eq!(parse_memory_type("invalid"), None);
-    }
-
-    #[test]
-    fn test_parse_tier() {
-        assert_eq!(parse_tier("working"), Some(MemoryTier::Working));
-        assert_eq!(parse_tier("EPISODIC"), Some(MemoryTier::Episodic));
-        assert_eq!(parse_tier("semantic"), Some(MemoryTier::Semantic));
-        assert_eq!(parse_tier("invalid"), None);
     }
 
     #[test]

@@ -156,67 +156,50 @@ pub struct Memory {
     pub expires_at: Option<DateTime<Utc>>,
     /// Version for optimistic locking
     pub version: u64,
+    /// Embedding vector for semantic similarity search.
+    /// None if embeddings are disabled or not yet computed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
 }
 
 impl Memory {
-    /// Create a new working memory.
-    pub fn working(key: impl Into<String>, content: impl Into<String>) -> Self {
+    fn new_with_tier(key: impl Into<String>, content: impl Into<String>, tier: MemoryTier) -> Self {
         let now = Utc::now();
+        let memory_type = match tier {
+            MemoryTier::Semantic => MemoryType::Pattern,
+            _ => MemoryType::Fact,
+        };
         Self {
             id: Uuid::new_v4(),
             key: key.into(),
             namespace: "default".to_string(),
             content: content.into(),
-            tier: MemoryTier::Working,
-            memory_type: MemoryType::Fact,
+            memory_type,
             metadata: MemoryMetadata::default(),
             access_count: 0,
             last_accessed: now,
             created_at: now,
             updated_at: now,
-            expires_at: Some(now + Duration::hours(1)),
+            expires_at: tier.default_ttl().map(|ttl| now + ttl),
             version: 1,
+            tier,
+            embedding: None,
         }
+    }
+
+    /// Create a new working memory.
+    pub fn working(key: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::new_with_tier(key, content, MemoryTier::Working)
     }
 
     /// Create a new episodic memory.
     pub fn episodic(key: impl Into<String>, content: impl Into<String>) -> Self {
-        let now = Utc::now();
-        Self {
-            id: Uuid::new_v4(),
-            key: key.into(),
-            namespace: "default".to_string(),
-            content: content.into(),
-            tier: MemoryTier::Episodic,
-            memory_type: MemoryType::Fact,
-            metadata: MemoryMetadata::default(),
-            access_count: 0,
-            last_accessed: now,
-            created_at: now,
-            updated_at: now,
-            expires_at: Some(now + Duration::days(7)),
-            version: 1,
-        }
+        Self::new_with_tier(key, content, MemoryTier::Episodic)
     }
 
     /// Create a new semantic memory (no expiry).
     pub fn semantic(key: impl Into<String>, content: impl Into<String>) -> Self {
-        let now = Utc::now();
-        Self {
-            id: Uuid::new_v4(),
-            key: key.into(),
-            namespace: "default".to_string(),
-            content: content.into(),
-            tier: MemoryTier::Semantic,
-            memory_type: MemoryType::Pattern,
-            metadata: MemoryMetadata::default(),
-            access_count: 0,
-            last_accessed: now,
-            created_at: now,
-            updated_at: now,
-            expires_at: None,
-            version: 1,
-        }
+        Self::new_with_tier(key, content, MemoryTier::Semantic)
     }
 
     /// Set namespace.
@@ -252,6 +235,12 @@ impl Memory {
     /// Add a tag.
     pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
         self.metadata.tags.push(tag.into());
+        self
+    }
+
+    /// Set embedding vector.
+    pub fn with_embedding(mut self, embedding: Vec<f32>) -> Self {
+        self.embedding = Some(embedding);
         self
     }
 
@@ -475,6 +464,23 @@ impl Memory {
 
         // Combine: 30% Jaccard + 50% TF-IDF weighted + 20% bigram
         (0.30 * jaccard + 0.50 * tf_idf_score + 0.20 * bigram_score).min(1.0)
+    }
+
+    /// Compute cosine similarity between this memory's embedding and a query vector.
+    ///
+    /// Returns None if either embedding is missing or dimensions don't match.
+    pub fn cosine_similarity(&self, query_vector: &[f32]) -> Option<f32> {
+        let embedding = self.embedding.as_ref()?;
+        if embedding.len() != query_vector.len() || embedding.is_empty() {
+            return None;
+        }
+        let dot: f32 = embedding.iter().zip(query_vector.iter()).map(|(a, b)| a * b).sum();
+        let norm_a: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm_b: f32 = query_vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm_a == 0.0 || norm_b == 0.0 {
+            return None;
+        }
+        Some(dot / (norm_a * norm_b))
     }
 
     /// Estimate the token count of this memory's content.
@@ -829,5 +835,46 @@ mod tests {
         assert_eq!(query.tier, Some(MemoryTier::Semantic));
         assert_eq!(query.search_query, Some("pattern".to_string()));
         assert_eq!(query.limit, Some(10));
+    }
+
+    #[test]
+    fn test_cosine_similarity_identical() {
+        let mem = Memory::working("key", "content")
+            .with_embedding(vec![1.0, 0.0, 0.0]);
+        let query = vec![1.0, 0.0, 0.0];
+        let sim = mem.cosine_similarity(&query).unwrap();
+        assert!((sim - 1.0).abs() < 0.001, "Identical vectors should have similarity 1.0");
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal() {
+        let mem = Memory::working("key", "content")
+            .with_embedding(vec![1.0, 0.0, 0.0]);
+        let query = vec![0.0, 1.0, 0.0];
+        let sim = mem.cosine_similarity(&query).unwrap();
+        assert!(sim.abs() < 0.001, "Orthogonal vectors should have similarity ~0.0");
+    }
+
+    #[test]
+    fn test_cosine_similarity_no_embedding() {
+        let mem = Memory::working("key", "content");
+        let query = vec![1.0, 0.0];
+        assert!(mem.cosine_similarity(&query).is_none());
+    }
+
+    #[test]
+    fn test_cosine_similarity_dimension_mismatch() {
+        let mem = Memory::working("key", "content")
+            .with_embedding(vec![1.0, 0.0]);
+        let query = vec![1.0, 0.0, 0.0];
+        assert!(mem.cosine_similarity(&query).is_none());
+    }
+
+    #[test]
+    fn test_with_embedding() {
+        let mem = Memory::working("key", "content")
+            .with_embedding(vec![0.1, 0.2, 0.3]);
+        assert!(mem.embedding.is_some());
+        assert_eq!(mem.embedding.unwrap().len(), 3);
     }
 }

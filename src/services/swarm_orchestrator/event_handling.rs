@@ -27,17 +27,15 @@ where
     A: AgentRepository + 'static,
     M: MemoryRepository + 'static,
 {
-    /// Get the EventBus if configured.
-    pub fn event_bus(&self) -> Option<&Arc<crate::services::event_bus::EventBus>> {
-        self.event_bus.as_ref()
+    /// Get the EventBus.
+    pub fn event_bus(&self) -> &Arc<crate::services::event_bus::EventBus> {
+        &self.event_bus
     }
 
-    /// Emit an event to the EventBus if configured.
+    /// Emit an event to the EventBus.
     /// This is a helper for publishing events without needing the mpsc channel.
     pub async fn emit_to_event_bus(&self, event: SwarmEvent) {
-        if let Some(ref bus) = self.event_bus {
-            bus.publish_swarm_event(event).await;
-        }
+        self.event_bus.publish_swarm_event(event).await;
     }
 
     // ========================================================================
@@ -328,103 +326,4 @@ where
         Ok(())
     }
 
-    /// Process A2A delegation requests from agents.
-    ///
-    /// Polls the A2A gateway for pending delegation messages and creates
-    /// corresponding tasks for the target agents.
-    pub(super) async fn process_a2a_delegations(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
-        let Some(ref a2a_url) = self.config.mcp_servers.a2a_gateway else {
-            return Ok(());
-        };
-
-        // Poll A2A gateway for pending delegation messages
-        // Using HTTP GET to fetch pending delegations
-        let client = reqwest::Client::new();
-        let url = format!("{}/api/v1/delegations/pending", a2a_url);
-
-        let response = match client.get(&url).timeout(std::time::Duration::from_secs(5)).send().await {
-            Ok(resp) => resp,
-            Err(e) => {
-                // Non-fatal: A2A gateway may not be running or reachable
-                tracing::debug!("Failed to poll A2A gateway for delegations: {}", e);
-                return Ok(());
-            }
-        };
-
-        if !response.status().is_success() {
-            return Ok(());
-        }
-
-        // Parse pending delegations
-        #[derive(serde::Deserialize)]
-        struct PendingDelegation {
-            id: Uuid,
-            sender_id: String,
-            target_agent: String,
-            task_description: String,
-            parent_task_id: Option<Uuid>,
-            goal_id: Option<Uuid>,
-            priority: String,
-        }
-
-        let delegations: Vec<PendingDelegation> = match response.json().await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::debug!("Failed to parse A2A delegations: {}", e);
-                return Ok(());
-            }
-        };
-
-        for delegation in delegations {
-            // Create a new task for the delegated work
-            let priority = match delegation.priority.to_lowercase().as_str() {
-                "critical" => crate::domain::models::TaskPriority::Critical,
-                "high" => crate::domain::models::TaskPriority::High,
-                "low" => crate::domain::models::TaskPriority::Low,
-                _ => crate::domain::models::TaskPriority::Normal,
-            };
-
-            let mut task = crate::domain::models::Task::with_title(
-                &format!("Delegated: {}", &delegation.task_description.chars().take(50).collect::<String>()),
-                &format!(
-                    "## A2A Delegation\n\n\
-                    Delegated by: {}\n\n\
-                    ## Task\n\n{}",
-                    delegation.sender_id,
-                    delegation.task_description
-                ),
-            )
-            .with_priority(priority)
-            .with_agent(&delegation.target_agent);
-
-            if let Some(parent_id) = delegation.parent_task_id {
-                task.parent_id = Some(parent_id);
-            }
-
-            if task.validate().is_ok() {
-                if let Ok(()) = self.task_repo.create(&task).await {
-                    let _ = event_tx.send(SwarmEvent::TaskSubmitted {
-                        task_id: task.id,
-                        task_title: task.title.clone(),
-                        goal_id: delegation.goal_id.unwrap_or(Uuid::nil()),
-                    }).await;
-
-                    self.audit_log.info(
-                        AuditCategory::Task,
-                        AuditAction::TaskCreated,
-                        format!(
-                            "Created delegated task {} for agent '{}' (from: {})",
-                            task.id, delegation.target_agent, delegation.sender_id
-                        ),
-                    ).await;
-
-                    // Acknowledge the delegation in A2A gateway
-                    let ack_url = format!("{}/api/v1/delegations/{}/ack", a2a_url, delegation.id);
-                    let _ = client.post(&ack_url).send().await;
-                }
-            }
-        }
-
-        Ok(())
-    }
 }
