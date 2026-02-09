@@ -5,10 +5,12 @@ use clap::{Args, Subcommand};
 use std::sync::Arc;
 
 use crate::adapters::sqlite::{goal_repository::SqliteGoalRepository, initialize_default_database};
+use crate::cli::command_dispatcher::CliCommandDispatcher;
 use crate::cli::id_resolver::resolve_goal_id;
 use crate::cli::output::{output, truncate, CommandOutput};
 use crate::domain::models::{Goal, GoalConstraint, GoalPriority, GoalStatus};
 use crate::domain::ports::GoalFilter;
+use crate::services::command_bus::{CommandResult, DomainCommand, GoalCommand};
 use crate::services::GoalService;
 
 #[derive(Args, Debug)]
@@ -188,7 +190,8 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
 
     let repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
     let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
-    let service = GoalService::new(repo, event_bus);
+    let service = GoalService::new(repo, event_bus.clone());
+    let dispatcher = CliCommandDispatcher::new(pool.clone(), event_bus);
 
     match args.command {
         GoalCommands::Set { name, description, priority, parent, constraint } => {
@@ -212,14 +215,22 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
                 })
                 .collect();
 
-            let goal = service.create_goal(
+            let cmd = DomainCommand::Goal(GoalCommand::Create {
                 name,
-                description.unwrap_or_default(),
+                description: description.unwrap_or_default(),
                 priority,
                 parent_id,
                 constraints,
-                vec![],
-            ).await?;
+                domains: vec![],
+            });
+
+            let result = dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let goal = match result {
+                CommandResult::Goal(g) => g,
+                _ => anyhow::bail!("Unexpected command result"),
+            };
 
             let out = GoalActionOutput {
                 success: true,
@@ -262,7 +273,19 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
 
         GoalCommands::Pause { id } => {
             let uuid = resolve_goal_id(&pool, &id).await?;
-            let goal = service.transition_status(uuid, GoalStatus::Paused).await?;
+
+            let cmd = DomainCommand::Goal(GoalCommand::TransitionStatus {
+                goal_id: uuid,
+                new_status: GoalStatus::Paused,
+            });
+
+            let result = dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let goal = match result {
+                CommandResult::Goal(g) => g,
+                _ => anyhow::bail!("Unexpected command result"),
+            };
 
             let out = GoalActionOutput {
                 success: true,
@@ -274,7 +297,19 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
 
         GoalCommands::Resume { id } => {
             let uuid = resolve_goal_id(&pool, &id).await?;
-            let goal = service.transition_status(uuid, GoalStatus::Active).await?;
+
+            let cmd = DomainCommand::Goal(GoalCommand::TransitionStatus {
+                goal_id: uuid,
+                new_status: GoalStatus::Active,
+            });
+
+            let result = dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let goal = match result {
+                CommandResult::Goal(g) => g,
+                _ => anyhow::bail!("Unexpected command result"),
+            };
 
             let out = GoalActionOutput {
                 success: true,
@@ -286,7 +321,19 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
 
         GoalCommands::Retire { id } => {
             let uuid = resolve_goal_id(&pool, &id).await?;
-            let goal = service.transition_status(uuid, GoalStatus::Retired).await?;
+
+            let cmd = DomainCommand::Goal(GoalCommand::TransitionStatus {
+                goal_id: uuid,
+                new_status: GoalStatus::Retired,
+            });
+
+            let result = dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let goal = match result {
+                CommandResult::Goal(g) => g,
+                _ => anyhow::bail!("Unexpected command result"),
+            };
 
             let out = GoalActionOutput {
                 success: true,

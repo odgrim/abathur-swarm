@@ -569,6 +569,12 @@ impl EventReactor {
         self.running.load(Ordering::SeqCst)
     }
 
+    /// Get the names of all registered handlers (snapshot).
+    pub async fn handler_names(&self) -> Vec<String> {
+        let handlers = self.handlers.read().await;
+        handlers.iter().map(|h| h.metadata().name).collect()
+    }
+
     /// Replay events that handlers missed during downtime.
     ///
     /// Finds the minimum watermark across all registered handlers, queries

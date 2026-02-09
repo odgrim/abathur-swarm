@@ -1,5 +1,6 @@
 //! Command-line interface module for Abathur.
 
+pub mod command_dispatcher;
 pub mod commands;
 pub mod event_helpers;
 pub mod id_resolver;
@@ -47,6 +48,10 @@ pub enum Commands {
     Swarm(commands::swarm::SwarmArgs),
     /// Start and manage MCP (Model Context Protocol) HTTP servers
     Mcp(commands::mcp::McpArgs),
+    /// Manage trigger rules for event-driven automation
+    Trigger(commands::trigger::TriggerArgs),
+    /// Query and inspect the event store
+    Event(commands::event::EventArgs),
 }
 
 pub fn handle_error(err: anyhow::Error, json_mode: bool) -> ! {

@@ -7,6 +7,7 @@ pub mod goal_repository;
 pub mod memory_repository;
 pub mod migrations;
 pub mod task_repository;
+pub mod trigger_rule_repository;
 pub mod worktree_repository;
 
 pub use agent_repository::SqliteAgentRepository;
@@ -16,6 +17,7 @@ pub use goal_repository::SqliteGoalRepository;
 pub use memory_repository::SqliteMemoryRepository;
 pub use migrations::{all_embedded_migrations, Migration, MigrationError, Migrator};
 pub use task_repository::SqliteTaskRepository;
+pub use trigger_rule_repository::SqliteTriggerRuleRepository;
 pub use worktree_repository::SqliteWorktreeRepository;
 
 use chrono::{DateTime, Utc};

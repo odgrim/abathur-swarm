@@ -4,6 +4,7 @@ pub mod agent_service;
 pub mod audit_log;
 pub mod circuit_breaker;
 pub mod cold_start;
+pub mod command_bus;
 pub mod config;
 pub mod context_truncation;
 pub mod context_window;
@@ -31,11 +32,13 @@ pub mod meta_planner; // Rust service module for decomposition planning
 pub mod overmind;
 pub mod swarm_orchestrator;
 pub mod task_service;
+pub mod trigger_rules;
 pub mod worktree_service;
 
 pub use agent_service::AgentService;
 pub use audit_log::{AuditAction, AuditActor, AuditCategory, AuditEntry, AuditFilter, AuditLevel, AuditLogConfig, AuditLogService, AuditStats, DecisionRationale};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerService, CircuitCheckResult, CircuitScope, CircuitState, CircuitStats as CircuitBreakerStats, CircuitTrippedEvent, RecoveryAction, RecoveryPolicy};
+pub use command_bus::{CommandBus, CommandEnvelope, CommandError, CommandId, CommandResult, CommandSource, DomainCommand, GoalCommand, GoalCommandHandler, MemoryCommand, MemoryCommandHandler, TaskCommand, TaskCommandHandler};
 pub use cold_start::{ColdStartConfig, ColdStartReport, ColdStartService, Convention, ConventionCategory, Dependency, ProjectType};
 pub use config::{Config, ConfigError, A2AFederationConfig, TrustedSwarmConfig, TrustLevel, FederationAuthMethod, SwarmIdentityConfig};
 pub use context_truncation::{TruncationConfig, estimate_tokens, truncate_section, truncate_to_token_budget, truncate_context_sections};
@@ -64,6 +67,7 @@ pub use event_bus::{EventBus, EventBusConfig, EventCategory, EventId, EventPaylo
 pub use event_reactor::{EventReactor, ReactorConfig, EventHandler, EventFilter, HandlerId, HandlerPriority, Reaction, HandlerContext, HandlerMetadata, ErrorStrategy};
 pub use event_scheduler::{EventScheduler, SchedulerConfig, ScheduledEvent, ScheduleType};
 pub use event_store::{EventQuery, EventStore, EventStoreError, EventStoreStats, InMemoryEventStore};
+pub use trigger_rules::{TriggerRule, TriggerRuleEngine, TriggerCondition, TriggerAction, TriggerEventPayload, SerializableEventFilter, SerializableDomainCommand};
 
 /// Extract a JSON object from LLM text output.
 ///

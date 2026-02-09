@@ -41,14 +41,28 @@ async fn build_cli_orchestrator(config: SwarmConfig) -> Result<CliOrchestrator> 
     let substrate: Arc<dyn crate::domain::ports::Substrate> =
         Arc::from(SubstrateRegistry::mock_substrate());
 
-    let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
-    let event_reactor = Arc::new(EventReactor::new(event_bus.clone(), ReactorConfig::default()));
+    let event_store: Arc<dyn crate::services::event_store::EventStore> =
+        Arc::new(crate::adapters::sqlite::SqliteEventRepository::new(pool.clone()));
+    let event_bus = Arc::new(
+        EventBus::new(EventBusConfig { persist_events: true, ..Default::default() })
+            .with_store(event_store.clone()),
+    );
+    let event_reactor = Arc::new(
+        EventReactor::new(event_bus.clone(), ReactorConfig::default())
+            .with_store(event_store),
+    );
     let event_scheduler = Arc::new(EventScheduler::new(event_bus.clone(), SchedulerConfig::default()));
+
+    let trigger_rule_repo = Arc::new(
+        crate::adapters::sqlite::SqliteTriggerRuleRepository::new(pool.clone()),
+    );
 
     Ok(SwarmOrchestrator::new(
         goal_repo, task_repo, worktree_repo, agent_repo, substrate, config,
         event_bus, event_reactor, event_scheduler,
-    ).with_memory_repo(memory_repo))
+    )
+    .with_memory_repo(memory_repo)
+    .with_trigger_rule_repo(trigger_rule_repo))
 }
 
 #[derive(Args, Debug)]
@@ -507,14 +521,23 @@ async fn run_swarm_foreground(
         ..Default::default()
     };
 
-    // Create shared EventBus for reactive event system
-    let event_bus = Arc::new(crate::services::EventBus::new(crate::services::EventBusConfig::default()));
+    // Create shared EventBus with persistence for reactive event system
+    let event_store: Arc<dyn crate::services::event_store::EventStore> =
+        Arc::new(crate::adapters::sqlite::SqliteEventRepository::new(pool.clone()));
+    let event_bus = Arc::new(
+        crate::services::EventBus::new(crate::services::EventBusConfig {
+            persist_events: true,
+            ..Default::default()
+        })
+        .with_store(event_store.clone()),
+    );
 
     // Create EventReactor and EventScheduler.
     // Built-in handlers and schedules are registered by the orchestrator
     // in its run() method via register_builtin_handlers/register_builtin_schedules.
     let reactor = Arc::new(
-        crate::services::EventReactor::new(event_bus.clone(), crate::services::ReactorConfig::default()),
+        crate::services::EventReactor::new(event_bus.clone(), crate::services::ReactorConfig::default())
+            .with_store(event_store),
     );
 
     let scheduler = Arc::new(
@@ -522,6 +545,10 @@ async fn run_swarm_foreground(
             event_bus.clone(),
             crate::services::SchedulerConfig::default(),
         ),
+    );
+
+    let trigger_rule_repo = Arc::new(
+        crate::adapters::sqlite::SqliteTriggerRuleRepository::new(pool.clone()),
     );
 
     let orchestrator = SwarmOrchestrator::new(
@@ -535,7 +562,8 @@ async fn run_swarm_foreground(
         reactor,
         scheduler,
     )
-    .with_memory_repo(memory_repo);
+    .with_memory_repo(memory_repo)
+    .with_trigger_rule_repo(trigger_rule_repo);
 
     if !json_mode {
         println!("Starting Abathur Swarm Orchestrator");

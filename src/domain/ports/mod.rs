@@ -8,6 +8,7 @@ pub mod null_embedding;
 pub mod null_memory;
 pub mod substrate;
 pub mod task_repository;
+pub mod trigger_rule_repository;
 pub mod worktree_repository;
 
 pub use agent_repository::{AgentFilter, AgentRepository};
@@ -18,4 +19,5 @@ pub use null_embedding::NullEmbeddingProvider;
 pub use null_memory::NullMemoryRepository;
 pub use substrate::{Substrate, SubstrateFactory};
 pub use task_repository::{TaskFilter, TaskRepository};
+pub use trigger_rule_repository::TriggerRuleRepository;
 pub use worktree_repository::WorktreeRepository;

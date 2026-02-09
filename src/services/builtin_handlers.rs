@@ -234,9 +234,11 @@ impl<M: MemoryRepository + 'static> EventHandler for MemoryMaintenanceHandler<M>
         let report = self.memory_service.run_maintenance().await
             .map_err(|e| format!("Memory maintenance failed: {}", e))?;
 
+        let mut events = Vec::new();
+
         let total_pruned = report.expired_pruned + report.decayed_pruned;
         if total_pruned > 0 {
-            let prune_event = UnifiedEvent {
+            events.push(UnifiedEvent {
                 id: EventId::new(),
                 sequence: SequenceNumber(0),
                 timestamp: chrono::Utc::now(),
@@ -253,11 +255,28 @@ impl<M: MemoryRepository + 'static> EventHandler for MemoryMaintenanceHandler<M>
                         report.promoted, report.conflicts_resolved,
                     ),
                 },
-            };
-            return Ok(Reaction::EmitEvents(vec![prune_event]));
+            });
         }
 
-        Ok(Reaction::None)
+        // Always emit a summary event for observability
+        events.push(UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Debug,
+            category: EventCategory::Memory,
+            goal_id: None,
+            task_id: None,
+            correlation_id: event.correlation_id,
+            payload: EventPayload::MemoryMaintenanceCompleted {
+                expired_pruned: report.expired_pruned,
+                decayed_pruned: report.decayed_pruned,
+                promoted: report.promoted,
+                conflicts_resolved: report.conflicts_resolved,
+            },
+        });
+
+        Ok(Reaction::EmitEvents(events))
     }
 }
 
@@ -421,6 +440,16 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
 
         if task.status != TaskStatus::Failed {
             return Ok(Reaction::None);
+        }
+
+        // Exponential backoff: 2^retry_count seconds minimum wait
+        let backoff_secs = 2u64.pow(task.retry_count.min(10));
+        if let Some(completed_at) = task.completed_at {
+            let elapsed = (chrono::Utc::now() - completed_at).num_seconds();
+            if elapsed < backoff_secs as i64 {
+                // Not ready to retry yet; the scheduled retry-check will try again
+                return Ok(Reaction::None);
+            }
         }
 
         let mut updated = task.clone();
@@ -1379,6 +1408,467 @@ impl<T: TaskRepository + 'static> EventHandler for TaskReadySpawnHandler<T> {
         }
 
         Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// MemoryReconciliationHandler
+// ============================================================================
+
+/// Periodic safety-net for memory subsystem: prunes expired/decayed memories,
+/// promotes candidates, and detects orphaned memories.
+///
+/// Triggered by `ScheduledEventFired { name: "memory-reconciliation" }`.
+pub struct MemoryReconciliationHandler<M: MemoryRepository> {
+    memory_service: Arc<MemoryService<M>>,
+}
+
+impl<M: MemoryRepository> MemoryReconciliationHandler<M> {
+    pub fn new(memory_service: Arc<MemoryService<M>>) -> Self {
+        Self { memory_service }
+    }
+}
+
+#[async_trait]
+impl<M: MemoryRepository + 'static> EventHandler for MemoryReconciliationHandler<M> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "MemoryReconciliationHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Scheduler])
+                .payload_types(vec!["ScheduledEventFired".to_string()]),
+            priority: HandlerPriority::LOW,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let name = match &event.payload {
+            EventPayload::ScheduledEventFired { name, .. } => name.as_str(),
+            _ => return Ok(Reaction::None),
+        };
+
+        if name != "memory-reconciliation" {
+            return Ok(Reaction::None);
+        }
+
+        let report = self.memory_service.run_maintenance().await
+            .map_err(|e| format!("Memory reconciliation failed: {}", e))?;
+
+        tracing::info!(
+            expired = report.expired_pruned,
+            decayed = report.decayed_pruned,
+            promoted = report.promoted,
+            conflicts = report.conflicts_resolved,
+            "MemoryReconciliationHandler: maintenance complete"
+        );
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// GoalReconciliationHandler
+// ============================================================================
+
+/// Periodic safety-net for goal subsystem: re-evaluates active goals,
+/// detects stale ones (no recent events), logs their status, and emits
+/// escalation events for goals with no activity beyond a configurable
+/// threshold (default 48h).
+///
+/// Triggered by `ScheduledEventFired { name: "goal-reconciliation" }`.
+pub struct GoalReconciliationHandler<G: GoalRepository> {
+    goal_repo: Arc<G>,
+    /// Hours of inactivity after which a goal triggers a human escalation.
+    escalation_threshold_hours: i64,
+}
+
+impl<G: GoalRepository> GoalReconciliationHandler<G> {
+    pub fn new(goal_repo: Arc<G>) -> Self {
+        Self { goal_repo, escalation_threshold_hours: 48 }
+    }
+}
+
+#[async_trait]
+impl<G: GoalRepository + 'static> EventHandler for GoalReconciliationHandler<G> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "GoalReconciliationHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Scheduler])
+                .payload_types(vec!["ScheduledEventFired".to_string()]),
+            priority: HandlerPriority::LOW,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let name = match &event.payload {
+            EventPayload::ScheduledEventFired { name, .. } => name.as_str(),
+            _ => return Ok(Reaction::None),
+        };
+
+        if name != "goal-reconciliation" {
+            return Ok(Reaction::None);
+        }
+
+        let active_goals = self.goal_repo.get_active_with_constraints().await
+            .map_err(|e| format!("GoalReconciliation: failed to get goals: {}", e))?;
+
+        let now = chrono::Utc::now();
+        let stale_threshold = chrono::Duration::hours(24);
+        let escalation_threshold = chrono::Duration::hours(self.escalation_threshold_hours);
+        let mut new_events = Vec::new();
+
+        for goal in &active_goals {
+            let age = now - goal.updated_at;
+            if age > escalation_threshold {
+                tracing::warn!(
+                    goal_id = %goal.id,
+                    goal_name = %goal.name,
+                    hours_stale = age.num_hours(),
+                    "GoalReconciliation: goal stale beyond escalation threshold, emitting escalation"
+                );
+
+                new_events.push(UnifiedEvent {
+                    id: EventId::new(),
+                    sequence: SequenceNumber(0),
+                    timestamp: chrono::Utc::now(),
+                    severity: EventSeverity::Warning,
+                    category: EventCategory::Escalation,
+                    goal_id: Some(goal.id),
+                    task_id: None,
+                    correlation_id: event.correlation_id,
+                    payload: EventPayload::HumanEscalationRequired {
+                        goal_id: Some(goal.id),
+                        task_id: None,
+                        reason: format!(
+                            "Goal '{}' has had no activity for {} hours",
+                            goal.name,
+                            age.num_hours()
+                        ),
+                        urgency: "medium".to_string(),
+                        questions: vec![
+                            format!("Goal '{}' appears stale. Should it be continued, paused, or retired?", goal.name),
+                        ],
+                        is_blocking: false,
+                    },
+                });
+            } else if age > stale_threshold {
+                tracing::info!(
+                    goal_id = %goal.id,
+                    goal_name = %goal.name,
+                    hours_stale = age.num_hours(),
+                    "GoalReconciliation: goal has not been updated recently"
+                );
+            }
+        }
+
+        tracing::debug!(
+            active_goals = active_goals.len(),
+            "GoalReconciliation: reconciliation sweep complete"
+        );
+
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
+    }
+}
+
+// ============================================================================
+// WorktreeReconciliationHandler
+// ============================================================================
+
+/// Triggered by the "reconciliation" scheduled event (piggybacks on existing schedule).
+/// Detects orphaned worktrees — active worktrees whose associated task is in a
+/// terminal state — and emits warning events. Does not delete worktrees.
+pub struct WorktreeReconciliationHandler<T: TaskRepository, W: WorktreeRepository> {
+    task_repo: Arc<T>,
+    worktree_repo: Arc<W>,
+}
+
+impl<T: TaskRepository, W: WorktreeRepository> WorktreeReconciliationHandler<T, W> {
+    pub fn new(task_repo: Arc<T>, worktree_repo: Arc<W>) -> Self {
+        Self { task_repo, worktree_repo }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static, W: WorktreeRepository + 'static> EventHandler for WorktreeReconciliationHandler<T, W> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "WorktreeReconciliationHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "reconciliation"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::LOW,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let active_worktrees = self.worktree_repo.list_active().await
+            .map_err(|e| format!("WorktreeReconciliation: failed to list active worktrees: {}", e))?;
+
+        let mut orphan_count = 0u32;
+        let mut new_events = Vec::new();
+
+        for wt in &active_worktrees {
+            let task = self.task_repo.get(wt.task_id).await
+                .map_err(|e| format!("WorktreeReconciliation: failed to get task: {}", e))?;
+
+            let is_orphaned = match &task {
+                Some(t) => t.is_terminal(),
+                None => true, // Task doesn't exist — worktree is orphaned
+            };
+
+            if is_orphaned {
+                orphan_count += 1;
+                tracing::warn!(
+                    worktree_id = %wt.id,
+                    task_id = %wt.task_id,
+                    path = %wt.path,
+                    "WorktreeReconciliation: orphaned worktree detected (task is terminal or missing)"
+                );
+
+                new_events.push(UnifiedEvent {
+                    id: EventId::new(),
+                    sequence: SequenceNumber(0),
+                    timestamp: chrono::Utc::now(),
+                    severity: EventSeverity::Warning,
+                    category: EventCategory::Orchestrator,
+                    goal_id: None,
+                    task_id: Some(wt.task_id),
+                    correlation_id: event.correlation_id,
+                    payload: EventPayload::ReconciliationCompleted {
+                        corrections_made: 0, // Flagging only, not correcting
+                    },
+                });
+            }
+        }
+
+        if orphan_count > 0 {
+            tracing::info!(
+                "WorktreeReconciliation: {} orphaned worktree(s) detected",
+                orphan_count
+            );
+        }
+
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
+    }
+}
+
+// ============================================================================
+// WatermarkAuditHandler
+// ============================================================================
+
+/// Triggered by the "watermark-audit" scheduled event (600s).
+/// Reads all handler watermarks from the event store, compares them to the
+/// latest event sequence, and logs warnings for handlers that are
+/// significantly behind (>100 events).
+pub struct WatermarkAuditHandler {
+    event_store: Arc<dyn EventStore>,
+    /// Names of handlers to audit (snapshot taken at registration time).
+    handler_names: Vec<String>,
+}
+
+impl WatermarkAuditHandler {
+    pub fn new(event_store: Arc<dyn EventStore>, handler_names: Vec<String>) -> Self {
+        Self { event_store, handler_names }
+    }
+}
+
+#[async_trait]
+impl EventHandler for WatermarkAuditHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "WatermarkAuditHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "watermark-audit"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::LOW,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let latest = self.event_store.latest_sequence().await
+            .map_err(|e| format!("WatermarkAudit: failed to get latest sequence: {}", e))?;
+
+        let latest_seq = match latest {
+            Some(seq) => seq.0,
+            None => return Ok(Reaction::None), // No events in store yet
+        };
+
+        let mut behind_count = 0u32;
+
+        for name in &self.handler_names {
+            let wm = self.event_store.get_watermark(name).await
+                .map_err(|e| format!("WatermarkAudit: failed to get watermark for {}: {}", name, e))?;
+
+            let handler_seq = wm.map(|s| s.0).unwrap_or(0);
+            let lag = latest_seq.saturating_sub(handler_seq);
+
+            if lag > 100 {
+                tracing::warn!(
+                    handler = %name,
+                    handler_seq = handler_seq,
+                    latest_seq = latest_seq,
+                    lag = lag,
+                    "WatermarkAudit: handler is significantly behind"
+                );
+                behind_count += 1;
+            }
+        }
+
+        if behind_count > 0 {
+            tracing::info!(
+                "WatermarkAudit: {} handler(s) significantly behind latest sequence {}",
+                behind_count, latest_seq
+            );
+        } else {
+            tracing::debug!(
+                "WatermarkAudit: all handlers within 100 events of sequence {}",
+                latest_seq
+            );
+        }
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// TriggerCatchupHandler
+// ============================================================================
+
+/// Triggered by the "trigger-rule-catchup" scheduled event (300s).
+/// Re-evaluates events that the TriggerRuleEngine may have missed by reading
+/// its own watermark and replaying events since that point.
+pub struct TriggerCatchupHandler {
+    trigger_engine: Arc<crate::services::trigger_rules::TriggerRuleEngine>,
+    event_store: Arc<dyn EventStore>,
+}
+
+impl TriggerCatchupHandler {
+    pub fn new(
+        trigger_engine: Arc<crate::services::trigger_rules::TriggerRuleEngine>,
+        event_store: Arc<dyn EventStore>,
+    ) -> Self {
+        Self { trigger_engine, event_store }
+    }
+}
+
+#[async_trait]
+impl EventHandler for TriggerCatchupHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "TriggerCatchupHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "trigger-rule-catchup"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::LOW,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, _event: &UnifiedEvent, ctx: &HandlerContext) -> Result<Reaction, String> {
+        // Read the TriggerRuleEngine's own watermark
+        let wm = self.event_store.get_watermark("TriggerRuleEngine").await
+            .map_err(|e| format!("TriggerCatchup: failed to get watermark: {}", e))?;
+
+        let since_seq = wm.unwrap_or(crate::services::event_bus::SequenceNumber(0));
+
+        // Query events since that watermark
+        let events = self.event_store.replay_since(since_seq).await
+            .map_err(|e| format!("TriggerCatchup: failed to replay events: {}", e))?;
+
+        if events.is_empty() {
+            return Ok(Reaction::None);
+        }
+
+        let mut all_reactions = Vec::new();
+        let mut max_seq = since_seq;
+
+        let handler_ctx = HandlerContext {
+            chain_depth: ctx.chain_depth,
+            correlation_id: ctx.correlation_id,
+        };
+
+        for evt in &events {
+            // Skip the catchup event itself to avoid infinite loops
+            if matches!(&evt.payload, EventPayload::ScheduledEventFired { name, .. } if name == "trigger-rule-catchup") {
+                continue;
+            }
+
+            // Re-evaluate through the trigger engine
+            match self.trigger_engine.handle(evt, &handler_ctx).await {
+                Ok(Reaction::EmitEvents(new_events)) => {
+                    all_reactions.extend(new_events);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("TriggerCatchup: trigger engine error on seq {}: {}", evt.sequence, e);
+                }
+            }
+
+            if evt.sequence > max_seq {
+                max_seq = evt.sequence;
+            }
+        }
+
+        // Update watermark after processing
+        if max_seq > since_seq {
+            if let Err(e) = self.event_store.set_watermark("TriggerRuleEngine", max_seq).await {
+                tracing::warn!("TriggerCatchup: failed to update watermark: {}", e);
+            }
+        }
+
+        tracing::debug!(
+            events_replayed = events.len(),
+            reactions = all_reactions.len(),
+            "TriggerCatchup: catch-up sweep complete"
+        );
+
+        if all_reactions.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(all_reactions))
+        }
     }
 }
 

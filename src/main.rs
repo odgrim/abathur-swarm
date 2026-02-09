@@ -23,6 +23,8 @@ async fn main() {
         Commands::Worktree(args) => abathur::cli::commands::worktree::execute(args, cli.json).await,
         Commands::Swarm(args) => abathur::cli::commands::swarm::execute(args, cli.json).await,
         Commands::Mcp(args) => abathur::cli::commands::mcp::execute(args, cli.json).await,
+        Commands::Trigger(args) => abathur::cli::commands::trigger::execute(args, cli.json).await,
+        Commands::Event(args) => abathur::cli::commands::event::execute(args, cli.json).await,
     };
 
     if let Err(err) = result {

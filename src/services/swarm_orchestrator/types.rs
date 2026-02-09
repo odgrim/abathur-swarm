@@ -49,6 +49,46 @@ pub struct SwarmConfig {
     pub convergence: ConvergenceLoopConfig,
     /// Interval in seconds for the reconciliation safety-net loop (default: 30).
     pub reconciliation_interval_secs: Option<u64>,
+    /// Configurable polling intervals for all scheduled handlers.
+    pub polling: PollingConfig,
+}
+
+/// Configurable polling intervals (seconds) for all scheduled handlers.
+#[derive(Debug, Clone)]
+pub struct PollingConfig {
+    pub reconciliation_interval_secs: u64,
+    pub stats_update_interval_secs: u64,
+    pub memory_maintenance_interval_secs: u64,
+    pub memory_reconciliation_interval_secs: u64,
+    pub goal_reconciliation_interval_secs: u64,
+    pub trigger_catchup_interval_secs: u64,
+    pub watermark_audit_interval_secs: u64,
+    pub retry_check_interval_secs: u64,
+    pub specialist_check_interval_secs: u64,
+    pub evolution_evaluation_interval_secs: u64,
+    pub escalation_check_interval_secs: u64,
+    pub goal_evaluation_interval_secs: u64,
+    pub a2a_poll_interval_secs: u64,
+}
+
+impl Default for PollingConfig {
+    fn default() -> Self {
+        Self {
+            reconciliation_interval_secs: 30,
+            stats_update_interval_secs: 10,
+            memory_maintenance_interval_secs: 300,
+            memory_reconciliation_interval_secs: 120,
+            goal_reconciliation_interval_secs: 60,
+            trigger_catchup_interval_secs: 300,
+            watermark_audit_interval_secs: 600,
+            retry_check_interval_secs: 15,
+            specialist_check_interval_secs: 30,
+            evolution_evaluation_interval_secs: 120,
+            escalation_check_interval_secs: 30,
+            goal_evaluation_interval_secs: 60,
+            a2a_poll_interval_secs: 15,
+        }
+    }
 }
 
 /// Configuration for the convergence loop behavior.
@@ -157,6 +197,7 @@ impl Default for SwarmConfig {
             enable_intent_verification: true,
             convergence: ConvergenceLoopConfig::default(),
             reconciliation_interval_secs: None,
+            polling: PollingConfig::default(),
         }
     }
 }

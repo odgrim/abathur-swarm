@@ -3,12 +3,15 @@
 use std::sync::Arc;
 use uuid::Uuid;
 
+use async_trait::async_trait;
+
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
     Memory, MemoryMetadata, MemoryQuery, MemoryTier, MemoryType,
     RelevanceWeights, ScoredMemory,
 };
 use crate::domain::ports::MemoryRepository;
+use crate::services::command_bus::{CommandError, CommandResult, MemoryCommand, MemoryCommandHandler};
 use crate::services::event_bus::{
     EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
 };
@@ -907,6 +910,47 @@ impl<R: MemoryRepository> MemoryService<R> {
         }).await;
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl<R: MemoryRepository + 'static> MemoryCommandHandler for MemoryService<R> {
+    async fn handle(&self, cmd: MemoryCommand) -> Result<CommandResult, CommandError> {
+        match cmd {
+            MemoryCommand::Store {
+                key,
+                content,
+                namespace,
+                tier,
+                memory_type,
+                metadata,
+            } => {
+                let memory = self
+                    .store(key, content, namespace, tier, memory_type, metadata)
+                    .await?;
+                Ok(CommandResult::Memory(memory))
+            }
+            MemoryCommand::Recall { id } => {
+                let memory = self.recall(id).await?;
+                Ok(CommandResult::MemoryOpt(memory))
+            }
+            MemoryCommand::RecallByKey { key, namespace } => {
+                let memory = self.recall_by_key(&key, &namespace).await?;
+                Ok(CommandResult::MemoryOpt(memory))
+            }
+            MemoryCommand::Forget { id } => {
+                self.forget(id).await?;
+                Ok(CommandResult::Unit)
+            }
+            MemoryCommand::PruneExpired => {
+                let count = self.prune_expired().await?;
+                Ok(CommandResult::PruneCount(count))
+            }
+            MemoryCommand::RunMaintenance => {
+                let report = self.run_maintenance().await?;
+                Ok(CommandResult::MaintenanceReport(report))
+            }
+        }
     }
 }
 

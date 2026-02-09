@@ -5,10 +5,12 @@ use clap::{Args, Subcommand};
 use std::sync::Arc;
 
 use crate::adapters::sqlite::{SqliteTaskRepository, initialize_default_database};
+use crate::cli::command_dispatcher::CliCommandDispatcher;
 use crate::cli::id_resolver::resolve_task_id;
 use crate::cli::output::{output, truncate, CommandOutput};
 use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::TaskFilter;
+use crate::services::command_bus::{CommandResult, DomainCommand, TaskCommand};
 use crate::services::TaskService;
 
 #[derive(Args, Debug)]
@@ -259,7 +261,8 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
 
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
     let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
-    let service = TaskService::new(task_repo, event_bus);
+    let service = TaskService::new(task_repo, event_bus.clone());
+    let dispatcher = CliCommandDispatcher::new(pool.clone(), event_bus);
 
     match args.command {
         TaskCommands::Submit {
@@ -290,19 +293,25 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 ..Default::default()
             });
 
-            let source = TaskSource::Human;
-
-            let task = service.submit_task(
+            let cmd = DomainCommand::Task(TaskCommand::Submit {
                 title,
-                prompt,
+                description: prompt,
                 parent_id,
                 priority,
-                agent,
-                deps,
-                context,
+                agent_type: agent,
+                depends_on: deps,
+                context: Box::new(context),
                 idempotency_key,
-                source,
-            ).await?;
+                source: TaskSource::Human,
+            });
+
+            let result = dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let task = match result {
+                CommandResult::Task(t) => t,
+                _ => anyhow::bail!("Unexpected command result"),
+            };
 
             let out = TaskActionOutput {
                 success: true,
@@ -351,7 +360,19 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
 
         TaskCommands::Cancel { id } => {
             let uuid = resolve_task_id(&pool, &id).await?;
-            let task = service.cancel_task(uuid).await?;
+
+            let cmd = DomainCommand::Task(TaskCommand::Cancel {
+                task_id: uuid,
+                reason: "user-requested".to_string(),
+            });
+
+            let result = dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let task = match result {
+                CommandResult::Task(t) => t,
+                _ => anyhow::bail!("Unexpected command result"),
+            };
 
             let out = TaskActionOutput {
                 success: true,
@@ -363,7 +384,16 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
 
         TaskCommands::Retry { id } => {
             let uuid = resolve_task_id(&pool, &id).await?;
-            let task = service.retry_task(uuid).await?;
+
+            let cmd = DomainCommand::Task(TaskCommand::Retry { task_id: uuid });
+
+            let result = dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let task = match result {
+                CommandResult::Task(t) => t,
+                _ => anyhow::bail!("Unexpected command result"),
+            };
 
             let out = TaskActionOutput {
                 success: true,

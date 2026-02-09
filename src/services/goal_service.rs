@@ -3,9 +3,12 @@
 use std::sync::Arc;
 use uuid::Uuid;
 
+use async_trait::async_trait;
+
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{Goal, GoalConstraint, GoalPriority, GoalStatus};
 use crate::domain::ports::{GoalFilter, GoalRepository};
+use crate::services::command_bus::{CommandError, CommandResult, GoalCommand, GoalCommandHandler};
 use crate::services::event_bus::{
     EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
 };
@@ -207,6 +210,42 @@ impl<R: GoalRepository> GoalService<R> {
         }).await;
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl<R: GoalRepository + 'static> GoalCommandHandler for GoalService<R> {
+    async fn handle(&self, cmd: GoalCommand) -> Result<CommandResult, CommandError> {
+        match cmd {
+            GoalCommand::Create {
+                name,
+                description,
+                priority,
+                parent_id,
+                constraints,
+                domains,
+            } => {
+                let goal = self
+                    .create_goal(name, description, priority, parent_id, constraints, domains)
+                    .await?;
+                Ok(CommandResult::Goal(goal))
+            }
+            GoalCommand::TransitionStatus {
+                goal_id,
+                new_status,
+            } => {
+                let goal = self.transition_status(goal_id, new_status).await?;
+                Ok(CommandResult::Goal(goal))
+            }
+            GoalCommand::UpdateDomains { goal_id, domains } => {
+                let goal = self.update_domains(goal_id, domains).await?;
+                Ok(CommandResult::Goal(goal))
+            }
+            GoalCommand::Delete { goal_id } => {
+                self.delete_goal(goal_id).await?;
+                Ok(CommandResult::Unit)
+            }
+        }
     }
 }
 

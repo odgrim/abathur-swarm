@@ -138,6 +138,14 @@ pub fn event_consistency_migration() -> Migration {
     }
 }
 
+pub fn trigger_rules_migration() -> Migration {
+    Migration {
+        version: 9,
+        description: "Trigger rules for declarative automation".to_string(),
+        sql: include_str!("../../../migrations/009_trigger_rules.sql").to_string(),
+    }
+}
+
 pub fn all_embedded_migrations() -> Vec<Migration> {
     vec![
         initial_schema_migration(),
@@ -148,5 +156,6 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
         goal_task_rebuild_migration(),
         event_architecture_migration(),
         event_consistency_migration(),
+        trigger_rules_migration(),
     ]
 }

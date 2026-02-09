@@ -3,9 +3,12 @@
 use std::sync::Arc;
 use uuid::Uuid;
 
+use async_trait::async_trait;
+
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::{TaskFilter, TaskRepository};
+use crate::services::command_bus::{CommandError, CommandResult, TaskCommand, TaskCommandHandler};
 use crate::services::event_bus::{
     EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
 };
@@ -487,7 +490,7 @@ impl<T: TaskRepository> TaskService<T> {
     }
 
     /// Cancel a task.
-    pub async fn cancel_task(&self, task_id: Uuid) -> DomainResult<Task> {
+    pub async fn cancel_task(&self, task_id: Uuid, reason: &str) -> DomainResult<Task> {
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
@@ -515,7 +518,7 @@ impl<T: TaskRepository> TaskService<T> {
             correlation_id: None,
             payload: EventPayload::TaskCanceled {
                 task_id,
-                reason: "user-requested".to_string(),
+                reason: reason.to_string(),
             },
         }).await;
 
@@ -562,6 +565,119 @@ impl<T: TaskRepository> TaskService<T> {
         Ok(())
     }
 
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
+    async fn handle(&self, cmd: TaskCommand) -> Result<CommandResult, CommandError> {
+        match cmd {
+            TaskCommand::Submit {
+                title,
+                description,
+                parent_id,
+                priority,
+                agent_type,
+                depends_on,
+                context,
+                idempotency_key,
+                source,
+            } => {
+                let task = self
+                    .submit_task(
+                        title,
+                        description,
+                        parent_id,
+                        priority,
+                        agent_type,
+                        depends_on,
+                        *context,
+                        idempotency_key,
+                        source,
+                    )
+                    .await?;
+                Ok(CommandResult::Task(task))
+            }
+            TaskCommand::Claim {
+                task_id,
+                agent_type,
+            } => {
+                let task = self.claim_task(task_id, &agent_type).await?;
+                Ok(CommandResult::Task(task))
+            }
+            TaskCommand::Complete { task_id, .. } => {
+                let task = self.complete_task(task_id).await?;
+                Ok(CommandResult::Task(task))
+            }
+            TaskCommand::Fail { task_id, error } => {
+                let task = self.fail_task(task_id, error).await?;
+                Ok(CommandResult::Task(task))
+            }
+            TaskCommand::Retry { task_id } => {
+                let task = self.retry_task(task_id).await?;
+                Ok(CommandResult::Task(task))
+            }
+            TaskCommand::Cancel { task_id, reason } => {
+                let task = self.cancel_task(task_id, &reason).await?;
+                Ok(CommandResult::Task(task))
+            }
+            TaskCommand::Transition {
+                task_id,
+                new_status,
+            } => {
+                // Direct transition for reconciliation — load, transition, save.
+                let mut task = self
+                    .task_repo
+                    .get(task_id)
+                    .await?
+                    .ok_or(DomainError::TaskNotFound(task_id))?;
+                task.transition_to(new_status).map_err(|_| {
+                    DomainError::InvalidStateTransition {
+                        from: task.status.as_str().to_string(),
+                        to: new_status.as_str().to_string(),
+                    }
+                })?;
+                self.task_repo.update(&task).await?;
+
+                // Emit event for the transition so handlers can react
+                let payload = match new_status {
+                    TaskStatus::Ready => Some(EventPayload::TaskReady {
+                        task_id,
+                        task_title: task.title.clone(),
+                    }),
+                    TaskStatus::Complete => Some(EventPayload::TaskCompleted {
+                        task_id,
+                        tokens_used: 0,
+                    }),
+                    TaskStatus::Failed => Some(EventPayload::TaskFailed {
+                        task_id,
+                        error: "reconciliation-transition".into(),
+                        retry_count: task.retry_count,
+                    }),
+                    TaskStatus::Canceled => Some(EventPayload::TaskCanceled {
+                        task_id,
+                        reason: "reconciliation-transition".into(),
+                    }),
+                    _ => None,
+                };
+                if let Some(payload) = payload {
+                    self.emit(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: chrono::Utc::now(),
+                        severity: EventSeverity::Info,
+                        category: EventCategory::Task,
+                        goal_id: None,
+                        task_id: Some(task_id),
+                        correlation_id: None,
+                        payload,
+                    })
+                    .await;
+                }
+
+                Ok(CommandResult::Task(task))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

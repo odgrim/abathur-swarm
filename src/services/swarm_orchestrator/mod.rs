@@ -21,7 +21,7 @@ pub(crate) mod helpers;
 
 // Re-export public types
 pub use types::{
-    ConvergenceLoopConfig, McpServerConfig, OrchestratorStatus, SwarmConfig,
+    ConvergenceLoopConfig, McpServerConfig, OrchestratorStatus, PollingConfig, SwarmConfig,
     SwarmEvent, SwarmStats, VerificationLevel,
 };
 
@@ -93,6 +93,7 @@ where
     pub(super) specialist_tx: tokio::sync::mpsc::Sender<uuid::Uuid>,
     pub(super) escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>,
     pub(super) federation_client: Option<Arc<crate::adapters::mcp::FederationClient>>,
+    pub(super) trigger_rule_repo: Option<Arc<dyn crate::domain::ports::TriggerRuleRepository>>,
 }
 
 // ============================================================================
@@ -148,6 +149,7 @@ where
             event_scheduler,
             escalation_store: Arc::new(RwLock::new(Vec::new())),
             federation_client: None,
+            trigger_rule_repo: None,
             ready_task_rx: Arc::new(tokio::sync::Mutex::new(ready_rx)),
             ready_task_tx: ready_tx,
             specialist_rx: Arc::new(tokio::sync::Mutex::new(specialist_rx)),
@@ -190,6 +192,12 @@ where
     /// Create orchestrator with custom guardrails configuration.
     pub fn with_guardrails(mut self, config: GuardrailsConfig) -> Self {
         self.guardrails = Arc::new(Guardrails::new(config));
+        self
+    }
+
+    /// Create orchestrator with a trigger rule repository for persisting fire state.
+    pub fn with_trigger_rule_repo(mut self, repo: Arc<dyn crate::domain::ports::TriggerRuleRepository>) -> Self {
+        self.trigger_rule_repo = Some(repo);
         self
     }
 

@@ -490,6 +490,29 @@ pub enum EventPayload {
         decision: String,
         allows_continuation: bool,
     },
+
+    // Trigger rule lifecycle events
+    TriggerRuleCreated {
+        rule_id: Uuid,
+        rule_name: String,
+    },
+    TriggerRuleToggled {
+        rule_id: Uuid,
+        rule_name: String,
+        enabled: bool,
+    },
+    TriggerRuleDeleted {
+        rule_id: Uuid,
+        rule_name: String,
+    },
+
+    // Memory maintenance summary
+    MemoryMaintenanceCompleted {
+        expired_pruned: u64,
+        decayed_pruned: u64,
+        promoted: u64,
+        conflicts_resolved: u64,
+    },
 }
 
 impl EventPayload {
@@ -570,6 +593,10 @@ impl EventPayload {
             Self::HumanEscalationRequired { .. } => "HumanEscalationRequired",
             Self::HumanEscalationNeeded { .. } => "HumanEscalationNeeded",
             Self::HumanResponseReceived { .. } => "HumanResponseReceived",
+            Self::TriggerRuleCreated { .. } => "TriggerRuleCreated",
+            Self::TriggerRuleToggled { .. } => "TriggerRuleToggled",
+            Self::TriggerRuleDeleted { .. } => "TriggerRuleDeleted",
+            Self::MemoryMaintenanceCompleted { .. } => "MemoryMaintenanceCompleted",
         }
     }
 }

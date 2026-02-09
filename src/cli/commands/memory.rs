@@ -5,9 +5,11 @@ use clap::{Args, Subcommand};
 use std::sync::Arc;
 
 use crate::adapters::sqlite::{SqliteMemoryRepository, initialize_default_database};
+use crate::cli::command_dispatcher::CliCommandDispatcher;
 use crate::cli::id_resolver::resolve_memory_id;
 use crate::cli::output::{output, truncate, CommandOutput};
 use crate::domain::models::{Memory, MemoryQuery, MemoryTier, MemoryType};
+use crate::services::command_bus::{CommandResult, DomainCommand, MemoryCommand};
 use crate::services::MemoryService;
 
 #[derive(Args, Debug)]
@@ -258,7 +260,8 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
 
     let repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
     let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
-    let service = MemoryService::new_with_event_bus(repo, event_bus);
+    let service = MemoryService::new_with_event_bus(repo, event_bus.clone());
+    let dispatcher = CliCommandDispatcher::new(pool.clone(), event_bus);
 
     match args.command {
         MemoryCommands::Store { key, content, namespace, tier, memory_type } => {
@@ -267,14 +270,22 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
             let mtype = MemoryType::from_str(&memory_type)
                 .ok_or_else(|| anyhow::anyhow!("Invalid memory type: {}", memory_type))?;
 
-            let memory = service.store(
+            let cmd = DomainCommand::Memory(MemoryCommand::Store {
                 key,
                 content,
                 namespace,
                 tier,
-                mtype,
-                None,
-            ).await?;
+                memory_type: mtype,
+                metadata: None,
+            });
+
+            let result = dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let memory = match result {
+                CommandResult::Memory(m) => m,
+                _ => anyhow::bail!("Unexpected command result"),
+            };
 
             let out = MemoryActionOutput {
                 success: true,
@@ -285,15 +296,18 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
         }
 
         MemoryCommands::Recall { id_or_key, namespace } => {
-            let memory = if let Ok(uuid) = resolve_memory_id(&pool, &id_or_key).await {
-                service.recall(uuid).await?
+            let cmd = if let Ok(uuid) = resolve_memory_id(&pool, &id_or_key).await {
+                DomainCommand::Memory(MemoryCommand::Recall { id: uuid })
             } else {
                 let ns = namespace.unwrap_or_else(|| "default".to_string());
-                service.recall_by_key(&id_or_key, &ns).await?
+                DomainCommand::Memory(MemoryCommand::RecallByKey { key: id_or_key.clone(), namespace: ns })
             };
 
-            match memory {
-                Some(mem) => {
+            let result = dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            match result {
+                CommandResult::MemoryOpt(Some(mem)) => {
                     let out = MemoryDetailOutput {
                         memory: MemoryOutput::from(&mem),
                         content: mem.content.clone(),
@@ -304,7 +318,7 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
                     };
                     output(&out, json_mode);
                 }
-                None => {
+                CommandResult::MemoryOpt(None) => {
                     let out = MemoryActionOutput {
                         success: false,
                         message: format!("Memory not found: {}", id_or_key),
@@ -312,6 +326,7 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
                     };
                     output(&out, json_mode);
                 }
+                _ => anyhow::bail!("Unexpected command result"),
             }
         }
 
@@ -344,7 +359,11 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
 
         MemoryCommands::Forget { id } => {
             let uuid = resolve_memory_id(&pool, &id).await?;
-            service.forget(uuid).await?;
+
+            let cmd = DomainCommand::Memory(MemoryCommand::Forget { id: uuid });
+
+            dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             let out = MemoryActionOutput {
                 success: true,
@@ -355,16 +374,24 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
         }
 
         MemoryCommands::Prune { expired_only } => {
-            let report = if expired_only {
-                let expired = service.prune_expired().await?;
-                crate::services::MaintenanceReport {
-                    expired_pruned: expired,
+            let cmd = if expired_only {
+                DomainCommand::Memory(MemoryCommand::PruneExpired)
+            } else {
+                DomainCommand::Memory(MemoryCommand::RunMaintenance)
+            };
+
+            let result = dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let report = match result {
+                CommandResult::MaintenanceReport(r) => r,
+                CommandResult::PruneCount(count) => crate::services::MaintenanceReport {
+                    expired_pruned: count,
                     decayed_pruned: 0,
                     promoted: 0,
                     conflicts_resolved: 0,
-                }
-            } else {
-                service.run_maintenance().await?
+                },
+                _ => anyhow::bail!("Unexpected command result"),
             };
 
             let out = PruneOutput {
