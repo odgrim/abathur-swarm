@@ -146,6 +146,22 @@ pub fn trigger_rules_migration() -> Migration {
     }
 }
 
+pub fn event_source_process_migration() -> Migration {
+    Migration {
+        version: 10,
+        description: "Add source_process_id to events for cross-process propagation".to_string(),
+        sql: include_str!("../../../migrations/010_event_source_process.sql").to_string(),
+    }
+}
+
+pub fn dead_letter_queue_migration() -> Migration {
+    Migration {
+        version: 11,
+        description: "Dead letter queue for handler failure retry".to_string(),
+        sql: include_str!("../../../migrations/011_dead_letter_queue.sql").to_string(),
+    }
+}
+
 pub fn all_embedded_migrations() -> Vec<Migration> {
     vec![
         initial_schema_migration(),
@@ -157,5 +173,7 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
         event_architecture_migration(),
         event_consistency_migration(),
         trigger_rules_migration(),
+        event_source_process_migration(),
+        dead_letter_queue_migration(),
     ]
 }

@@ -106,6 +106,7 @@ impl<R: MemoryRepository> MemoryService<R> {
             goal_id: None,
             task_id: None,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::MemoryStored {
                 memory_id: memory.id,
                 key: memory.key.clone(),
@@ -169,6 +170,7 @@ impl<R: MemoryRepository> MemoryService<R> {
                 goal_id: None,
                 task_id: None,
                 correlation_id: None,
+                source_process_id: None,
                 payload: EventPayload::MemoryAccessed {
                     memory_id: mem.id,
                     key: mem.key.clone(),
@@ -202,6 +204,7 @@ impl<R: MemoryRepository> MemoryService<R> {
                 goal_id: None,
                 task_id: None,
                 correlation_id: None,
+                source_process_id: None,
                 payload: EventPayload::MemoryAccessed {
                     memory_id: mem.id,
                     key: mem.key.clone(),
@@ -326,6 +329,7 @@ impl<R: MemoryRepository> MemoryService<R> {
                 goal_id: None,
                 task_id: None,
                 correlation_id: None,
+                source_process_id: None,
                 payload: EventPayload::MemoryDeleted {
                     memory_id: id,
                     key: mem.key,
@@ -350,6 +354,7 @@ impl<R: MemoryRepository> MemoryService<R> {
                 goal_id: None,
                 task_id: None,
                 correlation_id: None,
+                source_process_id: None,
                 payload: EventPayload::MemoryPruned {
                     count,
                     reason: "expired".to_string(),
@@ -436,6 +441,7 @@ impl<R: MemoryRepository> MemoryService<R> {
                 goal_id: None,
                 task_id: None,
                 correlation_id: None,
+                source_process_id: None,
                 payload: EventPayload::MemoryConflictDetected {
                     memory_a: conflict.memory_a,
                     memory_b: conflict.memory_b,
@@ -500,6 +506,7 @@ impl<R: MemoryRepository> MemoryService<R> {
                 goal_id: None,
                 task_id: None,
                 correlation_id: None,
+                source_process_id: None,
                 payload: EventPayload::MemoryPromoted {
                     memory_id: memory.id,
                     key: memory.key.clone(),
@@ -902,6 +909,7 @@ impl<R: MemoryRepository> MemoryService<R> {
             goal_id: None,
             task_id: None,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::MemoryConflictResolved {
                 memory_a: conflict.memory_a,
                 memory_b: conflict.memory_b,

@@ -320,6 +320,7 @@ impl TriggerRuleEngine {
                 goal_id: None,
                 task_id: None,
                 correlation_id: None,
+                source_process_id: None,
                 payload: EventPayload::TriggerRuleCreated {
                     rule_id,
                     rule_name,
@@ -357,6 +358,7 @@ impl TriggerRuleEngine {
                     goal_id: None,
                     task_id: None,
                     correlation_id: None,
+                    source_process_id: None,
                     payload: EventPayload::TriggerRuleToggled {
                         rule_id,
                         rule_name,
@@ -501,6 +503,7 @@ impl TriggerRuleEngine {
             goal_id: source_event.goal_id,
             task_id: source_event.task_id,
             correlation_id: source_event.correlation_id,
+            source_process_id: None,
             payload: payload.to_event_payload(),
         }
     }
@@ -739,6 +742,7 @@ mod tests {
             goal_id: None,
             task_id: None,
             correlation_id: None,
+            source_process_id: None,
             payload,
         }
     }

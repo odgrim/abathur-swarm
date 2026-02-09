@@ -93,6 +93,7 @@ impl<T: TaskRepository + 'static> EventHandler for TaskCompletedReadinessHandler
                         goal_id: event.goal_id,
                         task_id: Some(dep.id),
                         correlation_id: event.correlation_id,
+                        source_process_id: None,
                         payload: EventPayload::TaskReady {
                             task_id: dep.id,
                             task_title: dep.title.clone(),
@@ -247,6 +248,7 @@ impl<M: MemoryRepository + 'static> EventHandler for MemoryMaintenanceHandler<M>
                 goal_id: None,
                 task_id: None,
                 correlation_id: event.correlation_id,
+                source_process_id: None,
                 payload: EventPayload::MemoryPruned {
                     count: total_pruned,
                     reason: format!(
@@ -268,6 +270,7 @@ impl<M: MemoryRepository + 'static> EventHandler for MemoryMaintenanceHandler<M>
             goal_id: None,
             task_id: None,
             correlation_id: event.correlation_id,
+            source_process_id: None,
             payload: EventPayload::MemoryMaintenanceCompleted {
                 expired_pruned: report.expired_pruned,
                 decayed_pruned: report.decayed_pruned,
@@ -467,6 +470,7 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
                     goal_id: event.goal_id,
                     task_id: Some(task_id),
                     correlation_id: event.correlation_id,
+                    source_process_id: None,
                     payload: EventPayload::TaskRetrying {
                         task_id,
                         attempt: retry_count + 1,
@@ -482,6 +486,7 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
                     goal_id: event.goal_id,
                     task_id: Some(task_id),
                     correlation_id: event.correlation_id,
+                    source_process_id: None,
                     payload: EventPayload::TaskReady {
                         task_id,
                         task_title: updated.title.clone(),
@@ -625,6 +630,7 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static, W: WorktreeReposi
             goal_id: None,
             task_id: None,
             correlation_id: event.correlation_id,
+            source_process_id: None,
             payload: EventPayload::StatusUpdate(SwarmStatsPayload::from(new_stats)),
         };
 
@@ -712,6 +718,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
                         goal_id: None,
                         task_id: Some(task.id),
                         correlation_id: event.correlation_id,
+                        source_process_id: None,
                         payload: EventPayload::TaskReady {
                             task_id: task.id,
                             task_title: task.title.clone(),
@@ -748,6 +755,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
                         goal_id: None,
                         task_id: Some(task.id),
                         correlation_id: event.correlation_id,
+                        source_process_id: None,
                         payload: EventPayload::TaskReady {
                             task_id: task.id,
                             task_title: task.title.clone(),
@@ -783,6 +791,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
                             goal_id: None,
                             task_id: Some(task.id),
                             correlation_id: event.correlation_id,
+                            source_process_id: None,
                             payload: EventPayload::TaskFailed {
                                 task_id: task.id,
                                 error: format!("stale-timeout: task running for > {}s", self.stale_task_timeout_secs),
@@ -809,6 +818,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
             goal_id: None,
             task_id: None,
             correlation_id: event.correlation_id,
+            source_process_id: None,
             payload: EventPayload::ReconciliationCompleted { corrections_made: corrections },
         });
 
@@ -881,6 +891,7 @@ impl<T: TaskRepository + 'static> EventHandler for RetryProcessingHandler<T> {
                         goal_id: None,
                         task_id: Some(task.id),
                         correlation_id: event.correlation_id,
+                        source_process_id: None,
                         payload: EventPayload::TaskReady {
                             task_id: task.id,
                             task_title: updated.title.clone(),
@@ -1038,6 +1049,7 @@ impl<T: TaskRepository + 'static, A: AgentRepository + 'static> EventHandler for
                         goal_id: None,
                         task_id: None,
                         correlation_id: event.correlation_id,
+                        source_process_id: None,
                         payload: EventPayload::EvolutionTriggered {
                             template_name: agent_name.clone(),
                             trigger: format!("Low success rate: {:.0}% ({}/{})", success_rate * 100.0, successes, total),
@@ -1148,6 +1160,7 @@ impl<T: TaskRepository + 'static> EventHandler for A2APollHandler<T> {
                 goal_id: Some(goal_id),
                 task_id: Some(task.id),
                 correlation_id: event.correlation_id,
+                source_process_id: None,
                 payload: EventPayload::TaskSubmitted {
                     task_id: task.id,
                     task_title: title,
@@ -1274,6 +1287,7 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static, M: MemoryReposito
                     goal_id: Some(goal.id),
                     task_id: None,
                     correlation_id: event.correlation_id,
+                    source_process_id: None,
                     payload: EventPayload::GoalIterationCompleted {
                         goal_id: goal.id,
                         tasks_completed: relevant_completed.len(),
@@ -1301,6 +1315,7 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static, M: MemoryReposito
                         goal_id: Some(goal.id),
                         task_id: None,
                         correlation_id: event.correlation_id,
+                        source_process_id: None,
                         payload: EventPayload::GoalConstraintViolated {
                             goal_id: goal.id,
                             constraint_name: constraint.name.clone(),
@@ -1338,6 +1353,7 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static, M: MemoryReposito
                         goal_id: Some(goal.id),
                         task_id: None,
                         correlation_id: event.correlation_id,
+                        source_process_id: None,
                         payload: EventPayload::SemanticDriftDetected {
                             goal_id: goal.id,
                             recurring_gaps,
@@ -1541,6 +1557,7 @@ impl<G: GoalRepository + 'static> EventHandler for GoalReconciliationHandler<G> 
                     goal_id: Some(goal.id),
                     task_id: None,
                     correlation_id: event.correlation_id,
+                    source_process_id: None,
                     payload: EventPayload::HumanEscalationRequired {
                         goal_id: Some(goal.id),
                         task_id: None,
@@ -1653,6 +1670,7 @@ impl<T: TaskRepository + 'static, W: WorktreeRepository + 'static> EventHandler 
                     goal_id: None,
                     task_id: Some(wt.task_id),
                     correlation_id: event.correlation_id,
+                    source_process_id: None,
                     payload: EventPayload::ReconciliationCompleted {
                         corrections_made: 0, // Flagging only, not correcting
                     },
@@ -1872,6 +1890,334 @@ impl EventHandler for TriggerCatchupHandler {
     }
 }
 
+// ============================================================================
+// EventStorePollerHandler
+// ============================================================================
+
+/// Triggered by the "event-store-poll" scheduled event.
+/// Reads events from the SQLite EventStore with sequence numbers beyond
+/// the poller's high-water mark and re-publishes them into the broadcast
+/// channel, enabling cross-process event propagation.
+///
+/// Filters out events originating from the current process (using
+/// `source_process_id`) to avoid echo loops.
+pub struct EventStorePollerHandler {
+    event_store: Arc<dyn EventStore>,
+    /// Process ID of the local EventBus — events with this source are skipped.
+    local_process_id: uuid::Uuid,
+    /// High-water mark: the latest sequence number this poller has seen.
+    high_water_mark: Arc<RwLock<u64>>,
+    /// Maximum events to process per poll cycle.
+    max_per_poll: usize,
+}
+
+impl EventStorePollerHandler {
+    pub fn new(event_store: Arc<dyn EventStore>, local_process_id: uuid::Uuid) -> Self {
+        Self {
+            event_store,
+            local_process_id,
+            high_water_mark: Arc::new(RwLock::new(0)),
+            max_per_poll: 100,
+        }
+    }
+
+    /// Initialize the high-water mark from the event store's latest sequence.
+    /// Call this at startup so we don't replay the entire history.
+    pub async fn initialize_watermark(&self) {
+        match self.event_store.get_watermark("EventStorePollerHandler").await {
+            Ok(Some(seq)) => {
+                let mut hwm = self.high_water_mark.write().await;
+                *hwm = seq.0;
+                tracing::info!("EventStorePoller: initialized watermark at {}", seq.0);
+            }
+            Ok(None) => {
+                // No watermark yet — start from the latest sequence to avoid replaying history
+                match self.event_store.latest_sequence().await {
+                    Ok(Some(seq)) => {
+                        let mut hwm = self.high_water_mark.write().await;
+                        *hwm = seq.0;
+                        tracing::info!("EventStorePoller: no watermark found, starting from latest seq {}", seq.0);
+                    }
+                    _ => {}
+                }
+            }
+            Err(e) => {
+                tracing::warn!("EventStorePoller: failed to read watermark: {}", e);
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl EventHandler for EventStorePollerHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "EventStorePollerHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "event-store-poll"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::SYSTEM,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let hwm = {
+            let h = self.high_water_mark.read().await;
+            *h
+        };
+
+        // Query events beyond our high-water mark
+        let events = self.event_store
+            .query(
+                crate::services::event_store::EventQuery::new()
+                    .since_sequence(SequenceNumber(hwm + 1))
+                    .ascending()
+                    .limit(self.max_per_poll as u32),
+            )
+            .await
+            .map_err(|e| format!("EventStorePoller: failed to query events: {}", e))?;
+
+        if events.is_empty() {
+            return Ok(Reaction::None);
+        }
+
+        let mut new_events = Vec::new();
+        let mut new_hwm = hwm;
+
+        for evt in &events {
+            // Track highest sequence seen
+            if evt.sequence.0 > new_hwm {
+                new_hwm = evt.sequence.0;
+            }
+
+            // Skip events from this process (we already broadcast them)
+            if evt.source_process_id == Some(self.local_process_id) {
+                continue;
+            }
+
+            // Skip ScheduledEventFired — those are generated locally
+            if matches!(&evt.payload, EventPayload::ScheduledEventFired { .. }) {
+                continue;
+            }
+
+            new_events.push(evt.clone());
+        }
+
+        // Update high-water mark
+        if new_hwm > hwm {
+            let mut h = self.high_water_mark.write().await;
+            *h = new_hwm;
+
+            // Persist watermark
+            if let Err(e) = self.event_store.set_watermark("EventStorePollerHandler", SequenceNumber(new_hwm)).await {
+                tracing::warn!("EventStorePoller: failed to persist watermark: {}", e);
+            }
+        }
+
+        if !new_events.is_empty() {
+            tracing::info!(
+                "EventStorePoller: re-publishing {} cross-process events (hwm {} -> {})",
+                new_events.len(), hwm, new_hwm
+            );
+            Ok(Reaction::EmitEvents(new_events))
+        } else {
+            Ok(Reaction::None)
+        }
+    }
+}
+
+// ============================================================================
+// DeadLetterRetryHandler
+// ============================================================================
+
+/// Triggered by the "dead-letter-retry" scheduled event.
+/// Reads retryable entries from the dead letter queue, re-fetches the original
+/// event from the store, and re-publishes it so handlers get another chance.
+/// Applies exponential backoff (2^retry_count seconds) between retries.
+/// Marks entries as resolved when max retries exceeded.
+pub struct DeadLetterRetryHandler {
+    event_store: Arc<dyn EventStore>,
+}
+
+impl DeadLetterRetryHandler {
+    pub fn new(event_store: Arc<dyn EventStore>) -> Self {
+        Self { event_store }
+    }
+}
+
+#[async_trait]
+impl EventHandler for DeadLetterRetryHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "DeadLetterRetryHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "dead-letter-retry"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::LOW,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let entries = self.event_store
+            .get_retryable_dead_letters(10)
+            .await
+            .map_err(|e| format!("DeadLetterRetry: failed to get retryable entries: {}", e))?;
+
+        if entries.is_empty() {
+            return Ok(Reaction::None);
+        }
+
+        let mut events_to_replay = Vec::new();
+
+        for entry in &entries {
+            // Re-fetch the original event from the store
+            let original = self.event_store
+                .get_by_sequence(SequenceNumber(entry.event_sequence))
+                .await
+                .map_err(|e| format!("DeadLetterRetry: failed to get event seq {}: {}", entry.event_sequence, e))?;
+
+            match original {
+                Some(evt) => {
+                    events_to_replay.push(evt);
+
+                    // Calculate next retry with exponential backoff
+                    let backoff_secs = 2i64.pow((entry.retry_count + 1).min(10));
+                    let next_retry = chrono::Utc::now() + chrono::Duration::seconds(backoff_secs);
+
+                    if let Err(e) = self.event_store.increment_dead_letter_retry(&entry.id, next_retry).await {
+                        tracing::warn!("DeadLetterRetry: failed to increment retry for {}: {}", entry.id, e);
+                    }
+                }
+                None => {
+                    // Event no longer in store (pruned), resolve the DLQ entry
+                    tracing::info!(
+                        "DeadLetterRetry: event seq {} no longer in store, resolving DLQ entry {}",
+                        entry.event_sequence, entry.id
+                    );
+                    if let Err(e) = self.event_store.resolve_dead_letter(&entry.id).await {
+                        tracing::warn!("DeadLetterRetry: failed to resolve entry {}: {}", entry.id, e);
+                    }
+                }
+            }
+
+            // If retry_count + 1 >= max_retries, resolve it (this was the last attempt)
+            if entry.retry_count + 1 >= entry.max_retries {
+                tracing::info!(
+                    "DeadLetterRetry: max retries ({}) reached for handler '{}' on event seq {}, resolving",
+                    entry.max_retries, entry.handler_name, entry.event_sequence
+                );
+                if let Err(e) = self.event_store.resolve_dead_letter(&entry.id).await {
+                    tracing::warn!("DeadLetterRetry: failed to resolve entry {}: {}", entry.id, e);
+                }
+            }
+        }
+
+        if events_to_replay.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            tracing::info!(
+                "DeadLetterRetry: re-publishing {} events from dead letter queue",
+                events_to_replay.len()
+            );
+            Ok(Reaction::EmitEvents(events_to_replay))
+        }
+    }
+}
+
+// ============================================================================
+// EventPruningHandler
+// ============================================================================
+
+/// Triggered by the "event-pruning" scheduled event.
+/// Calls `event_store.prune_older_than()` to remove old events based on
+/// the configured retention duration.
+pub struct EventPruningHandler {
+    event_store: Arc<dyn EventStore>,
+    /// Retention duration in days.
+    retention_days: u64,
+}
+
+impl EventPruningHandler {
+    pub fn new(event_store: Arc<dyn EventStore>, retention_days: u64) -> Self {
+        Self { event_store, retention_days }
+    }
+}
+
+#[async_trait]
+impl EventHandler for EventPruningHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "EventPruningHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "event-pruning"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::LOW,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let retention = std::time::Duration::from_secs(self.retention_days * 24 * 3600);
+
+        let pruned = self.event_store
+            .prune_older_than(retention)
+            .await
+            .map_err(|e| format!("EventPruning: failed to prune events: {}", e))?;
+
+        if pruned > 0 {
+            tracing::info!("EventPruning: pruned {} events older than {} days", pruned, self.retention_days);
+
+            let summary = UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: chrono::Utc::now(),
+                severity: EventSeverity::Info,
+                category: EventCategory::Orchestrator,
+                goal_id: None,
+                task_id: None,
+                correlation_id: event.correlation_id,
+                source_process_id: None,
+                payload: EventPayload::ReconciliationCompleted {
+                    corrections_made: pruned as u32,
+                },
+            };
+
+            Ok(Reaction::EmitEvents(vec![summary]))
+        } else {
+            Ok(Reaction::None)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1912,6 +2258,7 @@ mod tests {
             goal_id: None,
             task_id: Some(upstream.id),
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::TaskCompleted {
                 task_id: upstream.id,
                 tokens_used: 100,
@@ -1965,6 +2312,7 @@ mod tests {
             goal_id: None,
             task_id: Some(upstream.id),
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::TaskCompleted {
                 task_id: upstream.id,
                 tokens_used: 100,
@@ -2009,6 +2357,7 @@ mod tests {
             goal_id: None,
             task_id: Some(upstream.id),
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::TaskFailed {
                 task_id: upstream.id,
                 error: "test failure".to_string(),
@@ -2055,6 +2404,7 @@ mod tests {
             goal_id: None,
             task_id: Some(upstream.id),
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::TaskFailed {
                 task_id: upstream.id,
                 error: "test failure".to_string(),

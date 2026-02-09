@@ -110,6 +110,7 @@ impl EventScheduler {
             goal_id: None,
             task_id: None,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::ScheduledEventRegistered {
                 schedule_id: id,
                 name: schedule.name.clone(),
@@ -139,6 +140,7 @@ impl EventScheduler {
                 goal_id: None,
                 task_id: None,
                 correlation_id: None,
+                source_process_id: None,
                 payload: EventPayload::ScheduledEventCanceled {
                     schedule_id: id,
                     name,
@@ -212,6 +214,7 @@ impl EventScheduler {
                                 goal_id: sched.goal_id,
                                 task_id: sched.task_id,
                                 correlation_id: None,
+                                source_process_id: None,
                                 payload: EventPayload::ScheduledEventFired {
                                     schedule_id: sched.id,
                                     name: sched.name.clone(),

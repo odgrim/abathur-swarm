@@ -71,6 +71,7 @@ impl<R: AgentRepository> AgentService<R> {
                 goal_id: None,
                 task_id: None,
                 correlation_id: None,
+                source_process_id: None,
                 payload: EventPayload::AgentTemplateRegistered {
                     template_name: template.name.clone(),
                     tier: format!("{:?}", template.tier),
@@ -106,6 +107,7 @@ impl<R: AgentRepository> AgentService<R> {
             goal_id: None,
             task_id: None,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::AgentTemplateRegistered {
                 template_name: template.name.clone(),
                 tier: format!("{:?}", template.tier),
@@ -155,6 +157,7 @@ impl<R: AgentRepository> AgentService<R> {
             goal_id: None,
             task_id: None,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::AgentTemplateStatusChanged {
                 template_name: name.to_string(),
                 from_status,
@@ -196,6 +199,7 @@ impl<R: AgentRepository> AgentService<R> {
             goal_id: None,
             task_id: None,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::AgentInstanceSpawned {
                 instance_id: instance.id,
                 template_name: template.name.clone(),
@@ -229,6 +233,7 @@ impl<R: AgentRepository> AgentService<R> {
             goal_id: None,
             task_id: Some(task_id),
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::AgentInstanceAssigned {
                 instance_id: instance.id,
                 task_id,
@@ -267,6 +272,7 @@ impl<R: AgentRepository> AgentService<R> {
             goal_id: None,
             task_id: instance.current_task_id,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::AgentInstanceCompleted {
                 instance_id: instance.id,
                 task_id: instance.current_task_id.unwrap_or(Uuid::nil()),
@@ -294,6 +300,7 @@ impl<R: AgentRepository> AgentService<R> {
             goal_id: None,
             task_id: instance.current_task_id,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::AgentInstanceFailed {
                 instance_id: instance.id,
                 task_id: instance.current_task_id,

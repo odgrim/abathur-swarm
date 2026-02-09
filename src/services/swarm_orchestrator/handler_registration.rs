@@ -10,7 +10,8 @@ use crate::domain::ports::{
     AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository,
 };
 use crate::services::builtin_handlers::{
-    A2APollHandler, EscalationTimeoutHandler, EvolutionEvaluationHandler,
+    A2APollHandler, DeadLetterRetryHandler, EscalationTimeoutHandler,
+    EventPruningHandler, EventStorePollerHandler, EvolutionEvaluationHandler,
     GoalCreatedHandler, GoalEvaluationHandler, GoalReconciliationHandler, GoalRetiredHandler,
     MemoryMaintenanceHandler, MemoryReconciliationHandler, ReconciliationHandler,
     RetryProcessingHandler, SpecialistCheckHandler, StatsUpdateHandler,
@@ -264,7 +265,7 @@ where
             engine
         };
 
-        // WatermarkAuditHandler + TriggerCatchupHandler (LOW) — require event store
+        // WatermarkAuditHandler + TriggerCatchupHandler + Poller/DLQ/Pruning (LOW) — require event store
         if let Some(event_store) = self.event_bus.store() {
             // Collect handler names for watermark auditing
             let handler_names: Vec<String> = reactor.handler_names().await;
@@ -279,7 +280,30 @@ where
             reactor
                 .register(Arc::new(TriggerCatchupHandler::new(
                     trigger_engine,
+                    event_store.clone(),
+                )))
+                .await;
+
+            // EventStorePollerHandler (SYSTEM) — cross-process event propagation
+            let poller = Arc::new(EventStorePollerHandler::new(
+                event_store.clone(),
+                self.event_bus.process_id(),
+            ));
+            poller.initialize_watermark().await;
+            reactor.register(poller).await;
+
+            // DeadLetterRetryHandler (LOW) — retry failed handler events
+            reactor
+                .register(Arc::new(DeadLetterRetryHandler::new(
+                    event_store.clone(),
+                )))
+                .await;
+
+            // EventPruningHandler (LOW) — prune old events
+            reactor
+                .register(Arc::new(EventPruningHandler::new(
                     event_store,
+                    self.config.event_retention_days,
                 )))
                 .await;
         }
@@ -438,5 +462,37 @@ where
                 EventSeverity::Debug,
             ))
             .await;
+
+        // Event store polling — cross-process event propagation
+        if self.event_bus.store().is_some() {
+            scheduler
+                .register(interval_schedule(
+                    "event-store-poll",
+                    Duration::from_secs(p.event_store_poll_interval_secs),
+                    EventCategory::Scheduler,
+                    EventSeverity::Debug,
+                ))
+                .await;
+
+            // Dead letter retry — periodic DLQ retry sweep
+            scheduler
+                .register(interval_schedule(
+                    "dead-letter-retry",
+                    Duration::from_secs(p.dead_letter_retry_interval_secs),
+                    EventCategory::Scheduler,
+                    EventSeverity::Debug,
+                ))
+                .await;
+
+            // Event pruning — remove old events based on retention policy
+            scheduler
+                .register(interval_schedule(
+                    "event-pruning",
+                    Duration::from_secs(p.event_pruning_interval_secs),
+                    EventCategory::Scheduler,
+                    EventSeverity::Debug,
+                ))
+                .await;
+        }
     }
 }

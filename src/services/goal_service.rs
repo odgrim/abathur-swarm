@@ -74,6 +74,7 @@ impl<R: GoalRepository> GoalService<R> {
             goal_id: Some(goal.id),
             task_id: None,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::GoalStarted {
                 goal_id: goal.id,
                 goal_name: goal.name.clone(),
@@ -115,6 +116,7 @@ impl<R: GoalRepository> GoalService<R> {
             goal_id: Some(goal.id),
             task_id: None,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::GoalStatusChanged {
                 goal_id: goal.id,
                 from_status: from_status.as_str().to_string(),
@@ -163,6 +165,7 @@ impl<R: GoalRepository> GoalService<R> {
             goal_id: Some(goal.id),
             task_id: None,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::GoalDomainsUpdated {
                 goal_id: goal.id,
                 old_domains,
@@ -203,6 +206,7 @@ impl<R: GoalRepository> GoalService<R> {
             goal_id: Some(id),
             task_id: None,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::GoalDeleted {
                 goal_id: id,
                 goal_name,

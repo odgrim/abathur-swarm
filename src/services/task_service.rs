@@ -309,6 +309,7 @@ impl<T: TaskRepository> TaskService<T> {
             goal_id: Some(goal_id),
             task_id: Some(task.id),
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::TaskSubmitted {
                 task_id: task.id,
                 task_title: task.title.clone(),
@@ -327,6 +328,7 @@ impl<T: TaskRepository> TaskService<T> {
                 goal_id: Some(goal_id),
                 task_id: Some(task.id),
                 correlation_id: None,
+                source_process_id: None,
                 payload: EventPayload::TaskReady {
                     task_id: task.id,
                     task_title: task.title.clone(),
@@ -381,6 +383,7 @@ impl<T: TaskRepository> TaskService<T> {
             goal_id: None,
             task_id: Some(task_id),
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::TaskClaimed {
                 task_id,
                 agent_type: agent_type.to_string(),
@@ -411,6 +414,7 @@ impl<T: TaskRepository> TaskService<T> {
             goal_id: None,
             task_id: Some(task_id),
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::TaskCompleted {
                 task_id,
                 tokens_used: 0,
@@ -446,6 +450,7 @@ impl<T: TaskRepository> TaskService<T> {
             goal_id: None,
             task_id: Some(task_id),
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::TaskFailed {
                 task_id,
                 error: error_str,
@@ -479,6 +484,7 @@ impl<T: TaskRepository> TaskService<T> {
             goal_id: None,
             task_id: Some(task_id),
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::TaskRetrying {
                 task_id,
                 attempt: task.retry_count,
@@ -516,6 +522,7 @@ impl<T: TaskRepository> TaskService<T> {
             goal_id: None,
             task_id: Some(task_id),
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::TaskCanceled {
                 task_id,
                 reason: reason.to_string(),
@@ -669,6 +676,7 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                         goal_id: None,
                         task_id: Some(task_id),
                         correlation_id: None,
+                        source_process_id: None,
                         payload,
                     })
                     .await;

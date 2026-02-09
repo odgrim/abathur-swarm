@@ -231,6 +231,7 @@ async fn test_reactor_dispatches_to_handler() {
         goal_id: None,
         task_id: Some(Uuid::new_v4()),
         correlation_id: None,
+        source_process_id: None,
         payload: EventPayload::TaskSubmitted {
             task_id: Uuid::new_v4(),
             task_title: "test task".to_string(),
@@ -249,6 +250,7 @@ async fn test_reactor_dispatches_to_handler() {
         goal_id: None,
         task_id: None,
         correlation_id: None,
+        source_process_id: None,
         payload: EventPayload::OrchestratorStarted,
     };
     event_bus.publish(event2).await;
@@ -328,6 +330,7 @@ async fn test_trigger_rule_emits_event_on_match() {
         goal_id: None,
         task_id: Some(Uuid::new_v4()),
         correlation_id: None,
+        source_process_id: None,
         payload: EventPayload::TaskCompleted {
             task_id: Uuid::new_v4(),
             tokens_used: 100,
@@ -370,6 +373,7 @@ async fn test_replay_missed_events_catches_up() {
             goal_id: None,
             task_id: Some(task_id),
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::TaskSubmitted {
                 task_id,
                 task_title: format!("task-{}", i),
@@ -629,6 +633,7 @@ async fn test_trigger_count_threshold() {
             goal_id: None,
             task_id: Some(Uuid::new_v4()),
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::TaskFailed {
                 task_id: Uuid::new_v4(),
                 error: "test error".to_string(),
@@ -651,6 +656,7 @@ async fn test_trigger_count_threshold() {
         goal_id: None,
         task_id: Some(Uuid::new_v4()),
         correlation_id: None,
+        source_process_id: None,
         payload: EventPayload::TaskFailed {
             task_id: Uuid::new_v4(),
             error: "test error 3".to_string(),

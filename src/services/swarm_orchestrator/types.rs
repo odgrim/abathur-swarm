@@ -51,6 +51,9 @@ pub struct SwarmConfig {
     pub reconciliation_interval_secs: Option<u64>,
     /// Configurable polling intervals for all scheduled handlers.
     pub polling: PollingConfig,
+    /// Retention period for events in days (default: 30). Events older than
+    /// this are pruned by the EventPruningHandler.
+    pub event_retention_days: u64,
 }
 
 /// Configurable polling intervals (seconds) for all scheduled handlers.
@@ -69,6 +72,12 @@ pub struct PollingConfig {
     pub escalation_check_interval_secs: u64,
     pub goal_evaluation_interval_secs: u64,
     pub a2a_poll_interval_secs: u64,
+    /// Interval for polling EventStore for cross-process events (default: 5s).
+    pub event_store_poll_interval_secs: u64,
+    /// Interval for retrying dead letter queue entries (default: 60s).
+    pub dead_letter_retry_interval_secs: u64,
+    /// Interval for pruning old events (default: 21600s = 6 hours).
+    pub event_pruning_interval_secs: u64,
 }
 
 impl Default for PollingConfig {
@@ -87,6 +96,9 @@ impl Default for PollingConfig {
             escalation_check_interval_secs: 30,
             goal_evaluation_interval_secs: 60,
             a2a_poll_interval_secs: 15,
+            event_store_poll_interval_secs: 5,
+            dead_letter_retry_interval_secs: 60,
+            event_pruning_interval_secs: 21600, // 6 hours
         }
     }
 }
@@ -198,6 +210,7 @@ impl Default for SwarmConfig {
             convergence: ConvergenceLoopConfig::default(),
             reconciliation_interval_secs: None,
             polling: PollingConfig::default(),
+            event_retention_days: 30,
         }
     }
 }

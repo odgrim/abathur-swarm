@@ -117,6 +117,10 @@ pub struct UnifiedEvent {
     pub goal_id: Option<Uuid>,
     pub task_id: Option<Uuid>,
     pub correlation_id: Option<Uuid>,
+    /// Identifies the EventBus process that originally published this event.
+    /// Used by EventStorePoller to avoid re-broadcasting events from this process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_process_id: Option<Uuid>,
     pub payload: EventPayload,
 }
 
@@ -978,6 +982,7 @@ impl From<SwarmEvent> for UnifiedEvent {
             goal_id,
             task_id,
             correlation_id: None,
+            source_process_id: None, // Will be stamped by EventBus on publish
             payload,
         }
     }
@@ -1113,6 +1118,7 @@ impl From<ExecutionEvent> for UnifiedEvent {
             goal_id,
             task_id,
             correlation_id: None,
+            source_process_id: None, // Will be stamped by EventBus on publish
             payload,
         }
     }
@@ -1143,6 +1149,9 @@ pub struct EventBus {
     store: Option<Arc<dyn EventStore>>,
     correlation_context: Arc<RwLock<Option<Uuid>>>,
     config: EventBusConfig,
+    /// Unique ID for this EventBus instance (process). Used to identify
+    /// events originating from this process for cross-process dedup.
+    process_id: Uuid,
 }
 
 impl EventBus {
@@ -1155,6 +1164,7 @@ impl EventBus {
             store: None,
             correlation_context: Arc::new(RwLock::new(None)),
             config,
+            process_id: Uuid::new_v4(),
         }
     }
 
@@ -1169,6 +1179,11 @@ impl EventBus {
         // Assign sequence number
         let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
         event.sequence = SequenceNumber(seq);
+
+        // Stamp with this process's ID if not already set
+        if event.source_process_id.is_none() {
+            event.source_process_id = Some(self.process_id);
+        }
 
         // Add correlation ID from context if not set
         if event.correlation_id.is_none() {
@@ -1226,6 +1241,11 @@ impl EventBus {
     /// Get the event store if configured.
     pub fn store(&self) -> Option<Arc<dyn EventStore>> {
         self.store.clone()
+    }
+
+    /// Get the unique process ID of this EventBus instance.
+    pub fn process_id(&self) -> Uuid {
+        self.process_id
     }
 
     /// Get the number of active subscribers.

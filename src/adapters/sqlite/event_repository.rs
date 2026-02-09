@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::services::event_bus::{
     EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
 };
-use crate::services::event_store::{EventQuery, EventStore, EventStoreError, EventStoreStats};
+use crate::services::event_store::{DeadLetterEntry, EventQuery, EventStore, EventStoreError, EventStoreStats};
 
 /// SQLite-backed event repository.
 #[derive(Clone)]
@@ -90,8 +90,8 @@ impl EventStore for SqliteEventRepository {
 
         sqlx::query(
             r#"
-            INSERT INTO events (id, sequence, timestamp, severity, category, goal_id, task_id, correlation_id, payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO events (id, sequence, timestamp, severity, category, goal_id, task_id, correlation_id, source_process_id, payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(event.id.0.to_string())
@@ -102,6 +102,7 @@ impl EventStore for SqliteEventRepository {
         .bind(event.goal_id.map(|id| id.to_string()))
         .bind(event.task_id.map(|id| id.to_string()))
         .bind(event.correlation_id.map(|id| id.to_string()))
+        .bind(event.source_process_id.map(|id| id.to_string()))
         .bind(payload_json)
         .execute(&self.pool)
         .await
@@ -111,7 +112,7 @@ impl EventStore for SqliteEventRepository {
     }
 
     async fn query(&self, query: EventQuery) -> Result<Vec<UnifiedEvent>, EventStoreError> {
-        let mut sql = String::from("SELECT id, sequence, timestamp, severity, category, goal_id, task_id, correlation_id, payload FROM events WHERE 1=1");
+        let mut sql = String::from("SELECT id, sequence, timestamp, severity, category, goal_id, task_id, correlation_id, source_process_id, payload FROM events WHERE 1=1");
         let mut params: Vec<String> = Vec::new();
 
         if let Some(since) = query.since_sequence {
@@ -330,6 +331,111 @@ impl EventStore for SqliteEventRepository {
             events_by_category,
         })
     }
+
+    async fn append_dead_letter(
+        &self,
+        event_id: &str,
+        event_sequence: u64,
+        handler_name: &str,
+        error_message: &str,
+        max_retries: u32,
+    ) -> Result<(), EventStoreError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        // First retry after 2 seconds (2^0 * 2)
+        let next_retry = (Utc::now() + chrono::Duration::seconds(2)).to_rfc3339();
+
+        sqlx::query(
+            r#"
+            INSERT INTO dead_letter_events (id, event_id, event_sequence, handler_name, error_message, retry_count, max_retries, next_retry_at, created_at)
+            VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+            "#,
+        )
+        .bind(&id)
+        .bind(event_id)
+        .bind(event_sequence as i64)
+        .bind(handler_name)
+        .bind(error_message)
+        .bind(max_retries as i64)
+        .bind(&next_retry)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn get_retryable_dead_letters(&self, limit: u32) -> Result<Vec<DeadLetterEntry>, EventStoreError> {
+        let now = Utc::now().to_rfc3339();
+
+        let rows: Vec<DeadLetterRow> = sqlx::query_as(
+            r#"
+            SELECT id, event_id, event_sequence, handler_name, error_message,
+                   retry_count, max_retries, next_retry_at, created_at, resolved_at
+            FROM dead_letter_events
+            WHERE resolved_at IS NULL
+              AND retry_count < max_retries
+              AND (next_retry_at IS NULL OR next_retry_at <= ?)
+            ORDER BY next_retry_at ASC
+            LIMIT ?
+            "#,
+        )
+        .bind(&now)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in rows {
+            entries.push(DeadLetterEntry {
+                id: row.id,
+                event_id: row.event_id,
+                event_sequence: row.event_sequence as u64,
+                handler_name: row.handler_name,
+                error_message: row.error_message,
+                retry_count: row.retry_count as u32,
+                max_retries: row.max_retries as u32,
+                next_retry_at: row.next_retry_at
+                    .as_ref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc)),
+                created_at: DateTime::parse_from_rfc3339(&row.created_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                resolved_at: None,
+            });
+        }
+
+        Ok(entries)
+    }
+
+    async fn resolve_dead_letter(&self, id: &str) -> Result<(), EventStoreError> {
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query("UPDATE dead_letter_events SET resolved_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| EventStoreError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn increment_dead_letter_retry(&self, id: &str, next_retry_at: DateTime<Utc>) -> Result<(), EventStoreError> {
+        sqlx::query(
+            "UPDATE dead_letter_events SET retry_count = retry_count + 1, next_retry_at = ? WHERE id = ?",
+        )
+        .bind(next_retry_at.to_rfc3339())
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
 }
 
 impl SqliteEventRepository {
@@ -374,9 +480,29 @@ impl SqliteEventRepository {
             goal_id,
             task_id,
             correlation_id,
+            source_process_id: row.source_process_id
+                .as_ref()
+                .map(|s| uuid::Uuid::parse_str(s))
+                .transpose()
+                .map_err(|e| EventStoreError::QueryError(format!("Invalid source_process_id: {}", e)))?,
             payload,
         })
     }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+#[allow(dead_code)]
+struct DeadLetterRow {
+    id: String,
+    event_id: String,
+    event_sequence: i64,
+    handler_name: String,
+    error_message: String,
+    retry_count: i64,
+    max_retries: i64,
+    next_retry_at: Option<String>,
+    created_at: String,
+    resolved_at: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -389,6 +515,7 @@ struct EventRow {
     goal_id: Option<String>,
     task_id: Option<String>,
     correlation_id: Option<String>,
+    source_process_id: Option<String>,
     payload: String,
 }
 
@@ -412,6 +539,7 @@ mod tests {
                 goal_id TEXT,
                 task_id TEXT,
                 correlation_id TEXT,
+                source_process_id TEXT,
                 payload TEXT NOT NULL
             )
             "#,
@@ -433,6 +561,7 @@ mod tests {
             goal_id: None,
             task_id: None,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::OrchestratorStarted,
         }
     }

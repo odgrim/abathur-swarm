@@ -206,6 +206,49 @@ pub trait EventStore: Send + Sync {
     async fn detect_sequence_gaps(&self, _from: u64, _to: u64) -> Result<Vec<(u64, u64)>, EventStoreError> {
         Ok(vec![])
     }
+
+    /// Append a dead letter entry for a handler that failed to process an event.
+    async fn append_dead_letter(
+        &self,
+        _event_id: &str,
+        _event_sequence: u64,
+        _handler_name: &str,
+        _error_message: &str,
+        _max_retries: u32,
+    ) -> Result<(), EventStoreError> {
+        Ok(())
+    }
+
+    /// Get dead letter entries that are ready for retry (resolved_at IS NULL,
+    /// retry_count < max_retries, next_retry_at <= now).
+    async fn get_retryable_dead_letters(&self, _limit: u32) -> Result<Vec<DeadLetterEntry>, EventStoreError> {
+        Ok(vec![])
+    }
+
+    /// Mark a dead letter entry as resolved.
+    async fn resolve_dead_letter(&self, _id: &str) -> Result<(), EventStoreError> {
+        Ok(())
+    }
+
+    /// Increment retry count and set next_retry_at for a dead letter entry.
+    async fn increment_dead_letter_retry(&self, _id: &str, _next_retry_at: DateTime<Utc>) -> Result<(), EventStoreError> {
+        Ok(())
+    }
+}
+
+/// A dead letter queue entry representing a handler failure.
+#[derive(Debug, Clone)]
+pub struct DeadLetterEntry {
+    pub id: String,
+    pub event_id: String,
+    pub event_sequence: u64,
+    pub handler_name: String,
+    pub error_message: String,
+    pub retry_count: u32,
+    pub max_retries: u32,
+    pub next_retry_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
 }
 
 /// In-memory event store for testing.
@@ -329,6 +372,7 @@ mod tests {
             goal_id: None,
             task_id: None,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::OrchestratorStarted,
         }
     }

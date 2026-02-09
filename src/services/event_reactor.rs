@@ -478,6 +478,18 @@ impl EventReactor {
                         }
                         Ok(Err(e)) => {
                             tracing::warn!("EventReactor: handler '{}' error: {}", meta.name, e);
+                            // Write to dead letter queue
+                            if let Some(ref store) = event_store {
+                                if let Err(dlq_err) = store.append_dead_letter(
+                                    &event.id.0.to_string(),
+                                    event.sequence.0,
+                                    &meta.name,
+                                    &e,
+                                    3,
+                                ).await {
+                                    tracing::warn!("EventReactor: failed to write DLQ entry: {}", dlq_err);
+                                }
+                            }
                             if meta.error_strategy == ErrorStrategy::CircuitBreak {
                                 let mut cbs = circuit_breakers.write().await;
                                 if let Some(cb) = cbs.get_mut(&meta.id) {
@@ -489,10 +501,23 @@ impl EventReactor {
                             }
                         }
                         Err(_) => {
+                            let timeout_msg = format!("handler timed out after {}ms", config.handler_timeout_ms);
                             tracing::warn!(
-                                "EventReactor: handler '{}' timed out after {}ms",
-                                meta.name, config.handler_timeout_ms
+                                "EventReactor: handler '{}' {}",
+                                meta.name, timeout_msg
                             );
+                            // Write to dead letter queue
+                            if let Some(ref store) = event_store {
+                                if let Err(dlq_err) = store.append_dead_letter(
+                                    &event.id.0.to_string(),
+                                    event.sequence.0,
+                                    &meta.name,
+                                    &timeout_msg,
+                                    3,
+                                ).await {
+                                    tracing::warn!("EventReactor: failed to write DLQ entry: {}", dlq_err);
+                                }
+                            }
                             let mut cbs = circuit_breakers.write().await;
                             if let Some(cb) = cbs.get_mut(&meta.id) {
                                 cb.record_failure(
@@ -729,6 +754,7 @@ mod tests {
             goal_id: None,
             task_id: None,
             correlation_id: None,
+            source_process_id: None,
             payload: EventPayload::OrchestratorStarted,
         }
     }
@@ -840,6 +866,7 @@ mod tests {
                     goal_id: None,
                     task_id: None,
                     correlation_id: event.correlation_id,
+                    source_process_id: None,
                     payload: EventPayload::OrchestratorStarted,
                 };
                 new_event.correlation_id = event.correlation_id.or(Some(Uuid::new_v4()));
