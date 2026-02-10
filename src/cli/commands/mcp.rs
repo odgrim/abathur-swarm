@@ -201,7 +201,7 @@ async fn start_memory_http(host: String, port: u16, enable_cors: bool, json_mode
     let task_service = TaskService::new(task_repo);
     let goal_service = GoalService::new(goal_repo);
 
-    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool);
+    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool).await;
     let command_bus = Arc::new(CommandBus::new(
         Arc::new(task_service),
         Arc::new(goal_service),
@@ -254,7 +254,7 @@ async fn start_tasks_http(host: String, port: u16, enable_cors: bool, json_mode:
     let goal_service = GoalService::new(goal_repo);
     let memory_service = MemoryService::new(memory_repo);
 
-    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool);
+    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool).await;
     let command_bus = Arc::new(CommandBus::new(
         Arc::new(task_service.clone()),
         Arc::new(goal_service),
@@ -300,7 +300,7 @@ async fn start_agents_http(host: String, port: u16, enable_cors: bool, json_mode
         .await?;
 
     let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool);
+    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool).await;
     let service = AgentService::new(agent_repo, event_bus);
 
     let config = AgentsHttpConfig {
@@ -428,7 +428,7 @@ async fn start_all(
     }
 
     // Create services with shared persistent EventBus
-    let shared_event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
+    let shared_event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone()).await;
 
     let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
     let memory_service = MemoryService::new(memory_repo);
@@ -577,7 +577,7 @@ async fn start_stdio(db_path: String, task_id: Option<String>) -> Result<()> {
         .await?;
 
     // Create repositories and services with shared persistent EventBus
-    let shared_event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
+    let shared_event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone()).await;
 
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
     let task_service = TaskService::new(task_repo);

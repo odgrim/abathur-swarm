@@ -189,7 +189,7 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
     let repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
+    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone()).await;
     let service = GoalService::new(repo);
     let dispatcher = CliCommandDispatcher::new(pool.clone(), event_bus);
 

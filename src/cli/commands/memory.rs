@@ -259,7 +259,7 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
     let repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
+    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone()).await;
     let service = MemoryService::new(repo);
     let dispatcher = CliCommandDispatcher::new(pool.clone(), event_bus);
 

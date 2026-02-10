@@ -56,7 +56,7 @@ pub enum AgentCommands {
         /// Agent name
         name: String,
         /// Specific version
-        #[arg(short, long)]
+        #[arg(long)]
         version: Option<u32>,
     },
     /// Disable an agent template
@@ -499,7 +499,7 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
     let repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone());
+    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone()).await;
     let service = AgentService::new(repo.clone(), event_bus);
 
     match args.command {

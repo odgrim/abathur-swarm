@@ -70,173 +70,24 @@ impl Migrator {
             .execute(&self.pool)
             .await
             .map_err(|e| MigrationError::ExecutionError { version: migration.version, source: e })?;
+
+        sqlx::query("INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)")
+            .bind(migration.version)
+            .bind(&migration.description)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| MigrationError::ExecutionError { version: migration.version, source: e })?;
+
         Ok(())
-    }
-}
-
-pub fn initial_schema_migration() -> Migration {
-    Migration {
-        version: 1,
-        description: "Initial schema".to_string(),
-        sql: include_str!("../../../migrations/001_initial_schema.sql").to_string(),
-    }
-}
-
-pub fn update_memories_migration() -> Migration {
-    Migration {
-        version: 2,
-        description: "Update memories schema for three-tier system".to_string(),
-        sql: include_str!("../../../migrations/002_update_memories_schema.sql").to_string(),
-    }
-}
-
-pub fn add_agent_instances_migration() -> Migration {
-    Migration {
-        version: 3,
-        description: "Add agent instances table".to_string(),
-        sql: include_str!("../../../migrations/003_add_agent_instances.sql").to_string(),
-    }
-}
-
-pub fn fix_worktrees_fk_migration() -> Migration {
-    Migration {
-        version: 4,
-        description: "Fix worktrees FK constraint".to_string(),
-        sql: include_str!("../../../migrations/004_fix_worktrees_fk.sql").to_string(),
-    }
-}
-
-pub fn add_events_table_migration() -> Migration {
-    Migration {
-        version: 5,
-        description: "Add events table".to_string(),
-        sql: include_str!("../../../migrations/005_add_events_table.sql").to_string(),
-    }
-}
-
-pub fn goal_task_rebuild_migration() -> Migration {
-    Migration {
-        version: 6,
-        description: "Goal-task rebuild".to_string(),
-        sql: include_str!("../../../migrations/006_goal_task_rebuild.sql").to_string(),
-    }
-}
-
-pub fn event_architecture_migration() -> Migration {
-    Migration {
-        version: 7,
-        description: "Event architecture: handler watermarks".to_string(),
-        sql: include_str!("../../../migrations/007_event_architecture.sql").to_string(),
-    }
-}
-
-pub fn event_consistency_migration() -> Migration {
-    Migration {
-        version: 8,
-        description: "Event consistency: scheduled events persistence".to_string(),
-        sql: include_str!("../../../migrations/008_event_consistency.sql").to_string(),
-    }
-}
-
-pub fn trigger_rules_migration() -> Migration {
-    Migration {
-        version: 9,
-        description: "Trigger rules for declarative automation".to_string(),
-        sql: include_str!("../../../migrations/009_trigger_rules.sql").to_string(),
-    }
-}
-
-pub fn event_source_process_migration() -> Migration {
-    Migration {
-        version: 10,
-        description: "Add source_process_id to events for cross-process propagation".to_string(),
-        sql: include_str!("../../../migrations/010_event_source_process.sql").to_string(),
-    }
-}
-
-pub fn dead_letter_queue_migration() -> Migration {
-    Migration {
-        version: 11,
-        description: "Dead letter queue for handler failure retry".to_string(),
-        sql: include_str!("../../../migrations/011_dead_letter_queue.sql").to_string(),
-    }
-}
-
-pub fn webhooks_migration() -> Migration {
-    Migration {
-        version: 12,
-        description: "Webhook subscriptions".to_string(),
-        sql: include_str!("../../../migrations/012_webhooks.sql").to_string(),
-    }
-}
-
-pub fn circuit_breaker_state_migration() -> Migration {
-    Migration {
-        version: 13,
-        description: "Circuit breaker state tracking".to_string(),
-        sql: include_str!("../../../migrations/013_circuit_breaker_state.sql").to_string(),
-    }
-}
-
-pub fn command_dedup_migration() -> Migration {
-    Migration {
-        version: 14,
-        description: "Command deduplication table".to_string(),
-        sql: include_str!("../../../migrations/014_command_dedup.sql").to_string(),
-    }
-}
-
-pub fn task_deadline_migration() -> Migration {
-    Migration {
-        version: 15,
-        description: "Add deadline column to tasks".to_string(),
-        sql: include_str!("../../../migrations/015_task_deadline.sql").to_string(),
-    }
-}
-
-pub fn trigger_absence_timers_migration() -> Migration {
-    Migration {
-        version: 16,
-        description: "Trigger absence timers persistence".to_string(),
-        sql: include_str!("../../../migrations/016_trigger_absence_timers.sql").to_string(),
-    }
-}
-
-pub fn convergence_trajectories_migration() -> Migration {
-    Migration {
-        version: 17,
-        description: "Convergence trajectory persistence".to_string(),
-        sql: include_str!("../../../migrations/017_convergence_trajectories.sql").to_string(),
-    }
-}
-
-pub fn task_execution_mode_migration() -> Migration {
-    Migration {
-        version: 18,
-        description: "Add execution_mode and trajectory_id to tasks".to_string(),
-        sql: include_str!("../../../migrations/018_task_execution_mode.sql").to_string(),
     }
 }
 
 pub fn all_embedded_migrations() -> Vec<Migration> {
     vec![
-        initial_schema_migration(),
-        update_memories_migration(),
-        add_agent_instances_migration(),
-        fix_worktrees_fk_migration(),
-        add_events_table_migration(),
-        goal_task_rebuild_migration(),
-        event_architecture_migration(),
-        event_consistency_migration(),
-        trigger_rules_migration(),
-        event_source_process_migration(),
-        dead_letter_queue_migration(),
-        webhooks_migration(),
-        circuit_breaker_state_migration(),
-        command_dedup_migration(),
-        task_deadline_migration(),
-        trigger_absence_timers_migration(),
-        convergence_trajectories_migration(),
-        task_execution_mode_migration(),
+        Migration {
+            version: 1,
+            description: "Initial schema".to_string(),
+            sql: include_str!("../../../migrations/001_initial_schema.sql").to_string(),
+        },
     ]
 }

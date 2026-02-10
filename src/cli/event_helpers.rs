@@ -17,13 +17,18 @@ use crate::services::event_store::EventStore;
 /// CLI and standalone MCP commands should use this instead of
 /// `EventBus::new(EventBusConfig::default())` so that events
 /// are written to the store and available for orchestrator replay.
-pub fn create_persistent_event_bus(pool: SqlitePool) -> Arc<EventBus> {
+///
+/// Initializes the sequence counter from the store so that new events
+/// receive sequence numbers that don't collide with already-persisted events.
+pub async fn create_persistent_event_bus(pool: SqlitePool) -> Arc<EventBus> {
     let event_store = Arc::new(SqliteEventRepository::new(pool));
-    Arc::new(
+    let bus = Arc::new(
         EventBus::new(EventBusConfig {
             persist_events: true,
             ..Default::default()
         })
         .with_store(event_store as Arc<dyn EventStore>),
-    )
+    );
+    bus.initialize_sequence_from_store().await;
+    bus
 }
