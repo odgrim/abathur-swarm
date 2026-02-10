@@ -2,6 +2,7 @@
 
 pub mod a2a;
 pub mod agent;
+pub mod convergence;
 pub mod dag;
 pub mod goal;
 pub mod intent_verification;
@@ -14,6 +15,7 @@ pub mod worktree;
 
 pub use a2a::*;
 pub use agent::*;
+pub use convergence::*;
 pub use dag::*;
 pub use goal::*;
 pub use intent_verification::*;

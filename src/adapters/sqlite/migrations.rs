@@ -202,6 +202,14 @@ pub fn trigger_absence_timers_migration() -> Migration {
     }
 }
 
+pub fn convergence_trajectories_migration() -> Migration {
+    Migration {
+        version: 17,
+        description: "Convergence trajectory persistence".to_string(),
+        sql: include_str!("../../../migrations/017_convergence_trajectories.sql").to_string(),
+    }
+}
+
 pub fn all_embedded_migrations() -> Vec<Migration> {
     vec![
         initial_schema_migration(),
@@ -220,5 +228,6 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
         command_dedup_migration(),
         task_deadline_migration(),
         trigger_absence_timers_migration(),
+        convergence_trajectories_migration(),
     ]
 }

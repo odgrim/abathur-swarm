@@ -1,0 +1,624 @@
+//! SQLite implementation of the TrajectoryRepository.
+
+use std::collections::HashMap;
+
+use async_trait::async_trait;
+use sqlx::SqlitePool;
+
+use crate::domain::errors::{DomainError, DomainResult};
+use crate::domain::models::task::Complexity;
+use crate::domain::models::{
+    AttractorState, AttractorType, ContextHealth, ConvergenceBudget, ConvergencePhase,
+    ConvergencePolicy, Observation, SpecificationEvolution, StrategyEntry, StrategyKind, Trajectory,
+};
+use crate::domain::ports::{StrategyStats, TrajectoryRepository};
+
+#[derive(Clone)]
+pub struct SqliteTrajectoryRepository {
+    pool: SqlitePool,
+}
+
+impl SqliteTrajectoryRepository {
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+/// Derive a stable string key from an `AttractorType` variant, matching the
+/// convention used by the strategy bandit.
+fn attractor_type_name(attractor: &AttractorType) -> &'static str {
+    match attractor {
+        AttractorType::FixedPoint { .. } => "fixed_point",
+        AttractorType::LimitCycle { .. } => "limit_cycle",
+        AttractorType::Divergent { .. } => "divergent",
+        AttractorType::Plateau { .. } => "plateau",
+        AttractorType::Indeterminate { .. } => "indeterminate",
+    }
+}
+
+#[async_trait]
+impl TrajectoryRepository for SqliteTrajectoryRepository {
+    async fn save(&self, trajectory: &Trajectory) -> DomainResult<()> {
+        let id = trajectory.id.to_string();
+        let task_id = trajectory.task_id.to_string();
+        let goal_id = trajectory.goal_id.map(|g| g.to_string());
+        let total_fresh_starts = trajectory.total_fresh_starts as i32;
+
+        let specification_json = serde_json::to_string(&trajectory.specification)?;
+        let observations_json = serde_json::to_string(&trajectory.observations)?;
+        let attractor_state_json = serde_json::to_string(&trajectory.attractor_state)?;
+        let budget_json = serde_json::to_string(&trajectory.budget)?;
+        let policy_json = serde_json::to_string(&trajectory.policy)?;
+        let strategy_log_json = serde_json::to_string(&trajectory.strategy_log)?;
+        let context_health_json = serde_json::to_string(&trajectory.context_health)?;
+        let hints_json = serde_json::to_string(&trajectory.hints)?;
+        let forced_strategy_json = trajectory
+            .forced_strategy
+            .as_ref()
+            .map(|s| serde_json::to_string(s))
+            .transpose()?;
+
+        let created_at = trajectory.created_at.to_rfc3339();
+        let updated_at = trajectory.updated_at.to_rfc3339();
+
+        // Store the full phase JSON so Coordinating's children are preserved.
+        let phase_json = serde_json::to_string(&trajectory.phase)?;
+
+        sqlx::query(
+            r#"INSERT INTO convergence_trajectories (
+                id, task_id, goal_id, phase, total_fresh_starts,
+                specification_json, observations_json, attractor_state_json,
+                budget_json, policy_json, strategy_log_json, context_health_json,
+                hints_json, forced_strategy_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                task_id = excluded.task_id,
+                goal_id = excluded.goal_id,
+                phase = excluded.phase,
+                total_fresh_starts = excluded.total_fresh_starts,
+                specification_json = excluded.specification_json,
+                observations_json = excluded.observations_json,
+                attractor_state_json = excluded.attractor_state_json,
+                budget_json = excluded.budget_json,
+                policy_json = excluded.policy_json,
+                strategy_log_json = excluded.strategy_log_json,
+                context_health_json = excluded.context_health_json,
+                hints_json = excluded.hints_json,
+                forced_strategy_json = excluded.forced_strategy_json,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at"#,
+        )
+        .bind(&id)
+        .bind(&task_id)
+        .bind(&goal_id)
+        .bind(&phase_json)
+        .bind(total_fresh_starts)
+        .bind(&specification_json)
+        .bind(&observations_json)
+        .bind(&attractor_state_json)
+        .bind(&budget_json)
+        .bind(&policy_json)
+        .bind(&strategy_log_json)
+        .bind(&context_health_json)
+        .bind(&hints_json)
+        .bind(&forced_strategy_json)
+        .bind(&created_at)
+        .bind(&updated_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn get(&self, trajectory_id: &str) -> DomainResult<Option<Trajectory>> {
+        let row: Option<TrajectoryRow> =
+            sqlx::query_as("SELECT * FROM convergence_trajectories WHERE id = ?")
+                .bind(trajectory_id)
+                .fetch_optional(&self.pool)
+                .await?;
+
+        row.map(|r| r.try_into()).transpose()
+    }
+
+    async fn get_by_task(&self, task_id: &str) -> DomainResult<Vec<Trajectory>> {
+        let rows: Vec<TrajectoryRow> = sqlx::query_as(
+            "SELECT * FROM convergence_trajectories WHERE task_id = ? ORDER BY updated_at DESC",
+        )
+        .bind(task_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(|r| r.try_into()).collect()
+    }
+
+    async fn get_by_goal(&self, goal_id: &str) -> DomainResult<Vec<Trajectory>> {
+        let rows: Vec<TrajectoryRow> = sqlx::query_as(
+            "SELECT * FROM convergence_trajectories WHERE goal_id = ? ORDER BY updated_at DESC",
+        )
+        .bind(goal_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(|r| r.try_into()).collect()
+    }
+
+    async fn get_recent(&self, limit: usize) -> DomainResult<Vec<Trajectory>> {
+        let rows: Vec<TrajectoryRow> = sqlx::query_as(
+            "SELECT * FROM convergence_trajectories ORDER BY updated_at DESC LIMIT ?",
+        )
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(|r| r.try_into()).collect()
+    }
+
+    async fn get_successful_strategies(
+        &self,
+        attractor_type: &AttractorType,
+        limit: usize,
+    ) -> DomainResult<Vec<StrategyEntry>> {
+        // Query converged trajectories, then filter strategy entries in application code
+        // for those with positive convergence_delta_achieved and matching attractor type.
+        let rows: Vec<TrajectoryRow> = sqlx::query_as(
+            r#"SELECT * FROM convergence_trajectories
+               WHERE phase = '"converged"'
+               ORDER BY updated_at DESC
+               LIMIT ?"#,
+        )
+        .bind((limit * 10) as i64) // Fetch more rows to account for filtering
+        .fetch_all(&self.pool)
+        .await?;
+
+        let target_attractor_name = attractor_type_name(attractor_type);
+        let mut successful_entries: Vec<StrategyEntry> = Vec::new();
+
+        for row in rows {
+            let trajectory: Trajectory = row.try_into()?;
+
+            // Check if this trajectory's attractor classification matches the requested type
+            let trajectory_attractor_name =
+                attractor_type_name(&trajectory.attractor_state.classification);
+            if trajectory_attractor_name != target_attractor_name {
+                continue;
+            }
+
+            // Collect strategy entries with positive convergence delta
+            for entry in &trajectory.strategy_log {
+                if let Some(delta) = entry.convergence_delta_achieved {
+                    if delta > 0.0 {
+                        successful_entries.push(entry.clone());
+                    }
+                }
+            }
+
+            if successful_entries.len() >= limit {
+                break;
+            }
+        }
+
+        successful_entries.truncate(limit);
+        Ok(successful_entries)
+    }
+
+    async fn delete(&self, trajectory_id: &str) -> DomainResult<()> {
+        sqlx::query("DELETE FROM convergence_trajectories WHERE id = ?")
+            .bind(trajectory_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn avg_iterations_by_complexity(&self, complexity: Complexity) -> DomainResult<f64> {
+        // Map complexity to the token budget that `allocate_budget` would assign.
+        // Since ConvergenceBudget is stored as JSON in budget_json, we match on
+        // the max_tokens field which uniquely identifies each complexity tier.
+        let max_tokens: u64 = match complexity {
+            Complexity::Trivial => 50_000,
+            Complexity::Simple => 150_000,
+            Complexity::Moderate => 400_000,
+            Complexity::Complex => 1_000_000,
+        };
+
+        // Use json_extract to read max_tokens from budget_json and
+        // json_array_length to count observations (iterations).
+        // Only consider terminal trajectories (converged or exhausted).
+        let row: Option<(f64,)> = sqlx::query_as(
+            r#"SELECT AVG(json_array_length(observations_json)) as avg_iters
+               FROM convergence_trajectories
+               WHERE (phase = '"converged"' OR phase = '"exhausted"')
+                 AND json_extract(budget_json, '$.max_tokens') = ?"#,
+        )
+        .bind(max_tokens as i64)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.0).unwrap_or(0.0))
+    }
+
+    async fn strategy_effectiveness(&self, strategy: StrategyKind) -> DomainResult<StrategyStats> {
+        let strategy_name = strategy.kind_name().to_string();
+
+        // Fetch all strategy_log_json columns from the database and compute
+        // statistics in application code. This avoids complex JSON iteration
+        // in SQLite which can be fragile across versions.
+        let rows: Vec<(String,)> = sqlx::query_as(
+            r#"SELECT strategy_log_json
+               FROM convergence_trajectories
+               WHERE strategy_log_json != '[]'"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut total_uses: u64 = 0;
+        let mut success_count: u64 = 0;
+        let mut total_delta: f64 = 0.0;
+        let mut total_tokens: u64 = 0;
+
+        for (log_json,) in &rows {
+            let entries: Vec<StrategyEntry> = serde_json::from_str(log_json)
+                .map_err(|e| {
+                    DomainError::SerializationError(format!("Invalid strategy_log: {}", e))
+                })?;
+
+            for entry in &entries {
+                if entry.strategy_kind.kind_name() == strategy_name {
+                    total_uses += 1;
+                    total_tokens += entry.tokens_used;
+
+                    if let Some(delta) = entry.convergence_delta_achieved {
+                        total_delta += delta;
+                        if delta > 0.0 {
+                            success_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        let average_delta = if total_uses > 0 {
+            total_delta / total_uses as f64
+        } else {
+            0.0
+        };
+
+        let average_tokens = if total_uses > 0 {
+            total_tokens / total_uses
+        } else {
+            0
+        };
+
+        Ok(StrategyStats {
+            strategy: strategy_name,
+            total_uses,
+            success_count,
+            average_delta,
+            average_tokens,
+        })
+    }
+
+    async fn attractor_distribution(&self) -> DomainResult<HashMap<String, u32>> {
+        // Extract the top-level attractor classification tag from the JSON.
+        // AttractorState is serialized as { "classification": { "<type>": {...} }, ... }
+        // We need to get the key name inside the classification object.
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT attractor_state_json FROM convergence_trajectories",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut distribution: HashMap<String, u32> = HashMap::new();
+
+        for (state_json,) in &rows {
+            let state: AttractorState = serde_json::from_str(state_json).map_err(|e| {
+                DomainError::SerializationError(format!("Invalid attractor_state: {}", e))
+            })?;
+
+            let type_name = attractor_type_name(&state.classification);
+            *distribution.entry(type_name.to_string()).or_insert(0) += 1;
+        }
+
+        Ok(distribution)
+    }
+
+    async fn convergence_rate_by_task_type(&self, category: &str) -> DomainResult<f64> {
+        // Match category against specification_json content using LIKE.
+        // Count converged vs total terminal trajectories.
+        let pattern = format!("%{}%", category);
+
+        let row: Option<(i64, i64)> = sqlx::query_as(
+            r#"SELECT
+                 COUNT(CASE WHEN phase = '"converged"' THEN 1 END) as converged,
+                 COUNT(*) as total
+               FROM convergence_trajectories
+               WHERE (phase = '"converged"' OR phase = '"exhausted"' OR phase = '"trapped"')
+                 AND specification_json LIKE ?"#,
+        )
+        .bind(&pattern)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some((converged, total)) if total > 0 => {
+                Ok(converged as f64 / total as f64)
+            }
+            _ => Ok(0.0),
+        }
+    }
+
+    async fn get_similar_trajectories(
+        &self,
+        description: &str,
+        tags: &[String],
+        limit: usize,
+    ) -> DomainResult<Vec<Trajectory>> {
+        // Build a query that matches the description and any of the tags
+        // against the specification_json content. We use multiple LIKE
+        // conditions combined with OR so that any matching keyword counts.
+        //
+        // The description is split into significant keywords (>= 4 chars)
+        // to broaden matching beyond exact substring.
+
+        let keywords: Vec<String> = description
+            .split_whitespace()
+            .filter(|w| w.len() >= 4)
+            .map(|w| w.to_lowercase())
+            .collect();
+
+        let mut all_terms: Vec<String> = keywords;
+        for tag in tags {
+            if !tag.is_empty() {
+                all_terms.push(tag.to_lowercase());
+            }
+        }
+
+        if all_terms.is_empty() {
+            // No meaningful search terms; fall back to recency-based retrieval.
+            return self.get_recent(limit).await;
+        }
+
+        // Build WHERE clause with LIKE conditions for each term.
+        let like_clauses: Vec<String> = all_terms
+            .iter()
+            .map(|_| "LOWER(specification_json) LIKE ?".to_string())
+            .collect();
+        let where_clause = like_clauses.join(" OR ");
+
+        let query = format!(
+            r#"SELECT * FROM convergence_trajectories
+               WHERE {}
+               ORDER BY updated_at DESC
+               LIMIT ?"#,
+            where_clause
+        );
+
+        // sqlx requires statically-known bind count, so we build the query
+        // dynamically using sqlx::query_as with runtime binds.
+        let mut q = sqlx::query_as::<_, TrajectoryRow>(&query);
+        for term in &all_terms {
+            q = q.bind(format!("%{}%", term));
+        }
+        q = q.bind(limit as i64);
+
+        let rows: Vec<TrajectoryRow> = q.fetch_all(&self.pool).await?;
+
+        rows.into_iter().map(|r| r.try_into()).collect()
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct TrajectoryRow {
+    id: String,
+    task_id: String,
+    goal_id: Option<String>,
+    phase: String,
+    total_fresh_starts: i32,
+    specification_json: String,
+    observations_json: String,
+    attractor_state_json: String,
+    budget_json: String,
+    policy_json: String,
+    strategy_log_json: String,
+    context_health_json: String,
+    hints_json: String,
+    forced_strategy_json: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl TryFrom<TrajectoryRow> for Trajectory {
+    type Error = DomainError;
+
+    fn try_from(row: TrajectoryRow) -> Result<Self, Self::Error> {
+        let id = super::parse_uuid(&row.id)?;
+        let task_id = super::parse_uuid(&row.task_id)?;
+        let goal_id = super::parse_optional_uuid(row.goal_id)?;
+
+        let phase: ConvergencePhase = serde_json::from_str(&row.phase)
+            .map_err(|e| DomainError::SerializationError(format!("Invalid phase: {}", e)))?;
+
+        let specification: SpecificationEvolution =
+            serde_json::from_str(&row.specification_json)
+                .map_err(|e| DomainError::SerializationError(format!("Invalid specification: {}", e)))?;
+
+        let observations: Vec<Observation> =
+            serde_json::from_str(&row.observations_json)
+                .map_err(|e| DomainError::SerializationError(format!("Invalid observations: {}", e)))?;
+
+        let attractor_state: AttractorState =
+            serde_json::from_str(&row.attractor_state_json)
+                .map_err(|e| DomainError::SerializationError(format!("Invalid attractor_state: {}", e)))?;
+
+        let budget: ConvergenceBudget =
+            serde_json::from_str(&row.budget_json)
+                .map_err(|e| DomainError::SerializationError(format!("Invalid budget: {}", e)))?;
+
+        let policy: ConvergencePolicy =
+            serde_json::from_str(&row.policy_json)
+                .map_err(|e| DomainError::SerializationError(format!("Invalid policy: {}", e)))?;
+
+        let strategy_log: Vec<StrategyEntry> =
+            serde_json::from_str(&row.strategy_log_json)
+                .map_err(|e| DomainError::SerializationError(format!("Invalid strategy_log: {}", e)))?;
+
+        let context_health: ContextHealth =
+            serde_json::from_str(&row.context_health_json)
+                .map_err(|e| DomainError::SerializationError(format!("Invalid context_health: {}", e)))?;
+
+        let hints: Vec<String> =
+            serde_json::from_str(&row.hints_json)
+                .map_err(|e| DomainError::SerializationError(format!("Invalid hints: {}", e)))?;
+
+        let forced_strategy: Option<StrategyKind> = row
+            .forced_strategy_json
+            .map(|s| serde_json::from_str(&s))
+            .transpose()
+            .map_err(|e| DomainError::SerializationError(format!("Invalid forced_strategy: {}", e)))?;
+
+        let created_at = super::parse_datetime(&row.created_at)?;
+        let updated_at = super::parse_datetime(&row.updated_at)?;
+
+        Ok(Trajectory {
+            id,
+            task_id,
+            goal_id,
+            specification,
+            observations,
+            attractor_state,
+            budget,
+            policy,
+            strategy_log,
+            phase,
+            context_health,
+            hints,
+            forced_strategy,
+            total_fresh_starts: row.total_fresh_starts as u32,
+            created_at,
+            updated_at,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::sqlite::create_migrated_test_pool;
+    use crate::domain::models::{
+        ConvergenceBudget, ConvergencePhase, ConvergencePolicy, SpecificationEvolution,
+        SpecificationSnapshot,
+    };
+    use uuid::Uuid;
+
+    async fn setup_test_repo() -> SqliteTrajectoryRepository {
+        let pool = create_migrated_test_pool().await.unwrap();
+        SqliteTrajectoryRepository::new(pool)
+    }
+
+    fn test_trajectory() -> Trajectory {
+        Trajectory::new(
+            Uuid::new_v4(),
+            Some(Uuid::new_v4()),
+            SpecificationEvolution::new(SpecificationSnapshot::new("test spec".into())),
+            ConvergenceBudget::default(),
+            ConvergencePolicy::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_save_and_get() {
+        let repo = setup_test_repo().await;
+        let trajectory = test_trajectory();
+
+        repo.save(&trajectory).await.unwrap();
+
+        let retrieved = repo.get(&trajectory.id.to_string()).await.unwrap();
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.id, trajectory.id);
+        assert_eq!(retrieved.task_id, trajectory.task_id);
+        assert_eq!(retrieved.goal_id, trajectory.goal_id);
+    }
+
+    #[tokio::test]
+    async fn test_save_upsert() {
+        let repo = setup_test_repo().await;
+        let mut trajectory = test_trajectory();
+
+        repo.save(&trajectory).await.unwrap();
+
+        trajectory.phase = ConvergencePhase::Iterating;
+        trajectory.total_fresh_starts = 2;
+        repo.save(&trajectory).await.unwrap();
+
+        let retrieved = repo.get(&trajectory.id.to_string()).await.unwrap().unwrap();
+        assert_eq!(retrieved.total_fresh_starts, 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_by_task() {
+        let repo = setup_test_repo().await;
+        let task_id = Uuid::new_v4();
+
+        let mut t1 = test_trajectory();
+        t1.task_id = task_id;
+        let mut t2 = test_trajectory();
+        t2.task_id = task_id;
+        let t3 = test_trajectory(); // different task
+
+        repo.save(&t1).await.unwrap();
+        repo.save(&t2).await.unwrap();
+        repo.save(&t3).await.unwrap();
+
+        let results = repo.get_by_task(&task_id.to_string()).await.unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_by_goal() {
+        let repo = setup_test_repo().await;
+        let goal_id = Uuid::new_v4();
+
+        let mut t1 = test_trajectory();
+        t1.goal_id = Some(goal_id);
+        let mut t2 = test_trajectory();
+        t2.goal_id = Some(goal_id);
+
+        repo.save(&t1).await.unwrap();
+        repo.save(&t2).await.unwrap();
+
+        let results = repo.get_by_goal(&goal_id.to_string()).await.unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_recent() {
+        let repo = setup_test_repo().await;
+
+        for _ in 0..5 {
+            repo.save(&test_trajectory()).await.unwrap();
+        }
+
+        let results = repo.get_recent(3).await.unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_delete() {
+        let repo = setup_test_repo().await;
+        let trajectory = test_trajectory();
+
+        repo.save(&trajectory).await.unwrap();
+        repo.delete(&trajectory.id.to_string()).await.unwrap();
+
+        let retrieved = repo.get(&trajectory.id.to_string()).await.unwrap();
+        assert!(retrieved.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_not_found() {
+        let repo = setup_test_repo().await;
+        let result = repo.get(&Uuid::new_v4().to_string()).await.unwrap();
+        assert!(result.is_none());
+    }
+}

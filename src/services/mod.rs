@@ -34,6 +34,8 @@ pub mod overmind;
 pub mod swarm_orchestrator;
 pub mod task_service;
 pub mod trigger_rules;
+pub mod convergence_engine;
+pub mod overseers;
 pub mod worktree_service;
 
 pub use agent_service::AgentService;
@@ -41,6 +43,7 @@ pub use audit_log::{AuditAction, AuditActor, AuditCategory, AuditEntry, AuditFil
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerService, CircuitCheckResult, CircuitScope, CircuitState, CircuitStats as CircuitBreakerStats, CircuitTrippedEvent, RecoveryAction, RecoveryPolicy};
 pub use command_bus::{CommandBus, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandResult, CommandSource, DomainCommand, GoalCommand, GoalCommandHandler, MemoryCommand, MemoryCommandHandler, TaskCommand, TaskCommandHandler};
 pub use cold_start::{ColdStartConfig, ColdStartReport, ColdStartService, Convention, ConventionCategory, Dependency, ProjectType};
+pub use convergence_engine::ConvergenceEngine;
 pub use config::{Config, ConfigError, A2AFederationConfig, TrustedSwarmConfig, TrustLevel, FederationAuthMethod, SwarmIdentityConfig};
 pub use context_truncation::{TruncationConfig, estimate_tokens, truncate_section, truncate_to_token_budget, truncate_context_sections};
 pub use context_window::{ContextWindowGuard, ContextWindowGuardConfig, ContextWindowCheck, model_context_window};
