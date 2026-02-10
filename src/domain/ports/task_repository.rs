@@ -68,4 +68,10 @@ pub trait TaskRepository: Send + Sync {
 
     /// Count tasks by status.
     async fn count_by_status(&self) -> DomainResult<std::collections::HashMap<TaskStatus, u64>>;
+
+    /// Atomically claim a Ready task by transitioning it to Running.
+    ///
+    /// Uses `UPDATE ... WHERE status = 'ready'` to prevent TOCTOU races.
+    /// Returns `Ok(None)` if the task was already claimed or not in Ready state.
+    async fn claim_task_atomic(&self, task_id: Uuid, agent_type: &str) -> DomainResult<Option<Task>>;
 }

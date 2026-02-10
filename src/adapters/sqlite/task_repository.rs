@@ -341,6 +341,28 @@ impl TaskRepository for SqliteTaskRepository {
         }
         Ok(counts)
     }
+
+    async fn claim_task_atomic(&self, task_id: Uuid, agent_type: &str) -> DomainResult<Option<Task>> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            r#"UPDATE tasks
+               SET status = 'running', agent_type = ?, version = version + 1,
+                   updated_at = ?, started_at = ?
+               WHERE id = ? AND status = 'ready'"#,
+        )
+        .bind(agent_type)
+        .bind(&now)
+        .bind(&now)
+        .bind(task_id.to_string())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+
+        self.get(task_id).await
+    }
 }
 
 impl SqliteTaskRepository {
@@ -540,5 +562,63 @@ mod tests {
         let ready = repo.get_ready_tasks(10).await.unwrap();
         assert_eq!(ready.len(), 2);
         assert_eq!(ready[0].title, "Ready High"); // Higher priority first
+    }
+
+    #[tokio::test]
+    async fn test_claim_task_atomic_success() {
+        let repo = setup_test_repo().await;
+
+        let mut task = Task::with_title("Claimable", "Desc");
+        task.status = TaskStatus::Ready;
+        repo.create(&task).await.unwrap();
+
+        let claimed = repo.claim_task_atomic(task.id, "overmind").await.unwrap();
+        assert!(claimed.is_some());
+
+        let claimed = claimed.unwrap();
+        assert_eq!(claimed.status, TaskStatus::Running);
+        assert_eq!(claimed.agent_type.as_deref(), Some("overmind"));
+        assert!(claimed.started_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_claim_task_atomic_double_claim() {
+        let repo = setup_test_repo().await;
+
+        let mut task = Task::with_title("Race me", "Desc");
+        task.status = TaskStatus::Ready;
+        repo.create(&task).await.unwrap();
+
+        let first = repo.claim_task_atomic(task.id, "overmind").await.unwrap();
+        assert!(first.is_some());
+
+        // Second claim should return None (already Running)
+        let second = repo.claim_task_atomic(task.id, "overmind").await.unwrap();
+        assert!(second.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_claim_task_atomic_non_ready() {
+        let repo = setup_test_repo().await;
+
+        // Default status is Pending, not Ready
+        let task = Task::with_title("Pending task", "Desc");
+        repo.create(&task).await.unwrap();
+
+        let result = repo.claim_task_atomic(task.id, "overmind").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_claim_task_atomic_increments_version() {
+        let repo = setup_test_repo().await;
+
+        let mut task = Task::with_title("Version check", "Desc");
+        task.status = TaskStatus::Ready;
+        let original_version = task.version;
+        repo.create(&task).await.unwrap();
+
+        let claimed = repo.claim_task_atomic(task.id, "overmind").await.unwrap().unwrap();
+        assert_eq!(claimed.version, original_version + 1);
     }
 }

@@ -7,6 +7,7 @@
 //! Protocol: newline-delimited JSON-RPC 2.0 on stdin/stdout.
 //! Logging goes to stderr (stdout is reserved for protocol messages).
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
@@ -391,6 +392,15 @@ where
         // Auto-populate parent_id from --task-id context
         let parent_id = self.task_id;
 
+        // Derive a deterministic idempotency key when submitting subtasks
+        // so duplicate overmind runs cannot create duplicate children.
+        let idempotency_key = parent_id.map(|pid| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            description.hash(&mut hasher);
+            let hash = hasher.finish();
+            format!("subtask:{}:{:016x}", pid, hash)
+        });
+
         let cmd = DomainCommand::Task(TaskCommand::Submit {
             title,
             description,
@@ -399,7 +409,7 @@ where
             agent_type,
             depends_on,
             context: Box::new(None),
-            idempotency_key: None,
+            idempotency_key,
             source: TaskSource::Human,
             deadline: None,
         });

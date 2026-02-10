@@ -674,22 +674,25 @@ where
     /// Drain the ready-task channel and spawn agents for each ready task.
     async fn drain_ready_tasks(&self, event_tx: &mpsc::Sender<SwarmEvent>) -> DomainResult<()> {
         let mut rx = self.ready_task_rx.lock().await;
-        let mut spawned = 0;
+        let mut spawned_ids = std::collections::HashSet::new();
 
         while let Ok(task_id) = rx.try_recv() {
             // Fetch and validate task is still Ready
             if let Ok(Some(task)) = self.task_repo.get(task_id).await {
                 if task.status == crate::domain::models::TaskStatus::Ready {
                     self.spawn_task_agent(&task, event_tx).await?;
-                    spawned += 1;
+                    spawned_ids.insert(task_id);
                 }
             }
         }
 
         // Also pick up any ready tasks not yet signaled via the channel
         // (e.g., tasks that became ready before the handler was registered)
-        if spawned == 0 {
+        if spawned_ids.is_empty() {
             self.process_goals(event_tx).await?;
+        } else {
+            // Run process_goals but skip tasks already attempted in this drain cycle
+            self.process_goals_excluding(event_tx, &spawned_ids).await?;
         }
 
         Ok(())

@@ -121,6 +121,23 @@ where
         Ok(())
     }
 
+    /// Like `process_goals` but skips tasks already attempted in the current drain cycle.
+    pub(super) async fn process_goals_excluding(
+        &self,
+        event_tx: &mpsc::Sender<SwarmEvent>,
+        already_spawned: &std::collections::HashSet<uuid::Uuid>,
+    ) -> DomainResult<()> {
+        let ready_tasks = self.task_repo.get_ready_tasks(self.config.max_agents).await?;
+
+        for task in &ready_tasks {
+            if !already_spawned.contains(&task.id) {
+                self.spawn_task_agent(task, event_tx).await?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Route a task to the appropriate agent type.
     ///
     /// Resolution priority:
@@ -255,6 +272,35 @@ where
 
         // Try to acquire agent permit
         if let Ok(permit) = self.agent_semaphore.clone().try_acquire_owned() {
+            // Atomically claim the task (Ready→Running) BEFORE spawning.
+            // This prevents TOCTOU races where multiple poll cycles see the
+            // same Ready task and spawn duplicate agents.
+            match self.task_repo.claim_task_atomic(task.id, &agent_type).await {
+                Ok(None) => {
+                    // Task was already claimed by another cycle — nothing to do
+                    tracing::debug!("Task {} already claimed, skipping spawn", task.id);
+                    drop(permit);
+                    return Ok(());
+                }
+                Ok(Some(_)) => {
+                    // Successfully claimed — publish event and continue to spawn
+                    self.event_bus.publish(crate::services::event_factory::task_event(
+                        crate::services::event_bus::EventSeverity::Info,
+                        None,
+                        task.id,
+                        crate::services::event_bus::EventPayload::TaskClaimed {
+                            task_id: task.id,
+                            agent_type: agent_type.clone(),
+                        },
+                    )).await;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to atomically claim task {}: {}", task.id, e);
+                    drop(permit);
+                    return Ok(());
+                }
+            }
+
             let system_prompt = self.get_agent_system_prompt(&agent_type).await;
 
             // Get agent template for version tracking, capabilities, and tool restrictions
@@ -425,47 +471,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             tokio::spawn(async move {
                 let _permit = permit;
 
-                // Claim task via CommandBus (transitions to Running and journals event)
-                if let Some(ref cb) = command_bus {
-                    let envelope = CommandEnvelope::new(
-                        CommandSource::System,
-                        DomainCommand::Task(TaskCommand::Claim {
-                            task_id,
-                            agent_type: agent_type.clone(),
-                        }),
-                    );
-                    if let Err(e) = cb.dispatch(envelope).await {
-                        tracing::warn!("Failed to claim task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
-                        if let Ok(Some(mut running_task)) = task_repo.get(task_id).await {
-                            let _ = running_task.transition_to(TaskStatus::Running);
-                            let _ = task_repo.update(&running_task).await;
-                            event_bus.publish(crate::services::event_factory::task_event(
-                                crate::services::event_bus::EventSeverity::Info,
-                                None,
-                                task_id,
-                                crate::services::event_bus::EventPayload::TaskClaimed {
-                                    task_id,
-                                    agent_type: agent_type.clone(),
-                                },
-                            )).await;
-                        }
-                    }
-                } else {
-                    tracing::warn!("CommandBus not initialized for task {} claim, using non-atomic fallback", task_id);
-                    if let Ok(Some(mut running_task)) = task_repo.get(task_id).await {
-                        let _ = running_task.transition_to(TaskStatus::Running);
-                        let _ = task_repo.update(&running_task).await;
-                        event_bus.publish(crate::services::event_factory::task_event(
-                            crate::services::event_bus::EventSeverity::Info,
-                            None,
-                            task_id,
-                            crate::services::event_bus::EventPayload::TaskClaimed {
-                                task_id,
-                                agent_type: agent_type.clone(),
-                            },
-                        )).await;
-                    }
-                }
+                // Task is already Running (claimed atomically before spawn).
 
                 // -----------------------------------------------------------------
                 // Convergent execution path (Phase 3)
