@@ -89,6 +89,59 @@ impl TaskSubmission {
             parallel_samples: None,
         }
     }
+
+    /// Add a constraint ("must X" invariant) to this submission.
+    ///
+    /// Constraints are folded into the specification as amendments during
+    /// trajectory initialization and widen the attractor basin by making
+    /// acceptance criteria explicit.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let submission = TaskSubmission::new("Implement user login".to_string())
+    ///     .with_constraint("Must use bcrypt for password hashing".to_string());
+    /// ```
+    pub fn with_constraint(mut self, constraint: String) -> Self {
+        self.constraints.push(constraint);
+        self
+    }
+
+    /// Add an anti-pattern ("not Y") to this submission.
+    ///
+    /// Anti-patterns are injected into the agent prompt and used by overseer
+    /// checks to penalize implementations that exhibit known bad patterns.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let submission = TaskSubmission::new("Implement user login".to_string())
+    ///     .with_anti_pattern("Do not store passwords in plaintext".to_string());
+    /// ```
+    pub fn with_anti_pattern(mut self, pattern: String) -> Self {
+        self.anti_patterns.push(pattern);
+        self
+    }
+
+    /// Add a file or resource reference for the engine to consider.
+    ///
+    /// References are routed into the convergence infrastructure during
+    /// the PREPARE phase: test files become acceptance tests, examples
+    /// become prompt enrichment, and other types become context files.
+    pub fn with_reference(mut self, reference: Reference) -> Self {
+        self.references.push(reference);
+        self
+    }
+
+    /// Set the priority hint for this submission.
+    ///
+    /// The priority hint adjusts both the convergence budget and policy
+    /// during the SETUP phase, controlling the tradeoff between speed,
+    /// cost, and thoroughness.
+    pub fn with_priority_hint(mut self, hint: PriorityHint) -> Self {
+        self.priority_hint = Some(hint);
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------

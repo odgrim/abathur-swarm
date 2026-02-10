@@ -505,8 +505,8 @@ mod tests {
     use super::*;
     use crate::adapters::sqlite::create_migrated_test_pool;
     use crate::domain::models::{
-        ConvergenceBudget, ConvergencePhase, ConvergencePolicy, SpecificationEvolution,
-        SpecificationSnapshot,
+        ArtifactReference, AttractorEvidence, ConvergenceBudget, ConvergencePhase,
+        ConvergencePolicy, OverseerSignals, SpecificationEvolution, SpecificationSnapshot,
     };
     use uuid::Uuid;
 
@@ -620,5 +620,410 @@ mod tests {
         let repo = setup_test_repo().await;
         let result = repo.get(&Uuid::new_v4().to_string()).await.unwrap();
         assert!(result.is_none());
+    }
+
+    // -- Analytics test helpers -----------------------------------------------
+
+    /// Create a trajectory in a terminal phase with the given complexity budget,
+    /// observations, and strategy log entries for analytics testing.
+    fn converged_trajectory_with_budget(
+        complexity: Complexity,
+        observation_count: usize,
+        strategy_entries: Vec<StrategyEntry>,
+    ) -> Trajectory {
+        use crate::domain::models::convergence::allocate_budget;
+
+        let budget = allocate_budget(complexity);
+        let mut t = Trajectory::new(
+            Uuid::new_v4(),
+            Some(Uuid::new_v4()),
+            SpecificationEvolution::new(SpecificationSnapshot::new("analytics test spec".into())),
+            budget,
+            ConvergencePolicy::default(),
+        );
+        t.phase = ConvergencePhase::Converged;
+
+        // Add observations with default signals and strategy.
+        for i in 0..observation_count {
+            let obs = Observation::new(
+                i as u32,
+                ArtifactReference::new(format!("/test/path/{}", i), format!("hash_{}", i)),
+                OverseerSignals::default(),
+                StrategyKind::RetryWithFeedback,
+                10_000,
+                5_000,
+            );
+            t.observations.push(obs);
+        }
+
+        t.strategy_log = strategy_entries;
+        t
+    }
+
+    /// Create a trajectory with a specific attractor classification.
+    fn trajectory_with_attractor(attractor_type: AttractorType) -> Trajectory {
+        let mut t = test_trajectory();
+        t.attractor_state = AttractorState {
+            classification: attractor_type,
+            confidence: 0.8,
+            detected_at: None,
+            evidence: AttractorEvidence {
+                recent_deltas: vec![],
+                recent_signatures: vec![],
+                rationale: "test".into(),
+            },
+        };
+        t
+    }
+
+    // -- Analytics tests ------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_avg_iterations_by_complexity() {
+        let repo = setup_test_repo().await;
+
+        // Create two converged Simple trajectories with 3 and 5 observations.
+        let t1 = converged_trajectory_with_budget(Complexity::Simple, 3, vec![]);
+        let t2 = converged_trajectory_with_budget(Complexity::Simple, 5, vec![]);
+
+        repo.save(&t1).await.unwrap();
+        repo.save(&t2).await.unwrap();
+
+        let avg = repo
+            .avg_iterations_by_complexity(Complexity::Simple)
+            .await
+            .unwrap();
+
+        // Average of 3 and 5 = 4.0
+        assert!(
+            (avg - 4.0).abs() < f64::EPSILON,
+            "Expected avg 4.0, got {}",
+            avg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_avg_iterations_no_matching_data() {
+        let repo = setup_test_repo().await;
+
+        // No trajectories at all.
+        let avg = repo
+            .avg_iterations_by_complexity(Complexity::Complex)
+            .await
+            .unwrap();
+
+        assert!(
+            (avg - 0.0).abs() < f64::EPSILON,
+            "Expected 0.0 for no data, got {}",
+            avg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_strategy_effectiveness() {
+        let repo = setup_test_repo().await;
+
+        // Create a trajectory with strategy log entries.
+        let entries = vec![
+            StrategyEntry::new(StrategyKind::RetryWithFeedback, 0, 10_000, false)
+                .with_delta(0.2),
+            StrategyEntry::new(StrategyKind::RetryWithFeedback, 1, 20_000, false)
+                .with_delta(-0.1),
+            StrategyEntry::new(StrategyKind::FocusedRepair, 2, 15_000, false)
+                .with_delta(0.3),
+        ];
+
+        let t = converged_trajectory_with_budget(Complexity::Simple, 3, entries);
+        repo.save(&t).await.unwrap();
+
+        let stats = repo
+            .strategy_effectiveness(StrategyKind::RetryWithFeedback)
+            .await
+            .unwrap();
+
+        assert_eq!(stats.strategy, "retry_with_feedback");
+        assert_eq!(stats.total_uses, 2);
+        assert_eq!(stats.success_count, 1); // Only delta 0.2 > 0.0
+        // Average delta: (0.2 + -0.1) / 2 = 0.05
+        assert!(
+            (stats.average_delta - 0.05).abs() < 1e-10,
+            "Expected avg delta 0.05, got {}",
+            stats.average_delta
+        );
+        // Average tokens: (10_000 + 20_000) / 2 = 15_000
+        assert_eq!(stats.average_tokens, 15_000);
+    }
+
+    #[tokio::test]
+    async fn test_strategy_effectiveness_no_uses() {
+        let repo = setup_test_repo().await;
+
+        let stats = repo
+            .strategy_effectiveness(StrategyKind::Decompose)
+            .await
+            .unwrap();
+
+        assert_eq!(stats.strategy, "decompose");
+        assert_eq!(stats.total_uses, 0);
+        assert_eq!(stats.success_count, 0);
+        assert!((stats.average_delta - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_attractor_distribution() {
+        let repo = setup_test_repo().await;
+
+        // Create trajectories with different attractor types.
+        let t1 = trajectory_with_attractor(AttractorType::FixedPoint {
+            estimated_remaining_iterations: 2,
+            estimated_remaining_tokens: 40_000,
+        });
+        let t2 = trajectory_with_attractor(AttractorType::FixedPoint {
+            estimated_remaining_iterations: 3,
+            estimated_remaining_tokens: 60_000,
+        });
+        let t3 = trajectory_with_attractor(AttractorType::Plateau {
+            stall_duration: 4,
+            plateau_level: 0.6,
+        });
+
+        repo.save(&t1).await.unwrap();
+        repo.save(&t2).await.unwrap();
+        repo.save(&t3).await.unwrap();
+
+        let dist = repo.attractor_distribution().await.unwrap();
+
+        assert_eq!(dist.get("fixed_point"), Some(&2));
+        assert_eq!(dist.get("plateau"), Some(&1));
+        // No other types should be present.
+        assert!(dist.get("limit_cycle").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_convergence_rate_by_task_type() {
+        let repo = setup_test_repo().await;
+
+        // Create trajectories with "rust" in specification.
+        let mut t1 = test_trajectory();
+        t1.specification = SpecificationEvolution::new(
+            SpecificationSnapshot::new("implement a rust parser".into()),
+        );
+        t1.phase = ConvergencePhase::Converged;
+        repo.save(&t1).await.unwrap();
+
+        let mut t2 = test_trajectory();
+        t2.specification = SpecificationEvolution::new(
+            SpecificationSnapshot::new("implement a rust formatter".into()),
+        );
+        t2.phase = ConvergencePhase::Exhausted;
+        repo.save(&t2).await.unwrap();
+
+        // One unrelated trajectory.
+        let mut t3 = test_trajectory();
+        t3.specification = SpecificationEvolution::new(
+            SpecificationSnapshot::new("implement a python linter".into()),
+        );
+        t3.phase = ConvergencePhase::Converged;
+        repo.save(&t3).await.unwrap();
+
+        let rate = repo
+            .convergence_rate_by_task_type("rust")
+            .await
+            .unwrap();
+
+        // 1 converged out of 2 terminal "rust" trajectories = 0.5
+        assert!(
+            (rate - 0.5).abs() < f64::EPSILON,
+            "Expected rate 0.5, got {}",
+            rate
+        );
+    }
+
+    #[tokio::test]
+    async fn test_convergence_rate_no_matching_category() {
+        let repo = setup_test_repo().await;
+
+        let rate = repo
+            .convergence_rate_by_task_type("nonexistent_category_xyz")
+            .await
+            .unwrap();
+
+        assert!(
+            (rate - 0.0).abs() < f64::EPSILON,
+            "Expected 0.0 for no matches, got {}",
+            rate
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_similar_trajectories() {
+        let repo = setup_test_repo().await;
+
+        // Create trajectories with varying specifications.
+        let mut t1 = test_trajectory();
+        t1.specification = SpecificationEvolution::new(
+            SpecificationSnapshot::new("implement authentication middleware".into()),
+        );
+        repo.save(&t1).await.unwrap();
+
+        let mut t2 = test_trajectory();
+        t2.specification = SpecificationEvolution::new(
+            SpecificationSnapshot::new("implement database connection pooling".into()),
+        );
+        repo.save(&t2).await.unwrap();
+
+        let mut t3 = test_trajectory();
+        t3.specification = SpecificationEvolution::new(
+            SpecificationSnapshot::new("fix authentication token expiry".into()),
+        );
+        repo.save(&t3).await.unwrap();
+
+        // Search for "authentication" related trajectories.
+        let results = repo
+            .get_similar_trajectories("authentication system", &[], 10)
+            .await
+            .unwrap();
+
+        // Should find t1 and t3 (both mention "authentication").
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_similar_trajectories_with_tags() {
+        let repo = setup_test_repo().await;
+
+        let mut t1 = test_trajectory();
+        t1.specification = SpecificationEvolution::new(
+            SpecificationSnapshot::new("implement REST API endpoint".into()),
+        );
+        repo.save(&t1).await.unwrap();
+
+        let mut t2 = test_trajectory();
+        t2.specification = SpecificationEvolution::new(
+            SpecificationSnapshot::new("implement GraphQL resolver".into()),
+        );
+        repo.save(&t2).await.unwrap();
+
+        // Search with tags that match t2.
+        let results = repo
+            .get_similar_trajectories("api", &["graphql".to_string()], 10)
+            .await
+            .unwrap();
+
+        // Should find t2 (matches "graphql" tag).
+        assert!(results.len() >= 1);
+        // Verify at least one result has GraphQL in spec.
+        let has_graphql = results.iter().any(|t| {
+            let spec_json = serde_json::to_string(&t.specification).unwrap_or_default();
+            spec_json.to_lowercase().contains("graphql")
+        });
+        assert!(has_graphql);
+    }
+
+    #[tokio::test]
+    async fn test_get_similar_trajectories_empty_terms() {
+        let repo = setup_test_repo().await;
+
+        // Save some trajectories.
+        for _ in 0..3 {
+            repo.save(&test_trajectory()).await.unwrap();
+        }
+
+        // Empty description with short words should fall back to get_recent.
+        let results = repo
+            .get_similar_trajectories("a b c", &[], 10)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_successful_strategies() {
+        let repo = setup_test_repo().await;
+
+        // Create a converged trajectory with a fixed_point attractor and
+        // strategy entries that have positive deltas.
+        let mut t = test_trajectory();
+        t.phase = ConvergencePhase::Converged;
+        t.attractor_state = AttractorState {
+            classification: AttractorType::FixedPoint {
+                estimated_remaining_iterations: 0,
+                estimated_remaining_tokens: 0,
+            },
+            confidence: 0.9,
+            detected_at: None,
+            evidence: AttractorEvidence {
+                recent_deltas: vec![0.1, 0.2],
+                recent_signatures: vec![],
+                rationale: "test".into(),
+            },
+        };
+        t.strategy_log = vec![
+            StrategyEntry::new(StrategyKind::RetryWithFeedback, 0, 10_000, false)
+                .with_delta(0.15),
+            StrategyEntry::new(StrategyKind::FocusedRepair, 1, 15_000, false)
+                .with_delta(-0.05), // negative, should not be included
+            StrategyEntry::new(StrategyKind::RetryAugmented, 2, 20_000, false)
+                .with_delta(0.25),
+        ];
+        repo.save(&t).await.unwrap();
+
+        let attractor_type = AttractorType::FixedPoint {
+            estimated_remaining_iterations: 0,
+            estimated_remaining_tokens: 0,
+        };
+
+        let entries = repo
+            .get_successful_strategies(&attractor_type, 10)
+            .await
+            .unwrap();
+
+        // Should return 2 entries (delta 0.15 and 0.25), not the negative one.
+        assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            assert!(entry.convergence_delta_achieved.unwrap() > 0.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_successful_strategies_wrong_attractor() {
+        let repo = setup_test_repo().await;
+
+        // Create a converged trajectory with fixed_point attractor.
+        let mut t = test_trajectory();
+        t.phase = ConvergencePhase::Converged;
+        t.attractor_state = AttractorState {
+            classification: AttractorType::FixedPoint {
+                estimated_remaining_iterations: 0,
+                estimated_remaining_tokens: 0,
+            },
+            confidence: 0.9,
+            detected_at: None,
+            evidence: AttractorEvidence {
+                recent_deltas: vec![],
+                recent_signatures: vec![],
+                rationale: "test".into(),
+            },
+        };
+        t.strategy_log = vec![
+            StrategyEntry::new(StrategyKind::RetryWithFeedback, 0, 10_000, false)
+                .with_delta(0.3),
+        ];
+        repo.save(&t).await.unwrap();
+
+        // Query for plateau attractor -- should find nothing because the
+        // trajectory has a fixed_point attractor.
+        let attractor_type = AttractorType::Plateau {
+            stall_duration: 3,
+            plateau_level: 0.5,
+        };
+
+        let entries = repo
+            .get_successful_strategies(&attractor_type, 10)
+            .await
+            .unwrap();
+
+        assert!(entries.is_empty());
     }
 }

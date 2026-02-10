@@ -274,7 +274,26 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             !trajectory.specification.effective.anti_patterns.is_empty(),
             false,
         );
-        let _mode = select_convergence_mode(&basin, &trajectory.policy, None);
+        let mode = select_convergence_mode(&basin, &trajectory.policy, None);
+
+        // If parallel mode is selected, route to converge_parallel instead
+        // of the sequential loop (spec 6.6).
+        if let ConvergenceMode::Parallel { initial_samples } = mode {
+            let submission = TaskSubmission {
+                description: trajectory.specification.effective.content.clone(),
+                goal_id: trajectory.goal_id,
+                inferred_complexity: Complexity::Moderate,
+                discovered_infrastructure: DiscoveredInfrastructure::default(),
+                priority_hint: trajectory.policy.priority_hint,
+                constraints: trajectory.specification.effective.constraints.clone(),
+                references: vec![],
+                anti_patterns: trajectory.specification.effective.anti_patterns.clone(),
+                parallel_samples: Some(initial_samples),
+            };
+            return self
+                .converge_parallel(&submission, initial_samples)
+                .await;
+        }
 
         // -- ITERATE phase --
         trajectory.phase = ConvergencePhase::Iterating;
@@ -323,13 +342,57 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             let strategy = if let Some(forced) = trajectory.forced_strategy.take() {
                 forced
             } else {
-                let eligible = eligible_strategies(
+                let mut eligible = eligible_strategies(
                     &trajectory.strategy_log,
                     attractor,
                     &trajectory.budget,
                     trajectory.total_fresh_starts,
                     trajectory.policy.max_fresh_starts,
                 );
+
+                // Spec 4.5: Decay-aware rotation check.
+                // If the current exploitation strategy has diminishing returns,
+                // filter it out so the bandit selects a different one.
+                if let Some(last_entry) = trajectory.strategy_log.last() {
+                    let current = &last_entry.strategy_kind;
+                    if current.is_exploitation() {
+                        let consecutive_uses = trajectory
+                            .strategy_log
+                            .iter()
+                            .rev()
+                            .take_while(|e| {
+                                e.strategy_kind.kind_name() == current.kind_name()
+                            })
+                            .count() as u32;
+                        let recent_deltas: Vec<f64> = trajectory
+                            .strategy_log
+                            .iter()
+                            .rev()
+                            .take_while(|e| {
+                                e.strategy_kind.kind_name() == current.kind_name()
+                            })
+                            .filter_map(|e| e.convergence_delta_achieved)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+
+                        if should_rotate_strategy(
+                            current,
+                            consecutive_uses,
+                            &recent_deltas,
+                        ) {
+                            let current_name = current.kind_name();
+                            tracing::info!(
+                                strategy = current_name,
+                                consecutive_uses = consecutive_uses,
+                                "Strategy rotation triggered: filtering out {}",
+                                current_name
+                            );
+                            eligible.retain(|s| s.kind_name() != current_name);
+                        }
+                    }
+                }
 
                 if eligible.is_empty() {
                     // No strategies available -- trapped
@@ -359,7 +422,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
 
             // c. Execute strategy -> produce artifact
             let (artifact, tokens_used, _wall_time_ms) =
-                self.execute_strategy(&strategy, &trajectory).await?;
+                self.execute_strategy(&strategy, &mut trajectory).await?;
 
             // d. Measure with overseers
             let mut observation =
@@ -522,7 +585,8 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             });
         }
 
-        // Classify attractor
+        // Classify attractor -- capture previous classification for transition detection
+        let previous_classification = trajectory.attractor_state.classification.clone();
         trajectory.attractor_state = classify_attractor(&trajectory.observations, 5);
 
         self.emit_event(ConvergenceEvent::AttractorClassified {
@@ -530,6 +594,22 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             attractor_type: trajectory.attractor_state.classification.clone(),
             confidence: trajectory.attractor_state.confidence,
         });
+
+        // Spec 7.3: Attractor transition detection (intervention point).
+        // Log when the attractor classification changes between observations.
+        let prev_name = self.attractor_type_name(&previous_classification);
+        let new_name =
+            self.attractor_type_name(&trajectory.attractor_state.classification);
+        if prev_name != new_name {
+            tracing::info!(
+                trajectory_id = %trajectory.id,
+                from = prev_name,
+                to = new_name,
+                "AttractorTransition intervention point: attractor changed from {} to {}",
+                prev_name,
+                new_name
+            );
+        }
 
         // Update bandit
         if let Some(obs) = trajectory.observations.last() {
@@ -703,52 +783,255 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
     // 6.6 converge_parallel -- Parallel trajectory sampling
     // -----------------------------------------------------------------------
 
-    /// Run parallel trajectory sampling (spec 6.6).
+    /// Run parallel trajectory sampling with Thompson Sampling (spec 6.6).
     ///
-    /// Spawns `sample_count` independent trajectories and selects the best
-    /// outcome. Each sample gets a fraction of the parent budget.
+    /// Two-phase approach:
+    ///
+    /// **Phase 1 -- Independent starts**: Generate `sample_count` independent
+    /// trajectories, each running exactly one iteration to produce an initial
+    /// observation. Each sample gets 1/N of the parent budget.
+    ///
+    /// **Phase 2 -- Thompson Sampling selection**: Iteratively select which
+    /// trajectory to invest the next iteration in, using per-trajectory
+    /// BetaDistributions updated from convergence deltas. Divergent
+    /// trajectories (with fewer than 3 observations exempted) are filtered
+    /// out. The loop continues until a trajectory converges, all budgets are
+    /// exhausted, or all trajectories are filtered out.
     pub async fn converge_parallel(
         &self,
         submission: &TaskSubmission,
         sample_count: u32,
     ) -> DomainResult<ConvergenceOutcome> {
-        let (base_trajectory, infrastructure) = self.prepare(submission).await?;
+        let (base_trajectory, _infrastructure) = self.prepare(submission).await?;
 
         self.emit_event(ConvergenceEvent::ParallelConvergenceStarted {
             trajectory_id: base_trajectory.id.to_string(),
             parallel_count: sample_count as usize,
         });
 
-        // Create sample trajectories, each with a fraction of the budget
-        let mut outcomes = Vec::new();
-        for _ in 0..sample_count {
+        let n = sample_count as usize;
+
+        // Phase 1: Generate N independent starts, each with one iteration.
+        let mut trajectories: Vec<Trajectory> = Vec::with_capacity(n);
+        let mut bandits: Vec<StrategyBandit> = Vec::with_capacity(n);
+        let mut scores: Vec<BetaDistribution> = Vec::with_capacity(n);
+        let mut active: Vec<bool> = Vec::with_capacity(n);
+
+        for _ in 0..n {
             let mut sample = base_trajectory.clone();
             sample.id = Uuid::new_v4();
-            // Each sample gets 1/N of the budget
-            sample.budget = base_trajectory
-                .budget
-                .scale(1.0 / sample_count as f64);
+            sample.budget = base_trajectory.budget.scale(1.0 / n as f64);
+            sample.phase = ConvergencePhase::Iterating;
 
-            let outcome = self.converge(sample, &infrastructure).await?;
-            outcomes.push(outcome);
+            let mut bandit = self.initialize_bandit(&sample).await;
+
+            // Run exactly one iteration for the initial start.
+            let attractor = &sample.attractor_state;
+            let eligible = eligible_strategies(
+                &sample.strategy_log,
+                attractor,
+                &sample.budget,
+                sample.total_fresh_starts,
+                sample.policy.max_fresh_starts,
+            );
+            if !eligible.is_empty() {
+                let strategy = bandit.select(
+                    &attractor.classification,
+                    &eligible,
+                    &sample.policy,
+                );
+                let (artifact, tokens_used, _wall_time_ms) =
+                    self.execute_strategy(&strategy, &mut sample).await?;
+                let mut observation = self
+                    .measure_artifact(&artifact, &strategy, &sample)
+                    .await?;
+                observation.tokens_used = tokens_used;
+                let _control = self
+                    .iterate_once(
+                        &mut sample,
+                        &mut bandit,
+                        &strategy,
+                        observation,
+                    )
+                    .await?;
+            }
+
+            trajectories.push(sample);
+            bandits.push(bandit);
+            scores.push(BetaDistribution::uniform());
+            active.push(true);
         }
 
-        // Select the best outcome: prefer Converged, then best Exhausted
-        let best = outcomes
-            .into_iter()
-            .min_by_key(|o| match o {
-                ConvergenceOutcome::Converged { .. } => 0,
-                ConvergenceOutcome::Decomposed { .. } => 1,
-                ConvergenceOutcome::Exhausted { .. } => 2,
-                ConvergenceOutcome::BudgetDenied { .. } => 3,
-                ConvergenceOutcome::Trapped { .. } => 4,
-            })
-            .unwrap_or(ConvergenceOutcome::Exhausted {
-                trajectory_id: base_trajectory.id.to_string(),
-                best_observation_sequence: None,
-            });
+        // Phase 2: Thompson Sampling to iteratively select which trajectory
+        // to invest the next iteration in.
+        loop {
+            // Filter out divergent trajectories (unless < 3 observations).
+            for i in 0..n {
+                if !active[i] {
+                    continue;
+                }
+                if let AttractorType::Divergent { .. } =
+                    &trajectories[i].attractor_state.classification
+                {
+                    if trajectories[i].observations.len() >= 3 {
+                        tracing::info!(
+                            trajectory_id = %trajectories[i].id,
+                            "Parallel convergence: filtering out divergent \
+                             trajectory",
+                        );
+                        active[i] = false;
+                    }
+                }
+            }
 
-        Ok(best)
+            // Check if any trajectories are still active.
+            if !active.iter().any(|&a| a) {
+                return Ok(ConvergenceOutcome::Exhausted {
+                    trajectory_id: base_trajectory.id.to_string(),
+                    best_observation_sequence: None,
+                });
+            }
+
+            // Check if any active trajectory has converged.
+            let mut best_converged: Option<usize> = None;
+            let mut all_exhausted = true;
+            for i in 0..n {
+                if !active[i] {
+                    continue;
+                }
+                if let Some(obs) = trajectories[i].observations.last() {
+                    if let Some(ref metrics) = obs.metrics {
+                        if metrics.convergence_level
+                            >= trajectories[i].policy.acceptance_threshold
+                            && obs.overseer_signals.all_passing()
+                        {
+                            best_converged = Some(i);
+                            break;
+                        }
+                    }
+                }
+                if trajectories[i].budget.has_remaining() {
+                    all_exhausted = false;
+                }
+            }
+
+            // If a trajectory converged, finalize and return.
+            if let Some(idx) = best_converged {
+                let final_seq = trajectories[idx]
+                    .observations
+                    .last()
+                    .map(|o| o.sequence)
+                    .unwrap_or(0);
+                let outcome = ConvergenceOutcome::Converged {
+                    trajectory_id: trajectories[idx].id.to_string(),
+                    final_observation_sequence: final_seq,
+                };
+                self.finalize(
+                    &mut trajectories[idx],
+                    &outcome,
+                    &bandits[idx],
+                )
+                .await?;
+                return Ok(outcome);
+            }
+
+            // If all active trajectories exhausted budgets, pick the best.
+            if all_exhausted {
+                let best_idx = (0..n)
+                    .filter(|&i| active[i])
+                    .max_by(|&a, &b| {
+                        let level_a = trajectories[a]
+                            .best_observation()
+                            .and_then(|o| o.metrics.as_ref())
+                            .map(|m| m.convergence_level)
+                            .unwrap_or(0.0);
+                        let level_b = trajectories[b]
+                            .best_observation()
+                            .and_then(|o| o.metrics.as_ref())
+                            .map(|m| m.convergence_level)
+                            .unwrap_or(0.0);
+                        level_a
+                            .partial_cmp(&level_b)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .unwrap_or(0);
+                let outcome = ConvergenceOutcome::Exhausted {
+                    trajectory_id: trajectories[best_idx].id.to_string(),
+                    best_observation_sequence: trajectories[best_idx]
+                        .best_observation()
+                        .map(|o| o.sequence),
+                };
+                self.finalize(
+                    &mut trajectories[best_idx],
+                    &outcome,
+                    &bandits[best_idx],
+                )
+                .await?;
+                return Ok(outcome);
+            }
+
+            // Thompson Sampling: sample from each active trajectory's Beta
+            // distribution and pick the highest scoring one.
+            let selected_idx = (0..n)
+                .filter(|&i| {
+                    active[i] && trajectories[i].budget.has_remaining()
+                })
+                .max_by(|&a, &b| {
+                    let score_a = scores[a].sample();
+                    let score_b = scores[b].sample();
+                    score_a
+                        .partial_cmp(&score_b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+            let selected_idx = match selected_idx {
+                Some(idx) => idx,
+                None => {
+                    return Ok(ConvergenceOutcome::Exhausted {
+                        trajectory_id: base_trajectory.id.to_string(),
+                        best_observation_sequence: None,
+                    });
+                }
+            };
+
+            // Run one iteration on the selected trajectory.
+            let traj = &mut trajectories[selected_idx];
+            let bandit = &mut bandits[selected_idx];
+            let attractor = &traj.attractor_state;
+            let eligible = eligible_strategies(
+                &traj.strategy_log,
+                attractor,
+                &traj.budget,
+                traj.total_fresh_starts,
+                traj.policy.max_fresh_starts,
+            );
+            if eligible.is_empty() {
+                active[selected_idx] = false;
+                continue;
+            }
+            let strategy = bandit.select(
+                &attractor.classification,
+                &eligible,
+                &traj.policy,
+            );
+            let (artifact, tokens_used, _wall_time_ms) =
+                self.execute_strategy(&strategy, traj).await?;
+            let mut observation = self
+                .measure_artifact(&artifact, &strategy, traj)
+                .await?;
+            observation.tokens_used = tokens_used;
+            let _control = self
+                .iterate_once(traj, bandit, &strategy, observation)
+                .await?;
+
+            // Update per-trajectory Thompson Sampling scores.
+            let latest_delta = traj.latest_convergence_delta();
+            if latest_delta > 0.0 {
+                scores[selected_idx].alpha += 1.0;
+            } else {
+                scores[selected_idx].beta += 1.0;
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -939,25 +1222,39 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
     // 9.2 decompose_and_coordinate -- Decomposition flow
     // -----------------------------------------------------------------------
 
-    /// Decompose a task into subtasks and coordinate their convergence (spec 9.2).
+    /// Decompose a task into subtasks and coordinate their convergence (spec 9.2, 9.3).
     ///
-    /// 1. Propose decomposition.
-    /// 2. Allocate budgets for subtasks.
-    /// 3. Create child trajectories.
-    /// 4. Emit DecompositionTriggered event.
-    /// 5. Return Decomposed outcome.
+    /// Full decomposition flow:
+    /// 1. Propose decomposition into subtasks.
+    /// 2. Reserve 25% of the parent budget for the integration trajectory.
+    /// 3. Allocate remaining 75% across child subtasks.
+    /// 4. Converge each child through the full engine (`self.converge()`).
+    /// 5. If any child fails, return Exhausted immediately.
+    /// 6. After all children converge, run a mandatory integration trajectory
+    ///    using the reserved budget.
+    /// 7. Return the final outcome.
     pub async fn decompose_and_coordinate(
         &self,
         trajectory: &mut Trajectory,
     ) -> DomainResult<ConvergenceOutcome> {
-        // Propose decomposition
+        // 1. Propose decomposition
         let decomposition = self.propose_decomposition(trajectory);
 
-        // Allocate budgets
+        // 2. Reserve 25% of parent budget for integration (spec 9.3)
+        let integration_budget = trajectory.budget.scale(0.25);
+
+        // 3. Allocate remaining 75% across child subtasks
         let child_budgets = allocate_decomposed_budget(&trajectory.budget, &decomposition);
 
-        // Create child trajectories
+        self.emit_event(ConvergenceEvent::DecompositionTriggered {
+            parent_trajectory_id: trajectory.id.to_string(),
+            child_count: decomposition.len(),
+        });
+
+        // 4. Converge each child through the full engine
         let mut child_ids = Vec::new();
+        let empty_infra = ConvergenceInfrastructure::default();
+
         for (subtask, budget) in decomposition.iter().zip(child_budgets.iter()) {
             let spec = SpecificationEvolution::new(subtask.specification.clone());
             let child = Trajectory::new(
@@ -968,18 +1265,88 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                 trajectory.policy.clone(),
             );
             child_ids.push(child.id.to_string());
-            self.trajectory_store.save(&child).await?;
+
+            // Run full convergence for this child.
+            // Box::pin is required because converge -> decompose_and_coordinate -> converge
+            // forms a recursive async call chain.
+            let child_outcome =
+                Box::pin(self.converge(child, &empty_infra)).await?;
+
+            // 5. If any child fails, return Exhausted immediately
+            if !matches!(&child_outcome, ConvergenceOutcome::Converged { .. }) {
+                tracing::warn!(
+                    parent_trajectory_id = %trajectory.id,
+                    child_subtask = %subtask.subtask_id,
+                    "Decomposition: child subtask did not converge, aborting coordination",
+                );
+                return Ok(ConvergenceOutcome::Exhausted {
+                    trajectory_id: trajectory.id.to_string(),
+                    best_observation_sequence: trajectory
+                        .best_observation()
+                        .map(|o| o.sequence),
+                });
+            }
         }
 
-        self.emit_event(ConvergenceEvent::DecompositionTriggered {
-            parent_trajectory_id: trajectory.id.to_string(),
-            child_count: child_ids.len(),
-        });
+        // 6. All children converged -- run mandatory integration trajectory (spec 9.3).
+        let integration_outcome = self
+            .run_integration_trajectory(trajectory, &child_ids, integration_budget)
+            .await?;
 
-        Ok(ConvergenceOutcome::Decomposed {
-            parent_trajectory_id: trajectory.id.to_string(),
-            child_trajectory_ids: child_ids,
-        })
+        match &integration_outcome {
+            ConvergenceOutcome::Converged { .. } => {
+                // 7. Integration succeeded -- return Decomposed with all child IDs
+                Ok(ConvergenceOutcome::Decomposed {
+                    parent_trajectory_id: trajectory.id.to_string(),
+                    child_trajectory_ids: child_ids,
+                })
+            }
+            _ => {
+                // Integration failed
+                tracing::warn!(
+                    parent_trajectory_id = %trajectory.id,
+                    "Decomposition: integration trajectory did not converge",
+                );
+                Ok(ConvergenceOutcome::Exhausted {
+                    trajectory_id: trajectory.id.to_string(),
+                    best_observation_sequence: trajectory
+                        .best_observation()
+                        .map(|o| o.sequence),
+                })
+            }
+        }
+    }
+
+    /// Run the mandatory integration trajectory after all children converge (spec 9.3).
+    ///
+    /// The integration trajectory verifies that the combined child outputs form
+    /// a coherent whole. It receives 25% of the parent budget and a specification
+    /// that references all child trajectory IDs.
+    async fn run_integration_trajectory(
+        &self,
+        parent_trajectory: &Trajectory,
+        child_ids: &[String],
+        integration_budget: ConvergenceBudget,
+    ) -> DomainResult<ConvergenceOutcome> {
+        let integration_description = format!(
+            "Integration of decomposed subtasks for: {}. Child trajectories: [{}]",
+            parent_trajectory.specification.effective.content,
+            child_ids.join(", "),
+        );
+
+        let integration_spec =
+            SpecificationEvolution::new(SpecificationSnapshot::new(integration_description));
+
+        let integration_trajectory = Trajectory::new(
+            parent_trajectory.task_id,
+            parent_trajectory.goal_id,
+            integration_spec,
+            integration_budget,
+            parent_trajectory.policy.clone(),
+        );
+
+        let empty_infra = ConvergenceInfrastructure::default();
+        Box::pin(self.converge(integration_trajectory, &empty_infra)).await
     }
 
     // -----------------------------------------------------------------------
@@ -1246,11 +1613,18 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
     /// strategy context and returns the artifact from the trajectory's
     /// worktree.
     ///
+    /// Strategies with side effects (spec 4.1):
+    /// - **ArchitectReview**: Creates a `SpecificationAmendment` with source
+    ///   `ArchitectAmendment`, applies it to the specification evolution, and
+    ///   emits a `SpecificationAmended` event.
+    /// - **RevertAndBranch**: Finds the target observation and uses its
+    ///   artifact as the starting point for the new branch.
+    ///
     /// Returns `(artifact, tokens_used, wall_time_ms)`.
     async fn execute_strategy(
         &self,
         strategy: &StrategyKind,
-        trajectory: &Trajectory,
+        trajectory: &mut Trajectory,
     ) -> DomainResult<(ArtifactReference, u64, u64)> {
         let start = std::time::Instant::now();
 
@@ -1264,24 +1638,84 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             "Executing convergence strategy"
         );
 
-        // For strategies that modify the specification (ArchitectReview, FreshStart),
-        // handle their side effects
+        // For strategies that modify the specification or trajectory state,
+        // handle their side effects (spec 4.1).
         match strategy {
-            StrategyKind::FreshStart { carry_forward } => {
-                // Fresh start resets context but preserves filesystem and trajectory metadata
+            StrategyKind::ArchitectReview => {
+                // Spec 4.1: ArchitectReview creates a SpecificationAmendment
+                // with source ArchitectAmendment and applies it to the
+                // specification evolution. In a full integration this would
+                // invoke the architect agent; here we create the amendment
+                // from the current trajectory state.
+                let amendment_description = format!(
+                    "Architect review after {} observations; attractor: {}",
+                    trajectory.observations.len(),
+                    self.attractor_type_name(
+                        &trajectory.attractor_state.classification
+                    ),
+                );
+                let amendment = SpecificationAmendment::new(
+                    AmendmentSource::ArchitectAmendment,
+                    amendment_description.clone(),
+                    "ArchitectReview strategy identified specification gaps",
+                );
+                trajectory.specification.add_amendment(amendment);
+
+                // Spec 1.6 / Task 6: Emit SpecificationAmended event
+                self.emit_event(ConvergenceEvent::SpecificationAmended {
+                    trajectory_id: trajectory.id.to_string(),
+                    amendment_source: AmendmentSource::ArchitectAmendment,
+                    amendment_summary: amendment_description,
+                });
+
                 tracing::info!(
                     trajectory_id = %trajectory.id,
-                    "Fresh start: carrying forward {} hints, best level from {} observations",
+                    "ArchitectReview: specification amended, {} total amendments",
+                    trajectory.specification.amendments.len(),
+                );
+            }
+            StrategyKind::FreshStart { carry_forward } => {
+                // Fresh start resets context but preserves filesystem and
+                // trajectory metadata
+                tracing::info!(
+                    trajectory_id = %trajectory.id,
+                    "Fresh start: carrying forward {} hints, best level \
+                     from {} observations",
                     carry_forward.hints.len(),
                     trajectory.observations.len(),
                 );
             }
             StrategyKind::RevertAndBranch { target } => {
+                // Spec 4.1: RevertAndBranch finds the target observation
+                // and uses its artifact as the starting point.
                 tracing::info!(
                     trajectory_id = %trajectory.id,
                     target = %target,
                     "Reverting to observation {} and branching",
                     target,
+                );
+
+                // Find the target observation and return its artifact
+                if let Some(target_obs) = trajectory
+                    .observations
+                    .iter()
+                    .find(|obs| obs.id == *target)
+                {
+                    let artifact = target_obs.artifact.clone();
+                    let elapsed = start.elapsed();
+                    let estimated_tokens = strategy.estimated_cost();
+                    return Ok((
+                        artifact,
+                        estimated_tokens,
+                        elapsed.as_millis() as u64,
+                    ));
+                }
+                // If target not found, fall through to default artifact
+                tracing::warn!(
+                    trajectory_id = %trajectory.id,
+                    target = %target,
+                    "RevertAndBranch target observation not found; \
+                     using latest artifact",
                 );
             }
             _ => {}

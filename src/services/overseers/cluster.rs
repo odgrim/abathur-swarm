@@ -12,11 +12,15 @@
 
 use std::time::Instant;
 
+use async_trait::async_trait;
+
 use super::traits::{apply_signal_update, has_blocking_failures, OverseerMeasurement};
+use crate::domain::errors::DomainResult;
 use crate::domain::models::convergence::{
     ArtifactReference, ConvergencePolicy, Overseer, OverseerCluster, OverseerCost,
     OverseerSignals,
 };
+use crate::services::convergence_engine::OverseerMeasurer;
 
 // ---------------------------------------------------------------------------
 // OverseerClusterService
@@ -235,6 +239,27 @@ impl OverseerClusterService {
 impl Default for OverseerClusterService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OverseerMeasurer trait implementation
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl OverseerMeasurer for OverseerClusterService {
+    /// Delegate to the existing `measure` method, wrapping the result in
+    /// `Ok(...)` to satisfy the `DomainResult<OverseerSignals>` return type.
+    ///
+    /// The underlying `measure` method already handles per-overseer errors
+    /// internally (logging and skipping failed overseers), so the cluster-level
+    /// operation itself is infallible and always returns `Ok`.
+    async fn measure(
+        &self,
+        artifact: &ArtifactReference,
+        policy: &ConvergencePolicy,
+    ) -> DomainResult<OverseerSignals> {
+        Ok(OverseerClusterService::measure(self, artifact, policy).await)
     }
 }
 
@@ -566,5 +591,26 @@ mod tests {
     fn default_cluster_is_empty() {
         let cluster = OverseerClusterService::default();
         assert!(cluster.overseers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn overseer_measurer_trait_returns_ok() {
+        use crate::services::convergence_engine::OverseerMeasurer;
+
+        let mut cluster = OverseerClusterService::new();
+        cluster.add(Box::new(MockOverseer {
+            name: "build",
+            cost: OverseerCost::Cheap,
+            result: passing_build_result(),
+        }));
+
+        let policy = ConvergencePolicy::default();
+        let result: crate::domain::errors::DomainResult<OverseerSignals> =
+            OverseerMeasurer::measure(&cluster, &test_artifact(), &policy).await;
+
+        assert!(result.is_ok());
+        let signals = result.unwrap();
+        assert!(signals.build_result.is_some());
+        assert!(signals.build_result.as_ref().unwrap().success);
     }
 }
