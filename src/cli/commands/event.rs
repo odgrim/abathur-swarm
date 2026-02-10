@@ -5,6 +5,7 @@ use clap::{Args, Subcommand};
 use std::sync::Arc;
 
 use crate::adapters::sqlite::{initialize_default_database, SqliteEventRepository};
+use crate::cli::id_resolver::resolve_dlq_id;
 use crate::cli::output::{output, CommandOutput};
 use crate::services::event_store::{EventQuery, EventStore};
 
@@ -402,7 +403,7 @@ pub async fn execute(args: EventArgs, json_mode: bool) -> Result<()> {
                 output(&out, json_mode);
             }
             DlqCommands::Retry { id } => {
-                let resolved_id = crate::cli::id_resolver::resolve_dlq_id(&pool, &id).await?;
+                let resolved_id = resolve_dlq_id(&pool, &id).await?;
                 store
                     .resolve_dead_letter(&resolved_id.to_string())
                     .await
