@@ -210,6 +210,14 @@ pub fn convergence_trajectories_migration() -> Migration {
     }
 }
 
+pub fn task_execution_mode_migration() -> Migration {
+    Migration {
+        version: 18,
+        description: "Add execution_mode and trajectory_id to tasks".to_string(),
+        sql: include_str!("../../../migrations/018_task_execution_mode.sql").to_string(),
+    }
+}
+
 pub fn all_embedded_migrations() -> Vec<Migration> {
     vec![
         initial_schema_migration(),
@@ -229,5 +237,6 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
         task_deadline_migration(),
         trigger_absence_timers_migration(),
         convergence_trajectories_migration(),
+        task_execution_mode_migration(),
     ]
 }

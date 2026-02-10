@@ -15,6 +15,7 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

@@ -6,6 +6,7 @@
 //! Goals no longer decompose into tasks or own tasks. Instead, goals provide
 //! aspirational guidance via GoalContextService when tasks are executed.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 
@@ -388,6 +389,9 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
             // Spawn task execution
             let task_id = task.id;
+            let is_convergent = task.execution_mode.is_convergent()
+                && self.config.convergence_enabled;
+            let task_clone = task.clone();
             let substrate = self.substrate.clone();
             let task_repo = self.task_repo.clone();
             let goal_repo = self.goal_repo.clone();
@@ -411,6 +415,12 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let default_base_ref = self.config.default_base_ref.clone();
             let require_commits = agent_can_write;
             let circuit_scope = scope;
+
+            // Convergence infrastructure (cloned into spawn block only when needed)
+            let overseer_cluster = self.overseer_cluster.clone();
+            let trajectory_repo = self.trajectory_repo.clone();
+            let convergence_engine_config = self.convergence_engine_config.clone();
+            let memory_repo = self.memory_repo.clone();
 
             tokio::spawn(async move {
                 let _permit = permit;
@@ -456,6 +466,496 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                         )).await;
                     }
                 }
+
+                // -----------------------------------------------------------------
+                // Convergent execution path (Phase 3)
+                // -----------------------------------------------------------------
+                if is_convergent {
+                    // Validate that all convergence infrastructure is available.
+                    // If any piece is missing, fall back to direct execution with a warning.
+                    let can_converge = overseer_cluster.is_some()
+                        && trajectory_repo.is_some()
+                        && memory_repo.is_some();
+
+                    if can_converge {
+                        let overseer_cluster = overseer_cluster.unwrap();
+                        let trajectory_repo_arc = trajectory_repo.unwrap();
+                        let memory_repo = memory_repo.unwrap();
+
+                        // Wrap the dyn TrajectoryRepository in a Sized newtype so
+                        // it can satisfy the generic T parameter of ConvergenceEngine.
+                        let trajectory_repo_wrapped = Arc::new(
+                            crate::services::convergence_bridge::DynTrajectoryRepository(
+                                trajectory_repo_arc,
+                            ),
+                        );
+
+                        // Build or reuse convergence engine config
+                        let engine_config = convergence_engine_config.unwrap_or_else(|| {
+                            crate::services::convergence_bridge::build_engine_config_from_defaults()
+                        });
+
+                        // Construct the convergence engine for this task.
+                        // The engine takes ownership of Arcs; clone so we can also
+                        // pass the trajectory repo to run_convergent_execution.
+                        let engine = crate::services::convergence_engine::ConvergenceEngine::new(
+                            trajectory_repo_wrapped.clone(),
+                            memory_repo,
+                            overseer_cluster,
+                            engine_config,
+                        );
+
+                        // Resolve goal_id for event correlation (best-effort)
+                        let goal_id: Option<uuid::Uuid> = None; // Tasks don't carry goal_id; bridge handles None
+
+                        // Create worktree ONCE for the entire convergence loop
+                        // (not recreated between iterations)
+                        let convergent_worktree_path = if use_worktrees {
+                            match worktree_repo.get_by_task(task_id).await {
+                                Ok(Some(wt)) => Some(wt.path.clone()),
+                                _ => worktree_path.clone(),
+                            }
+                        } else {
+                            None
+                        };
+
+                        audit_log.log(
+                            crate::services::AuditEntry::new(
+                                AuditLevel::Info,
+                                AuditCategory::Execution,
+                                AuditAction::TaskCompleted, // reuse; no dedicated convergence action
+                                AuditActor::System,
+                                format!(
+                                    "Task {} entering convergent execution (mode: {:?})",
+                                    task_id, task_clone.execution_mode
+                                ),
+                            )
+                            .with_entity(task_id, "task"),
+                        ).await;
+
+                        // Create a cancellation token for this convergent execution.
+                        // Currently not wired to external cancellation signals, but
+                        // provides the mechanism for graceful shutdown propagation.
+                        let cancellation_token = tokio_util::sync::CancellationToken::new();
+
+                        // Apply SLA deadline if the task has one
+                        let deadline = task_clone.deadline;
+
+                        // Run the convergent execution loop.
+                        // If the task requests parallel samples AND worktrees are
+                        // available, dispatch to the parallel path; otherwise use
+                        // the sequential convergent loop.
+                        let outcome = if let crate::domain::models::ExecutionMode::Convergent {
+                            parallel_samples: Some(n),
+                        } = &task_clone.execution_mode
+                        {
+                            if use_worktrees {
+                                super::convergent_execution::run_parallel_convergent_execution(
+                                    &task_clone,
+                                    goal_id,
+                                    &substrate,
+                                    &task_repo,
+                                    &trajectory_repo_wrapped,
+                                    &engine,
+                                    &event_bus,
+                                    &agent_type,
+                                    &system_prompt,
+                                    max_turns,
+                                    cancellation_token,
+                                    deadline,
+                                    *n,
+                                    &default_base_ref,
+                                    &format!(
+                                        "{}/convergent_parallel_{}",
+                                        repo_path.display(),
+                                        task_id
+                                    ),
+                                )
+                                .await
+                            } else {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    parallel_samples = n,
+                                    "Parallel convergent mode requested but worktrees disabled; falling back to sequential"
+                                );
+                                super::convergent_execution::run_convergent_execution(
+                                    &task_clone,
+                                    goal_id,
+                                    &substrate,
+                                    &task_repo,
+                                    &trajectory_repo_wrapped,
+                                    &engine,
+                                    &event_bus,
+                                    &agent_type,
+                                    &system_prompt,
+                                    convergent_worktree_path.as_deref(),
+                                    max_turns,
+                                    cancellation_token,
+                                    deadline,
+                                )
+                                .await
+                            }
+                        } else {
+                            super::convergent_execution::run_convergent_execution(
+                                &task_clone,
+                                goal_id,
+                                &substrate,
+                                &task_repo,
+                                &trajectory_repo_wrapped,
+                                &engine,
+                                &event_bus,
+                                &agent_type,
+                                &system_prompt,
+                                convergent_worktree_path.as_deref(),
+                                max_turns,
+                                cancellation_token,
+                                deadline,
+                            )
+                            .await
+                        };
+
+                        // Auto-commit safety net after convergence terminates
+                        if let Some(ref wt_path) = convergent_worktree_path {
+                            let _ = auto_commit_worktree(wt_path, task_id).await;
+                        }
+
+                        // Map ConvergentOutcome to task status transitions
+                        match outcome {
+                            Ok(super::convergent_execution::ConvergentOutcome::Converged)
+                            | Ok(super::convergent_execution::ConvergentOutcome::PartialAccepted) => {
+                                let target_status = if verify_on_completion {
+                                    TaskStatus::Validating
+                                } else {
+                                    TaskStatus::Complete
+                                };
+
+                                if let Some(ref cb) = command_bus {
+                                    let envelope = CommandEnvelope::new(
+                                        CommandSource::System,
+                                        DomainCommand::Task(TaskCommand::Transition {
+                                            task_id,
+                                            new_status: target_status,
+                                        }),
+                                    );
+                                    if let Err(e) = cb.dispatch(envelope).await {
+                                        tracing::warn!(
+                                            "Failed to complete convergent task {} via CommandBus: {}",
+                                            task_id, e
+                                        );
+                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                            let _ = t.transition_to(target_status);
+                                            let _ = task_repo.update(&t).await;
+                                        }
+                                    }
+                                } else if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                    let _ = t.transition_to(target_status);
+                                    let _ = task_repo.update(&t).await;
+                                }
+
+                                event_bus.publish(crate::services::event_factory::task_event(
+                                    crate::services::event_bus::EventSeverity::Info,
+                                    None,
+                                    task_id,
+                                    crate::services::event_bus::EventPayload::TaskCompleted {
+                                        task_id,
+                                        tokens_used: 0, // token tracking aggregated inside convergence loop
+                                    },
+                                )).await;
+
+                                circuit_breaker.record_success(circuit_scope.clone()).await;
+
+                                // Mark worktree as completed
+                                if use_worktrees {
+                                    if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                                        wt.complete();
+                                        let _ = worktree_repo.update(&wt).await;
+                                    }
+                                }
+
+                                // Run post-completion workflow (verify, merge, PR)
+                                if verify_on_completion || use_merge_queue || prefer_pull_requests {
+                                    let _ = run_post_completion_workflow(
+                                        task_id,
+                                        task_repo.clone(),
+                                        goal_repo.clone(),
+                                        worktree_repo.clone(),
+                                        &event_tx,
+                                        &audit_log,
+                                        verify_on_completion,
+                                        use_merge_queue,
+                                        prefer_pull_requests,
+                                        &repo_path,
+                                        &default_base_ref,
+                                        require_commits,
+                                    ).await;
+                                }
+
+                                // Record success in evolution loop for template improvement
+                                if track_evolution {
+                                    let execution = TaskExecution {
+                                        task_id,
+                                        template_name: agent_type_for_evolution.clone(),
+                                        template_version: template_version_for_evolution,
+                                        outcome: TaskOutcome::Success,
+                                        executed_at: chrono::Utc::now(),
+                                        turns_used: 0, // convergent mode tracks iterations, not turns
+                                        tokens_used: 0, // token tracking aggregated inside convergence loop
+                                        downstream_tasks: vec![],
+                                    };
+                                    evolution_loop.record_execution(execution).await;
+                                }
+
+                                audit_log.log(
+                                    crate::services::AuditEntry::new(
+                                        AuditLevel::Info,
+                                        AuditCategory::Task,
+                                        AuditAction::TaskCompleted,
+                                        AuditActor::System,
+                                        format!("Convergent task {} completed successfully", task_id),
+                                    )
+                                    .with_entity(task_id, "task"),
+                                ).await;
+                            }
+
+                            Ok(super::convergent_execution::ConvergentOutcome::Decomposed(trajectory)) => {
+                                // The convergence engine determined the task should be decomposed.
+                                // Extract subtask descriptions from the trajectory specification's
+                                // success criteria -- each criterion becomes a child task.
+                                // The parent task stays Running; it completes when children finish.
+                                let spec = &trajectory.specification.effective;
+                                let criteria = &spec.success_criteria;
+
+                                let child_count = if criteria.is_empty() { 1 } else { criteria.len() };
+
+                                audit_log.log(
+                                    crate::services::AuditEntry::new(
+                                        AuditLevel::Info,
+                                        AuditCategory::Task,
+                                        AuditAction::TaskCompleted,
+                                        AuditActor::System,
+                                        format!(
+                                            "Convergent task {} decomposed into {} subtask(s) (trajectory {})",
+                                            task_id, child_count, trajectory.id,
+                                        ),
+                                    )
+                                    .with_entity(task_id, "task"),
+                                ).await;
+
+                                if criteria.is_empty() {
+                                    // No granular criteria -- create a single child with the
+                                    // full specification as a retry in Direct mode
+                                    let mut child = Task::with_title(
+                                        &format!("Decomposed from {}", task_id),
+                                        &spec.content,
+                                    );
+                                    child.parent_id = Some(task_id);
+                                    child.execution_mode = crate::domain::models::ExecutionMode::Direct;
+                                    let _ = child.transition_to(TaskStatus::Ready);
+                                    if let Err(e) = task_repo.create(&child).await {
+                                        tracing::warn!(
+                                            "Failed to create decomposed subtask for {}: {}",
+                                            task_id, e
+                                        );
+                                    }
+                                } else {
+                                    for (i, criterion) in criteria.iter().enumerate() {
+                                        let title = format!(
+                                            "Subtask {}/{} of {}",
+                                            i + 1, criteria.len(), task_id,
+                                        );
+                                        let description = format!(
+                                            "{}\n\nFocus: {}",
+                                            spec.content, criterion,
+                                        );
+                                        let mut child = Task::with_title(&title, &description);
+                                        child.parent_id = Some(task_id);
+                                        child.execution_mode = crate::domain::models::ExecutionMode::Direct;
+                                        let _ = child.transition_to(TaskStatus::Ready);
+                                        if let Err(e) = task_repo.create(&child).await {
+                                            tracing::warn!(
+                                                "Failed to create decomposed subtask {} for {}: {}",
+                                                i + 1, task_id, e
+                                            );
+                                        }
+                                    }
+                                }
+
+                                // Worktree stays alive; children may use it or create their own
+                            }
+
+                            Ok(super::convergent_execution::ConvergentOutcome::Failed(msg)) => {
+                                if let Some(ref cb) = command_bus {
+                                    let envelope = CommandEnvelope::new(
+                                        CommandSource::System,
+                                        DomainCommand::Task(TaskCommand::Fail {
+                                            task_id,
+                                            error: Some(msg.clone()),
+                                        }),
+                                    );
+                                    if let Err(e) = cb.dispatch(envelope).await {
+                                        tracing::warn!(
+                                            "Failed to fail convergent task {} via CommandBus: {}",
+                                            task_id, e
+                                        );
+                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                            t.retry_count += 1;
+                                            let _ = t.transition_to(TaskStatus::Failed);
+                                            let _ = task_repo.update(&t).await;
+                                        }
+                                    }
+                                } else if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                    t.retry_count += 1;
+                                    let _ = t.transition_to(TaskStatus::Failed);
+                                    let _ = task_repo.update(&t).await;
+                                }
+
+                                event_bus.publish(crate::services::event_factory::task_event(
+                                    crate::services::event_bus::EventSeverity::Warning,
+                                    None,
+                                    task_id,
+                                    crate::services::event_bus::EventPayload::TaskFailed {
+                                        task_id,
+                                        error: msg.clone(),
+                                        retry_count: 0,
+                                    },
+                                )).await;
+
+                                circuit_breaker.record_failure(circuit_scope.clone(), &msg).await;
+
+                                // Mark worktree as failed
+                                if use_worktrees {
+                                    if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                                        wt.fail(msg.clone());
+                                        let _ = worktree_repo.update(&wt).await;
+                                    }
+                                }
+
+                                // Record failure in evolution loop for template improvement
+                                if track_evolution {
+                                    let execution = TaskExecution {
+                                        task_id,
+                                        template_name: agent_type_for_evolution.clone(),
+                                        template_version: template_version_for_evolution,
+                                        outcome: TaskOutcome::Failure,
+                                        executed_at: chrono::Utc::now(),
+                                        turns_used: 0,
+                                        tokens_used: 0,
+                                        downstream_tasks: vec![],
+                                    };
+                                    evolution_loop.record_execution(execution).await;
+                                }
+
+                                audit_log.log(
+                                    crate::services::AuditEntry::new(
+                                        AuditLevel::Warning,
+                                        AuditCategory::Task,
+                                        AuditAction::TaskFailed,
+                                        AuditActor::System,
+                                        format!("Convergent task {} failed: {}", task_id, msg),
+                                    )
+                                    .with_entity(task_id, "task"),
+                                ).await;
+                            }
+
+                            Ok(super::convergent_execution::ConvergentOutcome::Cancelled) => {
+                                // Trajectory has been persisted by the convergence loop.
+                                // Transition task to Canceled status.
+                                if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                    let _ = t.transition_to(TaskStatus::Canceled);
+                                    let _ = task_repo.update(&t).await;
+                                }
+
+                                if use_worktrees {
+                                    if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                                        wt.fail("cancelled".to_string());
+                                        let _ = worktree_repo.update(&wt).await;
+                                    }
+                                }
+
+                                audit_log.log(
+                                    crate::services::AuditEntry::new(
+                                        AuditLevel::Info,
+                                        AuditCategory::Task,
+                                        AuditAction::TaskFailed,
+                                        AuditActor::System,
+                                        format!("Convergent task {} cancelled", task_id),
+                                    )
+                                    .with_entity(task_id, "task"),
+                                ).await;
+                            }
+
+                            Err(e) => {
+                                let error_msg = format!("Convergent execution error: {}", e);
+
+                                if let Some(ref cb) = command_bus {
+                                    let envelope = CommandEnvelope::new(
+                                        CommandSource::System,
+                                        DomainCommand::Task(TaskCommand::Fail {
+                                            task_id,
+                                            error: Some(error_msg.clone()),
+                                        }),
+                                    );
+                                    let _ = cb.dispatch(envelope).await;
+                                } else if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                    t.retry_count += 1;
+                                    let _ = t.transition_to(TaskStatus::Failed);
+                                    let _ = task_repo.update(&t).await;
+                                }
+
+                                circuit_breaker.record_failure(circuit_scope.clone(), &error_msg).await;
+
+                                if use_worktrees {
+                                    if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                                        wt.fail(error_msg.clone());
+                                        let _ = worktree_repo.update(&wt).await;
+                                    }
+                                }
+
+                                audit_log.log(
+                                    crate::services::AuditEntry::new(
+                                        AuditLevel::Error,
+                                        AuditCategory::Task,
+                                        AuditAction::TaskFailed,
+                                        AuditActor::System,
+                                        error_msg,
+                                    )
+                                    .with_entity(task_id, "task"),
+                                ).await;
+                            }
+                        }
+
+                        // Convergent path complete -- skip direct execution below
+                        return;
+                    } else {
+                        // Missing convergence infrastructure -- fall back to direct
+                        tracing::warn!(
+                            "Task {} has convergent execution mode but convergence infrastructure \
+                             is not fully configured (overseer_cluster={}, trajectory_repo={}, \
+                             memory_repo={}). Falling back to direct execution.",
+                            task_id,
+                            overseer_cluster.is_some(),
+                            trajectory_repo.is_some(),
+                            memory_repo.is_some(),
+                        );
+                        audit_log.log(
+                            crate::services::AuditEntry::new(
+                                AuditLevel::Warning,
+                                AuditCategory::Execution,
+                                AuditAction::TaskFailed,
+                                AuditActor::System,
+                                format!(
+                                    "Task {} requested convergent execution but infrastructure not configured; using direct mode",
+                                    task_id
+                                ),
+                            )
+                            .with_entity(task_id, "task"),
+                        ).await;
+                    }
+                }
+
+                // -----------------------------------------------------------------
+                // Direct execution path (single-shot substrate invocation)
+                // -----------------------------------------------------------------
 
                 // Build substrate request with MCP servers for agent access to system services
                 let mut config = SubstrateConfig::default().with_max_turns(max_turns);

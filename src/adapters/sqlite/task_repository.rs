@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    ArtifactRef, RoutingHints, Task, TaskContext, TaskPriority, TaskSource, TaskStatus,
+    ArtifactRef, ExecutionMode, RoutingHints, Task, TaskContext, TaskPriority, TaskSource, TaskStatus,
 };
 use crate::domain::ports::{TaskFilter, TaskRepository};
 
@@ -29,12 +29,14 @@ impl TaskRepository for SqliteTaskRepository {
         let artifacts_json = serde_json::to_string(&task.artifacts)?;
         let context_json = serde_json::to_string(&task.context)?;
         let (source_type, source_ref) = serialize_task_source(&task.source);
+        let execution_mode_json = serde_json::to_string(&task.execution_mode)?;
 
         sqlx::query(
             r#"INSERT INTO tasks (id, parent_id, title, description, status, priority,
                agent_type, routing, artifacts, context, retry_count, max_retries, worktree_path,
-               idempotency_key, source_type, source_ref, version, created_at, updated_at, started_at, completed_at, deadline)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+               idempotency_key, source_type, source_ref, version, created_at, updated_at, started_at, completed_at, deadline,
+               execution_mode, trajectory_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
         )
         .bind(task.id.to_string())
         .bind(task.parent_id.map(|id| id.to_string()))
@@ -58,6 +60,8 @@ impl TaskRepository for SqliteTaskRepository {
         .bind(task.started_at.map(|t| t.to_rfc3339()))
         .bind(task.completed_at.map(|t| t.to_rfc3339()))
         .bind(task.deadline.map(|t| t.to_rfc3339()))
+        .bind(&execution_mode_json)
+        .bind(task.trajectory_id.map(|id| id.to_string()))
         .execute(&self.pool)
         .await?;
 
@@ -92,13 +96,15 @@ impl TaskRepository for SqliteTaskRepository {
         let artifacts_json = serde_json::to_string(&task.artifacts)?;
         let context_json = serde_json::to_string(&task.context)?;
         let (source_type, source_ref) = serialize_task_source(&task.source);
+        let execution_mode_json = serde_json::to_string(&task.execution_mode)?;
 
         let result = sqlx::query(
             r#"UPDATE tasks SET parent_id = ?, title = ?, description = ?,
                status = ?, priority = ?, agent_type = ?, routing = ?, artifacts = ?,
                context = ?, retry_count = ?, max_retries = ?, worktree_path = ?,
                source_type = ?, source_ref = ?,
-               version = ?, updated_at = ?, started_at = ?, completed_at = ?, deadline = ?
+               version = ?, updated_at = ?, started_at = ?, completed_at = ?, deadline = ?,
+               execution_mode = ?, trajectory_id = ?
                WHERE id = ?"#
         )
         .bind(task.parent_id.map(|id| id.to_string()))
@@ -120,6 +126,8 @@ impl TaskRepository for SqliteTaskRepository {
         .bind(task.started_at.map(|t| t.to_rfc3339()))
         .bind(task.completed_at.map(|t| t.to_rfc3339()))
         .bind(task.deadline.map(|t| t.to_rfc3339()))
+        .bind(&execution_mode_json)
+        .bind(task.trajectory_id.map(|id| id.to_string()))
         .bind(task.id.to_string())
         .execute(&self.pool)
         .await?;
@@ -377,6 +385,8 @@ struct TaskRow {
     started_at: Option<String>,
     completed_at: Option<String>,
     deadline: Option<String>,
+    execution_mode: Option<String>,
+    trajectory_id: Option<String>,
 }
 
 impl TryFrom<TaskRow> for Task {
@@ -404,6 +414,13 @@ impl TryFrom<TaskRow> for Task {
 
         let source = deserialize_task_source(row.source_type.as_deref(), row.source_ref.as_deref())?;
 
+        let execution_mode: ExecutionMode = match row.execution_mode {
+            Some(ref json) => serde_json::from_str(json)
+                .map_err(|e| DomainError::SerializationError(format!("Invalid execution_mode: {}", e)))?,
+            None => ExecutionMode::default(),
+        };
+        let trajectory_id = super::parse_optional_uuid(row.trajectory_id)?;
+
         Ok(Task {
             id,
             parent_id,
@@ -427,6 +444,8 @@ impl TryFrom<TaskRow> for Task {
             deadline,
             version: row.version as u64,
             idempotency_key: row.idempotency_key,
+            execution_mode,
+            trajectory_id,
         })
     }
 }

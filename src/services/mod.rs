@@ -34,6 +34,7 @@ pub mod overmind;
 pub mod swarm_orchestrator;
 pub mod task_service;
 pub mod trigger_rules;
+pub mod convergence_bridge;
 pub mod convergence_engine;
 pub mod overseers;
 pub mod worktree_service;

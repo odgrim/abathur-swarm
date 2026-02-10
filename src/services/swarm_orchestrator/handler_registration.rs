@@ -10,7 +10,10 @@ use crate::domain::ports::{
     AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository,
 };
 use crate::services::builtin_handlers::{
-    A2APollHandler, DeadLetterRetryHandler, EscalationTimeoutHandler,
+    A2APollHandler, ConvergenceCancellationHandler, ConvergenceCoordinationHandler,
+    ConvergenceEscalationFeedbackHandler,
+    ConvergenceEvolutionHandler, ConvergenceMemoryHandler, ConvergenceSLAPressureHandler,
+    DeadLetterRetryHandler, DirectModeExecutionMemoryHandler, EscalationTimeoutHandler,
     EventPruningHandler, EventStorePollerHandler, EvolutionEvaluationHandler,
     EvolutionTriggeredTemplateUpdateHandler,
     GoalCreatedHandler, GoalEvaluationHandler, GoalEvaluationTaskCreationHandler,
@@ -26,6 +29,7 @@ use crate::services::builtin_handlers::{
     WorktreeReconciliationHandler,
 };
 use crate::services::command_bus::CommandBus;
+use crate::services::convergence_bridge::DynTrajectoryRepository;
 use crate::services::event_bus::EventCategory;
 use crate::services::event_bus::EventSeverity;
 use crate::services::event_scheduler::interval_schedule;
@@ -64,6 +68,37 @@ where
                 self.task_repo.clone(),
             )))
             .await;
+
+        // ConvergenceCoordinationHandler (HIGH) — cascade child completion/failure to convergent parent
+        reactor
+            .register(Arc::new(ConvergenceCoordinationHandler::new(
+                self.task_repo.clone(),
+            )))
+            .await;
+
+        // ConvergenceCancellationHandler (HIGH) — cascade cancellation from convergent parent to children
+        reactor
+            .register(Arc::new(ConvergenceCancellationHandler::new(
+                self.task_repo.clone(),
+            )))
+            .await;
+
+        // ConvergenceSLAPressureHandler (HIGH) — add SLA pressure hints to convergent task context
+        reactor
+            .register(Arc::new(ConvergenceSLAPressureHandler::new(
+                self.task_repo.clone(),
+            )))
+            .await;
+
+        // ConvergenceEscalationFeedbackHandler (NORMAL) — feed human escalation responses back into convergence loop
+        if let Some(ref trajectory_repo) = self.trajectory_repo {
+            reactor
+                .register(Arc::new(ConvergenceEscalationFeedbackHandler::new(
+                    self.task_repo.clone(),
+                    Arc::new(DynTrajectoryRepository(trajectory_repo.clone())),
+                )))
+                .await;
+        }
 
         // TaskFailedRetryHandler (NORMAL) — retry after failure if retries remain
         reactor
@@ -178,6 +213,34 @@ where
                 .register(Arc::new(EvolutionEvaluationHandler::new(
                     self.task_repo.clone(),
                     self.agent_repo.clone(),
+                )))
+                .await;
+        }
+
+        // ConvergenceMemoryHandler (NORMAL) — record convergence outcomes to memory
+        if let Some(ref memory_repo) = self.memory_repo {
+            reactor
+                .register(Arc::new(ConvergenceMemoryHandler::new(
+                    self.task_repo.clone(),
+                    memory_repo.clone(),
+                )))
+                .await;
+        }
+
+        // DirectModeExecutionMemoryHandler (NORMAL) — record all task executions for classification heuristic
+        if let Some(ref memory_repo) = self.memory_repo {
+            reactor
+                .register(Arc::new(DirectModeExecutionMemoryHandler::new(
+                    memory_repo.clone(),
+                )))
+                .await;
+        }
+
+        // ConvergenceEvolutionHandler (NORMAL) — emit evolution metrics for convergent tasks
+        if self.config.track_evolution {
+            reactor
+                .register(Arc::new(ConvergenceEvolutionHandler::new(
+                    self.task_repo.clone(),
                 )))
                 .await;
         }

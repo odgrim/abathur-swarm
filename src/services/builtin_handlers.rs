@@ -10,12 +10,13 @@ use async_trait::async_trait;
 use tokio::sync::{RwLock, Semaphore};
 
 use crate::domain::models::{Goal, HumanEscalationEvent, Task, TaskStatus};
-use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
+use crate::domain::models::convergence::{AmendmentSource, SpecificationAmendment};
+use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, TrajectoryRepository, WorktreeRepository};
 use crate::services::event_store::EventStore;
 use crate::services::goal_context_service::GoalContextService;
 use crate::services::event_bus::{
     EventBus, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber,
-    SwarmStatsPayload, UnifiedEvent,
+    SwarmStatsPayload, TaskResultPayload, UnifiedEvent,
 };
 use crate::services::event_reactor::{
     ErrorStrategy, EventFilter, EventHandler, HandlerContext, HandlerId, HandlerMetadata,
@@ -3477,6 +3478,903 @@ impl<T: TaskRepository + 'static, G: GoalRepository + 'static> EventHandler for 
     }
 }
 
+// ============================================================================
+// ConvergenceCoordinationHandler
+// ============================================================================
+
+/// When a child task of a decomposed convergent parent completes or fails,
+/// check if all siblings are done and cascade the result to the parent.
+///
+/// This supplements TaskCompletedReadinessHandler (which handles DAG dependencies)
+/// with parent-child coordination for decomposed convergent tasks.
+pub struct ConvergenceCoordinationHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+}
+
+impl<T: TaskRepository> ConvergenceCoordinationHandler<T> {
+    pub fn new(task_repo: Arc<T>) -> Self {
+        Self { task_repo }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for ConvergenceCoordinationHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "ConvergenceCoordinationHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Task])
+                .payload_types(vec![
+                    "TaskCompleted".to_string(),
+                    "TaskCompletedWithResult".to_string(),
+                    "TaskFailed".to_string(),
+                ]),
+            priority: HandlerPriority::HIGH,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let task_id = match &event.payload {
+            EventPayload::TaskCompleted { task_id, .. } => *task_id,
+            EventPayload::TaskCompletedWithResult { task_id, .. } => *task_id,
+            EventPayload::TaskFailed { task_id, .. } => *task_id,
+            _ => return Ok(Reaction::None),
+        };
+
+        // Load the completed/failed task to check if it has a parent
+        let task = self.task_repo.get(task_id).await
+            .map_err(|e| format!("Failed to get task: {}", e))?;
+        let task = match task {
+            Some(t) => t,
+            None => return Ok(Reaction::None),
+        };
+
+        let parent_id = match task.parent_id {
+            Some(id) => id,
+            None => return Ok(Reaction::None), // Not a child task
+        };
+
+        // Load parent task
+        let parent = self.task_repo.get(parent_id).await
+            .map_err(|e| format!("Failed to get parent task: {}", e))?;
+        let parent = match parent {
+            Some(p) => p,
+            None => return Ok(Reaction::None),
+        };
+
+        // Only act on parents that are Running with a trajectory (convergent decomposition)
+        if parent.status != TaskStatus::Running || parent.trajectory_id.is_none() {
+            return Ok(Reaction::None);
+        }
+
+        // Load all sibling tasks (children of the parent)
+        let siblings = self.task_repo.get_subtasks(parent_id).await
+            .map_err(|e| format!("Failed to get subtasks: {}", e))?;
+
+        // Check if any sibling has failed
+        let any_failed = siblings.iter().any(|s| s.status == TaskStatus::Failed);
+
+        // Check if all siblings are in terminal states
+        let all_terminal = siblings.iter().all(|s| s.status.is_terminal());
+
+        if !all_terminal {
+            return Ok(Reaction::None); // Still waiting for siblings
+        }
+
+        let mut new_events = Vec::new();
+
+        if any_failed {
+            // Fail the parent
+            let mut updated_parent = parent.clone();
+            if updated_parent.transition_to(TaskStatus::Failed).is_ok() {
+                self.task_repo.update(&updated_parent).await
+                    .map_err(|e| format!("Failed to update parent: {}", e))?;
+
+                new_events.push(UnifiedEvent {
+                    id: EventId::new(),
+                    sequence: SequenceNumber(0),
+                    timestamp: chrono::Utc::now(),
+                    severity: EventSeverity::Error,
+                    category: EventCategory::Task,
+                    goal_id: event.goal_id,
+                    task_id: Some(parent_id),
+                    correlation_id: event.correlation_id,
+                    source_process_id: None,
+                    payload: EventPayload::TaskFailed {
+                        task_id: parent_id,
+                        error: "Decomposed child task failed".to_string(),
+                        retry_count: updated_parent.retry_count,
+                    },
+                });
+            }
+        } else {
+            // All siblings completed successfully — complete the parent
+            let mut updated_parent = parent.clone();
+            // Go through Validating first
+            if updated_parent.transition_to(TaskStatus::Validating).is_ok() {
+                self.task_repo.update(&updated_parent).await
+                    .map_err(|e| format!("Failed to update parent to validating: {}", e))?;
+
+                // Then complete
+                if updated_parent.transition_to(TaskStatus::Complete).is_ok() {
+                    self.task_repo.update(&updated_parent).await
+                        .map_err(|e| format!("Failed to update parent to complete: {}", e))?;
+
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: chrono::Utc::now(),
+                        severity: EventSeverity::Info,
+                        category: EventCategory::Task,
+                        goal_id: event.goal_id,
+                        task_id: Some(parent_id),
+                        correlation_id: event.correlation_id,
+                        source_process_id: None,
+                        payload: EventPayload::TaskCompleted {
+                            task_id: parent_id,
+                            tokens_used: 0,
+                        },
+                    });
+                }
+            }
+        }
+
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
+    }
+}
+
+// ============================================================================
+// ConvergenceCancellationHandler
+// ============================================================================
+
+/// When a convergent parent task is canceled, cascade cancellation to all
+/// Running/Ready children.
+pub struct ConvergenceCancellationHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+}
+
+impl<T: TaskRepository> ConvergenceCancellationHandler<T> {
+    pub fn new(task_repo: Arc<T>) -> Self {
+        Self { task_repo }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for ConvergenceCancellationHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "ConvergenceCancellationHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Task])
+                .payload_types(vec!["TaskCanceled".to_string()]),
+            priority: HandlerPriority::HIGH,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let task_id = match &event.payload {
+            EventPayload::TaskCanceled { task_id, .. } => *task_id,
+            _ => return Ok(Reaction::None),
+        };
+
+        // Load the canceled task
+        let task = self.task_repo.get(task_id).await
+            .map_err(|e| format!("Failed to get task: {}", e))?;
+        let task = match task {
+            Some(t) => t,
+            None => return Ok(Reaction::None),
+        };
+
+        // Only cascade if this is a convergent task with a trajectory (decomposed parent)
+        if task.trajectory_id.is_none() {
+            return Ok(Reaction::None);
+        }
+
+        // Load children
+        let children = self.task_repo.get_subtasks(task_id).await
+            .map_err(|e| format!("Failed to get subtasks: {}", e))?;
+
+        let mut new_events = Vec::new();
+
+        for child in children {
+            // Only cancel active (non-terminal) children
+            if child.status.is_terminal() {
+                continue;
+            }
+
+            let mut updated = child.clone();
+            if updated.transition_to(TaskStatus::Canceled).is_ok() {
+                self.task_repo.update(&updated).await
+                    .map_err(|e| format!("Failed to cancel child task: {}", e))?;
+
+                new_events.push(UnifiedEvent {
+                    id: EventId::new(),
+                    sequence: SequenceNumber(0),
+                    timestamp: chrono::Utc::now(),
+                    severity: EventSeverity::Warning,
+                    category: EventCategory::Task,
+                    goal_id: event.goal_id,
+                    task_id: Some(child.id),
+                    correlation_id: event.correlation_id,
+                    source_process_id: None,
+                    payload: EventPayload::TaskCanceled {
+                        task_id: child.id,
+                        reason: format!("Parent task {} was canceled", task_id),
+                    },
+                });
+            }
+        }
+
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
+    }
+}
+
+// ============================================================================
+// ConvergenceSLAPressureHandler
+// ============================================================================
+
+/// When a convergent task receives SLA pressure events (TaskSLAWarning or
+/// TaskSLACritical), add hints to the task context so the convergent execution
+/// loop can adjust its policy (lower acceptance threshold, skip expensive
+/// overseers).
+///
+/// Idempotent: checks for existing hints before adding.
+pub struct ConvergenceSLAPressureHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+}
+
+impl<T: TaskRepository> ConvergenceSLAPressureHandler<T> {
+    pub fn new(task_repo: Arc<T>) -> Self {
+        Self { task_repo }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for ConvergenceSLAPressureHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "ConvergenceSLAPressureHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Task])
+                .payload_types(vec![
+                    "TaskSLAWarning".to_string(),
+                    "TaskSLACritical".to_string(),
+                ]),
+            priority: HandlerPriority::HIGH,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let (task_id, hint) = match &event.payload {
+            EventPayload::TaskSLAWarning { task_id, .. } => (*task_id, "sla:warning"),
+            EventPayload::TaskSLACritical { task_id, .. } => (*task_id, "sla:critical"),
+            _ => return Ok(Reaction::None),
+        };
+
+        // Load the task
+        let task = self.task_repo.get(task_id).await
+            .map_err(|e| format!("Failed to get task: {}", e))?;
+        let task = match task {
+            Some(t) => t,
+            None => return Ok(Reaction::None),
+        };
+
+        // Only act on convergent tasks (those with a trajectory_id)
+        if task.trajectory_id.is_none() {
+            return Ok(Reaction::None);
+        }
+
+        // Idempotency: don't add the hint if it already exists
+        if task.context.hints.iter().any(|h| h == hint) {
+            return Ok(Reaction::None);
+        }
+
+        // When escalating to critical, also ensure warning hint is present
+        let mut updated = task.clone();
+        if hint == "sla:critical" && !updated.context.hints.iter().any(|h| h == "sla:warning") {
+            updated.context.hints.push("sla:warning".to_string());
+        }
+        updated.context.hints.push(hint.to_string());
+        updated.updated_at = chrono::Utc::now();
+
+        self.task_repo.update(&updated).await
+            .map_err(|e| format!("Failed to update task with SLA hint: {}", e))?;
+
+        tracing::info!(
+            task_id = %task_id,
+            hint = hint,
+            "Added SLA pressure hint to convergent task context"
+        );
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// ConvergenceMemoryHandler
+// ============================================================================
+
+/// When a convergent task terminates (ConvergenceTerminated event), record
+/// convergence outcomes to memory for future strategy warm-starting.
+///
+/// On "converged" outcome: store success memory (episodic tier, Pattern type)
+/// with task complexity, strategy sequence, iterations, and tokens.
+///
+/// On "exhausted"/"trapped"/"budget_denied" outcome: store failure memory
+/// (episodic tier, Error type) with the same metrics so future bandits can
+/// deprioritize strategies that failed on similar tasks.
+///
+/// Idempotent: uses an idempotency key based on trajectory_id to avoid
+/// duplicate memory entries.
+pub struct ConvergenceMemoryHandler<T: TaskRepository, M: MemoryRepository> {
+    task_repo: Arc<T>,
+    memory_repo: Arc<M>,
+}
+
+impl<T: TaskRepository, M: MemoryRepository> ConvergenceMemoryHandler<T, M> {
+    pub fn new(task_repo: Arc<T>, memory_repo: Arc<M>) -> Self {
+        Self { task_repo, memory_repo }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static, M: MemoryRepository + 'static> EventHandler for ConvergenceMemoryHandler<T, M> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "ConvergenceMemoryHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Convergence])
+                .payload_types(vec!["ConvergenceTerminated".to_string()]),
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let (task_id, trajectory_id, outcome, total_iterations, total_tokens, final_convergence_level) =
+            match &event.payload {
+                EventPayload::ConvergenceTerminated {
+                    task_id,
+                    trajectory_id,
+                    outcome,
+                    total_iterations,
+                    total_tokens,
+                    final_convergence_level,
+                } => (*task_id, *trajectory_id, outcome.clone(), *total_iterations, *total_tokens, *final_convergence_level),
+                _ => return Ok(Reaction::None),
+            };
+
+        // Idempotency: check if we already stored a memory for this trajectory
+        let idempotency_key = format!("convergence-outcome:{}", trajectory_id);
+        let existing = self.memory_repo
+            .get_by_key(&idempotency_key, "convergence")
+            .await
+            .map_err(|e| format!("Failed to check existing memory: {}", e))?;
+        if existing.is_some() {
+            return Ok(Reaction::None);
+        }
+
+        // Load the task for additional context (complexity, agent_type)
+        let task = self.task_repo.get(task_id).await
+            .map_err(|e| format!("Failed to get task: {}", e))?;
+        let task = match task {
+            Some(t) => t,
+            None => return Ok(Reaction::None),
+        };
+
+        let complexity = format!("{:?}", task.routing_hints.complexity);
+        let agent_type = task.agent_type.clone().unwrap_or_else(|| "unknown".to_string());
+        let is_success = outcome == "converged";
+
+        // Build memory content as a structured summary
+        let content = format!(
+            "Convergence {outcome} for task {task_id} (trajectory {trajectory_id}):\n\
+             - complexity: {complexity}\n\
+             - agent_type: {agent_type}\n\
+             - iterations: {total_iterations}\n\
+             - tokens: {total_tokens}\n\
+             - final_convergence_level: {final_convergence_level:.3}",
+        );
+
+        // Build the memory entry
+        let memory_type = if is_success {
+            crate::domain::models::MemoryType::Pattern
+        } else {
+            crate::domain::models::MemoryType::Error
+        };
+
+        let mut memory = crate::domain::models::Memory::episodic(idempotency_key, content)
+            .with_namespace("convergence")
+            .with_type(memory_type)
+            .with_source("convergence_engine")
+            .with_task(task_id);
+
+        // Add goal context if available
+        if let Some(goal_id) = event.goal_id {
+            memory = memory.with_goal(goal_id);
+        }
+
+        // Tag with outcome and complexity for future queries
+        memory = memory
+            .with_tag(format!("outcome:{}", outcome))
+            .with_tag(format!("complexity:{}", complexity))
+            .with_tag(format!("agent:{}", agent_type));
+
+        // Store custom metadata for machine consumption
+        memory.metadata.custom.insert(
+            "total_iterations".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(total_iterations)),
+        );
+        memory.metadata.custom.insert(
+            "total_tokens".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(total_tokens)),
+        );
+        memory.metadata.custom.insert(
+            "final_convergence_level".to_string(),
+            serde_json::json!(final_convergence_level),
+        );
+        memory.metadata.custom.insert(
+            "trajectory_id".to_string(),
+            serde_json::Value::String(trajectory_id.to_string()),
+        );
+        memory.metadata.relevance = if is_success { 0.8 } else { 0.6 };
+
+        self.memory_repo.store(&memory).await
+            .map_err(|e| format!("Failed to store convergence memory: {}", e))?;
+
+        tracing::info!(
+            task_id = %task_id,
+            trajectory_id = %trajectory_id,
+            outcome = %outcome,
+            "Stored convergence {} memory",
+            if is_success { "success" } else { "failure" }
+        );
+
+        // Emit a MemoryStored event for downstream processing
+        let memory_event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Debug,
+            category: EventCategory::Memory,
+            goal_id: event.goal_id,
+            task_id: Some(task_id),
+            correlation_id: event.correlation_id,
+            source_process_id: None,
+            payload: EventPayload::MemoryStored {
+                memory_id: memory.id,
+                key: memory.key.clone(),
+                namespace: memory.namespace.clone(),
+                tier: memory.tier.as_str().to_string(),
+                memory_type: memory.memory_type.as_str().to_string(),
+            },
+        };
+
+        Ok(Reaction::EmitEvents(vec![memory_event]))
+    }
+}
+
+// ============================================================================
+// DirectModeExecutionMemoryHandler
+// ============================================================================
+
+/// When any task execution is recorded (TaskExecutionRecorded event), store a
+/// lightweight episodic memory entry so the classification heuristic can learn
+/// which complexity levels benefit from convergence vs. direct execution.
+///
+/// This handler complements `ConvergenceMemoryHandler` (which stores rich
+/// convergence-specific outcomes) by recording every task completion -- direct
+/// mode or convergent -- in the `execution_history` namespace, keeping the
+/// observations uniform for the bandit/heuristic.
+///
+/// Idempotent: uses `execution-record:{task_id}` as an idempotency key.
+pub struct DirectModeExecutionMemoryHandler<M: MemoryRepository> {
+    memory_repo: Arc<M>,
+}
+
+impl<M: MemoryRepository> DirectModeExecutionMemoryHandler<M> {
+    pub fn new(memory_repo: Arc<M>) -> Self {
+        Self { memory_repo }
+    }
+}
+
+#[async_trait]
+impl<M: MemoryRepository + 'static> EventHandler for DirectModeExecutionMemoryHandler<M> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "DirectModeExecutionMemoryHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Task])
+                .payload_types(vec!["TaskExecutionRecorded".to_string()]),
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let (task_id, execution_mode, complexity, succeeded, tokens_used) =
+            match &event.payload {
+                EventPayload::TaskExecutionRecorded {
+                    task_id,
+                    execution_mode,
+                    complexity,
+                    succeeded,
+                    tokens_used,
+                } => (*task_id, execution_mode.clone(), complexity.clone(), *succeeded, *tokens_used),
+                _ => return Ok(Reaction::None),
+            };
+
+        // Idempotency: check if we already stored a memory for this task execution
+        let idempotency_key = format!("execution-record:{}", task_id);
+        let existing = self.memory_repo
+            .get_by_key(&idempotency_key, "execution_history")
+            .await
+            .map_err(|e| format!("Failed to check existing execution memory: {}", e))?;
+        if existing.is_some() {
+            return Ok(Reaction::None);
+        }
+
+        let outcome_str = if succeeded { "succeeded" } else { "failed" };
+
+        // Build a structured summary for the memory content
+        let content = format!(
+            "Task execution recorded for {task_id}:\n\
+             - execution_mode: {execution_mode}\n\
+             - complexity: {complexity}\n\
+             - outcome: {outcome_str}\n\
+             - tokens_used: {tokens_used}",
+        );
+
+        // Choose memory type based on outcome
+        let memory_type = if succeeded {
+            crate::domain::models::MemoryType::Pattern
+        } else {
+            crate::domain::models::MemoryType::Error
+        };
+
+        let mut memory = crate::domain::models::Memory::episodic(idempotency_key.clone(), content)
+            .with_namespace("execution_history")
+            .with_type(memory_type)
+            .with_source("task_execution")
+            .with_task(task_id);
+
+        // Add goal context if available
+        if let Some(goal_id) = event.goal_id {
+            memory = memory.with_goal(goal_id);
+        }
+
+        // Tag with mode, complexity, and outcome for future queries
+        memory = memory
+            .with_tag(format!("mode:{}", execution_mode))
+            .with_tag(format!("complexity:{}", complexity))
+            .with_tag(format!("outcome:{}", outcome_str));
+
+        // Store custom metadata for machine consumption
+        memory.metadata.custom.insert(
+            "tokens_used".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(tokens_used)),
+        );
+        memory.metadata.custom.insert(
+            "execution_mode".to_string(),
+            serde_json::Value::String(execution_mode.clone()),
+        );
+        memory.metadata.custom.insert(
+            "complexity".to_string(),
+            serde_json::Value::String(complexity.clone()),
+        );
+        memory.metadata.custom.insert(
+            "succeeded".to_string(),
+            serde_json::Value::Bool(succeeded),
+        );
+
+        // Lower relevance than convergence memory -- this is for learning, not active use
+        memory.metadata.relevance = 0.5;
+
+        self.memory_repo.store(&memory).await
+            .map_err(|e| format!("Failed to store execution memory: {}", e))?;
+
+        tracing::info!(
+            task_id = %task_id,
+            execution_mode = %execution_mode,
+            complexity = %complexity,
+            succeeded = succeeded,
+            "Stored execution history memory for classification heuristic"
+        );
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// ConvergenceEvolutionHandler
+// ============================================================================
+
+/// When a convergent task terminates, record convergence-specific metrics that
+/// feed the evolution loop. Emits a TaskCompletedWithResult event so that the
+/// EvolutionEvaluationHandler can pick it up and track per-agent-type
+/// convergence performance.
+///
+/// Idempotent: only acts on ConvergenceTerminated events and checks task state
+/// before emitting.
+pub struct ConvergenceEvolutionHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+}
+
+impl<T: TaskRepository> ConvergenceEvolutionHandler<T> {
+    pub fn new(task_repo: Arc<T>) -> Self {
+        Self { task_repo }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for ConvergenceEvolutionHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "ConvergenceEvolutionHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Convergence])
+                .payload_types(vec!["ConvergenceTerminated".to_string()]),
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let (task_id, _trajectory_id, outcome, total_iterations, total_tokens, final_convergence_level) =
+            match &event.payload {
+                EventPayload::ConvergenceTerminated {
+                    task_id,
+                    trajectory_id,
+                    outcome,
+                    total_iterations,
+                    total_tokens,
+                    final_convergence_level,
+                } => (*task_id, *trajectory_id, outcome.clone(), *total_iterations, *total_tokens, *final_convergence_level),
+                _ => return Ok(Reaction::None),
+            };
+
+        // Load the task to get agent_type and compute duration
+        let task = self.task_repo.get(task_id).await
+            .map_err(|e| format!("Failed to get task: {}", e))?;
+        let task = match task {
+            Some(t) => t,
+            None => return Ok(Reaction::None),
+        };
+
+        // Compute duration from started_at to now (or completed_at if available)
+        let duration_secs = task.started_at
+            .map(|started| {
+                let end = task.completed_at.unwrap_or_else(chrono::Utc::now);
+                (end - started).num_seconds().max(0) as u64
+            })
+            .unwrap_or(0);
+
+        // Map convergence outcome to task result status
+        let (status_str, error) = match outcome.as_str() {
+            "converged" => ("Complete".to_string(), None),
+            "exhausted" => ("Failed".to_string(), Some("Convergence exhausted: max iterations reached".to_string())),
+            "trapped" => ("Failed".to_string(), Some("Convergence trapped: attractor limit cycle detected".to_string())),
+            "budget_denied" => ("Failed".to_string(), Some("Convergence budget extension denied".to_string())),
+            "decomposed" => ("Complete".to_string(), None), // Decomposition is a valid outcome
+            other => ("Failed".to_string(), Some(format!("Convergence terminated: {}", other))),
+        };
+
+        // Store convergence metadata on the task context for evolution queries
+        let mut updated = task.clone();
+        updated.context.custom.insert(
+            "convergence_iterations".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(total_iterations)),
+        );
+        updated.context.custom.insert(
+            "convergence_tokens".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(total_tokens)),
+        );
+        updated.context.custom.insert(
+            "convergence_level".to_string(),
+            serde_json::json!(final_convergence_level),
+        );
+        updated.context.custom.insert(
+            "convergence_outcome".to_string(),
+            serde_json::Value::String(outcome.clone()),
+        );
+        updated.updated_at = chrono::Utc::now();
+
+        self.task_repo.update(&updated).await
+            .map_err(|e| format!("Failed to update task with convergence metadata: {}", e))?;
+
+        // Emit TaskCompletedWithResult so EvolutionEvaluationHandler can track it
+        let result_event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Task,
+            goal_id: event.goal_id,
+            task_id: Some(task_id),
+            correlation_id: event.correlation_id,
+            source_process_id: None,
+            payload: EventPayload::TaskCompletedWithResult {
+                task_id,
+                result: TaskResultPayload {
+                    task_id,
+                    status: status_str,
+                    error,
+                    duration_secs,
+                    retry_count: updated.retry_count,
+                    tokens_used: total_tokens,
+                },
+            },
+        };
+
+        tracing::info!(
+            task_id = %task_id,
+            outcome = %outcome,
+            iterations = total_iterations,
+            tokens = total_tokens,
+            convergence_level = final_convergence_level,
+            "Recorded convergence evolution metrics"
+        );
+
+        Ok(Reaction::EmitEvents(vec![result_event]))
+    }
+}
+
+// ============================================================================
+// ConvergenceEscalationFeedbackHandler
+// ============================================================================
+
+/// When a human responds to an escalation during convergence, process the
+/// response and feed it back into the convergence loop via a trajectory
+/// specification amendment.
+///
+/// On receiving a `HumanResponseReceived` event:
+/// 1. Check that the event has a `task_id` set on the envelope.
+/// 2. Load the task and verify it has a `trajectory_id` (convergent task).
+/// 3. Load the trajectory from the trajectory store.
+/// 4. Amend the specification with the human's decision text.
+/// 5. Persist the updated trajectory.
+/// 6. If `allows_continuation` is false, add a `convergence:force_stop` hint
+///    to the task context so the convergence loop can halt gracefully.
+pub struct ConvergenceEscalationFeedbackHandler<T: TaskRepository, Tr: TrajectoryRepository> {
+    task_repo: Arc<T>,
+    trajectory_repo: Arc<Tr>,
+}
+
+impl<T: TaskRepository, Tr: TrajectoryRepository> ConvergenceEscalationFeedbackHandler<T, Tr> {
+    pub fn new(task_repo: Arc<T>, trajectory_repo: Arc<Tr>) -> Self {
+        Self {
+            task_repo,
+            trajectory_repo,
+        }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static, Tr: TrajectoryRepository + 'static> EventHandler
+    for ConvergenceEscalationFeedbackHandler<T, Tr>
+{
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "ConvergenceEscalationFeedbackHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Escalation])
+                .payload_types(vec!["HumanResponseReceived".to_string()]),
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let (escalation_id, decision, allows_continuation) = match &event.payload {
+            EventPayload::HumanResponseReceived {
+                escalation_id,
+                decision,
+                allows_continuation,
+            } => (*escalation_id, decision.clone(), *allows_continuation),
+            _ => return Ok(Reaction::None),
+        };
+
+        // Step 1: The event must have a task_id on the envelope
+        let task_id = match event.task_id {
+            Some(id) => id,
+            None => return Ok(Reaction::None),
+        };
+
+        // Step 2: Load the task and check for a trajectory_id
+        let task = self
+            .task_repo
+            .get(task_id)
+            .await
+            .map_err(|e| format!("Failed to get task: {}", e))?;
+        let task = match task {
+            Some(t) => t,
+            None => return Ok(Reaction::None),
+        };
+
+        let trajectory_id = match task.trajectory_id {
+            Some(id) => id,
+            None => return Ok(Reaction::None), // Not a convergent task
+        };
+
+        // Step 3: Load the trajectory
+        let trajectory = self
+            .trajectory_repo
+            .get(&trajectory_id.to_string())
+            .await
+            .map_err(|e| format!("Failed to get trajectory: {}", e))?;
+        let mut trajectory = match trajectory {
+            Some(t) => t,
+            None => return Ok(Reaction::None),
+        };
+
+        // Step 4: Amend the specification with the human's decision
+        let amendment = SpecificationAmendment::new(
+            AmendmentSource::UserHint,
+            decision.clone(),
+            format!(
+                "Human escalation response (escalation_id={})",
+                escalation_id
+            ),
+        );
+        trajectory.specification.add_amendment(amendment);
+
+        // Step 5: Persist the updated trajectory
+        self.trajectory_repo
+            .save(&trajectory)
+            .await
+            .map_err(|e| format!("Failed to save trajectory: {}", e))?;
+
+        // Step 6: If continuation is not allowed, add force_stop hint
+        if !allows_continuation {
+            let mut updated_task = task.clone();
+            if !updated_task
+                .context
+                .hints
+                .iter()
+                .any(|h| h == "convergence:force_stop")
+            {
+                updated_task
+                    .context
+                    .hints
+                    .push("convergence:force_stop".to_string());
+                updated_task.updated_at = chrono::Utc::now();
+                self.task_repo
+                    .update(&updated_task)
+                    .await
+                    .map_err(|e| format!("Failed to update task with force_stop hint: {}", e))?;
+            }
+        }
+
+        // Step 7: Log the feedback application
+        tracing::info!(
+            task_id = %task_id,
+            escalation_id = %escalation_id,
+            allows_continuation = allows_continuation,
+            "Applied human escalation feedback as specification amendment to convergent trajectory"
+        );
+
+        Ok(Reaction::None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3484,6 +4382,7 @@ mod tests {
         create_migrated_test_pool, task_repository::SqliteTaskRepository,
     };
     use crate::domain::models::{Task, TaskStatus};
+    use uuid::Uuid;
 
     async fn setup_task_repo() -> Arc<SqliteTaskRepository> {
         let pool = create_migrated_test_pool().await.unwrap();
@@ -3681,5 +4580,540 @@ mod tests {
         // Downstream should NOT be blocked since retries remain
         let updated = repo.get(downstream.id).await.unwrap().unwrap();
         assert_eq!(updated.status, TaskStatus::Pending);
+    }
+
+    // ========================================================================
+    // ConvergenceCoordinationHandler tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_convergence_coordination_all_children_complete() {
+        let repo = setup_task_repo().await;
+        let handler = ConvergenceCoordinationHandler::new(repo.clone());
+
+        // Create parent: Running, convergent (has trajectory_id)
+        let mut parent = Task::new("Parent convergent task");
+        parent.trajectory_id = Some(Uuid::new_v4());
+        parent.transition_to(TaskStatus::Ready).unwrap();
+        parent.transition_to(TaskStatus::Running).unwrap();
+        repo.create(&parent).await.unwrap();
+
+        // Create child 1: complete
+        let mut child1 = Task::new("Child 1");
+        child1.parent_id = Some(parent.id);
+        child1.transition_to(TaskStatus::Ready).unwrap();
+        child1.transition_to(TaskStatus::Running).unwrap();
+        child1.transition_to(TaskStatus::Complete).unwrap();
+        repo.create(&child1).await.unwrap();
+
+        // Create child 2: complete
+        let mut child2 = Task::new("Child 2");
+        child2.parent_id = Some(parent.id);
+        child2.transition_to(TaskStatus::Ready).unwrap();
+        child2.transition_to(TaskStatus::Running).unwrap();
+        child2.transition_to(TaskStatus::Complete).unwrap();
+        repo.create(&child2).await.unwrap();
+
+        // Fire TaskCompleted for child2 (last child to complete)
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(child2.id),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::TaskCompleted {
+                task_id: child2.id,
+                tokens_used: 50,
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should emit a TaskCompleted event for the parent
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                assert_eq!(events.len(), 1);
+                match &events[0].payload {
+                    EventPayload::TaskCompleted { task_id, .. } => {
+                        assert_eq!(*task_id, parent.id);
+                    }
+                    other => panic!("Expected TaskCompleted, got {:?}", other),
+                }
+            }
+            Reaction::None => panic!("Expected EmitEvents, got Reaction::None"),
+        }
+
+        // Verify parent is now Complete
+        let updated_parent = repo.get(parent.id).await.unwrap().unwrap();
+        assert_eq!(updated_parent.status, TaskStatus::Complete);
+    }
+
+    #[tokio::test]
+    async fn test_convergence_coordination_child_fails() {
+        let repo = setup_task_repo().await;
+        let handler = ConvergenceCoordinationHandler::new(repo.clone());
+
+        // Create parent: Running, convergent
+        let mut parent = Task::new("Parent convergent task");
+        parent.trajectory_id = Some(Uuid::new_v4());
+        parent.transition_to(TaskStatus::Ready).unwrap();
+        parent.transition_to(TaskStatus::Running).unwrap();
+        repo.create(&parent).await.unwrap();
+
+        // Create child 1: failed
+        let mut child1 = Task::new("Child 1");
+        child1.parent_id = Some(parent.id);
+        child1.transition_to(TaskStatus::Ready).unwrap();
+        child1.transition_to(TaskStatus::Running).unwrap();
+        child1.transition_to(TaskStatus::Failed).unwrap();
+        repo.create(&child1).await.unwrap();
+
+        // Create child 2: complete
+        let mut child2 = Task::new("Child 2");
+        child2.parent_id = Some(parent.id);
+        child2.transition_to(TaskStatus::Ready).unwrap();
+        child2.transition_to(TaskStatus::Running).unwrap();
+        child2.transition_to(TaskStatus::Complete).unwrap();
+        repo.create(&child2).await.unwrap();
+
+        // Fire TaskFailed for child1
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Error,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(child1.id),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::TaskFailed {
+                task_id: child1.id,
+                error: "child task error".to_string(),
+                retry_count: 0,
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should emit TaskFailed for the parent
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                assert_eq!(events.len(), 1);
+                match &events[0].payload {
+                    EventPayload::TaskFailed { task_id, error, .. } => {
+                        assert_eq!(*task_id, parent.id);
+                        assert!(error.contains("child task failed"));
+                    }
+                    other => panic!("Expected TaskFailed, got {:?}", other),
+                }
+            }
+            Reaction::None => panic!("Expected EmitEvents, got Reaction::None"),
+        }
+
+        // Verify parent is now Failed
+        let updated_parent = repo.get(parent.id).await.unwrap().unwrap();
+        assert_eq!(updated_parent.status, TaskStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_convergence_coordination_partial_complete() {
+        let repo = setup_task_repo().await;
+        let handler = ConvergenceCoordinationHandler::new(repo.clone());
+
+        // Create parent: Running, convergent
+        let mut parent = Task::new("Parent convergent task");
+        parent.trajectory_id = Some(Uuid::new_v4());
+        parent.transition_to(TaskStatus::Ready).unwrap();
+        parent.transition_to(TaskStatus::Running).unwrap();
+        repo.create(&parent).await.unwrap();
+
+        // Create child 1: complete
+        let mut child1 = Task::new("Child 1");
+        child1.parent_id = Some(parent.id);
+        child1.transition_to(TaskStatus::Ready).unwrap();
+        child1.transition_to(TaskStatus::Running).unwrap();
+        child1.transition_to(TaskStatus::Complete).unwrap();
+        repo.create(&child1).await.unwrap();
+
+        // Create child 2: still Running (not terminal)
+        let mut child2 = Task::new("Child 2");
+        child2.parent_id = Some(parent.id);
+        child2.transition_to(TaskStatus::Ready).unwrap();
+        child2.transition_to(TaskStatus::Running).unwrap();
+        repo.create(&child2).await.unwrap();
+
+        // Fire TaskCompleted for child1 only
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(child1.id),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::TaskCompleted {
+                task_id: child1.id,
+                tokens_used: 50,
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should return None — still waiting for child2
+        assert!(matches!(reaction, Reaction::None));
+
+        // Parent should still be Running
+        let updated_parent = repo.get(parent.id).await.unwrap().unwrap();
+        assert_eq!(updated_parent.status, TaskStatus::Running);
+    }
+
+    // ========================================================================
+    // ConvergenceCancellationHandler tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_convergence_cancellation_cascades() {
+        let repo = setup_task_repo().await;
+        let handler = ConvergenceCancellationHandler::new(repo.clone());
+
+        // Create parent: Canceled, convergent (has trajectory_id)
+        let mut parent = Task::new("Parent convergent task");
+        parent.trajectory_id = Some(Uuid::new_v4());
+        parent.transition_to(TaskStatus::Ready).unwrap();
+        parent.transition_to(TaskStatus::Running).unwrap();
+        parent.transition_to(TaskStatus::Canceled).unwrap();
+        repo.create(&parent).await.unwrap();
+
+        // Create child 1: Running
+        let mut child1 = Task::new("Child 1");
+        child1.parent_id = Some(parent.id);
+        child1.transition_to(TaskStatus::Ready).unwrap();
+        child1.transition_to(TaskStatus::Running).unwrap();
+        repo.create(&child1).await.unwrap();
+
+        // Create child 2: Running
+        let mut child2 = Task::new("Child 2");
+        child2.parent_id = Some(parent.id);
+        child2.transition_to(TaskStatus::Ready).unwrap();
+        child2.transition_to(TaskStatus::Running).unwrap();
+        repo.create(&child2).await.unwrap();
+
+        // Fire TaskCanceled for the parent
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Warning,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(parent.id),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::TaskCanceled {
+                task_id: parent.id,
+                reason: "user requested cancellation".to_string(),
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should emit TaskCanceled events for both children
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                assert_eq!(events.len(), 2);
+                let canceled_ids: Vec<Uuid> = events.iter().map(|e| {
+                    match &e.payload {
+                        EventPayload::TaskCanceled { task_id, .. } => *task_id,
+                        other => panic!("Expected TaskCanceled, got {:?}", other),
+                    }
+                }).collect();
+                assert!(canceled_ids.contains(&child1.id));
+                assert!(canceled_ids.contains(&child2.id));
+            }
+            Reaction::None => panic!("Expected EmitEvents, got Reaction::None"),
+        }
+
+        // Verify both children are now Canceled
+        let updated_child1 = repo.get(child1.id).await.unwrap().unwrap();
+        assert_eq!(updated_child1.status, TaskStatus::Canceled);
+        let updated_child2 = repo.get(child2.id).await.unwrap().unwrap();
+        assert_eq!(updated_child2.status, TaskStatus::Canceled);
+    }
+
+    // ========================================================================
+    // ConvergenceSLAPressureHandler tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_convergence_sla_pressure_warning() {
+        let repo = setup_task_repo().await;
+        let handler = ConvergenceSLAPressureHandler::new(repo.clone());
+
+        // Create convergent task (has trajectory_id), in Running state
+        let mut task = Task::new("Convergent task with SLA");
+        task.trajectory_id = Some(Uuid::new_v4());
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        repo.create(&task).await.unwrap();
+
+        // Fire TaskSLAWarning event
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Warning,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(task.id),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::TaskSLAWarning {
+                task_id: task.id,
+                deadline: "2026-01-01T00:00:00Z".to_string(),
+                remaining_secs: 60,
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::None));
+
+        // Verify the task now has "sla:warning" hint
+        let updated = repo.get(task.id).await.unwrap().unwrap();
+        assert!(updated.context.hints.contains(&"sla:warning".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_convergence_sla_pressure_non_convergent_ignored() {
+        let repo = setup_task_repo().await;
+        let handler = ConvergenceSLAPressureHandler::new(repo.clone());
+
+        // Create direct task (no trajectory_id)
+        let mut task = Task::new("Direct task");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        repo.create(&task).await.unwrap();
+
+        assert!(task.trajectory_id.is_none()); // sanity check
+
+        // Fire TaskSLAWarning event
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Warning,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(task.id),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::TaskSLAWarning {
+                task_id: task.id,
+                deadline: "2026-01-01T00:00:00Z".to_string(),
+                remaining_secs: 60,
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::None));
+
+        // Verify the task does NOT have any SLA hints
+        let updated = repo.get(task.id).await.unwrap().unwrap();
+        assert!(!updated.context.hints.contains(&"sla:warning".to_string()));
+    }
+
+    // ========================================================================
+    // ConvergenceMemoryHandler tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_convergence_memory_handler_stores_success() {
+        use crate::adapters::sqlite::SqliteMemoryRepository;
+
+        let pool = crate::adapters::sqlite::create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+        let memory_repo = Arc::new(SqliteMemoryRepository::new(pool));
+        let handler = ConvergenceMemoryHandler::new(task_repo.clone(), memory_repo.clone());
+
+        // Create the task that the event refers to
+        let mut task = Task::new("Convergent task for memory");
+        let trajectory_id = Uuid::new_v4();
+        task.trajectory_id = Some(trajectory_id);
+        task.agent_type = Some("coder".to_string());
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task_repo.create(&task).await.unwrap();
+
+        // Fire ConvergenceTerminated with "converged" outcome
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Convergence,
+            goal_id: None,
+            task_id: Some(task.id),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::ConvergenceTerminated {
+                task_id: task.id,
+                trajectory_id,
+                outcome: "converged".to_string(),
+                total_iterations: 3,
+                total_tokens: 1500,
+                final_convergence_level: 0.95,
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should emit a MemoryStored event
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                assert_eq!(events.len(), 1);
+                match &events[0].payload {
+                    EventPayload::MemoryStored { namespace, tier, memory_type, .. } => {
+                        assert_eq!(namespace, "convergence");
+                        assert_eq!(tier, "episodic");
+                        assert_eq!(memory_type, "pattern"); // success -> Pattern
+                    }
+                    other => panic!("Expected MemoryStored, got {:?}", other),
+                }
+            }
+            Reaction::None => panic!("Expected EmitEvents, got Reaction::None"),
+        }
+
+        // Verify memory was actually stored by looking it up via the idempotency key
+        let idempotency_key = format!("convergence-outcome:{}", trajectory_id);
+        let stored = memory_repo.get_by_key(&idempotency_key, "convergence").await.unwrap();
+        assert!(stored.is_some(), "Memory should have been stored");
+        let stored = stored.unwrap();
+        assert!(stored.content.contains("converged"));
+        assert!(stored.content.contains("iterations: 3"));
+        assert!(stored.content.contains("tokens: 1500"));
+    }
+
+    // ========================================================================
+    // ConvergenceEvolutionHandler tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_convergence_evolution_handler_records_metrics() {
+        let repo = setup_task_repo().await;
+        let handler = ConvergenceEvolutionHandler::new(repo.clone());
+
+        // Create convergent task in Running state
+        let mut task = Task::new("Convergent task for evolution");
+        let trajectory_id = Uuid::new_v4();
+        task.trajectory_id = Some(trajectory_id);
+        task.agent_type = Some("coder".to_string());
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        repo.create(&task).await.unwrap();
+
+        // Fire ConvergenceTerminated event
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Convergence,
+            goal_id: None,
+            task_id: Some(task.id),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::ConvergenceTerminated {
+                task_id: task.id,
+                trajectory_id,
+                outcome: "converged".to_string(),
+                total_iterations: 5,
+                total_tokens: 2500,
+                final_convergence_level: 0.92,
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should emit a TaskCompletedWithResult event
+        match &reaction {
+            Reaction::EmitEvents(events) => {
+                assert_eq!(events.len(), 1);
+                match &events[0].payload {
+                    EventPayload::TaskCompletedWithResult { task_id, result } => {
+                        assert_eq!(*task_id, task.id);
+                        assert_eq!(result.status, "Complete");
+                        assert_eq!(result.tokens_used, 2500);
+                        assert!(result.error.is_none());
+                    }
+                    other => panic!("Expected TaskCompletedWithResult, got {:?}", other),
+                }
+            }
+            Reaction::None => panic!("Expected EmitEvents, got Reaction::None"),
+        }
+
+        // Verify task context was updated with convergence metrics
+        let updated = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(
+            updated.context.custom.get("convergence_iterations"),
+            Some(&serde_json::Value::Number(serde_json::Number::from(5u32)))
+        );
+        assert_eq!(
+            updated.context.custom.get("convergence_tokens"),
+            Some(&serde_json::Value::Number(serde_json::Number::from(2500u64)))
+        );
+        assert_eq!(
+            updated.context.custom.get("convergence_level"),
+            Some(&serde_json::json!(0.92))
+        );
+        assert_eq!(
+            updated.context.custom.get("convergence_outcome"),
+            Some(&serde_json::Value::String("converged".to_string()))
+        );
     }
 }

@@ -88,6 +88,7 @@ pub enum EventCategory {
     Escalation,
     Memory,
     Scheduler,
+    Convergence,
 }
 
 impl std::fmt::Display for EventCategory {
@@ -102,6 +103,7 @@ impl std::fmt::Display for EventCategory {
             Self::Escalation => write!(f, "escalation"),
             Self::Memory => write!(f, "memory"),
             Self::Scheduler => write!(f, "scheduler"),
+            Self::Convergence => write!(f, "convergence"),
         }
     }
 }
@@ -604,6 +606,77 @@ pub enum EventPayload {
         goal_id: Uuid,
         reason: String,
     },
+
+    // Convergence lifecycle events (task-level convergence integration)
+
+    /// Emitted when convergence loop starts for a task.
+    ConvergenceStarted {
+        task_id: Uuid,
+        trajectory_id: Uuid,
+        estimated_iterations: u32,
+        basin_width: String,
+        convergence_mode: String,
+    },
+
+    /// Emitted after each convergence iteration.
+    ConvergenceIteration {
+        task_id: Uuid,
+        trajectory_id: Uuid,
+        iteration: u32,
+        strategy: String,
+        convergence_delta: f64,
+        convergence_level: f64,
+        attractor_type: String,
+        budget_remaining_fraction: f64,
+    },
+
+    /// Emitted when attractor classification changes.
+    ConvergenceAttractorTransition {
+        task_id: Uuid,
+        trajectory_id: Uuid,
+        from: String,
+        to: String,
+        confidence: f64,
+    },
+
+    /// Emitted when convergence requests a budget extension.
+    ConvergenceBudgetExtension {
+        task_id: Uuid,
+        trajectory_id: Uuid,
+        granted: bool,
+        additional_iterations: u32,
+        additional_tokens: u64,
+    },
+
+    /// Emitted when a fresh start is triggered during convergence.
+    ConvergenceFreshStart {
+        task_id: Uuid,
+        trajectory_id: Uuid,
+        fresh_start_number: u32,
+        reason: String,
+    },
+
+    /// Emitted when convergence completes (success or failure).
+    ConvergenceTerminated {
+        task_id: Uuid,
+        trajectory_id: Uuid,
+        outcome: String,
+        total_iterations: u32,
+        total_tokens: u64,
+        final_convergence_level: f64,
+    },
+
+    /// Emitted on task completion for opportunistic convergence memory recording.
+    /// Captures lightweight execution metrics that feed the classification heuristic
+    /// dataset (Part 10.3 of convergence-task-integration spec). The actual memory
+    /// storage is handled by an event handler, not by TaskService.
+    TaskExecutionRecorded {
+        task_id: Uuid,
+        execution_mode: String,
+        complexity: String,
+        succeeded: bool,
+        tokens_used: u64,
+    },
 }
 
 impl EventPayload {
@@ -702,6 +775,13 @@ impl EventPayload {
             Self::MemoryInformedGoal { .. } => "MemoryInformedGoal",
             Self::TaskDescriptionUpdated { .. } => "TaskDescriptionUpdated",
             Self::GoalDescriptionUpdated { .. } => "GoalDescriptionUpdated",
+            Self::ConvergenceStarted { .. } => "ConvergenceStarted",
+            Self::ConvergenceIteration { .. } => "ConvergenceIteration",
+            Self::ConvergenceAttractorTransition { .. } => "ConvergenceAttractorTransition",
+            Self::ConvergenceBudgetExtension { .. } => "ConvergenceBudgetExtension",
+            Self::ConvergenceFreshStart { .. } => "ConvergenceFreshStart",
+            Self::ConvergenceTerminated { .. } => "ConvergenceTerminated",
+            Self::TaskExecutionRecorded { .. } => "TaskExecutionRecorded",
         }
     }
 }

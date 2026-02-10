@@ -6,7 +6,7 @@ use uuid::Uuid;
 use async_trait::async_trait;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus};
+use crate::domain::models::{Complexity, ExecutionMode, Task, TaskContext, TaskPriority, TaskSource, TaskStatus};
 use crate::domain::ports::{TaskFilter, TaskRepository};
 use crate::services::command_bus::{CommandError, CommandOutcome, CommandResult, TaskCommand, TaskCommandHandler};
 use crate::services::event_bus::{
@@ -89,6 +89,12 @@ impl SpawnLimitType {
 pub struct TaskService<T: TaskRepository> {
     task_repo: Arc<T>,
     spawn_limits: SpawnLimitConfig,
+    /// Default execution mode override. When `Some`, all tasks without an
+    /// explicit execution mode use this value and the classification heuristic
+    /// is skipped. When `None`, the heuristic decides. This gives operators a
+    /// kill switch (set to `Some(ExecutionMode::Direct)` to disable convergence
+    /// inference globally).
+    default_execution_mode: Option<ExecutionMode>,
 }
 
 impl<T: TaskRepository> TaskService<T> {
@@ -96,12 +102,24 @@ impl<T: TaskRepository> TaskService<T> {
         Self {
             task_repo,
             spawn_limits: SpawnLimitConfig::default(),
+            default_execution_mode: None,
         }
     }
 
     /// Create with custom spawn limits.
     pub fn with_spawn_limits(mut self, limits: SpawnLimitConfig) -> Self {
         self.spawn_limits = limits;
+        self
+    }
+
+    /// Set the default execution mode override.
+    ///
+    /// When set to `Some(ExecutionMode::Direct)`, the classification heuristic
+    /// is bypassed and all tasks default to direct execution unless they were
+    /// explicitly submitted with a convergent mode. When `None`, the heuristic
+    /// runs for tasks that don't have an explicit mode set.
+    pub fn with_default_execution_mode(mut self, mode: Option<ExecutionMode>) -> Self {
+        self.default_execution_mode = mode;
         self
     }
 
@@ -236,6 +254,110 @@ impl<T: TaskRepository> TaskService<T> {
         Ok(count)
     }
 
+    /// Classify whether a task should use Direct or Convergent execution mode.
+    ///
+    /// Uses a scoring heuristic based on task complexity, description content,
+    /// context hints, source lineage, and priority. A score >= 3 recommends
+    /// Convergent mode; below that, Direct mode is used.
+    ///
+    /// When `default_mode` is `Some(...)`, the operator override takes precedence
+    /// and the heuristic is skipped entirely (the operator's mode is returned).
+    fn classify_execution_mode(
+        task: &Task,
+        parent_mode: Option<&ExecutionMode>,
+        default_mode: &Option<ExecutionMode>,
+    ) -> ExecutionMode {
+        // If operator set a default, use it as the baseline for tasks that
+        // did not explicitly request a mode.
+        if let Some(mode) = default_mode {
+            return mode.clone();
+        }
+
+        let mut convergent_score: i32 = 0;
+
+        // --- Complexity signals ---
+        match task.routing_hints.complexity {
+            Complexity::Complex => convergent_score += 3,
+            Complexity::Moderate => {
+                // Moderate complexity with a lengthy description suggests
+                // requirements that benefit from iterative refinement.
+                if task.description.split_whitespace().count() > 200 {
+                    convergent_score += 2;
+                }
+            }
+            Complexity::Trivial => convergent_score -= 3,
+            Complexity::Simple => convergent_score -= 3,
+        }
+
+        // --- Description content signals ---
+        let desc_lower = task.description.to_lowercase();
+
+        // Presence of test expectations or acceptance criteria implies
+        // measurable success conditions — a strong fit for convergence.
+        let acceptance_keywords = [
+            "acceptance criteria",
+            "should pass",
+            "must pass",
+            "expected output",
+            "test case",
+            "assert",
+            "verify that",
+            "ensure that",
+        ];
+        if acceptance_keywords.iter().any(|kw| desc_lower.contains(kw)) {
+            convergent_score += 2;
+        }
+
+        // --- Context hints signals ---
+        // Anti-patterns and constraints in hints suggest the task needs
+        // guardrails that convergence provides.
+        let has_anti_patterns = task.context.hints.iter().any(|h| {
+            h.starts_with("anti-pattern:") || h.starts_with("constraint:")
+        });
+        if has_anti_patterns {
+            convergent_score += 2;
+        }
+
+        // --- Parent inheritance ---
+        // Subtasks of convergent parents inherit the convergent mode unless
+        // other signals strongly push toward Direct.
+        if let TaskSource::SubtaskOf(_) = &task.source {
+            if let Some(parent_exec_mode) = parent_mode {
+                if parent_exec_mode.is_convergent() {
+                    convergent_score += 3;
+                }
+            }
+        }
+
+        // --- Priority signal ---
+        // Low priority tasks are "fast-lane": favor Direct execution to
+        // minimize latency and token cost.
+        if task.priority == TaskPriority::Low {
+            convergent_score -= 2;
+        }
+
+        // --- Threshold decision ---
+        if convergent_score >= 3 {
+            ExecutionMode::Convergent { parallel_samples: None }
+        } else {
+            ExecutionMode::Direct
+        }
+    }
+
+    /// Look up the parent task's execution mode, if the task has a parent.
+    async fn resolve_parent_execution_mode(
+        &self,
+        parent_id: Option<Uuid>,
+    ) -> DomainResult<Option<ExecutionMode>> {
+        match parent_id {
+            Some(pid) => {
+                let parent = self.task_repo.get(pid).await?;
+                Ok(parent.map(|p| p.execution_mode))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Submit a new task. Returns the task and events to be journaled.
     #[allow(clippy::too_many_arguments)]
     pub async fn submit_task(
@@ -300,6 +422,21 @@ impl<T: TaskRepository> TaskService<T> {
 
         if let Some(ctx) = context {
             task.context = ctx;
+        }
+
+        // --- Execution mode classification heuristic (Part 1.2) ---
+        // If the task was submitted with the default Direct mode (i.e. no explicit
+        // mode was requested), run the heuristic to determine whether it should be
+        // upgraded to Convergent. Tasks explicitly set to Convergent by the caller
+        // are left untouched.
+        if task.execution_mode.is_direct() {
+            let parent_mode = self.resolve_parent_execution_mode(parent_id).await?;
+            let inferred_mode = Self::classify_execution_mode(
+                &task,
+                parent_mode.as_ref(),
+                &self.default_execution_mode,
+            );
+            task.execution_mode = inferred_mode;
         }
 
         task.validate().map_err(DomainError::ValidationFailed)?;
@@ -390,6 +527,14 @@ impl<T: TaskRepository> TaskService<T> {
     }
 
     /// Mark task as complete.
+    ///
+    /// In addition to the standard TaskCompleted event, emits a
+    /// `TaskExecutionRecorded` event for opportunistic convergence memory
+    /// recording (spec Part 10.3). This lightweight event captures the task's
+    /// complexity, execution mode, and success/failure signal. An event handler
+    /// downstream persists this data to build the dataset used by the
+    /// classification heuristic to learn which complexity levels benefit from
+    /// convergence.
     pub async fn complete_task(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
@@ -401,7 +546,7 @@ impl<T: TaskRepository> TaskService<T> {
 
         self.task_repo.update(&task).await?;
 
-        let events = vec![Self::make_event(
+        let mut events = vec![Self::make_event(
             EventSeverity::Info,
             EventCategory::Task,
             None,
@@ -412,10 +557,38 @@ impl<T: TaskRepository> TaskService<T> {
             },
         )];
 
+        // Opportunistic convergence memory recording (Part 10.3).
+        // Emit a lightweight event so that a downstream handler can persist
+        // execution metrics. This builds the dataset that informs the
+        // classification heuristic over time.
+        let execution_mode_str = if task.execution_mode.is_convergent() {
+            "convergent".to_string()
+        } else {
+            "direct".to_string()
+        };
+        let complexity_str = format!("{:?}", task.routing_hints.complexity).to_lowercase();
+
+        events.push(Self::make_event(
+            EventSeverity::Debug,
+            EventCategory::Memory,
+            None,
+            Some(task_id),
+            EventPayload::TaskExecutionRecorded {
+                task_id,
+                execution_mode: execution_mode_str,
+                complexity: complexity_str,
+                succeeded: true,
+                tokens_used: 0, // Actual token count filled by orchestrator-level event
+            },
+        ));
+
         Ok((task, events))
     }
 
     /// Mark task as failed.
+    ///
+    /// Also emits a `TaskExecutionRecorded` event for opportunistic convergence
+    /// memory recording, mirroring the event emitted on success (Part 10.3).
     pub async fn fail_task(&self, task_id: Uuid, error_message: Option<String>) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
@@ -432,22 +605,59 @@ impl<T: TaskRepository> TaskService<T> {
 
         self.task_repo.update(&task).await?;
 
-        let events = vec![Self::make_event(
-            EventSeverity::Error,
-            EventCategory::Task,
-            None,
-            Some(task_id),
-            EventPayload::TaskFailed {
-                task_id,
-                error: error_str,
-                retry_count: task.retry_count,
-            },
-        )];
+        let execution_mode_str = if task.execution_mode.is_convergent() {
+            "convergent".to_string()
+        } else {
+            "direct".to_string()
+        };
+        let complexity_str = format!("{:?}", task.routing_hints.complexity).to_lowercase();
+
+        let events = vec![
+            Self::make_event(
+                EventSeverity::Error,
+                EventCategory::Task,
+                None,
+                Some(task_id),
+                EventPayload::TaskFailed {
+                    task_id,
+                    error: error_str,
+                    retry_count: task.retry_count,
+                },
+            ),
+            // Opportunistic convergence memory recording (Part 10.3).
+            Self::make_event(
+                EventSeverity::Debug,
+                EventCategory::Memory,
+                None,
+                Some(task_id),
+                EventPayload::TaskExecutionRecorded {
+                    task_id,
+                    execution_mode: execution_mode_str,
+                    complexity: complexity_str,
+                    succeeded: false,
+                    tokens_used: 0,
+                },
+            ),
+        ];
 
         Ok((task, events))
     }
 
     /// Retry a failed task.
+    ///
+    /// For convergent tasks (`trajectory_id.is_some()`), the retry intentionally
+    /// preserves the trajectory_id. The convergent execution path in the
+    /// orchestrator detects `task.trajectory_id.is_some()` and resumes the
+    /// existing trajectory (loading accumulated observations, attractor state,
+    /// and bandit learning) rather than creating a new one from scratch. This
+    /// ensures retry attempts build on previous convergence progress rather
+    /// than discarding it. See spec Part 4.2 for full details.
+    ///
+    /// When a convergent task failed due to being trapped in an attractor
+    /// (indicated by an `Error: trapped` hint in context), a `convergence:fresh_start`
+    /// hint is added to signal the convergent execution path to force a FreshStart
+    /// strategy on the next iteration. This helps escape the attractor by
+    /// resetting the working state while carrying forward learned context.
     pub async fn retry_task(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
@@ -456,6 +666,19 @@ impl<T: TaskRepository> TaskService<T> {
             return Err(DomainError::ValidationFailed(
                 "Task cannot be retried: either not failed or max retries exceeded".to_string()
             ));
+        }
+
+        // For convergent tasks that failed due to being trapped, signal
+        // the convergent execution path to force a FreshStart strategy.
+        // The trap detection looks for "Error: trapped" hints added by
+        // fail_task() when the convergence loop reports a Trapped outcome.
+        if task.execution_mode.is_convergent() && task.trajectory_id.is_some() {
+            let is_trapped = task.context.hints.iter().any(|h| {
+                h.to_lowercase().contains("trapped")
+            });
+            if is_trapped {
+                task.context.hints.push("convergence:fresh_start".to_string());
+            }
         }
 
         task.retry().map_err(DomainError::ValidationFailed)?;
@@ -826,5 +1049,326 @@ mod tests {
         let (retried, _) = service.retry_task(task.id).await.unwrap();
         assert_eq!(retried.status, TaskStatus::Ready);
         assert_eq!(retried.retry_count, 1);
+    }
+
+    // --- Execution mode classification heuristic tests ---
+
+    #[test]
+    fn test_classify_complex_task_as_convergent() {
+        let mut task = Task::new("Implement a complex feature with many moving parts");
+        task.routing_hints.complexity = Complexity::Complex;
+
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        assert!(mode.is_convergent(), "Complex tasks should classify as Convergent");
+    }
+
+    #[test]
+    fn test_classify_trivial_task_as_direct() {
+        let mut task = Task::new("Rename a variable");
+        task.routing_hints.complexity = Complexity::Trivial;
+
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        assert!(mode.is_direct(), "Trivial tasks should classify as Direct");
+    }
+
+    #[test]
+    fn test_classify_simple_task_as_direct() {
+        let mut task = Task::new("Add a config field");
+        task.routing_hints.complexity = Complexity::Simple;
+
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        assert!(mode.is_direct(), "Simple tasks should classify as Direct");
+    }
+
+    #[test]
+    fn test_classify_moderate_short_description_as_direct() {
+        let mut task = Task::new("Short description of a moderate task");
+        task.routing_hints.complexity = Complexity::Moderate;
+
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        assert!(mode.is_direct(), "Moderate tasks with short descriptions should be Direct");
+    }
+
+    #[test]
+    fn test_classify_moderate_long_description_as_convergent() {
+        // Build a description with > 200 words and acceptance criteria keywords
+        let words: String = (0..210).map(|i| format!("word{}", i)).collect::<Vec<_>>().join(" ");
+        let desc = format!("{} acceptance criteria: must pass all tests", words);
+        let mut task = Task::new(desc);
+        task.routing_hints.complexity = Complexity::Moderate;
+
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        // 2 (long moderate) + 2 (acceptance criteria) = 4 >= 3
+        assert!(mode.is_convergent(), "Moderate task with long desc + acceptance criteria should be Convergent");
+    }
+
+    #[test]
+    fn test_classify_with_anti_pattern_hints() {
+        let mut task = Task::new("Fix something with constraints");
+        task.routing_hints.complexity = Complexity::Moderate;
+        task.context.hints.push("anti-pattern: do not use unwrap".to_string());
+        task.context.hints.push("constraint: must preserve backwards compat".to_string());
+
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        // 0 (moderate, short desc) + 2 (has anti-pattern/constraint) = 2 < 3
+        assert!(mode.is_direct(), "Moderate with hints but no other signals stays Direct");
+
+        // Now add acceptance criteria to push over threshold
+        task.description = "Fix something. Verify that all tests pass.".to_string();
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        // 0 + 2 (hints) + 2 (acceptance keyword) = 4 >= 3
+        assert!(mode.is_convergent(), "Moderate + hints + acceptance keywords should be Convergent");
+    }
+
+    #[test]
+    fn test_classify_subtask_inherits_convergent_parent() {
+        let parent_id = Uuid::new_v4();
+        let mut task = Task::new("Child task of convergent parent");
+        task.source = TaskSource::SubtaskOf(parent_id);
+        // Default complexity is Moderate, which alone gives 0 points
+        // Parent inheritance adds +3
+
+        let parent_mode = ExecutionMode::Convergent { parallel_samples: None };
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, Some(&parent_mode), &None,
+        );
+        assert!(mode.is_convergent(), "Subtasks of convergent parents should inherit Convergent");
+    }
+
+    #[test]
+    fn test_classify_low_priority_pushes_toward_direct() {
+        let mut task = Task::new("Something that needs to verify that tests pass");
+        task.routing_hints.complexity = Complexity::Moderate;
+        task.priority = TaskPriority::Low;
+        // acceptance keyword: +2, low priority: -2 = 0 < 3
+
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        assert!(mode.is_direct(), "Low priority should push toward Direct");
+    }
+
+    #[test]
+    fn test_classify_operator_default_overrides_heuristic() {
+        let mut task = Task::new("Complex task that would normally be convergent");
+        task.routing_hints.complexity = Complexity::Complex;
+
+        let default_mode = Some(ExecutionMode::Direct);
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &default_mode,
+        );
+        assert!(mode.is_direct(), "Operator default_execution_mode should override heuristic");
+    }
+
+    #[test]
+    fn test_classify_operator_default_convergent() {
+        let mut task = Task::new("Simple task");
+        task.routing_hints.complexity = Complexity::Simple;
+
+        let default_mode = Some(ExecutionMode::Convergent { parallel_samples: None });
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &default_mode,
+        );
+        assert!(mode.is_convergent(), "Operator default Convergent should override even for simple tasks");
+    }
+
+    // --- Trajectory-aware retry tests ---
+
+    #[tokio::test]
+    async fn test_retry_convergent_preserves_trajectory_id() {
+        let service = setup_service().await;
+
+        let (task, _) = service.submit_task(
+            Some("Convergent Task".to_string()),
+            "Desc".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+        ).await.unwrap();
+
+        // Manually set convergent mode and trajectory_id (normally done by orchestrator)
+        let mut task_updated = service.get_task(task.id).await.unwrap().unwrap();
+        task_updated.execution_mode = ExecutionMode::Convergent { parallel_samples: None };
+        task_updated.trajectory_id = Some(Uuid::new_v4());
+        // Transition to Ready -> Running -> Failed so we can retry
+        task_updated.status = TaskStatus::Ready;
+        service.task_repo.update(&task_updated).await.unwrap();
+
+        service.claim_task(task.id, "test-agent").await.unwrap();
+        service.fail_task(task.id, Some("convergence exhausted".to_string())).await.unwrap();
+
+        let trajectory_before = service.get_task(task.id).await.unwrap().unwrap().trajectory_id;
+        let (retried, _) = service.retry_task(task.id).await.unwrap();
+
+        assert_eq!(retried.status, TaskStatus::Ready);
+        assert_eq!(retried.trajectory_id, trajectory_before,
+            "trajectory_id must be preserved on retry for convergent tasks");
+    }
+
+    #[tokio::test]
+    async fn test_retry_trapped_convergent_adds_fresh_start_hint() {
+        let service = setup_service().await;
+
+        let (task, _) = service.submit_task(
+            Some("Trapped Task".to_string()),
+            "Desc".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+        ).await.unwrap();
+
+        // Set up as convergent with trajectory
+        let mut task_updated = service.get_task(task.id).await.unwrap().unwrap();
+        task_updated.execution_mode = ExecutionMode::Convergent { parallel_samples: None };
+        task_updated.trajectory_id = Some(Uuid::new_v4());
+        task_updated.status = TaskStatus::Ready;
+        service.task_repo.update(&task_updated).await.unwrap();
+
+        service.claim_task(task.id, "test-agent").await.unwrap();
+        // Fail with "trapped" in the error message — this is what the convergence
+        // loop does when LoopControl::Trapped fires.
+        service.fail_task(task.id, Some("trapped in FixedPoint attractor".to_string())).await.unwrap();
+
+        let (retried, _) = service.retry_task(task.id).await.unwrap();
+        assert!(
+            retried.context.hints.iter().any(|h| h == "convergence:fresh_start"),
+            "Retrying a trapped convergent task should add convergence:fresh_start hint"
+        );
+    }
+
+    // --- Opportunistic memory recording tests ---
+
+    #[tokio::test]
+    async fn test_complete_task_emits_execution_recorded_event() {
+        let service = setup_service().await;
+
+        let (task, _) = service.submit_task(
+            Some("Test".to_string()),
+            "Desc".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+        ).await.unwrap();
+
+        service.claim_task(task.id, "test-agent").await.unwrap();
+        let (_, events) = service.complete_task(task.id).await.unwrap();
+
+        // Should have TaskCompleted + TaskExecutionRecorded
+        assert!(events.len() >= 2, "complete_task should emit at least 2 events");
+        let recorded = events.iter().find(|e| {
+            matches!(&e.payload, EventPayload::TaskExecutionRecorded { succeeded: true, .. })
+        });
+        assert!(recorded.is_some(), "Should emit TaskExecutionRecorded with succeeded=true");
+    }
+
+    #[tokio::test]
+    async fn test_fail_task_emits_execution_recorded_event() {
+        let service = setup_service().await;
+
+        let (task, _) = service.submit_task(
+            Some("Test".to_string()),
+            "Desc".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+        ).await.unwrap();
+
+        service.claim_task(task.id, "test-agent").await.unwrap();
+        let (_, events) = service.fail_task(task.id, Some("boom".to_string())).await.unwrap();
+
+        // Should have TaskFailed + TaskExecutionRecorded
+        assert!(events.len() >= 2, "fail_task should emit at least 2 events");
+        let recorded = events.iter().find(|e| {
+            matches!(&e.payload, EventPayload::TaskExecutionRecorded { succeeded: false, .. })
+        });
+        assert!(recorded.is_some(), "Should emit TaskExecutionRecorded with succeeded=false");
+    }
+
+    // --- with_default_execution_mode builder test ---
+
+    #[tokio::test]
+    async fn test_submit_task_respects_default_execution_mode() {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let service = TaskService::new(task_repo)
+            .with_default_execution_mode(Some(ExecutionMode::Direct));
+
+        // Submit a complex task — normally would be classified as Convergent
+        let mut ctx = TaskContext::default();
+        ctx.hints.push("anti-pattern: avoid unsafe".to_string());
+        let (task, _) = service.submit_task(
+            Some("Complex Task".to_string()),
+            "This is a complex task that should verify that all tests pass".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            Some(ctx),
+            None,
+            TaskSource::Human,
+            None,
+        ).await.unwrap();
+
+        assert!(task.execution_mode.is_direct(),
+            "When default_execution_mode is Direct, heuristic should be skipped");
+    }
+
+    #[tokio::test]
+    async fn test_submit_complex_task_infers_convergent() {
+        let service = setup_service().await;
+
+        // Submit a complex task — heuristic should classify as Convergent
+        let mut ctx = TaskContext::default();
+        ctx.hints.push("constraint: must preserve API compatibility".to_string());
+        let (task, _) = service.submit_task(
+            Some("Complex Feature".to_string()),
+            "Implement the full OAuth2 flow. Ensure that all integration tests pass.".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            Some(ctx),
+            None,
+            TaskSource::Human,
+            None,
+        ).await.unwrap();
+
+        // Default complexity is Moderate. "ensure that" keyword = +2, constraint hint = +2 => 4 >= 3
+        assert!(task.execution_mode.is_convergent(),
+            "Task with acceptance criteria + constraints should be inferred as Convergent");
     }
 }

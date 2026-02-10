@@ -222,6 +222,55 @@ impl PromptTier {
     }
 }
 
+/// How a task should be executed.
+///
+/// Direct mode is the default: a single substrate invocation.
+/// Convergent mode wraps repeated invocations with strategy selection,
+/// overseer measurement, and attractor tracking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ExecutionMode {
+    /// Single-shot substrate invocation. Agent runs once; result is
+    /// accepted or the task fails.
+    Direct,
+
+    /// Convergence-guided iterative execution. The convergence engine
+    /// wraps repeated substrate invocations with strategy selection,
+    /// overseer measurement, and attractor tracking.
+    Convergent {
+        /// When Some(n), spawns n parallel trajectories and selects the best.
+        /// When None, uses sequential mode (default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parallel_samples: Option<u32>,
+    },
+}
+
+impl Default for ExecutionMode {
+    fn default() -> Self {
+        Self::Direct
+    }
+}
+
+impl ExecutionMode {
+    /// Whether this is convergent mode.
+    pub fn is_convergent(&self) -> bool {
+        matches!(self, Self::Convergent { .. })
+    }
+
+    /// Whether this is direct mode.
+    pub fn is_direct(&self) -> bool {
+        matches!(self, Self::Direct)
+    }
+
+    /// Get parallel samples count if in convergent mode.
+    pub fn parallel_samples(&self) -> Option<u32> {
+        match self {
+            Self::Convergent { parallel_samples } => *parallel_samples,
+            Self::Direct => None,
+        }
+    }
+}
+
 /// Hints for agent routing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutingHints {
@@ -317,6 +366,10 @@ pub struct Task {
     pub version: u64,
     /// Idempotency key for deduplication
     pub idempotency_key: Option<String>,
+    /// How this task should be executed (direct or convergent).
+    pub execution_mode: ExecutionMode,
+    /// Trajectory ID for convergent tasks (links to convergence engine state).
+    pub trajectory_id: Option<Uuid>,
 }
 
 impl Task {
@@ -348,6 +401,8 @@ impl Task {
             deadline: None,
             version: 1,
             idempotency_key: None,
+            execution_mode: ExecutionMode::default(),
+            trajectory_id: None,
         }
     }
 
@@ -377,6 +432,8 @@ impl Task {
             deadline: None,
             version: 1,
             idempotency_key: None,
+            execution_mode: ExecutionMode::default(),
+            trajectory_id: None,
         }
     }
 
@@ -421,6 +478,12 @@ impl Task {
     /// Set idempotency key.
     pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
+        self
+    }
+
+    /// Set execution mode.
+    pub fn with_execution_mode(mut self, mode: ExecutionMode) -> Self {
+        self.execution_mode = mode;
         self
     }
 

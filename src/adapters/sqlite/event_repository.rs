@@ -53,6 +53,7 @@ impl SqliteEventRepository {
             EventCategory::Escalation => "escalation",
             EventCategory::Memory => "memory",
             EventCategory::Scheduler => "scheduler",
+            EventCategory::Convergence => "convergence",
         }
     }
 
@@ -67,6 +68,7 @@ impl SqliteEventRepository {
             "escalation" => EventCategory::Escalation,
             "memory" => EventCategory::Memory,
             "scheduler" => EventCategory::Scheduler,
+            "convergence" => EventCategory::Convergence,
             _ => EventCategory::Task,
         }
     }

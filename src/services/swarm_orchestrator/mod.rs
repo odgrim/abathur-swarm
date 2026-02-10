@@ -18,6 +18,7 @@ mod handler_registration;
 mod specialist_triggers;
 mod infrastructure;
 pub(crate) mod helpers;
+pub(crate) mod convergent_execution;
 
 // Re-export public types
 pub use types::{
@@ -33,7 +34,7 @@ use crate::domain::errors::DomainResult;
 use crate::domain::models::{Goal, HumanEscalationEvent};
 use crate::domain::ports::{
     AgentRepository, GoalRepository, MemoryRepository, NullMemoryRepository,
-    Substrate, TaskRepository, WorktreeRepository,
+    Substrate, TaskRepository, TrajectoryRepository, WorktreeRepository,
 };
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
@@ -98,6 +99,16 @@ where
     pub(super) command_bus: Arc<RwLock<Option<Arc<CommandBus>>>>,
     /// Optional DB pool for services that need persistence (absence timers, command dedup).
     pub(super) pool: Option<sqlx::SqlitePool>,
+
+    // -- Convergence infrastructure --
+
+    /// Overseer cluster for convergent execution quality measurement.
+    pub(super) overseer_cluster: Option<Arc<crate::services::overseers::OverseerClusterService>>,
+    /// Trajectory repository for convergence state persistence.
+    pub(super) trajectory_repo: Option<Arc<dyn TrajectoryRepository>>,
+    /// Pre-built convergence engine config derived from SwarmConfig.
+    /// Stored here to avoid recomputing on every convergent task spawn.
+    pub(super) convergence_engine_config: Option<crate::domain::models::convergence::ConvergenceEngineConfig>,
 }
 
 // ============================================================================
@@ -160,6 +171,9 @@ where
             specialist_tx,
             command_bus: Arc::new(RwLock::new(None)),
             pool: None,
+            overseer_cluster: None,
+            trajectory_repo: None,
+            convergence_engine_config: None,
         }
     }
 
@@ -228,6 +242,40 @@ where
     /// Provide a DB pool for services that need persistence (absence timers, command dedup).
     pub fn with_pool(mut self, pool: sqlx::SqlitePool) -> Self {
         self.pool = Some(pool);
+        self
+    }
+
+    /// Create orchestrator with an overseer cluster for convergent execution.
+    ///
+    /// The overseer cluster provides quality measurement (compilation, type checking,
+    /// linting, testing, etc.) used by the convergence engine during iterative
+    /// convergent execution.
+    pub fn with_overseer_cluster(
+        mut self,
+        cluster: Arc<crate::services::overseers::OverseerClusterService>,
+    ) -> Self {
+        self.overseer_cluster = Some(cluster);
+        self
+    }
+
+    /// Create orchestrator with a trajectory repository for convergence state persistence.
+    ///
+    /// Required for convergent execution. Without this, convergent tasks will
+    /// fall back to direct execution with a warning.
+    pub fn with_trajectory_repo(mut self, repo: Arc<dyn TrajectoryRepository>) -> Self {
+        self.trajectory_repo = Some(repo);
+        self
+    }
+
+    /// Create orchestrator with convergence engine configuration.
+    ///
+    /// If not set explicitly, the config is derived from `SwarmConfig` when the
+    /// first convergent task is spawned.
+    pub fn with_convergence_engine_config(
+        mut self,
+        config: crate::domain::models::convergence::ConvergenceEngineConfig,
+    ) -> Self {
+        self.convergence_engine_config = Some(config);
         self
     }
 

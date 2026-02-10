@@ -54,6 +54,16 @@ pub struct SwarmConfig {
     /// Retention period for events in days (default: 30). Events older than
     /// this are pruned by the EventPruningHandler.
     pub event_retention_days: u64,
+
+    /// Whether convergent execution is enabled at all.
+    /// When false, all tasks run Direct regardless of their execution_mode field.
+    /// This is the global kill switch.
+    pub convergence_enabled: bool,
+
+    /// Default execution mode when not explicitly set and heuristic is disabled.
+    /// When set to Some(mode), all tasks without an explicit mode use this.
+    /// When None, the classification heuristic decides.
+    pub default_execution_mode: Option<crate::domain::models::ExecutionMode>,
 }
 
 /// Configurable polling intervals (seconds) for all scheduled handlers.
@@ -295,6 +305,8 @@ impl Default for SwarmConfig {
             reconciliation_interval_secs: None,
             polling: PollingConfig::default(),
             event_retention_days: 30,
+            convergence_enabled: false,
+            default_execution_mode: None,
         }
     }
 }
