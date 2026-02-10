@@ -39,12 +39,19 @@ pub async fn resolve_trigger_rule_id(pool: &SqlitePool, prefix: &str) -> Result<
         .await
 }
 
+/// Resolve a dead letter entry ID prefix to a full UUID string.
+pub async fn resolve_dlq_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid> {
+    resolve_prefix(pool, prefix, "dead letter entry", DLQ_QUERY)
+        .await
+}
+
 const TASK_QUERY: &str = "SELECT id FROM tasks WHERE id LIKE ?";
 const GOAL_QUERY: &str = "SELECT id FROM goals WHERE id LIKE ?";
 const WORKTREE_QUERY: &str =
     "SELECT id FROM worktrees WHERE id LIKE ? UNION SELECT id FROM worktrees WHERE task_id LIKE ?";
 const MEMORY_QUERY: &str = "SELECT id FROM memories WHERE id LIKE ?";
 const TRIGGER_RULE_QUERY: &str = "SELECT id FROM trigger_rules WHERE id LIKE ?";
+const DLQ_QUERY: &str = "SELECT id FROM dead_letter_events WHERE id LIKE ?";
 
 fn validate_prefix(prefix: &str) -> Result<()> {
     if prefix.is_empty() {

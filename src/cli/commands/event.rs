@@ -279,7 +279,7 @@ pub async fn execute(args: EventArgs, json_mode: bool) -> Result<()> {
         .await
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
-    let store = Arc::new(SqliteEventRepository::new(pool));
+    let store = Arc::new(SqliteEventRepository::new(pool.clone()));
 
     match args.command {
         EventCommands::Stats => {
@@ -402,13 +402,14 @@ pub async fn execute(args: EventArgs, json_mode: bool) -> Result<()> {
                 output(&out, json_mode);
             }
             DlqCommands::Retry { id } => {
+                let resolved_id = crate::cli::id_resolver::resolve_dlq_id(&pool, &id).await?;
                 store
-                    .resolve_dead_letter(&id)
+                    .resolve_dead_letter(&resolved_id.to_string())
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to resolve DLQ entry: {}", e))?;
 
                 let out = DlqActionOutput {
-                    message: format!("Resolved DLQ entry {}", id),
+                    message: format!("Resolved DLQ entry {}", resolved_id),
                     count: 1,
                 };
                 output(&out, json_mode);
