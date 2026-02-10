@@ -405,7 +405,7 @@ pub async fn execute(args: EventArgs, json_mode: bool) -> Result<()> {
             DlqCommands::Retry { id } => {
                 let resolved_id = resolve_dlq_id(&pool, &id).await?;
                 store
-                    .resolve_dead_letter(&resolved_id.to_string())
+                    .resolve_dead_letter(&resolved_id)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to resolve DLQ entry: {}", e))?;
 
