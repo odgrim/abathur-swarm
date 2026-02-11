@@ -94,6 +94,7 @@ impl EventStore for SqliteEventRepository {
             r#"
             INSERT INTO events (id, sequence, timestamp, severity, category, goal_id, task_id, correlation_id, source_process_id, payload)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO NOTHING
             "#,
         )
         .bind(event.id.0.to_string())

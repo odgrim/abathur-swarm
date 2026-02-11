@@ -323,6 +323,10 @@ where
                         let builtins = builtin_trigger_rules();
                         for builtin in builtins {
                             if !merged.iter().any(|r| r.name == builtin.name) {
+                                // Persist built-in rule so FK constraints on absence timers work
+                                if let Err(e) = repo.create(&builtin).await {
+                                    tracing::debug!("Could not seed built-in rule '{}': {}", builtin.name, e);
+                                }
                                 merged.push(builtin);
                             }
                         }
@@ -333,6 +337,12 @@ where
                     _ => {
                         // No DB rules or error: fall back to built-in defaults
                         let rules = builtin_trigger_rules();
+                        // Seed built-in rules into DB so FK constraints on absence timers work
+                        for rule in &rules {
+                            if let Err(e) = repo.create(rule).await {
+                                tracing::debug!("Could not seed built-in rule '{}': {}", rule.name, e);
+                            }
+                        }
                         let count = rules.len();
                         engine.load_rules(rules).await;
                         tracing::info!("Loaded {} built-in trigger rules (no DB rules found)", count);
