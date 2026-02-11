@@ -1012,7 +1012,7 @@ impl From<SwarmEvent> for UnifiedEvent {
                 Some(task_id),
                 EventPayload::TaskRetrying { task_id, attempt, max_attempts },
             ),
-            SwarmEvent::TaskVerified { task_id, passed, checks_passed, checks_total } => (
+            SwarmEvent::TaskVerified { task_id, passed, checks_passed, checks_total, .. } => (
                 EventSeverity::Info,
                 EventCategory::Verification,
                 None,

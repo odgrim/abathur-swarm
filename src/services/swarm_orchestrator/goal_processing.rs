@@ -320,6 +320,18 @@ where
                 _ => (1, vec!["task-execution".to_string()], vec![], true),
             };
 
+            // Read-only agent roles never produce commits regardless of tool capabilities.
+            // Agents like researchers and the overmind may have shell access for reading
+            // but don't create code changes — requiring commits causes infinite retry loops.
+            let is_read_only_role = {
+                let lower = agent_type.to_lowercase();
+                lower == "overmind"
+                    || lower.contains("researcher")
+                    || lower.contains("planner")
+                    || lower.contains("analyst")
+                    || lower.contains("architect")
+            };
+
             // Register agent capabilities with A2A gateway if configured
             if self.config.mcp_servers.a2a_gateway.is_some() {
                 if let Err(e) = self.register_agent_capabilities(&agent_type, capabilities).await {
@@ -459,7 +471,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let prefer_pull_requests = self.config.prefer_pull_requests;
             let repo_path = self.config.repo_path.clone();
             let default_base_ref = self.config.default_base_ref.clone();
-            let require_commits = agent_can_write;
+            let require_commits = agent_can_write && !is_read_only_role;
             let circuit_scope = scope;
 
             // Convergence infrastructure (cloned into spawn block only when needed)

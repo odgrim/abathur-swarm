@@ -350,7 +350,7 @@ pub enum SwarmEvent {
     /// Task retrying.
     TaskRetrying { task_id: Uuid, attempt: u32, max_attempts: u32 },
     /// Task verified.
-    TaskVerified { task_id: Uuid, passed: bool, checks_passed: usize, checks_total: usize },
+    TaskVerified { task_id: Uuid, passed: bool, checks_passed: usize, checks_total: usize, failures_summary: Option<String> },
     /// Task queued for merge.
     TaskQueuedForMerge { task_id: Uuid, stage: String },
     /// Pull request created for completed task.
@@ -533,6 +533,7 @@ impl SwarmEvent {
                 passed: *passed,
                 checks_passed: *checks_passed,
                 checks_total: *checks_total,
+                failures_summary: None, // Not available from EventPayload
             }),
             EventPayload::TaskQueuedForMerge { task_id, stage } => Some(SwarmEvent::TaskQueuedForMerge {
                 task_id: *task_id,

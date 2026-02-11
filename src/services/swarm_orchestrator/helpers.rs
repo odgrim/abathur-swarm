@@ -187,6 +187,7 @@ where
                     passed: result.passed,
                     checks_passed,
                     checks_total,
+                    failures_summary: result.failures_summary.clone(),
                 }).await;
 
                 if result.passed {

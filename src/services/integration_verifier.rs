@@ -178,16 +178,42 @@ where
         let all_passed = checks.iter().all(|c| c.passed);
         let failures: Vec<_> = checks.iter().filter(|c| !c.passed).collect();
 
+        // Log each check result for debugging task verification issues
+        for check in &checks {
+            if check.passed {
+                tracing::debug!(
+                    task_id = %task_id,
+                    check = %check.name,
+                    "Verification check passed: {}",
+                    check.message
+                );
+            } else {
+                tracing::warn!(
+                    task_id = %task_id,
+                    check = %check.name,
+                    details = ?check.details,
+                    "Verification check FAILED: {}",
+                    check.message
+                );
+            }
+        }
+
         let failures_summary = if failures.is_empty() {
             None
         } else {
-            Some(
-                failures
-                    .iter()
-                    .map(|c| format!("{}: {}", c.name, c.message))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
+            let summary = failures
+                .iter()
+                .map(|c| format!("{}: {}", c.name, c.message))
+                .collect::<Vec<_>>()
+                .join("\n");
+            tracing::warn!(
+                task_id = %task_id,
+                checks_passed = checks.len() - failures.len(),
+                checks_total = checks.len(),
+                "Task verification failed: {}",
+                summary
+            );
+            Some(summary)
         };
 
         Ok(VerificationResult {

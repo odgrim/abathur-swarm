@@ -686,10 +686,17 @@ async fn run_swarm_foreground(
                         println!("  Task retrying: {} (attempt {}/{})", task_id, attempt, max_attempts);
                     }
                 }
-                SwarmEvent::TaskVerified { task_id, passed, checks_passed, checks_total } => {
+                SwarmEvent::TaskVerified { task_id, passed, checks_passed, checks_total, failures_summary } => {
                     if !json_mode {
                         let status = if *passed { "passed" } else { "failed" };
                         println!("  Task verified: {} - {} ({}/{})", task_id, status, checks_passed, checks_total);
+                        if !passed {
+                            if let Some(summary) = failures_summary {
+                                for line in summary.lines() {
+                                    println!("    FAILED CHECK: {}", line);
+                                }
+                            }
+                        }
                     }
                 }
                 SwarmEvent::TaskQueuedForMerge { task_id, stage } => {

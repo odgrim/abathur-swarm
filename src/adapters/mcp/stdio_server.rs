@@ -7,7 +7,6 @@
 //! Protocol: newline-delimited JSON-RPC 2.0 on stdin/stdout.
 //! Logging goes to stderr (stdout is reserved for protocol messages).
 
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
@@ -394,11 +393,35 @@ where
 
         // Derive a deterministic idempotency key when submitting subtasks
         // so duplicate overmind runs cannot create duplicate children.
+        //
+        // Uses a semantic role extracted from the agent_type + title rather than
+        // hashing the description verbatim.  LLM retries produce semantically
+        // identical tasks with slightly different wording, which defeats a pure
+        // description hash.  By keying on (parent, agent_type, normalized_title)
+        // we collapse duplicates like "Research: prefix ID resolution across CLI
+        // commands" and "Research: prefix-based ID matching across all commands".
         let idempotency_key = parent_id.map(|pid| {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            description.hash(&mut hasher);
-            let hash = hasher.finish();
-            format!("subtask:{}:{:016x}", pid, hash)
+            // Prefer agent_type when available; fall back to first word of title.
+            let role = agent_type.as_deref().unwrap_or("unknown");
+
+            // Normalize the title: lowercase, strip punctuation, take first 6
+            // significant words so minor rephrasing still matches.
+            let normalized_title: String = title.as_deref()
+                .or(Some(&description))
+                .unwrap_or("")
+                .to_lowercase()
+                .split_whitespace()
+                .filter(|w| {
+                    // Drop common stop words that LLMs shuffle
+                    !matches!(*w, "a" | "an" | "the" | "and" | "or" | "for" | "to"
+                        | "in" | "of" | "on" | "all" | "across" | "with" | "that"
+                        | "this" | "from" | "into" | "by")
+                })
+                .take(6)
+                .collect::<Vec<_>>()
+                .join("_");
+
+            format!("subtask:{}:{}:{}", pid, role, normalized_title)
         });
 
         let cmd = DomainCommand::Task(TaskCommand::Submit {

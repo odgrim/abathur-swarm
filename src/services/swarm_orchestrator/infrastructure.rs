@@ -314,11 +314,25 @@ where
         }
     }
 
-    /// Create a worktree for task execution.
+    /// Create or reuse a worktree for task execution.
+    ///
+    /// On retries the worktree from the previous attempt still exists in the DB
+    /// (and on disk).  Instead of failing with a UNIQUE constraint error, we
+    /// detect the existing worktree and reuse its path.
     pub(super) async fn create_worktree_for_task(
         &self,
         task_id: Uuid,
     ) -> DomainResult<String> {
+        // Fast path: if a worktree already exists for this task (retry scenario),
+        // reuse it instead of trying to create a duplicate.
+        if let Ok(Some(existing)) = self.worktree_repo.get_by_task(task_id).await {
+            tracing::info!(
+                "Reusing existing worktree for task {} at {}",
+                task_id, existing.path
+            );
+            return Ok(existing.path);
+        }
+
         let worktree_config = WorktreeConfig {
             base_path: self.config.worktree_base_path.clone(),
             repo_path: self.config.repo_path.clone(),
