@@ -130,11 +130,7 @@ where
 
         let mut checks = Vec::new();
 
-        // 1. Check task is complete
-        let status_check = self.check_task_status(&task);
-        checks.push(status_check);
-
-        // 2. Check all dependencies complete
+        // 1. Check all dependencies complete
         let deps_check = self.check_dependencies_complete(&task).await?;
         checks.push(deps_check);
 
@@ -223,27 +219,6 @@ where
             failures_summary,
             verified_at: Utc::now(),
         })
-    }
-
-    /// Check that the task itself is in Complete status.
-    fn check_task_status(&self, task: &Task) -> VerificationCheck {
-        if task.status == TaskStatus::Complete {
-            VerificationCheck {
-                name: "task_status".to_string(),
-                passed: true,
-                message: "Task is complete".to_string(),
-                details: None,
-            }
-        } else {
-            VerificationCheck {
-                name: "task_status".to_string(),
-                passed: false,
-                message: format!("Task is not complete (status: {:?})", task.status),
-                details: Some(serde_json::json!({
-                    "current_status": format!("{:?}", task.status)
-                })),
-            }
-        }
     }
 
     /// Check that all task dependencies are complete.
