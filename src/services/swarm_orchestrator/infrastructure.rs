@@ -319,6 +319,11 @@ where
     /// On retries the worktree from the previous attempt still exists in the DB
     /// (and on disk).  Instead of failing with a UNIQUE constraint error, we
     /// detect the existing worktree and reuse its path.
+    ///
+    /// For subtasks (tasks with a parent_id), the worktree branches from the
+    /// root ancestor's feature branch instead of the default base ref. This
+    /// enables the feature-branch aggregation pattern where all subtask work
+    /// is merged back into a single feature branch for a combined PR.
     pub(super) async fn create_worktree_for_task(
         &self,
         task_id: Uuid,
@@ -333,6 +338,23 @@ where
             return Ok(existing.path);
         }
 
+        // If this is a subtask, branch from the root ancestor's feature branch
+        let parent_base_ref = if let Ok(Some(task)) = self.task_repo.get(task_id).await {
+            if let Some(parent_id) = task.parent_id {
+                let root_id = self.find_root_ancestor(parent_id).await;
+                match self.worktree_repo.get_by_task(root_id).await {
+                    Ok(Some(root_wt)) if !root_wt.status.is_terminal() => {
+                        Some(root_wt.branch.clone())
+                    }
+                    _ => None, // Root has no active worktree; use default
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let worktree_config = WorktreeConfig {
             base_path: self.config.worktree_base_path.clone(),
             repo_path: self.config.repo_path.clone(),
@@ -345,7 +367,8 @@ where
             worktree_config,
         );
 
-        let worktree = worktree_service.create_worktree(task_id, None).await?;
+        // Pass parent branch as base_ref when available
+        let worktree = worktree_service.create_worktree(task_id, parent_base_ref.as_deref()).await?;
 
         // Publish via EventBus (bridge forwards to event_tx automatically)
         self.event_bus.publish(crate::services::event_factory::task_event(
@@ -359,6 +382,21 @@ where
         )).await;
 
         Ok(worktree.path)
+    }
+
+    /// Walk up the parent_id chain to find the root ancestor task.
+    pub(super) async fn find_root_ancestor(&self, task_id: Uuid) -> Uuid {
+        let mut current = task_id;
+        for _ in 0..50 {
+            match self.task_repo.get(current).await {
+                Ok(Some(task)) => match task.parent_id {
+                    Some(pid) => current = pid,
+                    None => return current,
+                },
+                _ => return current,
+            }
+        }
+        current
     }
 
     /// Update statistics.

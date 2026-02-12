@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::domain::errors::DomainResult;
+use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::TaskStatus;
 use crate::domain::ports::{GoalRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
@@ -141,8 +141,39 @@ pub async fn try_create_pull_request(
     }
 }
 
+/// Outcome of merging a subtask branch into the feature branch.
+enum MergeBackOutcome {
+    /// Subtask branch successfully merged into feature branch.
+    Merged,
+    /// Subtask had no commits ahead of feature branch.
+    NoCommits,
+    /// Merge conflict detected; queued in MergeQueue for specialist resolution.
+    ConflictQueued,
+}
+
+/// Walk up the parent_id chain to find the root ancestor task.
+/// Standalone helper for use by both infrastructure.rs and helpers.rs.
+pub async fn find_root_ancestor_id<T: TaskRepository>(task_id: Uuid, task_repo: &T) -> Uuid {
+    let mut current = task_id;
+    for _ in 0..50 {
+        match task_repo.get(current).await {
+            Ok(Some(task)) => match task.parent_id {
+                Some(pid) => current = pid,
+                None => return current,
+            },
+            _ => return current,
+        }
+    }
+    current
+}
+
 /// Helper function to run post-completion workflow (verification and merging).
 /// This is called from spawned tasks after successful task completion.
+///
+/// For subtasks (tasks with parent_id), this merges the subtask branch back
+/// into the root ancestor's feature branch and checks if the entire task tree
+/// is ready for a single PR. For standalone tasks (no parent, no children),
+/// the existing per-task PR/merge flow is used.
 pub async fn run_post_completion_workflow<G, T, W>(
     task_id: Uuid,
     task_repo: Arc<T>,
@@ -271,8 +302,118 @@ where
         true // Skip verification, assume passed
     };
 
+    // Step 1.5: Feature branch handling
+    if let Ok(Some(task)) = task_repo.get(task_id).await {
+        // Case A: This is a subtask (has parent_id)
+        if task.parent_id.is_some() {
+            // Check if this is a merge-conflict-specialist completing
+            let is_conflict_resolution = task.context.custom
+                .get("feature_branch_conflict")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            if is_conflict_resolution {
+                // The specialist resolved the conflict directly in the root worktree.
+                // Mark the original subtask's worktree as merged.
+                if let Some(original_subtask_id_str) = task.context.custom
+                    .get("original_subtask_id")
+                    .and_then(|v| v.as_str())
+                {
+                    if let Ok(original_id) = Uuid::parse_str(original_subtask_id_str) {
+                        if let Ok(Some(mut original_wt)) = worktree_repo.get_by_task(original_id).await {
+                            original_wt.merged("conflict-resolved-by-specialist".to_string());
+                            let _ = worktree_repo.update(&original_wt).await;
+                        }
+                    }
+                }
+
+                // Mark the merge request as completed in the queue
+                if let Some(mr_id_str) = task.context.custom
+                    .get("merge_request_id")
+                    .and_then(|v| v.as_str())
+                {
+                    if let Ok(mr_id) = Uuid::parse_str(mr_id_str) {
+                        let verifier = IntegrationVerifierService::new(
+                            task_repo.clone(),
+                            goal_repo.clone(),
+                            worktree_repo.clone(),
+                            VerifierConfig::default(),
+                        );
+                        let merge_config = MergeQueueConfig {
+                            repo_path: repo_path.to_str().unwrap_or(".").to_string(),
+                            main_branch: default_base_ref.to_string(),
+                            ..Default::default()
+                        };
+                        let merge_queue = MergeQueue::new(
+                            task_repo.clone(),
+                            worktree_repo.clone(),
+                            Arc::new(verifier),
+                            merge_config,
+                        );
+                        let _ = merge_queue.retry_after_conflict_resolution(mr_id).await;
+                    }
+                }
+
+                // Don't try to merge-back again (specialist already did the merge)
+                // Fall through to auto-ship check below
+            } else {
+                // Normal subtask: attempt merge-back
+                if verification_passed && require_commits {
+                    let merge_result = merge_subtask_into_feature_branch(
+                        task_id,
+                        task_repo.clone(),
+                        goal_repo.clone(),
+                        worktree_repo.clone(),
+                        event_tx,
+                        audit_log,
+                        repo_path,
+                        default_base_ref,
+                    ).await;
+
+                    match merge_result {
+                        Ok(MergeBackOutcome::Merged) => {
+                            // Worktree cleanup for subtask
+                            if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                                wt.merged("merged-to-feature-branch".to_string());
+                                let _ = worktree_repo.update(&wt).await;
+                            }
+                        }
+                        Ok(MergeBackOutcome::NoCommits) => { /* nothing to merge */ }
+                        Ok(MergeBackOutcome::ConflictQueued) => {
+                            // Conflict recorded in merge queue; specialist trigger will handle.
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            tracing::warn!("Subtask {} merge-back failed: {}", task_id, e);
+                        }
+                    }
+                }
+            }
+
+            // Check if the entire tree is ready to ship
+            try_auto_ship(
+                task_id, task_repo.clone(), worktree_repo.clone(),
+                event_tx, audit_log, repo_path, default_base_ref,
+            ).await;
+
+            return Ok(()); // Skip normal per-task PR/merge flow
+        }
+
+        // Case B: This is a root task with children (Overmind)
+        let subtasks = task_repo.get_subtasks(task_id).await.unwrap_or_default();
+        if !subtasks.is_empty() {
+            // Don't create per-task PR; check if all children are done
+            try_auto_ship(
+                task_id, task_repo.clone(), worktree_repo.clone(),
+                event_tx, audit_log, repo_path, default_base_ref,
+            ).await;
+            return Ok(());
+        }
+    }
+
     // Step 2: Try PR creation if preferred, then fall back to merge queue
-    if verification_passed && prefer_pull_requests {
+    // (only for standalone tasks — no parent, no children)
+    if verification_passed && prefer_pull_requests && require_commits {
         if let Ok(Some(worktree)) = worktree_repo.get_by_task(task_id).await {
             // Look up task title/description for the PR
             let (pr_title, pr_body) = if let Ok(Some(task)) = task_repo.get(task_id).await {
@@ -313,7 +454,7 @@ where
     }
 
     // Step 3: Queue for merge if verification passed and merge queue is enabled
-    if verification_passed && use_merge_queue {
+    if verification_passed && use_merge_queue && require_commits {
         if let Ok(Some(worktree)) = worktree_repo.get_by_task(task_id).await {
             let verifier = IntegrationVerifierService::new(
                 task_repo.clone(),
@@ -402,4 +543,278 @@ where
     }
 
     Ok(())
+}
+
+/// Merge a subtask's branch into the root ancestor's feature branch.
+async fn merge_subtask_into_feature_branch<G, T, W>(
+    task_id: Uuid,
+    task_repo: Arc<T>,
+    goal_repo: Arc<G>,
+    worktree_repo: Arc<W>,
+    event_tx: &mpsc::Sender<SwarmEvent>,
+    audit_log: &Arc<AuditLogService>,
+    repo_path: &std::path::Path,
+    default_base_ref: &str,
+) -> DomainResult<MergeBackOutcome>
+where
+    G: GoalRepository + 'static,
+    T: TaskRepository + 'static,
+    W: WorktreeRepository + 'static,
+{
+    use tokio::process::Command;
+
+    let subtask_wt = match worktree_repo.get_by_task(task_id).await? {
+        Some(wt) => wt,
+        None => return Ok(MergeBackOutcome::NoCommits),
+    };
+
+    let task = match task_repo.get(task_id).await? {
+        Some(t) => t,
+        None => return Ok(MergeBackOutcome::NoCommits),
+    };
+
+    let root_id = find_root_ancestor_id(task.parent_id.unwrap(), &*task_repo).await;
+    let root_wt = match worktree_repo.get_by_task(root_id).await? {
+        Some(wt) => wt,
+        None => return Ok(MergeBackOutcome::NoCommits),
+    };
+
+    // Check if subtask has commits ahead of feature branch
+    let log_output = Command::new("git")
+        .args(["log", &format!("{}..{}", root_wt.branch, subtask_wt.branch), "--oneline"])
+        .current_dir(repo_path)
+        .output()
+        .await;
+
+    let has_commits = match log_output {
+        Ok(out) => !String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        Err(_) => false,
+    };
+
+    if !has_commits {
+        return Ok(MergeBackOutcome::NoCommits);
+    }
+
+    // Use MergeQueue for the merge (gets conflict handling + specialist integration)
+    let verifier = IntegrationVerifierService::new(
+        task_repo.clone(),
+        goal_repo.clone(),
+        worktree_repo.clone(),
+        VerifierConfig::default(),
+    );
+    let merge_config = MergeQueueConfig {
+        repo_path: repo_path.to_str().unwrap_or(".").to_string(),
+        main_branch: default_base_ref.to_string(),
+        require_verification: false, // verification already ran above
+        route_conflicts_to_specialist: true,
+        ..Default::default()
+    };
+    let merge_queue = MergeQueue::new(
+        task_repo.clone(),
+        worktree_repo.clone(),
+        Arc::new(verifier),
+        merge_config,
+    );
+
+    // Queue merge: subtask branch → feature branch, in root's worktree
+    merge_queue.queue_merge_back(
+        task_id,
+        &subtask_wt.branch,
+        &root_wt.branch,
+        &root_wt.path,
+    ).await?;
+
+    // Process immediately
+    match merge_queue.process_next().await? {
+        Some(result) if result.success => {
+            let _ = event_tx.send(SwarmEvent::SubtaskMergedToFeature {
+                task_id,
+                feature_branch: root_wt.branch.clone(),
+            }).await;
+
+            audit_log.info(
+                AuditCategory::Task,
+                AuditAction::TaskCompleted,
+                format!("Subtask {} merged into feature branch '{}'", task_id, root_wt.branch),
+            ).await;
+
+            Ok(MergeBackOutcome::Merged)
+        }
+        Some(result) if result.had_conflicts => {
+            // Conflict detected. The MergeQueue recorded it with status=Conflict.
+            // The existing process_merge_conflict_specialists (specialist_triggers.rs)
+            // will pick this up on next tick and spawn a specialist.
+            audit_log.info(
+                AuditCategory::Task,
+                AuditAction::TaskFailed,
+                format!(
+                    "Merge conflict merging subtask {} into feature branch: {:?}",
+                    task_id, result.conflict_files
+                ),
+            ).await;
+
+            Ok(MergeBackOutcome::ConflictQueued)
+        }
+        Some(result) => {
+            // Non-conflict merge failure
+            Err(DomainError::ExecutionFailed(
+                result.error.unwrap_or_else(|| "Unknown merge failure".to_string())
+            ))
+        }
+        None => Ok(MergeBackOutcome::NoCommits),
+    }
+}
+
+/// Check if all tasks in a tree are terminal and, if so, create a single PR.
+async fn try_auto_ship<T, W>(
+    triggering_task_id: Uuid,
+    task_repo: Arc<T>,
+    worktree_repo: Arc<W>,
+    event_tx: &mpsc::Sender<SwarmEvent>,
+    audit_log: &Arc<AuditLogService>,
+    repo_path: &std::path::Path,
+    default_base_ref: &str,
+) -> Option<String>
+where
+    T: TaskRepository + 'static,
+    W: WorktreeRepository + 'static,
+{
+    let root_id = find_root_ancestor_id(triggering_task_id, &*task_repo).await;
+    let root_task = task_repo.get(root_id).await.ok()??;
+
+    // Root must be terminal
+    if !root_task.is_terminal() { return None; }
+
+    // All descendants must be terminal
+    if !all_descendants_terminal(root_id, &*task_repo).await { return None; }
+
+    // At least one descendant must have succeeded
+    if root_task.status != TaskStatus::Complete
+        && !has_any_successful_descendant(root_id, &*task_repo).await
+    {
+        audit_log.info(
+            AuditCategory::Task,
+            AuditAction::TaskCompleted,
+            format!("All tasks in tree {} terminal but none succeeded - no PR", root_id),
+        ).await;
+        return None;
+    }
+
+    // Get root's worktree
+    let root_wt = worktree_repo.get_by_task(root_id).await.ok()??;
+
+    // Check feature branch has commits ahead of base
+    let has_commits = {
+        use tokio::process::Command;
+        Command::new("git")
+            .args(["log", &format!("{}..{}", default_base_ref, root_wt.branch), "--oneline"])
+            .current_dir(repo_path)
+            .output()
+            .await
+            .map(|out| !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+            .unwrap_or(false)
+    };
+
+    if !has_commits {
+        audit_log.info(
+            AuditCategory::Task,
+            AuditAction::TaskCompleted,
+            format!("Feature branch {} has no commits ahead of {} - no PR", root_wt.branch, default_base_ref),
+        ).await;
+        return None;
+    }
+
+    // Build PR content from task tree
+    let (pr_title, pr_body) = build_pr_description(root_id, &*task_repo).await;
+
+    // Create the single PR using existing function
+    let pr_url = try_create_pull_request(
+        &root_wt.path,
+        &root_wt.branch,
+        &pr_title,
+        &pr_body,
+        default_base_ref,
+    ).await?;
+
+    let _ = event_tx.send(SwarmEvent::PullRequestCreated {
+        task_id: root_id,
+        pr_url: pr_url.clone(),
+        branch: root_wt.branch.clone(),
+    }).await;
+
+    audit_log.info(
+        AuditCategory::Task,
+        AuditAction::TaskCompleted,
+        format!("Feature branch PR created for tree {}: {}", root_id, pr_url),
+    ).await;
+
+    Some(pr_url)
+}
+
+/// BFS check: all descendants in terminal state.
+async fn all_descendants_terminal<T: TaskRepository>(root_id: Uuid, task_repo: &T) -> bool {
+    let mut queue = vec![root_id];
+    while let Some(id) = queue.pop() {
+        let subtasks = match task_repo.get_subtasks(id).await {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        for st in subtasks {
+            if !st.is_terminal() { return false; }
+            queue.push(st.id);
+        }
+    }
+    true
+}
+
+/// BFS check: any descendant completed successfully.
+async fn has_any_successful_descendant<T: TaskRepository>(root_id: Uuid, task_repo: &T) -> bool {
+    let mut queue = vec![root_id];
+    while let Some(id) = queue.pop() {
+        if let Ok(subtasks) = task_repo.get_subtasks(id).await {
+            for st in &subtasks {
+                if st.status == TaskStatus::Complete { return true; }
+                queue.push(st.id);
+            }
+        }
+    }
+    false
+}
+
+/// Build combined PR title and body from the task tree.
+async fn build_pr_description<T: TaskRepository>(root_id: Uuid, task_repo: &T) -> (String, String) {
+    let root_title = task_repo.get(root_id).await
+        .ok().flatten()
+        .map(|t| t.title.clone())
+        .unwrap_or_else(|| format!("Task {}", &root_id.to_string()[..8]));
+
+    let root_desc = task_repo.get(root_id).await
+        .ok().flatten()
+        .map(|t| t.description.clone())
+        .unwrap_or_default();
+
+    let mut body = String::new();
+    if !root_desc.is_empty() {
+        body.push_str(&root_desc);
+        body.push_str("\n\n");
+    }
+    body.push_str("## Subtasks\n\n");
+
+    let mut bfs = vec![root_id];
+    while let Some(id) = bfs.pop() {
+        if let Ok(subtasks) = task_repo.get_subtasks(id).await {
+            for st in &subtasks {
+                let marker = match st.status {
+                    TaskStatus::Complete => "- [x]",
+                    TaskStatus::Failed => "- [-]",
+                    TaskStatus::Canceled => "- [~]",
+                    _ => "- [ ]",
+                };
+                body.push_str(&format!("{} {} ({})\n", marker, st.title, st.status.as_str()));
+                bfs.push(st.id);
+            }
+        }
+    }
+
+    (root_title, body)
 }

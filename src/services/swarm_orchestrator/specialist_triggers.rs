@@ -714,6 +714,41 @@ where
                     .unwrap_or(false);
 
             if !resolution_exists {
+                // Determine parent_id and context for the specialist task.
+                // If the conflict's task has a parent, this is a feature branch merge-back.
+                let (specialist_parent_id, conflict_context) = {
+                    let conflict_task = self.task_repo.get(conflict.task_id).await.ok().flatten();
+                    if let Some(ref ct) = conflict_task {
+                        if ct.parent_id.is_some() {
+                            let root_id = self.find_root_ancestor(conflict.task_id).await;
+                            let mut custom = std::collections::HashMap::new();
+                            custom.insert(
+                                "feature_branch_conflict".to_string(),
+                                serde_json::json!(true),
+                            );
+                            custom.insert(
+                                "original_subtask_id".to_string(),
+                                serde_json::json!(conflict.task_id.to_string()),
+                            );
+                            custom.insert(
+                                "merge_request_id".to_string(),
+                                serde_json::json!(conflict.merge_request_id.to_string()),
+                            );
+                            let ctx = crate::domain::models::TaskContext {
+                                input: String::new(),
+                                hints: vec![],
+                                relevant_files: conflict.conflict_files.clone(),
+                                custom,
+                            };
+                            (Some(root_id), Some(ctx))
+                        } else {
+                            (None, None)
+                        }
+                    } else {
+                        (None, None)
+                    }
+                };
+
                 let title = format!("Resolve merge conflict: {} → {}", conflict.source_branch, conflict.target_branch);
                 let description = format!(
                     "A merge conflict was detected when trying to merge branch '{}' into '{}'.\n\n\
@@ -741,11 +776,11 @@ where
                         DomainCommand::Task(TaskCommand::Submit {
                             title: Some(title.clone()),
                             description: description.clone(),
-                            parent_id: None,
-                            priority: TaskPriority::Normal,
+                            parent_id: specialist_parent_id,
+                            priority: TaskPriority::High,
                             agent_type: Some("merge-conflict-specialist".to_string()),
                             depends_on: vec![],
-                            context: Box::new(None),
+                            context: Box::new(conflict_context),
                             idempotency_key: None,
                             source: TaskSource::System,
                             deadline: None,

@@ -677,6 +677,12 @@ pub enum EventPayload {
         succeeded: bool,
         tokens_used: u64,
     },
+
+    /// Subtask branch merged into feature branch.
+    SubtaskMergedToFeature {
+        task_id: Uuid,
+        feature_branch: String,
+    },
 }
 
 impl EventPayload {
@@ -782,6 +788,7 @@ impl EventPayload {
             Self::ConvergenceFreshStart { .. } => "ConvergenceFreshStart",
             Self::ConvergenceTerminated { .. } => "ConvergenceTerminated",
             Self::TaskExecutionRecorded { .. } => "TaskExecutionRecorded",
+            Self::SubtaskMergedToFeature { .. } => "SubtaskMergedToFeature",
         }
     }
 }
@@ -1151,6 +1158,13 @@ impl From<SwarmEvent> for UnifiedEvent {
                 None,
                 None,
                 EventPayload::HumanResponseReceived { escalation_id, decision, allows_continuation },
+            ),
+            SwarmEvent::SubtaskMergedToFeature { task_id, feature_branch } => (
+                EventSeverity::Info,
+                EventCategory::Task,
+                None,
+                Some(task_id),
+                EventPayload::SubtaskMergedToFeature { task_id, feature_branch },
             ),
         };
 

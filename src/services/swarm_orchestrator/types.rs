@@ -431,6 +431,8 @@ pub enum SwarmEvent {
         dependents_can_proceed: bool,
         gaps_count: usize,
     },
+    /// Subtask branch merged into feature branch.
+    SubtaskMergedToFeature { task_id: Uuid, feature_branch: String },
     /// Semantic drift detected in convergence loop.
     SemanticDriftDetected {
         goal_id: Uuid,
@@ -591,6 +593,10 @@ impl SwarmEvent {
                 limit_type: limit_type.clone(),
                 current_value: *current_value,
                 limit_value: *limit_value,
+            }),
+            EventPayload::SubtaskMergedToFeature { task_id, feature_branch } => Some(SwarmEvent::SubtaskMergedToFeature {
+                task_id: *task_id,
+                feature_branch: feature_branch.clone(),
             }),
             EventPayload::HumanEscalationRequired { goal_id, task_id, reason, urgency, questions, is_blocking } => Some(SwarmEvent::HumanEscalationRequired {
                 goal_id: *goal_id,

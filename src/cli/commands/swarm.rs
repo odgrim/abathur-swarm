@@ -898,6 +898,11 @@ async fn run_swarm_foreground(
                         println!("  Reconciliation: {} corrections made", corrections_made);
                     }
                 }
+                SwarmEvent::SubtaskMergedToFeature { task_id, feature_branch } => {
+                    if !json_mode {
+                        println!("  Subtask merged to feature: {} → {}", task_id, feature_branch);
+                    }
+                }
             }
         }
     });

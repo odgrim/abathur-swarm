@@ -253,6 +253,25 @@ where
         Ok(id)
     }
 
+    /// Queue a merge-back: subtask branch → feature branch, in the feature branch's worktree.
+    pub async fn queue_merge_back(
+        &self,
+        task_id: Uuid,
+        source_branch: &str,
+        target_branch: &str,
+        target_workdir: &str,
+    ) -> DomainResult<Uuid> {
+        let request = MergeRequest::new_stage1(
+            task_id,
+            source_branch.to_string(),
+            target_branch.to_string(),
+            target_workdir.to_string(),
+        );
+        let id = request.id;
+        self.queue.write().await.push_back(request);
+        Ok(id)
+    }
+
     /// Queue a Stage 2 merge (task → main).
     pub async fn queue_stage2(&self, task_id: Uuid) -> DomainResult<Uuid> {
         // Get worktree for this task
