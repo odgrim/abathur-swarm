@@ -33,6 +33,12 @@ pub async fn resolve_memory_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid> 
         .await
 }
 
+/// Resolve an event ID prefix to a full UUID.
+pub async fn resolve_event_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid> {
+    resolve_prefix(pool, prefix, "event", EVENT_QUERY)
+        .await
+}
+
 /// Resolve a trigger rule ID prefix to a full UUID.
 pub async fn resolve_trigger_rule_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid> {
     resolve_prefix(pool, prefix, "trigger_rule", TRIGGER_RULE_QUERY)
@@ -78,6 +84,7 @@ const GOAL_QUERY: &str = "SELECT id FROM goals WHERE id LIKE ?";
 const WORKTREE_QUERY: &str =
     "SELECT id FROM worktrees WHERE id LIKE ? UNION SELECT id FROM worktrees WHERE task_id LIKE ?";
 const MEMORY_QUERY: &str = "SELECT id FROM memories WHERE id LIKE ?";
+const EVENT_QUERY: &str = "SELECT id FROM events WHERE id LIKE ?";
 const TRIGGER_RULE_QUERY: &str = "SELECT id FROM trigger_rules WHERE id LIKE ?";
 const DLQ_QUERY: &str = "SELECT id FROM dead_letter_events WHERE id LIKE ? AND resolved_at IS NULL";
 
