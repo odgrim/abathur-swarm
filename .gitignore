@@ -16,6 +16,8 @@ design_docs/Chapter*
 
 # Claude
 .mcp.json
+CLAUDE.md
+.claude/
 
 # Documentation
 site/

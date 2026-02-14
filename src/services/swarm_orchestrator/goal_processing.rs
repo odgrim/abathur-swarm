@@ -395,23 +395,23 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                     tracing::debug!("Wrote CLAUDE.md with tool restrictions to {:?}", claude_md_path);
                 }
 
-                // Neutralize mcpServers in worktree settings.
-                // The orchestrator provides MCP via --mcp-config with absolute paths;
-                // the settings-level server uses a relative DB path that won't resolve
-                // from the worktree CWD.
-                let settings_path = std::path::Path::new(wt_path)
-                    .join(".claude")
-                    .join("settings.json");
-                if settings_path.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&settings_path) {
-                        if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
-                            if let Some(obj) = json.as_object_mut() {
-                                obj.remove("mcpServers");
-                                if let Ok(updated) = serde_json::to_string_pretty(&json) {
-                                    let _ = std::fs::write(&settings_path, format!("{updated}\n"));
-                                }
-                            }
-                        }
+                // Bootstrap .claude/settings.json in worktree.
+                // We write the permissions block directly (no mcpServers —
+                // the orchestrator provides MCP via --mcp-config with absolute paths).
+                let claude_dir = std::path::Path::new(wt_path).join(".claude");
+                let _ = std::fs::create_dir_all(&claude_dir);
+                let tools: Vec<serde_json::Value> = crate::ABATHUR_ALLOWED_TOOLS
+                    .iter()
+                    .map(|t| serde_json::Value::String(t.to_string()))
+                    .collect();
+                let settings_content = serde_json::json!({
+                    "permissions": {
+                        "allowedTools": tools
+                    }
+                });
+                if let Ok(pretty) = serde_json::to_string_pretty(&settings_content) {
+                    if let Err(e) = std::fs::write(claude_dir.join("settings.json"), format!("{pretty}\n")) {
+                        tracing::warn!("Failed to write .claude/settings.json to worktree: {}", e);
                     }
                 }
             }

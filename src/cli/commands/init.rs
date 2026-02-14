@@ -7,6 +7,7 @@ use tokio::fs;
 
 use crate::adapters::sqlite::initialize_database;
 use crate::cli::output::{output, CommandOutput};
+use crate::ABATHUR_ALLOWED_TOOLS;
 
 #[derive(Args, Debug)]
 pub struct InitArgs {
@@ -124,19 +125,6 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
     Ok(())
 }
 
-const ABATHUR_TOOLS: &[&str] = &[
-    "mcp__abathur__task_submit",
-    "mcp__abathur__task_list",
-    "mcp__abathur__task_get",
-    "mcp__abathur__task_update_status",
-    "mcp__abathur__agent_create",
-    "mcp__abathur__agent_list",
-    "mcp__abathur__agent_get",
-    "mcp__abathur__memory_search",
-    "mcp__abathur__memory_store",
-    "mcp__abathur__memory_get",
-    "mcp__abathur__goals_list",
-];
 
 async fn merge_claude_settings(target_path: &Path) -> Result<()> {
     let settings_path = target_path.join(".claude").join("settings.json");
@@ -178,7 +166,7 @@ async fn merge_claude_settings(target_path: &Path) -> Result<()> {
         .or_insert_with(|| serde_json::json!([]))
         .as_array_mut()
         .expect("allowedTools must be an array");
-    for tool in ABATHUR_TOOLS {
+    for tool in ABATHUR_ALLOWED_TOOLS {
         let val = serde_json::Value::String(tool.to_string());
         if !tools.contains(&val) {
             tools.push(val);
