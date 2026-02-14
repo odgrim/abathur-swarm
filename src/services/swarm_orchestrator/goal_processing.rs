@@ -716,6 +716,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         &repo_path,
                                         &default_base_ref,
                                         require_commits,
+                                        true, // intent_satisfied: convergence engine verified intent
                                     ).await;
                                 }
 
@@ -1142,6 +1143,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     &repo_path,
                                     &default_base_ref,
                                     require_commits,
+                                    false, // intent_satisfied: no convergence verification on this path
                                 ).await;
 
                                 if let Err(e) = workflow_result {

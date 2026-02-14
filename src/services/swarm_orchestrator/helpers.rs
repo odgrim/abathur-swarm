@@ -187,12 +187,24 @@ pub async fn run_post_completion_workflow<G, T, W>(
     repo_path: &std::path::Path,
     default_base_ref: &str,
     require_commits: bool,
+    intent_satisfied: bool,
 ) -> DomainResult<()>
 where
     G: GoalRepository + 'static,
     T: TaskRepository + 'static,
     W: WorktreeRepository + 'static,
 {
+    // When the convergence engine has verified intent satisfaction (e.g., "remove dead code"
+    // where the code is already clean), skip the commits gate so the task can complete
+    // successfully without producing any commits.
+    let effective_require_commits = require_commits && !intent_satisfied;
+    if intent_satisfied && require_commits {
+        tracing::info!(
+            task_id = %task_id,
+            "Intent verified as satisfied — overriding require_commits to false"
+        );
+    }
+
     // Step 1: Run lightweight verification if enabled (no code checks - those happen at merge time)
     let verification_passed = if verify_on_completion {
         let verifier = IntegrationVerifierService::new(
@@ -203,7 +215,7 @@ where
                 run_tests: false,
                 run_lint: false,
                 check_format: false,
-                require_commits,
+                require_commits: effective_require_commits,
                 ..VerifierConfig::default()
             },
         );
@@ -358,7 +370,7 @@ where
                 // Fall through to auto-ship check below
             } else {
                 // Normal subtask: attempt merge-back
-                if verification_passed && require_commits {
+                if verification_passed && effective_require_commits {
                     let merge_result = merge_subtask_into_feature_branch(
                         task_id,
                         task_repo.clone(),
@@ -413,7 +425,7 @@ where
 
     // Step 2: Try PR creation if preferred, then fall back to merge queue
     // (only for standalone tasks — no parent, no children)
-    if verification_passed && prefer_pull_requests && require_commits {
+    if verification_passed && prefer_pull_requests && effective_require_commits {
         if let Ok(Some(worktree)) = worktree_repo.get_by_task(task_id).await {
             // Look up task title/description for the PR
             let (pr_title, pr_body) = if let Ok(Some(task)) = task_repo.get(task_id).await {
@@ -454,7 +466,7 @@ where
     }
 
     // Step 3: Queue for merge if verification passed and merge queue is enabled
-    if verification_passed && use_merge_queue && require_commits {
+    if verification_passed && use_merge_queue && effective_require_commits {
         if let Ok(Some(worktree)) = worktree_repo.get_by_task(task_id).await {
             let verifier = IntegrationVerifierService::new(
                 task_repo.clone(),
