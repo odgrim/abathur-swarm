@@ -1267,11 +1267,12 @@ async fn show_escalations(json_mode: bool) -> Result<()> {
 }
 
 async fn respond_to_escalation(id: &str, decision: &str, message: Option<&str>, json_mode: bool) -> Result<()> {
+    use crate::adapters::sqlite::create_pool;
+    use crate::cli::id_resolver::resolve_event_id;
     use crate::domain::models::{EscalationDecision, HumanEscalationResponse};
-    use uuid::Uuid;
 
-    let event_id: Uuid = id.parse()
-        .map_err(|e| anyhow::anyhow!("Invalid escalation ID: {}", e))?;
+    let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
+    let event_id = resolve_event_id(&pool, id).await?;
 
     let escalation_decision = match decision {
         "accept" => EscalationDecision::Accept,
