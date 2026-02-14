@@ -44,39 +44,13 @@ pub async fn resolve_trigger_rule_id(pool: &SqlitePool, prefix: &str) -> Result<
 /// Returns `String` rather than `Uuid` because the `EventStore` trait uses
 /// `&str` for DLQ IDs.  Only unresolved entries are searched.
 pub async fn resolve_dlq_id(pool: &SqlitePool, prefix: &str) -> Result<String> {
-    // Fast path: if it looks like a full UUID, return directly
-    if Uuid::parse_str(prefix).is_ok() {
-        return Ok(prefix.to_string());
-    }
-
-    validate_prefix(prefix)?;
-
-    let pattern = format!("{}%", prefix);
-    let rows: Vec<(String,)> = sqlx::query_as(DLQ_QUERY)
-        .bind(&pattern)
-        .fetch_all(pool)
-        .await?;
-
-    match rows.len() {
-        0 => bail!("No dead letter entry found matching '{}'", prefix),
-        1 => Ok(rows[0].0.clone()),
-        n => {
-            let mut msg = format!(
-                "Ambiguous prefix '{}': matches {} dead letter entries:",
-                prefix, n
-            );
-            for row in &rows {
-                msg.push_str(&format!("\n  {}", row.0));
-            }
-            bail!("{}", msg)
-        }
-    }
+    resolve_prefix_raw(pool, prefix, "dead letter entry", DLQ_QUERY).await
 }
 
 const TASK_QUERY: &str = "SELECT id FROM tasks WHERE id LIKE ?";
 const GOAL_QUERY: &str = "SELECT id FROM goals WHERE id LIKE ?";
 const WORKTREE_QUERY: &str =
-    "SELECT id FROM worktrees WHERE id LIKE ? UNION SELECT id FROM worktrees WHERE task_id LIKE ?";
+    "SELECT id FROM worktrees WHERE id LIKE ?1 UNION SELECT id FROM worktrees WHERE task_id LIKE ?1";
 const MEMORY_QUERY: &str = "SELECT id FROM memories WHERE id LIKE ?";
 const TRIGGER_RULE_QUERY: &str = "SELECT id FROM trigger_rules WHERE id LIKE ?";
 const DLQ_QUERY: &str = "SELECT id FROM dead_letter_events WHERE id LIKE ? AND resolved_at IS NULL";
@@ -94,38 +68,28 @@ fn validate_prefix(prefix: &str) -> Result<()> {
     Ok(())
 }
 
-async fn resolve_prefix(
+/// Core prefix resolution returning the raw ID string.
+async fn resolve_prefix_raw(
     pool: &SqlitePool,
     prefix: &str,
     entity: &str,
     query: &str,
-) -> Result<Uuid> {
-    // Fast path: if it parses as a full UUID, return directly
-    if let Ok(uuid) = Uuid::parse_str(prefix) {
-        return Ok(uuid);
+) -> Result<String> {
+    if Uuid::parse_str(prefix).is_ok() {
+        return Ok(prefix.to_string());
     }
 
     validate_prefix(prefix)?;
 
     let pattern = format!("{}%", prefix);
-
-    let rows: Vec<(String,)> = if query == WORKTREE_QUERY {
-        // Worktree query has two bind params (id LIKE ? UNION task_id LIKE ?)
-        sqlx::query_as(query)
-            .bind(&pattern)
-            .bind(&pattern)
-            .fetch_all(pool)
-            .await?
-    } else {
-        sqlx::query_as(query)
-            .bind(&pattern)
-            .fetch_all(pool)
-            .await?
-    };
+    let rows: Vec<(String,)> = sqlx::query_as(query)
+        .bind(&pattern)
+        .fetch_all(pool)
+        .await?;
 
     match rows.len() {
         0 => bail!("No {} found matching '{}'", entity, prefix),
-        1 => Ok(Uuid::parse_str(&rows[0].0)?),
+        1 => Ok(rows[0].0.clone()),
         n => {
             let mut msg = format!(
                 "Ambiguous prefix '{}': matches {} {}s:",
@@ -137,4 +101,17 @@ async fn resolve_prefix(
             bail!("{}", msg)
         }
     }
+}
+
+async fn resolve_prefix(
+    pool: &SqlitePool,
+    prefix: &str,
+    entity: &str,
+    query: &str,
+) -> Result<Uuid> {
+    if let Ok(uuid) = Uuid::parse_str(prefix) {
+        return Ok(uuid);
+    }
+    let raw = resolve_prefix_raw(pool, prefix, entity, query).await?;
+    Ok(Uuid::parse_str(&raw)?)
 }
