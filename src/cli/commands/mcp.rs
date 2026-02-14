@@ -559,22 +559,20 @@ async fn start_all(
 async fn start_stdio(db_path: String, task_id: Option<String>) -> Result<()> {
     use crate::adapters::mcp::StdioServer;
     use crate::adapters::sqlite::SqliteGoalRepository;
+    use crate::cli::id_resolver::resolve_task_id;
 
-    // Parse optional task ID
-    let task_uuid = match task_id {
-        Some(ref id) => Some(
-            uuid::Uuid::parse_str(id)
-                .map_err(|e| anyhow::anyhow!("Invalid task ID '{}': {}", id, e))?,
-        ),
-        None => None,
-    };
-
-    // Initialize database
+    // Initialize database first so we can use prefix resolution
     let pool = create_pool(&db_path, None).await?;
     let migrator = Migrator::new(pool.clone());
     migrator
         .run_embedded_migrations(all_embedded_migrations())
         .await?;
+
+    // Resolve optional task ID (supports prefix matching)
+    let task_uuid = match task_id {
+        Some(ref id) => Some(resolve_task_id(&pool, id).await?),
+        None => None,
+    };
 
     // Create repositories and services with shared persistent EventBus
     let shared_event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone()).await;
