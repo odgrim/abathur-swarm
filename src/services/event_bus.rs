@@ -254,6 +254,14 @@ pub enum EventPayload {
         decision: String,
     },
 
+    /// Review failure loop-back triggered: spawns a new plan → implement → review cycle.
+    ReviewLoopTriggered {
+        failed_review_task_id: Uuid,
+        iteration: u32,
+        max_iterations: u32,
+        new_plan_task_id: Uuid,
+    },
+
     // Agent events
     AgentCreated {
         agent_type: String,
@@ -720,6 +728,7 @@ impl EventPayload {
             Self::WaveCompleted { .. } => "WaveCompleted",
             Self::RestructureTriggered { .. } => "RestructureTriggered",
             Self::RestructureDecision { .. } => "RestructureDecision",
+            Self::ReviewLoopTriggered { .. } => "ReviewLoopTriggered",
             Self::AgentCreated { .. } => "AgentCreated",
             Self::SpecialistSpawned { .. } => "SpecialistSpawned",
             Self::EvolutionTriggered { .. } => "EvolutionTriggered",

@@ -21,8 +21,8 @@ use crate::services::builtin_handlers::{
     MemoryConflictEscalationHandler, MemoryInformedDecompositionHandler,
     MemoryMaintenanceHandler, MemoryReconciliationHandler,
     PriorityAgingHandler, ReconciliationHandler,
-    RetryProcessingHandler, SpecialistCheckHandler, StartupCatchUpHandler,
-    StatsUpdateHandler, TaskCompletionLearningHandler,
+    ReviewFailureLoopHandler, RetryProcessingHandler, SpecialistCheckHandler,
+    StartupCatchUpHandler, StatsUpdateHandler, TaskCompletionLearningHandler,
     TaskCompletedReadinessHandler, TaskFailedBlockHandler, TaskFailedRetryHandler,
     TaskReadySpawnHandler, TaskSLAEnforcementHandler,
     TriggerCatchupHandler, WatermarkAuditHandler,
@@ -277,6 +277,15 @@ where
 
             bus
         };
+
+        // ReviewFailureLoopHandler (HIGH) — loop review failures back to plan+implement
+        reactor
+            .register(Arc::new(ReviewFailureLoopHandler::new(
+                self.task_repo.clone(),
+                command_bus.clone(),
+                self.config.max_review_iterations,
+            )))
+            .await;
 
         // A2APollHandler (NORMAL) — poll A2A gateway for delegations
         if let Some(ref a2a_url) = self.config.mcp_servers.a2a_gateway {

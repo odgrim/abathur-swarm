@@ -21,6 +21,9 @@ pub struct SwarmConfig {
     pub auto_retry: bool,
     /// Maximum retries per task.
     pub max_task_retries: u32,
+    /// Maximum review loop-back iterations (plan → implement → review) before
+    /// falling through to normal failure handling.
+    pub max_review_iterations: u32,
     /// Base path for worktrees.
     pub worktree_base_path: PathBuf,
     /// Repository path.
@@ -290,6 +293,7 @@ impl Default for SwarmConfig {
             goal_timeout_secs: 3600,
             auto_retry: true,
             max_task_retries: 3,
+            max_review_iterations: 3,
             worktree_base_path: PathBuf::from(".abathur/worktrees"),
             repo_path: PathBuf::from("."),
             default_base_ref: "main".to_string(),

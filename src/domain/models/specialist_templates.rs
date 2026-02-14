@@ -112,6 +112,8 @@ Create a **code review agent** that reviews for correctness, edge cases, test co
 
 After review completion, the orchestrator's post-completion workflow automatically handles integration (PR creation or merge to main).
 
+When a review task fails because the implementation has issues, the system automatically loops back to create a new plan + implement + review cycle incorporating the review feedback. This loop is bounded by `max_review_iterations`. Ensure review tasks use `agent_type: "code-reviewer"` so the system can identify them.
+
 ### Agent Reuse Policy
 
 ALWAYS call `agent_list` before `agent_create`. Reuse an existing agent if one is suitable for the needed role. Only create a new agent when no existing agent covers the needed role. For example, if a "database-schema-architect" already exists from a previous task, reuse it for subsequent database planning tasks rather than creating a duplicate.
