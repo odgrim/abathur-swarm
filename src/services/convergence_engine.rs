@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::convergence::*;
+use crate::domain::models::intent_verification::{GapCategory, GapSeverity, IntentGap};
 use crate::domain::models::task::Complexity;
 use crate::domain::models::{Memory, MemoryQuery, MemoryType};
 use crate::domain::ports::{MemoryRepository, TrajectoryRepository};
@@ -557,10 +558,25 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             entry = entry.with_delta(delta);
         }
 
-        // Run intent verification if scheduled
+        // Run intent verification if scheduled (spec 7.2)
+        //
+        // Verification synthesizes a VerificationResult from overseer signals
+        // and the specification. It runs periodically (controlled by
+        // policy.intent_verification_frequency), on threshold crossings, and
+        // on attractor transitions to FixedPoint.
         if self.should_verify(trajectory) {
-            // verification = self.verify_intent(&trajectory).await?;
-            // obs_with_metrics = obs_with_metrics.with_verification(verification);
+            let level = obs_with_metrics
+                .metrics
+                .as_ref()
+                .map(|m| m.convergence_level)
+                .unwrap_or(0.0);
+            let verification = self.verify_from_signals(
+                &obs_with_metrics.overseer_signals,
+                &trajectory.specification.effective,
+                trajectory.task_id,
+                level,
+            );
+            obs_with_metrics = obs_with_metrics.with_verification(verification);
         }
 
         // Push observation
@@ -1219,6 +1235,177 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
     }
 
     // -----------------------------------------------------------------------
+    // Intent verification from overseer signals
+    // -----------------------------------------------------------------------
+
+    /// Synthesize a [`VerificationResult`] from overseer signals and the
+    /// specification.
+    ///
+    /// This is a deterministic, signal-based verification — not an LLM call.
+    /// It answers "does the current artifact satisfy the specification?" by
+    /// mapping overseer pass/fail results to intent gaps. The result feeds
+    /// into attractor classification (ambiguity detection) and strategy
+    /// selection (remaining gaps inform `FocusedRepair` targets).
+    ///
+    /// Satisfaction levels:
+    /// - **"satisfied"** — all present overseers pass, convergence level >= acceptance threshold
+    /// - **"partial"** — some overseers pass, convergence level > 0.3
+    /// - **"unsatisfied"** — build failure or convergence level <= 0.3
+    fn verify_from_signals(
+        &self,
+        signals: &OverseerSignals,
+        spec: &SpecificationSnapshot,
+        task_id: Uuid,
+        convergence_level: f64,
+    ) -> VerificationResult {
+        let mut gaps: Vec<IntentGap> = Vec::new();
+
+        // Build failure is a critical gap
+        if let Some(ref build) = signals.build_result {
+            if !build.success {
+                let mut gap = IntentGap::new(
+                    format!("Build failure: {} error(s)", build.error_count),
+                    GapSeverity::Critical,
+                )
+                .with_category(GapCategory::Functional)
+                .with_task(task_id);
+                if let Some(first_error) = build.errors.first() {
+                    gap = gap.with_action(format!("Fix build error: {}", first_error));
+                }
+                gaps.push(gap);
+            }
+        }
+
+        // Type check failure
+        if let Some(ref tc) = signals.type_check {
+            if !tc.clean {
+                let mut gap = IntentGap::new(
+                    format!("Type check failure: {} error(s)", tc.error_count),
+                    GapSeverity::Major,
+                )
+                .with_category(GapCategory::Functional)
+                .with_task(task_id);
+                if let Some(first_error) = tc.errors.first() {
+                    gap = gap.with_action(format!("Fix type error: {}", first_error));
+                }
+                gaps.push(gap);
+            }
+        }
+
+        // Failing tests
+        if let Some(ref tests) = signals.test_results {
+            if tests.failed > 0 {
+                let gap = IntentGap::new(
+                    format!(
+                        "Test failures: {}/{} tests failing ({}  regressions)",
+                        tests.failed, tests.total, tests.regression_count
+                    ),
+                    if tests.regression_count > 0 {
+                        GapSeverity::Major
+                    } else {
+                        GapSeverity::Moderate
+                    },
+                )
+                .with_category(GapCategory::Testing)
+                .with_task(task_id)
+                .with_action(format!(
+                    "Fix failing tests: {}",
+                    tests
+                        .failing_test_names
+                        .iter()
+                        .take(3)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                gaps.push(gap);
+            }
+        }
+
+        // Security vulnerabilities
+        if let Some(ref sec) = signals.security_scan {
+            let vuln_count = sec.critical_count + sec.high_count;
+            if vuln_count > 0 {
+                let gap = IntentGap::new(
+                    format!(
+                        "Security vulnerabilities: {} critical, {} high",
+                        sec.critical_count, sec.high_count
+                    ),
+                    if sec.critical_count > 0 {
+                        GapSeverity::Critical
+                    } else {
+                        GapSeverity::Major
+                    },
+                )
+                .with_category(GapCategory::Security)
+                .with_task(task_id);
+                gaps.push(gap);
+            }
+        }
+
+        // Lint errors (not warnings)
+        if let Some(ref lint) = signals.lint_results {
+            if lint.error_count > 0 {
+                gaps.push(
+                    IntentGap::new(
+                        format!("Lint errors: {} error(s)", lint.error_count),
+                        GapSeverity::Minor,
+                    )
+                    .with_category(GapCategory::Maintainability)
+                    .with_task(task_id),
+                );
+            }
+        }
+
+        // Failing custom checks
+        for check in &signals.custom_checks {
+            if !check.passed {
+                gaps.push(
+                    IntentGap::new(
+                        format!("Custom check '{}' failed: {}", check.name, check.details),
+                        GapSeverity::Moderate,
+                    )
+                    .with_category(GapCategory::Functional)
+                    .with_task(task_id),
+                );
+            }
+        }
+
+        // Check specification requirements against what overseers can tell us.
+        // If the spec has success_criteria but we have no test results at all,
+        // flag that as an implicit gap — we can't verify intent without tests.
+        if !spec.success_criteria.is_empty() && signals.test_results.is_none() {
+            gaps.push(
+                IntentGap::new(
+                    "Specification has success criteria but no test results available",
+                    GapSeverity::Moderate,
+                )
+                .with_category(GapCategory::Testing)
+                .with_task(task_id)
+                .as_implicit("Success criteria require test verification"),
+            );
+        }
+
+        // Determine satisfaction level
+        let has_critical = gaps.iter().any(|g| matches!(g.severity, GapSeverity::Critical));
+        let has_major = gaps.iter().any(|g| matches!(g.severity, GapSeverity::Major));
+
+        let (satisfaction, confidence) = if gaps.is_empty()
+            && convergence_level >= self.config.default_policy.acceptance_threshold
+        {
+            ("satisfied", 0.9_f64.min(convergence_level))
+        } else if has_critical || convergence_level <= 0.3 {
+            ("unsatisfied", 0.8)
+        } else if has_major {
+            ("partial", 0.7)
+        } else {
+            ("partial", 0.6)
+        };
+
+        VerificationResult::new(satisfaction, confidence, gaps)
+    }
+
+    // -----------------------------------------------------------------------
     // 9.2 decompose_and_coordinate -- Decomposition flow
     // -----------------------------------------------------------------------
 
@@ -1819,6 +2006,22 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
     // -----------------------------------------------------------------------
     // Overseer measurement
     // -----------------------------------------------------------------------
+
+    /// Run overseer measurement on an artifact and return aggregated signals.
+    ///
+    /// This is the public entry point for external callers (e.g. the
+    /// orchestrator's convergent execution loop) that need overseer signals
+    /// without constructing a full `Observation`. Delegates to the injected
+    /// `overseer_measurer` implementation, which runs overseers in
+    /// cost-ordered phases and respects the policy's `skip_expensive_overseers`
+    /// flag.
+    pub async fn measure(
+        &self,
+        artifact: &ArtifactReference,
+        policy: &ConvergencePolicy,
+    ) -> DomainResult<OverseerSignals> {
+        self.overseer_measurer.measure(artifact, policy).await
+    }
 
     /// Measure an artifact with overseers using the OverseerMeasurer trait.
     ///
@@ -3043,5 +3246,356 @@ mod tests {
             serde_json::from_str(&memory.content).unwrap();
         let dist = &restored.context_arms["fixed_point"]["focused_repair"];
         assert!((dist.alpha - 4.0).abs() < f64::EPSILON);
+    }
+
+    // -----------------------------------------------------------------------
+    // verify_from_signals tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_from_signals_all_passing_high_level() {
+        let engine = test_engine();
+        let spec = SpecificationSnapshot::new("Implement authentication".to_string());
+        let task_id = Uuid::new_v4();
+
+        let signals = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 10,
+                failed: 0,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        };
+
+        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.95);
+
+        assert_eq!(result.satisfaction, "satisfied");
+        assert!(result.gaps.is_empty());
+        assert!(result.confidence > 0.85);
+    }
+
+    #[test]
+    fn test_verify_from_signals_build_failure() {
+        let engine = test_engine();
+        let spec = SpecificationSnapshot::new("Implement authentication".to_string());
+        let task_id = Uuid::new_v4();
+
+        let signals = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: false,
+                error_count: 3,
+                errors: vec!["cannot find type `Foo`".to_string()],
+            }),
+            ..OverseerSignals::default()
+        };
+
+        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.2);
+
+        assert_eq!(result.satisfaction, "unsatisfied");
+        assert!(!result.gaps.is_empty());
+
+        let build_gap = result.gaps.iter().find(|g| g.description.contains("Build failure")).unwrap();
+        assert_eq!(build_gap.severity, GapSeverity::Critical);
+        assert_eq!(build_gap.category, GapCategory::Functional);
+        assert!(build_gap.suggested_action.as_ref().unwrap().contains("cannot find type"));
+    }
+
+    #[test]
+    fn test_verify_from_signals_test_failures_with_regressions() {
+        let engine = test_engine();
+        let spec = SpecificationSnapshot::new("Implement authentication".to_string());
+        let task_id = Uuid::new_v4();
+
+        let signals = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 7,
+                failed: 3,
+                skipped: 0,
+                total: 10,
+                regression_count: 2,
+                failing_test_names: vec![
+                    "test_login".to_string(),
+                    "test_register".to_string(),
+                    "test_logout".to_string(),
+                ],
+            }),
+            ..OverseerSignals::default()
+        };
+
+        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.5);
+
+        assert_eq!(result.satisfaction, "partial");
+
+        let test_gap = result.gaps.iter().find(|g| g.description.contains("Test failures")).unwrap();
+        // Regressions should bump severity to Major
+        assert_eq!(test_gap.severity, GapSeverity::Major);
+        assert_eq!(test_gap.category, GapCategory::Testing);
+        assert!(test_gap.suggested_action.as_ref().unwrap().contains("test_login"));
+    }
+
+    #[test]
+    fn test_verify_from_signals_security_vulnerabilities() {
+        let engine = test_engine();
+        let spec = SpecificationSnapshot::new("Implement authentication".to_string());
+        let task_id = Uuid::new_v4();
+
+        let signals = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 10,
+                failed: 0,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            security_scan: Some(SecurityScanResult {
+                critical_count: 1,
+                high_count: 2,
+                medium_count: 0,
+                findings: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        };
+
+        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.8);
+
+        // Critical security vuln + critical gap => unsatisfied
+        assert_eq!(result.satisfaction, "unsatisfied");
+
+        let sec_gap = result.gaps.iter().find(|g| g.category == GapCategory::Security).unwrap();
+        assert_eq!(sec_gap.severity, GapSeverity::Critical);
+        assert!(sec_gap.description.contains("1 critical"));
+    }
+
+    #[test]
+    fn test_verify_from_signals_high_security_only() {
+        let engine = test_engine();
+        let spec = SpecificationSnapshot::new("Implement feature".to_string());
+        let task_id = Uuid::new_v4();
+
+        let signals = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            security_scan: Some(SecurityScanResult {
+                critical_count: 0,
+                high_count: 1,
+                medium_count: 3,
+                findings: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        };
+
+        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.7);
+
+        // No critical security, but Major gap from high_count
+        let sec_gap = result.gaps.iter().find(|g| g.category == GapCategory::Security).unwrap();
+        assert_eq!(sec_gap.severity, GapSeverity::Major);
+        assert_eq!(result.satisfaction, "partial");
+    }
+
+    #[test]
+    fn test_verify_from_signals_lint_errors() {
+        let engine = test_engine();
+        let spec = SpecificationSnapshot::new("Implement feature".to_string());
+        let task_id = Uuid::new_v4();
+
+        let signals = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            lint_results: Some(LintResults {
+                error_count: 5,
+                warning_count: 10,
+                errors: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        };
+
+        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.8);
+
+        let lint_gap = result.gaps.iter().find(|g| g.category == GapCategory::Maintainability).unwrap();
+        assert_eq!(lint_gap.severity, GapSeverity::Minor);
+        // Lint-only gaps with no major issues => partial
+        assert_eq!(result.satisfaction, "partial");
+    }
+
+    #[test]
+    fn test_verify_from_signals_custom_check_failure() {
+        let engine = test_engine();
+        let spec = SpecificationSnapshot::new("Implement feature".to_string());
+        let task_id = Uuid::new_v4();
+
+        let signals = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            custom_checks: vec![
+                CustomCheckResult {
+                    name: "coverage".to_string(),
+                    passed: false,
+                    details: "Coverage at 50%, required 80%".to_string(),
+                },
+                CustomCheckResult {
+                    name: "formatting".to_string(),
+                    passed: true,
+                    details: "All files formatted".to_string(),
+                },
+            ],
+            ..OverseerSignals::default()
+        };
+
+        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.7);
+
+        // Only the failing custom check should produce a gap
+        assert_eq!(result.gaps.len(), 1);
+        assert!(result.gaps[0].description.contains("coverage"));
+        assert!(result.gaps[0].description.contains("Coverage at 50%"));
+        assert_eq!(result.gaps[0].severity, GapSeverity::Moderate);
+    }
+
+    #[test]
+    fn test_verify_from_signals_no_tests_with_success_criteria() {
+        let engine = test_engine();
+        let mut spec = SpecificationSnapshot::new("Implement feature".to_string());
+        spec.success_criteria.push("All endpoints return valid JSON".to_string());
+        let task_id = Uuid::new_v4();
+
+        // Signals with build passing but NO test results
+        let signals = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        };
+
+        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.7);
+
+        // Should have an implicit gap about missing test results
+        let implicit_gap = result.gaps.iter().find(|g| g.is_implicit).unwrap();
+        assert_eq!(implicit_gap.category, GapCategory::Testing);
+        assert!(implicit_gap.description.contains("success criteria"));
+        assert!(implicit_gap.implicit_rationale.is_some());
+    }
+
+    #[test]
+    fn test_verify_from_signals_empty_signals_low_level() {
+        let engine = test_engine();
+        let spec = SpecificationSnapshot::new("Implement feature".to_string());
+        let task_id = Uuid::new_v4();
+
+        // Empty signals with very low convergence level
+        let signals = OverseerSignals::default();
+
+        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.1);
+
+        // No gaps from signals, but level <= 0.3 => unsatisfied
+        assert_eq!(result.satisfaction, "unsatisfied");
+    }
+
+    #[test]
+    fn test_verify_from_signals_empty_signals_high_level() {
+        let engine = test_engine();
+        let spec = SpecificationSnapshot::new("Implement feature".to_string());
+        let task_id = Uuid::new_v4();
+
+        // Empty signals but high convergence level
+        let signals = OverseerSignals::default();
+
+        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.95);
+
+        // No gaps and level >= threshold => satisfied
+        assert_eq!(result.satisfaction, "satisfied");
+        assert!(result.confidence >= 0.9);
+    }
+
+    #[test]
+    fn test_verify_from_signals_type_check_failure() {
+        let engine = test_engine();
+        let spec = SpecificationSnapshot::new("Implement feature".to_string());
+        let task_id = Uuid::new_v4();
+
+        let signals = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: false,
+                error_count: 2,
+                errors: vec!["expected String, found i32".to_string()],
+            }),
+            ..OverseerSignals::default()
+        };
+
+        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.6);
+
+        let tc_gap = result.gaps.iter().find(|g| g.description.contains("Type check")).unwrap();
+        assert_eq!(tc_gap.severity, GapSeverity::Major);
+        assert!(tc_gap.suggested_action.as_ref().unwrap().contains("expected String"));
+        // Major gap => partial
+        assert_eq!(result.satisfaction, "partial");
+    }
+
+    // -----------------------------------------------------------------------
+    // measure (public delegation) test
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_measure_delegates_to_overseer_measurer() {
+        let expected_signals = signals_with_tests(8, 10);
+        let engine = ConvergenceEngine::new(
+            Arc::new(MockTrajectoryRepo::new()),
+            Arc::new(MockMemoryRepo::new()),
+            Arc::new(MockOverseerMeasurer::with_signals(expected_signals.clone())),
+            test_config(),
+        );
+
+        let artifact = test_artifact(0);
+        let policy = test_policy();
+
+        let signals = engine.measure(&artifact, &policy).await.unwrap();
+
+        // Verify delegation by checking returned signals match what the mock provides
+        assert_eq!(
+            signals.test_results.as_ref().unwrap().passed,
+            expected_signals.test_results.as_ref().unwrap().passed,
+        );
+        assert_eq!(
+            signals.test_results.as_ref().unwrap().failed,
+            expected_signals.test_results.as_ref().unwrap().failed,
+        );
     }
 }

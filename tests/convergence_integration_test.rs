@@ -367,7 +367,7 @@ async fn test_build_convergent_prompt_includes_strategy_context() {
     trajectory.observations.push(obs);
 
     // Test RetryWithFeedback -- should include previous attempt feedback
-    let prompt = build_convergent_prompt(&task, &trajectory, &StrategyKind::RetryWithFeedback);
+    let prompt = build_convergent_prompt(&task, &trajectory, &StrategyKind::RetryWithFeedback, None);
     assert!(
         prompt.contains("Implement frobnicator"),
         "Prompt should include the specification content"
@@ -399,21 +399,21 @@ async fn test_build_convergent_prompt_includes_strategy_context() {
 
     // Test IncrementalRefinement -- should include refinement instructions
     let prompt =
-        build_convergent_prompt(&task, &trajectory, &StrategyKind::IncrementalRefinement);
+        build_convergent_prompt(&task, &trajectory, &StrategyKind::IncrementalRefinement, None);
     assert!(
         prompt.contains("partially correct"),
         "IncrementalRefinement should include refinement guidance"
     );
 
     // Test Reframe -- should include reframe instructions
-    let prompt = build_convergent_prompt(&task, &trajectory, &StrategyKind::Reframe);
+    let prompt = build_convergent_prompt(&task, &trajectory, &StrategyKind::Reframe, None);
     assert!(
         prompt.contains("Reconsider the approach"),
         "Reframe should include reconsideration guidance"
     );
 
     // Test Decompose -- should include decomposition instructions
-    let prompt = build_convergent_prompt(&task, &trajectory, &StrategyKind::Decompose);
+    let prompt = build_convergent_prompt(&task, &trajectory, &StrategyKind::Decompose, None);
     assert!(
         prompt.contains("Break it into"),
         "Decompose should include decomposition guidance"
@@ -1085,7 +1085,7 @@ async fn test_build_convergent_prompt_fresh_start() {
 
     let strategy = StrategyKind::FreshStart { carry_forward };
 
-    let prompt = build_convergent_prompt(&task, &trajectory, &strategy);
+    let prompt = build_convergent_prompt(&task, &trajectory, &strategy, None);
 
     // Should include the "Start fresh" preamble
     assert!(
@@ -1164,7 +1164,7 @@ async fn test_build_convergent_prompt_alternative_approach() {
         false,
     ));
 
-    let prompt = build_convergent_prompt(&task, &trajectory, &StrategyKind::AlternativeApproach);
+    let prompt = build_convergent_prompt(&task, &trajectory, &StrategyKind::AlternativeApproach, None);
 
     // Should include the "Previous approaches" header
     assert!(
@@ -1256,7 +1256,7 @@ async fn test_build_convergent_prompt_focused_repair() {
     );
     trajectory.observations.push(obs);
 
-    let prompt = build_convergent_prompt(&task, &trajectory, &StrategyKind::FocusedRepair);
+    let prompt = build_convergent_prompt(&task, &trajectory, &StrategyKind::FocusedRepair, None);
 
     // Should include the "Focus on fixing" header
     assert!(

@@ -32,7 +32,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::models::intent_verification::IntentGap;
+use crate::domain::models::intent_verification::{IntentGap, IntentVerificationResult};
 
 use super::*;
 
@@ -572,6 +572,23 @@ impl VerificationResult {
     /// implicit (unstated requirements) are treated as ambiguity indicators.
     pub fn has_ambiguity_gaps(&self) -> bool {
         self.gaps.iter().any(|g| g.is_implicit)
+    }
+}
+
+impl From<&IntentVerificationResult> for VerificationResult {
+    /// Lossy conversion from the rich `IntentVerificationResult` into the
+    /// lightweight `VerificationResult` stored on observations.
+    ///
+    /// Combines explicit and implicit gaps into a single list. Rich data
+    /// (reprompt guidance, escalation info) is consumed at the orchestrator
+    /// layer before this conversion happens for storage.
+    fn from(ivr: &IntentVerificationResult) -> Self {
+        let gaps: Vec<IntentGap> = ivr.all_gaps().cloned().collect();
+        Self {
+            satisfaction: ivr.satisfaction.as_str().to_string(),
+            confidence: ivr.confidence,
+            gaps,
+        }
     }
 }
 

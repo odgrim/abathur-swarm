@@ -22,6 +22,7 @@
 //! but the goal itself is never "verified as complete."
 
 use std::sync::Arc;
+use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
@@ -831,6 +832,55 @@ where
                 })
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ConvergentIntentVerifier trait implementation
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl<G, T> crate::services::swarm_orchestrator::convergent_execution::ConvergentIntentVerifier
+    for IntentVerifierService<G, T>
+where
+    G: GoalRepository + 'static,
+    T: TaskRepository + 'static,
+{
+    async fn verify_convergent_intent(
+        &self,
+        task: &crate::domain::models::task::Task,
+        goal_id: Option<Uuid>,
+        iteration: u32,
+    ) -> DomainResult<Option<IntentVerificationResult>> {
+        // Try to extract intent from the goal first (richer context),
+        // then fall back to the task description.
+        let intent = if let Some(gid) = goal_id {
+            match self.extract_guiding_intent(gid).await {
+                Ok(intent) => intent,
+                Err(e) => {
+                    tracing::debug!(
+                        task_id = %task.id,
+                        goal_id = %gid,
+                        error = %e,
+                        "Could not extract guiding intent from goal; falling back to task"
+                    );
+                    OriginalIntent::from_task(task.id, &task.description)
+                }
+            }
+        } else {
+            OriginalIntent::from_task(task.id, &task.description)
+        };
+
+        // Skip verification if the intent is empty (no meaningful description)
+        if intent.original_text.trim().is_empty() {
+            return Ok(None);
+        }
+
+        let result = self
+            .verify_intent(&intent, &[task.clone()], iteration)
+            .await?;
+
+        Ok(Some(result))
     }
 }
 

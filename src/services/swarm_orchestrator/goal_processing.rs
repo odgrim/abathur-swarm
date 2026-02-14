@@ -480,6 +480,14 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let convergence_engine_config = self.convergence_engine_config.clone();
             let memory_repo = self.memory_repo.clone();
 
+            // Cast the generic IntentVerifierService to the trait object for
+            // convergent execution. This erases the <G, T> generics.
+            let convergent_intent_verifier: Option<
+                std::sync::Arc<dyn super::convergent_execution::ConvergentIntentVerifier>,
+            > = self.intent_verifier.as_ref().map(|iv| {
+                Arc::clone(iv) as Arc<dyn super::convergent_execution::ConvergentIntentVerifier>
+            });
+
             tokio::spawn(async move {
                 let _permit = permit;
 
@@ -588,6 +596,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         repo_path.display(),
                                         task_id
                                     ),
+                                    convergent_intent_verifier.clone(),
                                 )
                                 .await
                             } else {
@@ -610,6 +619,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     max_turns,
                                     cancellation_token,
                                     deadline,
+                                    convergent_intent_verifier.clone(),
                                 )
                                 .await
                             }
@@ -628,6 +638,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 max_turns,
                                 cancellation_token,
                                 deadline,
+                                convergent_intent_verifier,
                             )
                             .await
                         };

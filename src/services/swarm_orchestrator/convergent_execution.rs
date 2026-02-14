@@ -27,11 +27,15 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::convergence::*;
+use crate::domain::models::intent_verification::{
+    GapSeverity, IntentSatisfaction, IntentVerificationResult,
+};
 use crate::domain::models::task::Task;
 use crate::domain::models::{SubstrateConfig, SubstrateRequest};
 use crate::domain::ports::{MemoryRepository, Substrate, TaskRepository, TrajectoryRepository};
@@ -39,6 +43,28 @@ use crate::services::convergence_bridge;
 use crate::services::convergence_engine::{ConvergenceEngine, OverseerMeasurer};
 use crate::services::event_bus::{EventBus, EventPayload, EventSeverity};
 use crate::services::event_factory;
+
+// ---------------------------------------------------------------------------
+// ConvergentIntentVerifier trait
+// ---------------------------------------------------------------------------
+
+/// Trait that erases the `<G, T>` generics from `IntentVerifierService`,
+/// letting all convergent execution functions accept
+/// `Option<Arc<dyn ConvergentIntentVerifier>>` without new type parameters.
+#[async_trait]
+pub trait ConvergentIntentVerifier: Send + Sync {
+    /// Run LLM-based intent verification for a convergent task.
+    ///
+    /// Returns `Ok(Some(result))` when verification succeeds, `Ok(None)` if
+    /// no intent can be extracted (e.g. no goal_id and task has no meaningful
+    /// description), or `Err` on infrastructure failure.
+    async fn verify_convergent_intent(
+        &self,
+        task: &Task,
+        goal_id: Option<Uuid>,
+        iteration: u32,
+    ) -> DomainResult<Option<IntentVerificationResult>>;
+}
 
 // ---------------------------------------------------------------------------
 // ConvergentOutcome
@@ -108,6 +134,7 @@ pub async fn run_convergent_execution<T, Tr, M, O>(
     max_turns: u32,
     cancellation_token: CancellationToken,
     deadline: Option<chrono::DateTime<chrono::Utc>>,
+    intent_verifier: Option<Arc<dyn ConvergentIntentVerifier>>,
 ) -> DomainResult<ConvergentOutcome>
 where
     T: TaskRepository + 'static,
@@ -119,10 +146,7 @@ where
     // 1. PREPARE -- Create or resume a trajectory (Part 4.2)
     // -----------------------------------------------------------------------
 
-    let (mut trajectory, _infrastructure, mut bandit) = if let Some(tid) = task.trajectory_id {
-        // Resume existing trajectory on retry. The trajectory already
-        // contains the full history of observations, attractor state, and
-        // bandit learning. The retry continues from where it left off.
+    let (mut trajectory, _infrastructure, bandit) = if let Some(tid) = task.trajectory_id {
         let loaded = trajectory_store
             .get(&tid.to_string())
             .await?
@@ -136,11 +160,9 @@ where
         let bandit = engine.initialize_bandit(&loaded).await;
         (loaded, None, bandit)
     } else {
-        // First run: prepare from scratch.
         let submission = convergence_bridge::task_to_submission(task, goal_id);
         let (trajectory, infrastructure) = engine.prepare(&submission).await?;
 
-        // Link the trajectory back to the task for observability and retry
         if let Ok(Some(mut t)) = task_repo.get(task.id).await {
             t.trajectory_id = Some(trajectory.id);
             let _ = task_repo.update(&t).await;
@@ -181,339 +203,28 @@ where
     // Transition to iterating phase
     trajectory.phase = ConvergencePhase::Iterating;
 
-    // Part 7.1: Track previous attractor classification for transition detection
-    let mut prev_attractor = trajectory.attractor_state.classification.clone();
-
     // -----------------------------------------------------------------------
-    // 2. ITERATE -- Main convergence loop
+    // 2. Delegate to the shared inner loop
     // -----------------------------------------------------------------------
 
-    loop {
-        // 2a. Check cancellation token (Part 4.4)
-        //
-        // Checked at the top of each iteration. If cancelled, persist the
-        // trajectory in its current state and return Cancelled. The caller
-        // handles the task status transition.
-        if cancellation_token.is_cancelled() {
-            trajectory_store.save(&trajectory).await?;
-            emit_convergence_terminated(
-                event_bus, task, goal_id, &trajectory, "cancelled",
-            ).await;
-            return Ok(ConvergentOutcome::Cancelled);
-        }
-
-        // 2a'. SLA pressure consumption (Part 8.2)
-        //
-        // The ConvergenceSLAPressureHandler adds "sla:warning" or "sla:critical"
-        // hints to the persisted task. Re-read the task to check for these hints
-        // and adjust the convergence policy accordingly.
-        if let Ok(Some(current_task)) = task_repo.get(task.id).await {
-            apply_sla_pressure(&current_task.context.hints, &mut trajectory.policy);
-        }
-
-        // 2b. Select strategy
-        //
-        // Use forced strategy if set (e.g. fresh start from context degradation),
-        // otherwise run the eligibility filter + bandit selection.
-        let strategy = if let Some(forced) = trajectory.forced_strategy.take() {
-            forced
-        } else {
-            let eligible = eligible_strategies(
-                &trajectory.strategy_log,
-                &trajectory.attractor_state,
-                &trajectory.budget,
-                trajectory.total_fresh_starts,
-                trajectory.policy.max_fresh_starts,
-            );
-            if eligible.is_empty() {
-                // No strategies available -- trapped
-                let outcome = ConvergenceOutcome::Trapped {
-                    trajectory_id: trajectory.id.to_string(),
-                    attractor_type: trajectory.attractor_state.classification.clone(),
-                };
-                engine.finalize(&mut trajectory, &outcome, &bandit).await?;
-                emit_convergence_terminated(
-                    event_bus, task, goal_id, &trajectory, "trapped",
-                ).await;
-                return Ok(ConvergentOutcome::Failed(format!(
-                    "trapped in {:?} attractor -- no eligible escape strategies",
-                    trajectory.attractor_state.classification
-                )));
-            }
-            bandit.select(
-                &trajectory.attractor_state.classification,
-                &eligible,
-                &trajectory.policy,
-            )
-        };
-
-        // Part 7.1: Strategy escalation check
-        // ArchitectReview and Decompose are high-impact strategies that
-        // may warrant human oversight before execution.
-        if matches!(&strategy, StrategyKind::ArchitectReview | StrategyKind::Decompose) {
-            event_bus.publish(event_factory::make_event(
-                EventSeverity::Warning,
-                crate::services::event_bus::EventCategory::Convergence,
-                goal_id,
-                Some(task.id),
-                EventPayload::HumanEscalationNeeded {
-                    goal_id,
-                    task_id: Some(task.id),
-                    reason: format!(
-                        "Convergence engine selected {} strategy for task {}",
-                        strategy.kind_name(), task.id
-                    ),
-                    urgency: "medium".to_string(),
-                    is_blocking: false,
-                },
-            )).await;
-        }
-
-        // 2c. FreshStart worktree reset (Part 3.7)
-        //
-        // When the selected strategy is FreshStart, reset the worktree to
-        // the base branch state before substrate invocation. This provides
-        // a clean slate while preserving the worktree allocation. The
-        // carry-forward context in the prompt provides the agent with
-        // learnings from previous attempts without polluting the working tree.
-        if matches!(strategy, StrategyKind::FreshStart { .. }) {
-            trajectory.total_fresh_starts += 1;
-            if let Some(wt) = worktree_path {
-                reset_worktree(wt).await?;
-            }
-            event_bus.publish(event_factory::make_event(
-                EventSeverity::Info,
-                crate::services::event_bus::EventCategory::Convergence,
-                goal_id,
-                Some(task.id),
-                EventPayload::ConvergenceFreshStart {
-                    task_id: task.id,
-                    trajectory_id: trajectory.id,
-                    fresh_start_number: trajectory.total_fresh_starts,
-                    reason: "FreshStart strategy selected".to_string(),
-                },
-            )).await;
-        }
-
-        // 2d. Build a convergent prompt from task + trajectory + strategy
-        let prompt = convergence_bridge::build_convergent_prompt(task, &trajectory, &strategy);
-
-        // 2e. Execute one substrate invocation with wall-time tracking
-        let mut config = SubstrateConfig::default().with_max_turns(max_turns);
-        if let Some(wt) = worktree_path {
-            config = config.with_working_dir(wt);
-        }
-        let request = SubstrateRequest::new(
-            task.id,
-            agent_type,
-            system_prompt,
-            &prompt,
-        ).with_config(config);
-
-        let iteration_start = Instant::now();
-        let session = substrate.execute(request).await?;
-        let wall_time_ms = iteration_start.elapsed().as_millis() as u64;
-
-        // 2f. Collect artifact reference from the worktree
-        let artifact = convergence_bridge::collect_artifact(
-            worktree_path.unwrap_or("."),
-            "", // content hash will be computed by overseers if needed
-        );
-
-        // 2g. Build the observation
-        let tokens_used = session.total_tokens();
-        let sequence = trajectory.observations.len() as u32;
-
-        let observation = Observation::new(
-            sequence,
-            artifact,
-            OverseerSignals::default(), // overseers run inside iterate_once via engine
-            strategy.clone(),
-            tokens_used,
-            wall_time_ms,
-        );
-
-        // 2h. Delegate to the engine's iterate_once: computes metrics,
-        // classifies attractor, updates bandit, persists trajectory,
-        // and returns loop control.
-        let loop_control = engine
-            .iterate_once(&mut trajectory, &mut bandit, &strategy, observation)
-            .await?;
-
-        // Part 7.1: Attractor transition detection
-        let current_attractor = &trajectory.attractor_state.classification;
-        if attractor_type_label(current_attractor) != attractor_type_label(&prev_attractor) {
-            event_bus.publish(event_factory::make_event(
-                EventSeverity::Info,
-                crate::services::event_bus::EventCategory::Convergence,
-                goal_id,
-                Some(task.id),
-                EventPayload::ConvergenceAttractorTransition {
-                    task_id: task.id,
-                    trajectory_id: trajectory.id,
-                    from: attractor_type_label(&prev_attractor).to_string(),
-                    to: attractor_type_label(current_attractor).to_string(),
-                    confidence: trajectory.attractor_state.confidence,
-                },
-            )).await;
-            prev_attractor = current_attractor.clone();
-        }
-
-        // 2i. Emit iteration event
-        let (delta, level) = trajectory
-            .observations
-            .last()
-            .and_then(|o| o.metrics.as_ref())
-            .map(|m| (m.convergence_delta, m.convergence_level))
-            .unwrap_or((0.0, 0.0));
-
-        event_bus.publish(event_factory::make_event(
-            EventSeverity::Info,
-            crate::services::event_bus::EventCategory::Convergence,
-            goal_id,
-            Some(task.id),
-            EventPayload::ConvergenceIteration {
-                task_id: task.id,
-                trajectory_id: trajectory.id,
-                iteration: sequence,
-                strategy: strategy.kind_name().to_string(),
-                convergence_delta: delta,
-                convergence_level: level,
-                attractor_type: attractor_type_label(
-                    &trajectory.attractor_state.classification,
-                ).to_string(),
-                budget_remaining_fraction: trajectory.budget.remaining_fraction(),
-            },
-        )).await;
-
-        // 2j. Act on loop control
-        match loop_control {
-            LoopControl::Continue => {
-                // Keep iterating
-                continue;
-            }
-            LoopControl::Converged => {
-                let final_seq = trajectory
-                    .observations
-                    .last()
-                    .map(|o| o.sequence)
-                    .unwrap_or(0);
-                let outcome = ConvergenceOutcome::Converged {
-                    trajectory_id: trajectory.id.to_string(),
-                    final_observation_sequence: final_seq,
-                };
-                engine.finalize(&mut trajectory, &outcome, &bandit).await?;
-                emit_convergence_terminated(
-                    event_bus, task, goal_id, &trajectory, "converged",
-                ).await;
-                return Ok(ConvergentOutcome::Converged);
-            }
-            LoopControl::Exhausted => {
-                // Check partial acceptance policy
-                let accept_partial = if trajectory.policy.partial_acceptance {
-                    trajectory
-                        .best_observation()
-                        .and_then(|o| o.metrics.as_ref())
-                        .map(|m| m.convergence_level >= trajectory.policy.partial_threshold)
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
-
-                let best_seq = trajectory.best_observation().map(|o| o.sequence);
-                let outcome = if accept_partial {
-                    ConvergenceOutcome::Converged {
-                        trajectory_id: trajectory.id.to_string(),
-                        final_observation_sequence: best_seq.unwrap_or(0),
-                    }
-                } else {
-                    ConvergenceOutcome::Exhausted {
-                        trajectory_id: trajectory.id.to_string(),
-                        best_observation_sequence: best_seq,
-                    }
-                };
-                engine.finalize(&mut trajectory, &outcome, &bandit).await?;
-                emit_convergence_terminated(
-                    event_bus, task, goal_id, &trajectory, "exhausted",
-                ).await;
-                return Ok(if accept_partial {
-                    ConvergentOutcome::PartialAccepted
-                } else {
-                    ConvergentOutcome::Failed(
-                        "convergence budget exhausted without reaching acceptance threshold"
-                            .to_string(),
-                    )
-                });
-            }
-            LoopControl::Trapped => {
-                let outcome = ConvergenceOutcome::Trapped {
-                    trajectory_id: trajectory.id.to_string(),
-                    attractor_type: trajectory.attractor_state.classification.clone(),
-                };
-                engine.finalize(&mut trajectory, &outcome, &bandit).await?;
-                emit_convergence_terminated(
-                    event_bus, task, goal_id, &trajectory, "trapped",
-                ).await;
-                return Ok(ConvergentOutcome::Failed(format!(
-                    "trapped in {} attractor",
-                    attractor_type_label(&trajectory.attractor_state.classification),
-                )));
-            }
-            LoopControl::Decompose => {
-                emit_convergence_terminated(
-                    event_bus, task, goal_id, &trajectory, "decomposed",
-                ).await;
-                return Ok(ConvergentOutcome::Decomposed(trajectory));
-            }
-            LoopControl::RequestExtension => {
-                let additional_iterations = 3u32;
-                let additional_tokens = (trajectory.budget.max_tokens as f64 * 0.3) as u64;
-
-                if engine.request_extension(&mut trajectory).await? {
-                    // Extension granted -- emit event and continue iterating
-                    event_bus.publish(event_factory::make_event(
-                        EventSeverity::Info,
-                        crate::services::event_bus::EventCategory::Convergence,
-                        goal_id,
-                        Some(task.id),
-                        EventPayload::ConvergenceBudgetExtension {
-                            task_id: task.id,
-                            trajectory_id: trajectory.id,
-                            granted: true,
-                            additional_iterations,
-                            additional_tokens,
-                        },
-                    )).await;
-                    continue;
-                } else {
-                    event_bus.publish(event_factory::make_event(
-                        EventSeverity::Warning,
-                        crate::services::event_bus::EventCategory::Convergence,
-                        goal_id,
-                        Some(task.id),
-                        EventPayload::ConvergenceBudgetExtension {
-                            task_id: task.id,
-                            trajectory_id: trajectory.id,
-                            granted: false,
-                            additional_iterations: 0,
-                            additional_tokens: 0,
-                        },
-                    )).await;
-
-                    let outcome = ConvergenceOutcome::BudgetDenied {
-                        trajectory_id: trajectory.id.to_string(),
-                    };
-                    engine.finalize(&mut trajectory, &outcome, &bandit).await?;
-                    emit_convergence_terminated(
-                        event_bus, task, goal_id, &trajectory, "budget_denied",
-                    ).await;
-                    return Ok(ConvergentOutcome::Failed(
-                        "budget extension denied".to_string(),
-                    ));
-                }
-            }
-        }
-    }
+    run_convergent_execution_inner(
+        task,
+        goal_id,
+        substrate,
+        task_repo,
+        trajectory_store,
+        engine,
+        event_bus,
+        agent_type,
+        system_prompt,
+        worktree_path,
+        max_turns,
+        cancellation_token,
+        trajectory,
+        bandit,
+        intent_verifier,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -553,6 +264,7 @@ pub async fn run_parallel_convergent_execution<T, Tr, M, O>(
     parallel_samples: u32,
     base_branch: &str,
     worktree_base_dir: &str,
+    intent_verifier: Option<Arc<dyn ConvergentIntentVerifier>>,
 ) -> DomainResult<ConvergentOutcome>
 where
     T: TaskRepository + 'static,
@@ -663,6 +375,7 @@ where
             task,
             &sample_trajectories[i],
             &strategy,
+            None, // Phase 1: no LLM verification yet
         );
 
         let strategy_clone = strategy.clone();
@@ -728,11 +441,25 @@ where
 
     for result in &results {
         if let Some((idx, strategy, artifact, tokens_used, wall_time_ms)) = result {
+            // Measure with overseers (Part 5)
+            let overseer_signals = engine
+                .measure(artifact, &sample_trajectories[*idx].policy)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        sample = *idx,
+                        error = %e,
+                        "Overseer measurement failed for parallel sample {}; using empty signals",
+                        *idx
+                    );
+                    OverseerSignals::default()
+                });
+
             let sequence = sample_trajectories[*idx].observations.len() as u32;
             let observation = Observation::new(
                 sequence,
                 artifact.clone(),
-                OverseerSignals::default(),
+                overseer_signals,
                 strategy.clone(),
                 *tokens_used,
                 *wall_time_ms,
@@ -829,6 +556,7 @@ where
 
     // Delegate to the standard sequential loop for the remaining budget.
     // We pass the winning worktree path and let the sequential loop run.
+    // Phase 2 uses LLM intent verification.
     run_convergent_execution_inner(
         task,
         goal_id,
@@ -844,6 +572,7 @@ where
         cancellation_token,
         trajectory,
         bandit,
+        intent_verifier,
     )
     .await
 }
@@ -872,6 +601,7 @@ async fn run_convergent_execution_inner<T2, Tr, M, O>(
     cancellation_token: CancellationToken,
     mut trajectory: Trajectory,
     mut bandit: StrategyBandit,
+    intent_verifier: Option<Arc<dyn ConvergentIntentVerifier>>,
 ) -> DomainResult<ConvergentOutcome>
 where
     T2: TaskRepository + 'static,
@@ -881,6 +611,10 @@ where
 {
     // Part 7.1: Track previous attractor classification for transition detection
     let mut prev_attractor = trajectory.attractor_state.classification.clone();
+
+    // LLM intent verification state -- carried across iterations so the
+    // prompt builder can include feedback from the most recent verification.
+    let mut last_intent_verification: Option<IntentVerificationResult> = None;
 
     loop {
         // Check cancellation
@@ -930,8 +664,6 @@ where
         };
 
         // Part 7.1: Strategy escalation check
-        // ArchitectReview and Decompose are high-impact strategies that
-        // may warrant human oversight before execution.
         if matches!(&strategy, StrategyKind::ArchitectReview | StrategyKind::Decompose) {
             event_bus.publish(event_factory::make_event(
                 EventSeverity::Warning,
@@ -971,8 +703,13 @@ where
             )).await;
         }
 
-        // Build prompt and execute substrate
-        let prompt = convergence_bridge::build_convergent_prompt(task, &trajectory, &strategy);
+        // Build prompt with optional intent verification feedback
+        let prompt = convergence_bridge::build_convergent_prompt(
+            task,
+            &trajectory,
+            &strategy,
+            last_intent_verification.as_ref(),
+        );
 
         let mut config = SubstrateConfig::default().with_max_turns(max_turns);
         if let Some(wt) = worktree_path {
@@ -994,13 +731,26 @@ where
             "",
         );
 
+        // Measure with overseers (Part 5)
+        let overseer_signals = engine
+            .measure(&artifact, &trajectory.policy)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %e,
+                    "Overseer measurement failed; using empty signals"
+                );
+                OverseerSignals::default()
+            });
+
         let tokens_used = session.total_tokens();
         let sequence = trajectory.observations.len() as u32;
 
         let observation = Observation::new(
             sequence,
             artifact,
-            OverseerSignals::default(),
+            overseer_signals,
             strategy.clone(),
             tokens_used,
             wall_time_ms,
@@ -1058,8 +808,139 @@ where
 
         // Act on loop control
         match loop_control {
-            LoopControl::Continue => continue,
+            LoopControl::Continue => {
+                // -----------------------------------------------------------
+                // Periodic intent verification (on Continue iterations)
+                // -----------------------------------------------------------
+                if let Some(ref verifier) = intent_verifier {
+                    if engine.should_verify(&trajectory) {
+                        match verifier.verify_convergent_intent(task, goal_id, sequence).await {
+                            Ok(Some(ivr)) => {
+                                tracing::info!(
+                                    task_id = %task.id,
+                                    satisfaction = %ivr.satisfaction.as_str(),
+                                    confidence = ivr.confidence,
+                                    gaps = ivr.gaps.len() + ivr.implicit_gaps.len(),
+                                    "Periodic intent verification (iteration {})",
+                                    sequence,
+                                );
+
+                                // Apply specification amendments for Major/Critical gaps
+                                apply_verification_amendments(&ivr, &mut trajectory);
+
+                                // Emit verification event
+                                emit_intent_verification_event(
+                                    event_bus, task, goal_id, &ivr,
+                                ).await;
+
+                                // Check if escalation is needed
+                                if let Some(ref escalation) = ivr.escalation {
+                                    emit_escalation_from_verification(
+                                        event_bus, task, goal_id, escalation,
+                                    ).await;
+                                } else if let Some(auto_escalation) = ivr.should_escalate() {
+                                    emit_escalation_from_verification(
+                                        event_bus, task, goal_id, &auto_escalation,
+                                    ).await;
+                                }
+
+                                // Store for next iteration's prompt enrichment
+                                last_intent_verification = Some(ivr);
+                            }
+                            Ok(None) => {
+                                // No intent extractable -- skip
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    task_id = %task.id,
+                                    error = %e,
+                                    "Periodic intent verification failed; continuing without"
+                                );
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             LoopControl::Converged => {
+                // -----------------------------------------------------------
+                // Convergence gate: LLM intent verification before accepting
+                // -----------------------------------------------------------
+                if let Some(ref verifier) = intent_verifier {
+                    match verifier.verify_convergent_intent(task, goal_id, sequence).await {
+                        Ok(Some(ivr)) => {
+                            tracing::info!(
+                                task_id = %task.id,
+                                satisfaction = %ivr.satisfaction.as_str(),
+                                confidence = ivr.confidence,
+                                gaps = ivr.gaps.len() + ivr.implicit_gaps.len(),
+                                "Convergence gate intent verification",
+                            );
+
+                            emit_intent_verification_event(
+                                event_bus, task, goal_id, &ivr,
+                            ).await;
+
+                            match ivr.satisfaction {
+                                IntentSatisfaction::Satisfied => {
+                                    // Intent satisfied -- proceed with convergence
+                                    tracing::info!(
+                                        task_id = %task.id,
+                                        "Intent verification confirmed convergence"
+                                    );
+                                }
+                                IntentSatisfaction::Partial | IntentSatisfaction::Unsatisfied => {
+                                    // Intent NOT satisfied -- override convergence
+                                    tracing::warn!(
+                                        task_id = %task.id,
+                                        satisfaction = %ivr.satisfaction.as_str(),
+                                        "Intent verification overriding convergence: work does not satisfy intent"
+                                    );
+
+                                    // Apply specification amendments
+                                    apply_verification_amendments(&ivr, &mut trajectory);
+
+                                    // Check escalation
+                                    if let Some(ref escalation) = ivr.escalation {
+                                        emit_escalation_from_verification(
+                                            event_bus, task, goal_id, escalation,
+                                        ).await;
+                                    } else if let Some(auto_escalation) = ivr.should_escalate() {
+                                        emit_escalation_from_verification(
+                                            event_bus, task, goal_id, &auto_escalation,
+                                        ).await;
+                                    }
+
+                                    // Store for next iteration's prompt
+                                    last_intent_verification = Some(ivr);
+
+                                    // Continue iterating instead of converging
+                                    continue;
+                                }
+                                IntentSatisfaction::Indeterminate => {
+                                    // Can't determine -- proceed with convergence
+                                    // (graceful degradation on ambiguous result)
+                                    tracing::warn!(
+                                        task_id = %task.id,
+                                        "Intent verification indeterminate; proceeding with convergence"
+                                    );
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            // No intent extractable -- proceed
+                        }
+                        Err(e) => {
+                            // Graceful degradation -- proceed with convergence
+                            tracing::warn!(
+                                task_id = %task.id,
+                                error = %e,
+                                "Intent verification failed at convergence gate; proceeding with convergence"
+                            );
+                        }
+                    }
+                }
+
                 let final_seq = trajectory
                     .observations
                     .last()
@@ -1179,6 +1060,83 @@ where
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Intent verification helpers
+// ---------------------------------------------------------------------------
+
+/// Convert Major/Critical gaps from an intent verification result into
+/// specification amendments on the trajectory.
+///
+/// This enriches the effective specification so that subsequent iterations
+/// see the discovered requirements. Minor and Moderate gaps are left as
+/// prompt-level feedback only (via `last_intent_verification`).
+fn apply_verification_amendments(
+    ivr: &IntentVerificationResult,
+    trajectory: &mut Trajectory,
+) {
+    for gap in ivr.all_gaps() {
+        if gap.severity >= GapSeverity::Major {
+            let amendment = SpecificationAmendment::new(
+                AmendmentSource::ImplicitRequirementDiscovered,
+                &gap.description,
+                gap.suggested_action
+                    .as_deref()
+                    .unwrap_or("Discovered via intent verification"),
+            );
+            trajectory.specification.add_amendment(amendment);
+        }
+    }
+}
+
+/// Emit an `IntentVerificationResult` event to the event bus.
+async fn emit_intent_verification_event(
+    event_bus: &Arc<EventBus>,
+    task: &Task,
+    goal_id: Option<Uuid>,
+    ivr: &IntentVerificationResult,
+) {
+    let should_continue = ivr.satisfaction.should_retry();
+    event_bus.publish(event_factory::make_event(
+        EventSeverity::Info,
+        crate::services::event_bus::EventCategory::Convergence,
+        goal_id,
+        Some(task.id),
+        EventPayload::IntentVerificationResult {
+            satisfaction: ivr.satisfaction.as_str().to_string(),
+            confidence: ivr.confidence,
+            gaps_count: ivr.gaps.len() + ivr.implicit_gaps.len(),
+            iteration: ivr.iteration,
+            should_continue,
+        },
+    )).await;
+}
+
+/// Emit a `HumanEscalationNeeded` event triggered by intent verification.
+async fn emit_escalation_from_verification(
+    event_bus: &Arc<EventBus>,
+    task: &Task,
+    goal_id: Option<Uuid>,
+    escalation: &crate::domain::models::HumanEscalation,
+) {
+    let is_blocking = matches!(
+        escalation.urgency,
+        crate::domain::models::intent_verification::EscalationUrgency::Blocking,
+    );
+    event_bus.publish(event_factory::make_event(
+        EventSeverity::Warning,
+        crate::services::event_bus::EventCategory::Convergence,
+        goal_id,
+        Some(task.id),
+        EventPayload::HumanEscalationNeeded {
+            goal_id,
+            task_id: Some(task.id),
+            reason: escalation.reason.clone(),
+            urgency: format!("{:?}", escalation.urgency).to_lowercase(),
+            is_blocking,
+        },
+    )).await;
 }
 
 // ---------------------------------------------------------------------------

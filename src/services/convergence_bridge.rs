@@ -16,6 +16,7 @@ use crate::domain::models::convergence::{
     OverseerSignals, PriorityHint, Reference, ReferenceType, StrategyEntry,
     StrategyKind, TaskSubmission, Trajectory,
 };
+use crate::domain::models::intent_verification::IntentVerificationResult;
 use crate::domain::models::task::{Complexity, ExecutionMode, Task, TaskPriority};
 use crate::domain::ports::{StrategyStats, TrajectoryRepository};
 use crate::services::swarm_orchestrator::types::SwarmConfig;
@@ -91,6 +92,7 @@ pub fn build_convergent_prompt(
     task: &Task,
     trajectory: &Trajectory,
     strategy: &StrategyKind,
+    last_verification: Option<&IntentVerificationResult>,
 ) -> String {
     let mut sections = vec![];
 
@@ -201,6 +203,61 @@ pub fn build_convergent_prompt(
                 ));
             }
         }
+    }
+
+    // Intent verification feedback from previous LLM-based verification
+    if let Some(ivr) = last_verification {
+        let mut verification_section = String::new();
+        verification_section.push_str(&format!(
+            "## Intent Verification Feedback\n\n\
+             **Satisfaction**: {} (confidence: {:.0}%)\n",
+            ivr.satisfaction.as_str(),
+            ivr.confidence * 100.0,
+        ));
+
+        if !ivr.accomplishment_summary.is_empty() {
+            verification_section.push_str(&format!(
+                "**Assessment**: {}\n",
+                ivr.accomplishment_summary,
+            ));
+        }
+
+        if !ivr.gaps.is_empty() {
+            verification_section.push_str("\n**Explicit Gaps** (must address):\n");
+            for gap in &ivr.gaps {
+                let action = gap.suggested_action.as_deref().unwrap_or("no suggestion");
+                verification_section.push_str(&format!(
+                    "- [{}] {}: {}\n",
+                    gap.severity.as_str(),
+                    gap.description,
+                    action,
+                ));
+            }
+        }
+
+        if !ivr.implicit_gaps.is_empty() {
+            verification_section.push_str("\n**Implicit Gaps** (unstated but expected requirements):\n");
+            for gap in &ivr.implicit_gaps {
+                let rationale = gap.implicit_rationale.as_deref().unwrap_or("expected by convention");
+                verification_section.push_str(&format!(
+                    "- [{}] {}: {}\n",
+                    gap.severity.as_str(),
+                    gap.description,
+                    rationale,
+                ));
+            }
+        }
+
+        if let Some(ref guidance) = ivr.reprompt_guidance {
+            if !guidance.focus_areas.is_empty() {
+                verification_section.push_str("\n**Focus Areas** (prioritize these):\n");
+                for area in &guidance.focus_areas {
+                    verification_section.push_str(&format!("- {}\n", area));
+                }
+            }
+        }
+
+        sections.push(verification_section);
     }
 
     // Suppress the unused variable warning for `task` -- it is accepted for
