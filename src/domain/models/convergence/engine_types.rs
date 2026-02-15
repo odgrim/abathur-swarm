@@ -18,6 +18,8 @@ pub enum LoopControl {
     Continue,
     /// The trajectory has reached the acceptance threshold and passed verification.
     Converged,
+    /// Overseer signals suggest readiness — request intent verification for finality.
+    IntentCheck,
     /// The convergence budget has been fully consumed without converging.
     Exhausted,
     /// All escape strategies for a limit cycle have been exhausted.

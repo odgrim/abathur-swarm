@@ -58,11 +58,15 @@ pub trait ConvergentIntentVerifier: Send + Sync {
     /// Returns `Ok(Some(result))` when verification succeeds, `Ok(None)` if
     /// no intent can be extracted (e.g. no goal_id and task has no meaningful
     /// description), or `Err` on infrastructure failure.
+    ///
+    /// When `overseer_signals` is provided, the verifier includes a summary
+    /// of overseer state in the verification prompt as informational context.
     async fn verify_convergent_intent(
         &self,
         task: &Task,
         goal_id: Option<Uuid>,
         iteration: u32,
+        overseer_signals: Option<&OverseerSignals>,
     ) -> DomainResult<Option<IntentVerificationResult>>;
 }
 
@@ -814,7 +818,7 @@ where
                 // -----------------------------------------------------------
                 if let Some(ref verifier) = intent_verifier {
                     if engine.should_verify(&trajectory) {
-                        match verifier.verify_convergent_intent(task, goal_id, sequence).await {
+                        match verifier.verify_convergent_intent(task, goal_id, sequence, None).await {
                             Ok(Some(ivr)) => {
                                 tracing::info!(
                                     task_id = %task.id,
@@ -862,19 +866,26 @@ where
                 }
                 continue;
             }
-            LoopControl::Converged => {
+            LoopControl::IntentCheck => {
                 // -----------------------------------------------------------
-                // Convergence gate: LLM intent verification before accepting
+                // Intent-driven finality: overseer readiness met, ask verifier
                 // -----------------------------------------------------------
+                let overseer_signals = trajectory
+                    .observations
+                    .last()
+                    .map(|o| &o.overseer_signals);
+
                 if let Some(ref verifier) = intent_verifier {
-                    match verifier.verify_convergent_intent(task, goal_id, sequence).await {
+                    match verifier.verify_convergent_intent(
+                        task, goal_id, sequence, overseer_signals,
+                    ).await {
                         Ok(Some(ivr)) => {
                             tracing::info!(
                                 task_id = %task.id,
                                 satisfaction = %ivr.satisfaction.as_str(),
                                 confidence = ivr.confidence,
                                 gaps = ivr.gaps.len() + ivr.implicit_gaps.len(),
-                                "Convergence gate intent verification",
+                                "IntentCheck finality verification",
                             );
 
                             emit_intent_verification_event(
@@ -883,24 +894,23 @@ where
 
                             match ivr.satisfaction {
                                 IntentSatisfaction::Satisfied => {
-                                    // Intent satisfied -- proceed with convergence
+                                    // Intent satisfied -- finalize as converged
                                     tracing::info!(
                                         task_id = %task.id,
                                         "Intent verification confirmed convergence"
                                     );
+                                    // Fall through to finalize below
                                 }
                                 IntentSatisfaction::Partial | IntentSatisfaction::Unsatisfied => {
-                                    // Intent NOT satisfied -- override convergence
+                                    // Intent NOT satisfied -- keep iterating
                                     tracing::warn!(
                                         task_id = %task.id,
                                         satisfaction = %ivr.satisfaction.as_str(),
-                                        "Intent verification overriding convergence: work does not satisfy intent"
+                                        "Intent verification: work does not satisfy intent, continuing"
                                     );
 
-                                    // Apply specification amendments
                                     apply_verification_amendments(&ivr, &mut trajectory);
 
-                                    // Check escalation
                                     if let Some(ref escalation) = ivr.escalation {
                                         emit_escalation_from_verification(
                                             event_bus, task, goal_id, escalation,
@@ -911,36 +921,80 @@ where
                                         ).await;
                                     }
 
-                                    // Store for next iteration's prompt
                                     last_intent_verification = Some(ivr);
-
-                                    // Continue iterating instead of converging
                                     continue;
                                 }
                                 IntentSatisfaction::Indeterminate => {
-                                    // Can't determine -- proceed with convergence
-                                    // (graceful degradation on ambiguous result)
+                                    // Can't determine -- fall back to old overseer check
                                     tracing::warn!(
                                         task_id = %task.id,
-                                        "Intent verification indeterminate; proceeding with convergence"
+                                        "Intent verification indeterminate; falling back to overseer check"
                                     );
+                                    let (level, all_pass) = trajectory
+                                        .observations
+                                        .last()
+                                        .map(|o| {
+                                            let lvl = o.metrics.as_ref()
+                                                .map(|m| m.convergence_level)
+                                                .unwrap_or(0.0);
+                                            (lvl, o.overseer_signals.all_passing())
+                                        })
+                                        .unwrap_or((0.0, false));
+                                    if level >= trajectory.policy.acceptance_threshold && all_pass {
+                                        // Fall through to finalize
+                                    } else {
+                                        continue;
+                                    }
                                 }
                             }
                         }
                         Ok(None) => {
-                            // No intent extractable -- proceed
+                            // No intent extractable -- fall back to old overseer check
+                            let (level, all_pass) = trajectory
+                                .observations
+                                .last()
+                                .map(|o| {
+                                    let lvl = o.metrics.as_ref()
+                                        .map(|m| m.convergence_level)
+                                        .unwrap_or(0.0);
+                                    (lvl, o.overseer_signals.all_passing())
+                                })
+                                .unwrap_or((0.0, false));
+                            if !(level >= trajectory.policy.acceptance_threshold && all_pass) {
+                                continue;
+                            }
                         }
                         Err(e) => {
-                            // Graceful degradation -- proceed with convergence
+                            // Infrastructure failure -- continue iterating
+                            // (NOT silently accept convergence)
                             tracing::warn!(
                                 task_id = %task.id,
                                 error = %e,
-                                "Intent verification failed at convergence gate; proceeding with convergence"
+                                "Intent verification infrastructure failure; continuing iteration"
                             );
+                            continue;
                         }
+                    }
+                } else {
+                    // No intent verifier configured -- fall back to old
+                    // overseer-based convergence check for backward compat
+                    let (level, all_pass) = trajectory
+                        .observations
+                        .last()
+                        .map(|o| {
+                            let lvl = o.metrics.as_ref()
+                                .map(|m| m.convergence_level)
+                                .unwrap_or(0.0);
+                            (lvl, o.overseer_signals.all_passing())
+                        })
+                        .unwrap_or((0.0, false));
+                    if !(level >= trajectory.policy.acceptance_threshold && all_pass) {
+                        continue;
                     }
                 }
 
+                // Finalize as converged (reached via Satisfied, Indeterminate
+                // fallback, no-intent fallback, or no-verifier fallback)
                 let final_seq = trajectory
                     .observations
                     .last()
@@ -955,6 +1009,13 @@ where
                     event_bus, task, goal_id, &trajectory, "converged",
                 ).await;
                 return Ok(ConvergentOutcome::Converged);
+            }
+            LoopControl::Converged => {
+                // check_loop_control no longer returns Converged; IntentCheck
+                // replaced it. This arm exists for exhaustive matching.
+                unreachable!(
+                    "check_loop_control should return IntentCheck, not Converged"
+                );
             }
             LoopControl::Exhausted => {
                 let accept_partial = if trajectory.policy.partial_acceptance {

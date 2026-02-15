@@ -84,6 +84,15 @@ pub struct ConvergencePolicy {
     /// method adjusts both the policy and budget during SETUP.
     pub priority_hint: Option<PriorityHint>,
 
+    /// Convergence readiness threshold for triggering intent verification.
+    ///
+    /// When the hard-gate-free convergence readiness score exceeds this
+    /// threshold, the engine emits `LoopControl::IntentCheck` to request
+    /// an LLM-based intent verification for finality. Lower than
+    /// `acceptance_threshold` because it merely triggers "ask the intent
+    /// verifier" rather than declaring convergence outright.
+    pub intent_readiness_threshold: f64,
+
     /// Maximum total fresh starts before escalating.
     ///
     /// A fresh start discards the current trajectory and begins again from
@@ -104,6 +113,7 @@ impl Default for ConvergencePolicy {
             intent_verification_frequency: 2,
             prefer_cheap_strategies: false,
             priority_hint: None,
+            intent_readiness_threshold: 0.7,
             max_fresh_starts: 3,
         }
     }
@@ -146,6 +156,7 @@ impl PriorityHint {
     /// ## Fast
     /// - `budget.max_iterations` capped at 5 (takes the minimum of current and 5)
     /// - `policy.acceptance_threshold` set to 0.85
+    /// - `policy.intent_readiness_threshold` set to 0.6
     /// - `policy.skip_expensive_overseers` set to `true`
     /// - `policy.partial_acceptance` set to `true`
     /// - `policy.exploration_weight` set to 0.1
@@ -153,6 +164,7 @@ impl PriorityHint {
     /// ## Thorough
     /// - `budget.max_extensions` increased by 2
     /// - `policy.acceptance_threshold` set to 0.98
+    /// - `policy.intent_readiness_threshold` set to 0.8
     /// - `policy.skip_expensive_overseers` set to `false`
     /// - `policy.partial_acceptance` set to `false`
     /// - `policy.exploration_weight` set to 0.4
@@ -168,6 +180,7 @@ impl PriorityHint {
             PriorityHint::Fast => {
                 budget.max_iterations = budget.max_iterations.min(5);
                 policy.acceptance_threshold = 0.85;
+                policy.intent_readiness_threshold = 0.6;
                 policy.skip_expensive_overseers = true;
                 policy.partial_acceptance = true;
                 policy.exploration_weight = 0.1;
@@ -175,6 +188,7 @@ impl PriorityHint {
             PriorityHint::Thorough => {
                 budget.max_extensions += 2;
                 policy.acceptance_threshold = 0.98;
+                policy.intent_readiness_threshold = 0.8;
                 policy.skip_expensive_overseers = false;
                 policy.partial_acceptance = false;
                 policy.exploration_weight = 0.4;
@@ -206,6 +220,7 @@ mod tests {
         assert_eq!(policy.intent_verification_frequency, 2);
         assert!(!policy.prefer_cheap_strategies);
         assert!(policy.priority_hint.is_none());
+        assert!((policy.intent_readiness_threshold - 0.7).abs() < f64::EPSILON);
         assert_eq!(policy.max_fresh_starts, 3);
     }
 
@@ -219,6 +234,7 @@ mod tests {
 
         assert_eq!(budget.max_iterations, 5);
         assert!((policy.acceptance_threshold - 0.85).abs() < f64::EPSILON);
+        assert!((policy.intent_readiness_threshold - 0.6).abs() < f64::EPSILON);
         assert!(policy.skip_expensive_overseers);
         assert!(policy.partial_acceptance);
         assert!((policy.exploration_weight - 0.1).abs() < f64::EPSILON);
@@ -246,6 +262,7 @@ mod tests {
 
         assert_eq!(budget.max_extensions, 3);
         assert!((policy.acceptance_threshold - 0.98).abs() < f64::EPSILON);
+        assert!((policy.intent_readiness_threshold - 0.8).abs() < f64::EPSILON);
         assert!(!policy.skip_expensive_overseers);
         assert!(!policy.partial_acceptance);
         assert!((policy.exploration_weight - 0.4).abs() < f64::EPSILON);

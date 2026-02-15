@@ -98,6 +98,66 @@ impl Default for ObservationMetrics {
 }
 
 // ============================================================================
+// Convergence Readiness (hard-gate-free)
+// ============================================================================
+
+/// Computes a hard-gate-free readiness score from overseer signals.
+///
+/// Uses the same weighted composite as [`convergence_level`] (0.55×tests +
+/// 0.20×build + 0.10×type + 0.15×custom), but does **not** apply hard gates
+/// for build or type failures. Build/type failures produce naturally low
+/// scores through their weighted contribution, but are never artificially
+/// capped.
+///
+/// This score is used exclusively for deciding when to trigger intent
+/// verification — the finality decision itself is made by the intent
+/// verifier, not by this score. [`convergence_level`] with hard gates
+/// remains the metric used for progress tracking, bandit updates, and
+/// attractor classification.
+///
+/// # No-Signal Rule
+///
+/// If no overseers have produced any signals, returns 0.0 (same as
+/// `convergence_level`).
+pub fn convergence_readiness(signals: &OverseerSignals) -> f64 {
+    if !signals.has_any_signal() {
+        return 0.0;
+    }
+
+    let test_level = signals
+        .test_results
+        .as_ref()
+        .map(|t| t.passed as f64 / t.total.max(1) as f64)
+        .unwrap_or(1.0);
+
+    let build_level = signals
+        .build_result
+        .as_ref()
+        .map(|b| if b.success { 1.0 } else { 0.0 })
+        .unwrap_or(1.0);
+
+    let type_level = signals
+        .type_check
+        .as_ref()
+        .map(|t| if t.clean { 1.0 } else { 0.0 })
+        .unwrap_or(1.0);
+
+    let custom_level = if signals.custom_checks.is_empty() {
+        1.0
+    } else {
+        signals
+            .custom_checks
+            .iter()
+            .filter(|c| c.passed)
+            .count() as f64
+            / signals.custom_checks.len() as f64
+    };
+
+    // Same weighted composite — no hard gates applied
+    0.55 * test_level + 0.20 * build_level + 0.10 * type_level + 0.15 * custom_level
+}
+
+// ============================================================================
 // Context Health
 // ============================================================================
 
@@ -1326,5 +1386,105 @@ mod tests {
         let json = serde_json::to_string(&weights).unwrap();
         let deserialized: ConvergenceWeights = serde_json::from_str(&json).unwrap();
         assert!((deserialized.w_test - 0.5).abs() < f64::EPSILON);
+    }
+
+    // --- convergence_readiness tests ---
+
+    #[test]
+    fn test_convergence_readiness_no_signals() {
+        let signals = OverseerSignals::empty();
+        assert_eq!(convergence_readiness(&signals), 0.0);
+    }
+
+    #[test]
+    fn test_convergence_readiness_all_passing() {
+        let signals = signals_with_tests(10, 10, 0);
+        let readiness = convergence_readiness(&signals);
+        // Same as convergence_level when no hard gates needed:
+        // 0.55 * 1.0 + 0.20 * 1.0 + 0.10 * 1.0 + 0.15 * 1.0 = 1.0
+        assert!((readiness - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_convergence_readiness_build_failure_no_hard_gate() {
+        let signals = OverseerSignals {
+            test_results: Some(TestResults {
+                passed: 10,
+                failed: 0,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            build_result: Some(BuildResult {
+                success: false,
+                error_count: 3,
+                errors: Vec::new(),
+            }),
+            type_check: None,
+            lint_results: None,
+            security_scan: None,
+            custom_checks: vec![],
+        };
+        let readiness = convergence_readiness(&signals);
+        let level = convergence_level(&signals);
+
+        // convergence_level caps at 0.3 due to build failure
+        assert!(level <= 0.3, "convergence_level should be capped at 0.3, got {level}");
+
+        // convergence_readiness does NOT cap — build_level=0.0 just produces a naturally lower score
+        // 0.55 * 1.0 + 0.20 * 0.0 + 0.10 * 1.0 + 0.15 * 1.0 = 0.80
+        assert!((readiness - 0.80).abs() < 1e-10,
+            "convergence_readiness should be 0.80 (no hard gate), got {readiness}");
+        assert!(readiness > 0.3,
+            "convergence_readiness should NOT be capped at 0.3 by build failure");
+    }
+
+    #[test]
+    fn test_convergence_readiness_type_failure_no_hard_gate() {
+        let signals = OverseerSignals {
+            test_results: Some(TestResults {
+                passed: 10,
+                failed: 0,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: false,
+                error_count: 2,
+                errors: Vec::new(),
+            }),
+            lint_results: None,
+            security_scan: None,
+            custom_checks: vec![],
+        };
+        let readiness = convergence_readiness(&signals);
+        let level = convergence_level(&signals);
+
+        // convergence_level caps at 0.6 due to type failure
+        assert!(level <= 0.6, "convergence_level should be capped at 0.6, got {level}");
+
+        // convergence_readiness: 0.55 * 1.0 + 0.20 * 1.0 + 0.10 * 0.0 + 0.15 * 1.0 = 0.90
+        assert!((readiness - 0.90).abs() < 1e-10,
+            "convergence_readiness should be 0.90 (no hard gate), got {readiness}");
+        assert!(readiness > 0.6,
+            "convergence_readiness should NOT be capped at 0.6 by type failure");
+    }
+
+    #[test]
+    fn test_convergence_readiness_same_as_level_when_all_passing() {
+        // When there are no hard-gate triggers, readiness == level
+        let signals = signals_with_tests(8, 10, 0);
+        let readiness = convergence_readiness(&signals);
+        let level = convergence_level(&signals);
+        assert!((readiness - level).abs() < f64::EPSILON,
+            "readiness ({readiness}) should equal level ({level}) when no hard gates apply");
     }
 }

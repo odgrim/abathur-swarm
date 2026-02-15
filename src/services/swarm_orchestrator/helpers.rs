@@ -250,6 +250,39 @@ where
                             task_id, checks_passed, checks_total
                         ),
                     ).await;
+                } else if intent_satisfied {
+                    // Intent verifier has confirmed satisfaction — integration
+                    // verifier failures are advisory, not blocking.
+                    tracing::warn!(
+                        task_id = %task_id,
+                        failures = ?result.failures_summary,
+                        "Integration verifier failed but intent is satisfied — \
+                         proceeding to Complete (advisory mode)"
+                    );
+
+                    // Transition Validating -> Complete despite integration failure
+                    if let Ok(Some(mut task)) = task_repo.get(task_id).await {
+                        if task.status == TaskStatus::Validating {
+                            let _ = task.transition_to(TaskStatus::Complete);
+                            let _ = task_repo.update(&task).await;
+                        }
+                    }
+
+                    audit_log.log(
+                        AuditEntry::new(
+                            AuditLevel::Warning,
+                            AuditCategory::Task,
+                            AuditAction::TaskCompleted,
+                            AuditActor::System,
+                            format!(
+                                "Task {} completed (intent satisfied) despite integration \
+                                 verifier failures: {}",
+                                task_id,
+                                result.failures_summary.clone().unwrap_or_default()
+                            ),
+                        )
+                        .with_entity(task_id, "task"),
+                    ).await;
                 } else {
                     // Transition Validating -> Failed
                     if let Ok(Some(mut task)) = task_repo.get(task_id).await {
@@ -280,34 +313,68 @@ where
                     ).await;
                 }
 
-                result.passed
+                // When intent is satisfied, treat as passed even if
+                // integration checks failed (advisory mode)
+                result.passed || intent_satisfied
             }
             Err(e) => {
-                // Transition Validating -> Failed on verification error
-                if let Ok(Some(mut task)) = task_repo.get(task_id).await {
-                    if task.status == TaskStatus::Validating {
-                        let _ = task.transition_to(TaskStatus::Failed);
-                        let _ = task_repo.update(&task).await;
+                if intent_satisfied {
+                    // Infrastructure error with intent satisfied — advisory
+                    tracing::warn!(
+                        task_id = %task_id,
+                        error = %e,
+                        "Integration verification error but intent satisfied — \
+                         proceeding to Complete"
+                    );
+
+                    if let Ok(Some(mut task)) = task_repo.get(task_id).await {
+                        if task.status == TaskStatus::Validating {
+                            let _ = task.transition_to(TaskStatus::Complete);
+                            let _ = task_repo.update(&task).await;
+                        }
                     }
-                }
 
-                // Also mark worktree as failed so retry can create a fresh one
-                if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
-                    wt.fail(format!("Verification error: {}", e));
-                    let _ = worktree_repo.update(&wt).await;
-                }
+                    audit_log.log(
+                        AuditEntry::new(
+                            AuditLevel::Warning,
+                            AuditCategory::Task,
+                            AuditAction::TaskCompleted,
+                            AuditActor::System,
+                            format!(
+                                "Task {} completed (intent satisfied) despite verification error: {}",
+                                task_id, e
+                            ),
+                        )
+                        .with_entity(task_id, "task"),
+                    ).await;
+                    true
+                } else {
+                    // Transition Validating -> Failed on verification error
+                    if let Ok(Some(mut task)) = task_repo.get(task_id).await {
+                        if task.status == TaskStatus::Validating {
+                            let _ = task.transition_to(TaskStatus::Failed);
+                            let _ = task_repo.update(&task).await;
+                        }
+                    }
 
-                audit_log.log(
-                    AuditEntry::new(
-                        AuditLevel::Warning,
-                        AuditCategory::Task,
-                        AuditAction::TaskFailed,
-                        AuditActor::System,
-                        format!("Task {} verification error: {}", task_id, e),
-                    )
-                    .with_entity(task_id, "task"),
-                ).await;
-                false
+                    // Also mark worktree as failed so retry can create a fresh one
+                    if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                        wt.fail(format!("Verification error: {}", e));
+                        let _ = worktree_repo.update(&wt).await;
+                    }
+
+                    audit_log.log(
+                        AuditEntry::new(
+                            AuditLevel::Warning,
+                            AuditCategory::Task,
+                            AuditAction::TaskFailed,
+                            AuditActor::System,
+                            format!("Task {} verification error: {}", task_id, e),
+                        )
+                        .with_entity(task_id, "task"),
+                    ).await;
+                    false
+                }
             }
         }
     } else {

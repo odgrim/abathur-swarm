@@ -33,6 +33,7 @@ use crate::domain::models::{
     RepromptApproach, RepromptGuidance, RepromptStrategySelector, SessionStatus,
     SubstrateConfig, SubstrateRequest, Task, TaskStatus,
 };
+use crate::domain::models::convergence::OverseerSignals;
 use crate::domain::ports::{GoalRepository, Substrate, TaskRepository};
 
 /// Configuration for the intent verifier.
@@ -851,10 +852,11 @@ where
         task: &crate::domain::models::task::Task,
         goal_id: Option<Uuid>,
         iteration: u32,
+        overseer_signals: Option<&OverseerSignals>,
     ) -> DomainResult<Option<IntentVerificationResult>> {
         // Try to extract intent from the goal first (richer context),
         // then fall back to the task description.
-        let intent = if let Some(gid) = goal_id {
+        let mut intent = if let Some(gid) = goal_id {
             match self.extract_guiding_intent(gid).await {
                 Ok(intent) => intent,
                 Err(e) => {
@@ -874,6 +876,70 @@ where
         // Skip verification if the intent is empty (no meaningful description)
         if intent.original_text.trim().is_empty() {
             return Ok(None);
+        }
+
+        // When overseer signals are provided, append a summary to the intent
+        // context so the LLM has full visibility into static check results.
+        if let Some(signals) = overseer_signals {
+            let mut signal_summary = String::from(
+                "\n\n## Current Overseer Signals (informational — your assessment of \
+                 intent satisfaction is the authoritative finality decision)\n\n",
+            );
+
+            if let Some(ref build) = signals.build_result {
+                signal_summary.push_str(&format!(
+                    "- **Build**: {} ({})\n",
+                    if build.success { "PASS" } else { "FAIL" },
+                    if build.error_count > 0 {
+                        format!("{} error(s)", build.error_count)
+                    } else {
+                        "clean".to_string()
+                    },
+                ));
+            }
+
+            if let Some(ref tests) = signals.test_results {
+                signal_summary.push_str(&format!(
+                    "- **Tests**: {}/{} passing ({} failed, {} regressions)\n",
+                    tests.passed, tests.total, tests.failed, tests.regression_count,
+                ));
+            }
+
+            if let Some(ref tc) = signals.type_check {
+                signal_summary.push_str(&format!(
+                    "- **Type check**: {} ({})\n",
+                    if tc.clean { "PASS" } else { "FAIL" },
+                    if tc.error_count > 0 {
+                        format!("{} error(s)", tc.error_count)
+                    } else {
+                        "clean".to_string()
+                    },
+                ));
+            }
+
+            if let Some(ref lint) = signals.lint_results {
+                signal_summary.push_str(&format!(
+                    "- **Lint**: {} error(s), {} warning(s)\n",
+                    lint.error_count, lint.warning_count,
+                ));
+            }
+
+            if let Some(ref sec) = signals.security_scan {
+                signal_summary.push_str(&format!(
+                    "- **Security**: {} critical, {} high, {} medium finding(s)\n",
+                    sec.critical_count, sec.high_count, sec.medium_count,
+                ));
+            }
+
+            for check in &signals.custom_checks {
+                signal_summary.push_str(&format!(
+                    "- **Custom check '{}'**: {}\n",
+                    check.name,
+                    if check.passed { "PASS" } else { "FAIL" },
+                ));
+            }
+
+            intent.original_text.push_str(&signal_summary);
         }
 
         let result = self

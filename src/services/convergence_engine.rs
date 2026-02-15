@@ -436,7 +436,39 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                 .await?;
 
             match control {
+                LoopControl::IntentCheck => {
+                    // The engine's internal converge() loop doesn't have
+                    // access to the LLM intent verifier. Use summarize_signals
+                    // as a best-effort approximation: only finalize when the
+                    // signal summary says "satisfied."
+                    if let Some(obs) = trajectory.observations.last() {
+                        let level = obs
+                            .metrics
+                            .as_ref()
+                            .map(|m| m.convergence_level)
+                            .unwrap_or(0.0);
+                        let summary = self.summarize_signals(
+                            &obs.overseer_signals,
+                            &trajectory.specification.effective,
+                            trajectory.task_id,
+                            level,
+                        );
+                        if summary.satisfaction == "satisfied" {
+                            let outcome = ConvergenceOutcome::Converged {
+                                trajectory_id: trajectory.id.to_string(),
+                                final_observation_sequence: obs.sequence,
+                            };
+                            self.finalize(&mut trajectory, &outcome, &bandit)
+                                .await?;
+                            return Ok(outcome);
+                        }
+                    }
+                    // Not satisfied — keep iterating
+                    continue;
+                }
                 LoopControl::Converged => {
+                    // check_loop_control no longer returns Converged directly
+                    // (IntentCheck replaced it), but handle for safety.
                     let final_seq = trajectory
                         .observations
                         .last()
@@ -570,7 +602,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                 .as_ref()
                 .map(|m| m.convergence_level)
                 .unwrap_or(0.0);
-            let verification = self.verify_from_signals(
+            let verification = self.summarize_signals(
                 &obs_with_metrics.overseer_signals,
                 &trajectory.specification.effective,
                 trajectory.task_id,
@@ -672,16 +704,24 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             return Ok(LoopControl::Exhausted);
         }
 
-        // 2. Convergence check -- has the trajectory reached the acceptance threshold?
+        // 2. Intent-readiness check -- should we ask the intent verifier?
+        //
+        // Uses convergence_readiness() (no hard gates) rather than
+        // convergence_level, and a lower threshold (intent_readiness_threshold,
+        // default 0.7 vs acceptance_threshold 0.95). Also triggers on
+        // FixedPoint attractor (stable state = natural point to check intent).
+        //
+        // The orchestrator handles IntentCheck by calling the LLM intent
+        // verifier. Converged stays in the enum for backward compat but
+        // check_loop_control no longer returns it.
         if let Some(obs) = trajectory.observations.last() {
-            if let Some(ref metrics) = obs.metrics {
-                if metrics.convergence_level >= trajectory.policy.acceptance_threshold {
-                    // Check if overseer signals are all passing
-                    if obs.overseer_signals.all_passing() {
-                        return Ok(LoopControl::Converged);
-                    }
-                    // High level but not all passing -- keep iterating
-                }
+            let readiness = convergence_readiness(&obs.overseer_signals);
+            let at_fixed_point = matches!(
+                &trajectory.attractor_state.classification,
+                AttractorType::FixedPoint { .. }
+            );
+            if readiness >= trajectory.policy.intent_readiness_threshold || at_fixed_point {
+                return Ok(LoopControl::IntentCheck);
             }
         }
 
@@ -908,7 +948,12 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                 });
             }
 
-            // Check if any active trajectory has converged.
+            // Check if any active trajectory is ready for finality.
+            //
+            // The parallel path doesn't have access to the LLM intent
+            // verifier, so we use summarize_signals as a best-effort
+            // approximation: readiness must meet the threshold AND the
+            // signal summary must report "satisfied."
             let mut best_converged: Option<usize> = None;
             let mut all_exhausted = true;
             for i in 0..n {
@@ -916,11 +961,20 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                     continue;
                 }
                 if let Some(obs) = trajectories[i].observations.last() {
-                    if let Some(ref metrics) = obs.metrics {
-                        if metrics.convergence_level
-                            >= trajectories[i].policy.acceptance_threshold
-                            && obs.overseer_signals.all_passing()
-                        {
+                    let readiness = convergence_readiness(&obs.overseer_signals);
+                    if readiness >= trajectories[i].policy.intent_readiness_threshold {
+                        let level = obs
+                            .metrics
+                            .as_ref()
+                            .map(|m| m.convergence_level)
+                            .unwrap_or(0.0);
+                        let summary = self.summarize_signals(
+                            &obs.overseer_signals,
+                            &trajectories[i].specification.effective,
+                            trajectories[i].task_id,
+                            level,
+                        );
+                        if summary.satisfaction == "satisfied" {
                             best_converged = Some(i);
                             break;
                         }
@@ -1238,20 +1292,19 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
     // Intent verification from overseer signals
     // -----------------------------------------------------------------------
 
-    /// Synthesize a [`VerificationResult`] from overseer signals and the
-    /// specification.
+    /// Summarize overseer signals into a structured [`VerificationResult`].
     ///
-    /// This is a deterministic, signal-based verification — not an LLM call.
-    /// It answers "does the current artifact satisfy the specification?" by
-    /// mapping overseer pass/fail results to intent gaps. The result feeds
-    /// into attractor classification (ambiguity detection) and strategy
-    /// selection (remaining gaps inform `FocusedRepair` targets).
+    /// This is a deterministic, signal-based summary — not an LLM call and
+    /// **not a finality check**. The result feeds into attractor
+    /// classification (ambiguity detection) and strategy selection (remaining
+    /// gaps inform `FocusedRepair` targets). Finality decisions are made by
+    /// the LLM-based intent verifier via `LoopControl::IntentCheck`.
     ///
-    /// Satisfaction levels:
+    /// Satisfaction levels (descriptive, not authoritative):
     /// - **"satisfied"** — all present overseers pass, convergence level >= acceptance threshold
     /// - **"partial"** — some overseers pass, convergence level > 0.3
     /// - **"unsatisfied"** — build failure or convergence level <= 0.3
-    fn verify_from_signals(
+    fn summarize_signals(
         &self,
         signals: &OverseerSignals,
         spec: &SpecificationSnapshot,
@@ -2531,11 +2584,11 @@ mod tests {
     }
 
     #[test]
-    fn test_loop_control_converged_when_threshold_met() {
+    fn test_loop_control_intent_check_when_readiness_met() {
         let engine = test_engine();
         let mut trajectory = test_trajectory();
 
-        // Add an observation that meets the acceptance threshold with all passing signals
+        // Add an observation with all passing signals (readiness = 1.0 > 0.7 threshold)
         let all_passing_signals = signals_with_tests(10, 10);
         let obs = Observation::new(
             0,
@@ -2550,34 +2603,120 @@ mod tests {
         let bandit = StrategyBandit::with_default_priors();
 
         let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
-        assert!(matches!(result, LoopControl::Converged));
+        assert!(matches!(result, LoopControl::IntentCheck),
+            "Expected IntentCheck when readiness >= threshold, got {:?}", result);
     }
 
     #[test]
-    fn test_loop_control_not_converged_when_signals_not_passing() {
+    fn test_loop_control_continue_when_readiness_below_threshold() {
         let engine = test_engine();
         let mut trajectory = test_trajectory();
 
-        // High level but tests are failing
-        let failing_signals = signals_with_tests(5, 10);
+        // 2/10 tests passing with build and type passing:
+        // readiness = 0.55 * 0.2 + 0.20 * 1.0 + 0.10 * 1.0 + 0.15 * 1.0 = 0.56
+        // Below default threshold of 0.7
+        let low_signals = signals_with_tests(2, 10);
         let obs = Observation::new(
             0,
             test_artifact(0),
-            failing_signals,
+            low_signals,
             StrategyKind::RetryWithFeedback,
             10_000,
             5_000,
         )
-        .with_metrics(metrics_with(0.1, 0.96));
+        .with_metrics(metrics_with(0.1, 0.56));
         trajectory.observations.push(obs);
         let bandit = StrategyBandit::with_default_priors();
 
         let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
-        // Should NOT be converged because signals are not all passing
-        assert!(
-            !matches!(result, LoopControl::Converged),
-            "Should not converge when signals are not all passing"
-        );
+        assert!(matches!(result, LoopControl::Continue),
+            "Expected Continue when readiness < threshold, got {:?}", result);
+    }
+
+    #[test]
+    fn test_loop_control_intent_check_with_build_failure() {
+        let engine = test_engine();
+        let mut trajectory = test_trajectory();
+
+        // Build failure but 10/10 tests pass + type passes:
+        // readiness = 0.55 * 1.0 + 0.20 * 0.0 + 0.10 * 1.0 + 0.15 * 1.0 = 0.80
+        // Above default threshold of 0.7 — IntentCheck should be emitted
+        let signals = OverseerSignals {
+            test_results: Some(TestResults {
+                passed: 10,
+                failed: 0,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            build_result: Some(BuildResult {
+                success: false,
+                error_count: 1,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        };
+        let obs = Observation::new(
+            0,
+            test_artifact(0),
+            signals,
+            StrategyKind::RetryWithFeedback,
+            10_000,
+            5_000,
+        )
+        .with_metrics(metrics_with(0.1, 0.3)); // convergence_level capped at 0.3 by hard gate
+        trajectory.observations.push(obs);
+        let bandit = StrategyBandit::with_default_priors();
+
+        let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+        // IntentCheck uses convergence_readiness (no hard gates), not convergence_level
+        assert!(matches!(result, LoopControl::IntentCheck),
+            "Expected IntentCheck even with build failure (readiness 0.80 > 0.7), got {:?}", result);
+    }
+
+    #[test]
+    fn test_loop_control_intent_check_at_fixed_point() {
+        let engine = test_engine();
+        let mut trajectory = test_trajectory();
+
+        // Low readiness signals (below threshold)
+        let low_signals = signals_with_tests(2, 10);
+        let obs = Observation::new(
+            0,
+            test_artifact(0),
+            low_signals,
+            StrategyKind::RetryWithFeedback,
+            10_000,
+            5_000,
+        )
+        .with_metrics(metrics_with(0.01, 0.4));
+        trajectory.observations.push(obs);
+
+        // Set FixedPoint attractor — should trigger IntentCheck regardless of readiness
+        trajectory.attractor_state = AttractorState {
+            classification: AttractorType::FixedPoint {
+                estimated_remaining_iterations: 2,
+                estimated_remaining_tokens: 10_000,
+            },
+            confidence: 0.9,
+            detected_at: None,
+            evidence: AttractorEvidence {
+                recent_deltas: vec![0.01, 0.005, 0.002],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        };
+
+        let bandit = StrategyBandit::with_default_priors();
+        let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+        assert!(matches!(result, LoopControl::IntentCheck),
+            "Expected IntentCheck at FixedPoint attractor, got {:?}", result);
     }
 
     #[test]
@@ -3249,11 +3388,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // verify_from_signals tests
+    // summarize_signals tests
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_verify_from_signals_all_passing_high_level() {
+    fn test_summarize_signals_all_passing_high_level() {
         let engine = test_engine();
         let spec = SpecificationSnapshot::new("Implement authentication".to_string());
         let task_id = Uuid::new_v4();
@@ -3280,7 +3419,7 @@ mod tests {
             ..OverseerSignals::default()
         };
 
-        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.95);
+        let result = engine.summarize_signals(&signals, &spec, task_id, 0.95);
 
         assert_eq!(result.satisfaction, "satisfied");
         assert!(result.gaps.is_empty());
@@ -3288,7 +3427,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_from_signals_build_failure() {
+    fn test_summarize_signals_build_failure() {
         let engine = test_engine();
         let spec = SpecificationSnapshot::new("Implement authentication".to_string());
         let task_id = Uuid::new_v4();
@@ -3302,7 +3441,7 @@ mod tests {
             ..OverseerSignals::default()
         };
 
-        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.2);
+        let result = engine.summarize_signals(&signals, &spec, task_id, 0.2);
 
         assert_eq!(result.satisfaction, "unsatisfied");
         assert!(!result.gaps.is_empty());
@@ -3314,7 +3453,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_from_signals_test_failures_with_regressions() {
+    fn test_summarize_signals_test_failures_with_regressions() {
         let engine = test_engine();
         let spec = SpecificationSnapshot::new("Implement authentication".to_string());
         let task_id = Uuid::new_v4();
@@ -3340,7 +3479,7 @@ mod tests {
             ..OverseerSignals::default()
         };
 
-        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.5);
+        let result = engine.summarize_signals(&signals, &spec, task_id, 0.5);
 
         assert_eq!(result.satisfaction, "partial");
 
@@ -3352,7 +3491,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_from_signals_security_vulnerabilities() {
+    fn test_summarize_signals_security_vulnerabilities() {
         let engine = test_engine();
         let spec = SpecificationSnapshot::new("Implement authentication".to_string());
         let task_id = Uuid::new_v4();
@@ -3380,7 +3519,7 @@ mod tests {
             ..OverseerSignals::default()
         };
 
-        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.8);
+        let result = engine.summarize_signals(&signals, &spec, task_id, 0.8);
 
         // Critical security vuln + critical gap => unsatisfied
         assert_eq!(result.satisfaction, "unsatisfied");
@@ -3391,7 +3530,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_from_signals_high_security_only() {
+    fn test_summarize_signals_high_security_only() {
         let engine = test_engine();
         let spec = SpecificationSnapshot::new("Implement feature".to_string());
         let task_id = Uuid::new_v4();
@@ -3411,7 +3550,7 @@ mod tests {
             ..OverseerSignals::default()
         };
 
-        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.7);
+        let result = engine.summarize_signals(&signals, &spec, task_id, 0.7);
 
         // No critical security, but Major gap from high_count
         let sec_gap = result.gaps.iter().find(|g| g.category == GapCategory::Security).unwrap();
@@ -3420,7 +3559,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_from_signals_lint_errors() {
+    fn test_summarize_signals_lint_errors() {
         let engine = test_engine();
         let spec = SpecificationSnapshot::new("Implement feature".to_string());
         let task_id = Uuid::new_v4();
@@ -3439,7 +3578,7 @@ mod tests {
             ..OverseerSignals::default()
         };
 
-        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.8);
+        let result = engine.summarize_signals(&signals, &spec, task_id, 0.8);
 
         let lint_gap = result.gaps.iter().find(|g| g.category == GapCategory::Maintainability).unwrap();
         assert_eq!(lint_gap.severity, GapSeverity::Minor);
@@ -3448,7 +3587,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_from_signals_custom_check_failure() {
+    fn test_summarize_signals_custom_check_failure() {
         let engine = test_engine();
         let spec = SpecificationSnapshot::new("Implement feature".to_string());
         let task_id = Uuid::new_v4();
@@ -3474,7 +3613,7 @@ mod tests {
             ..OverseerSignals::default()
         };
 
-        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.7);
+        let result = engine.summarize_signals(&signals, &spec, task_id, 0.7);
 
         // Only the failing custom check should produce a gap
         assert_eq!(result.gaps.len(), 1);
@@ -3484,7 +3623,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_from_signals_no_tests_with_success_criteria() {
+    fn test_summarize_signals_no_tests_with_success_criteria() {
         let engine = test_engine();
         let mut spec = SpecificationSnapshot::new("Implement feature".to_string());
         spec.success_criteria.push("All endpoints return valid JSON".to_string());
@@ -3500,7 +3639,7 @@ mod tests {
             ..OverseerSignals::default()
         };
 
-        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.7);
+        let result = engine.summarize_signals(&signals, &spec, task_id, 0.7);
 
         // Should have an implicit gap about missing test results
         let implicit_gap = result.gaps.iter().find(|g| g.is_implicit).unwrap();
@@ -3510,7 +3649,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_from_signals_empty_signals_low_level() {
+    fn test_summarize_signals_empty_signals_low_level() {
         let engine = test_engine();
         let spec = SpecificationSnapshot::new("Implement feature".to_string());
         let task_id = Uuid::new_v4();
@@ -3518,14 +3657,14 @@ mod tests {
         // Empty signals with very low convergence level
         let signals = OverseerSignals::default();
 
-        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.1);
+        let result = engine.summarize_signals(&signals, &spec, task_id, 0.1);
 
         // No gaps from signals, but level <= 0.3 => unsatisfied
         assert_eq!(result.satisfaction, "unsatisfied");
     }
 
     #[test]
-    fn test_verify_from_signals_empty_signals_high_level() {
+    fn test_summarize_signals_empty_signals_high_level() {
         let engine = test_engine();
         let spec = SpecificationSnapshot::new("Implement feature".to_string());
         let task_id = Uuid::new_v4();
@@ -3533,7 +3672,7 @@ mod tests {
         // Empty signals but high convergence level
         let signals = OverseerSignals::default();
 
-        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.95);
+        let result = engine.summarize_signals(&signals, &spec, task_id, 0.95);
 
         // No gaps and level >= threshold => satisfied
         assert_eq!(result.satisfaction, "satisfied");
@@ -3541,7 +3680,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_from_signals_type_check_failure() {
+    fn test_summarize_signals_type_check_failure() {
         let engine = test_engine();
         let spec = SpecificationSnapshot::new("Implement feature".to_string());
         let task_id = Uuid::new_v4();
@@ -3560,7 +3699,7 @@ mod tests {
             ..OverseerSignals::default()
         };
 
-        let result = engine.verify_from_signals(&signals, &spec, task_id, 0.6);
+        let result = engine.summarize_signals(&signals, &spec, task_id, 0.6);
 
         let tc_gap = result.gaps.iter().find(|g| g.description.contains("Type check")).unwrap();
         assert_eq!(tc_gap.severity, GapSeverity::Major);
