@@ -878,16 +878,25 @@ where
             return Ok(None);
         }
 
-        // When overseer signals are provided, append a summary to the intent
-        // context so the LLM has full visibility into static check results.
+        // When overseer signals are provided, append structured evidence to
+        // the intent context. These are inputs to the verifier's judgment, not
+        // preconditions — the verifier decides whether failures are relevant
+        // to the task's intent or are pre-existing/unrelated.
         if let Some(signals) = overseer_signals {
-            let mut signal_summary = String::from(
-                "\n\n## Current Overseer Signals (informational — your assessment of \
-                 intent satisfaction is the authoritative finality decision)\n\n",
+            let mut evidence = String::from(
+                "\n\n## Overseer Evidence\n\n\
+                 The following static check results are provided as context for your \
+                 judgment. A failing build or test is important evidence but does NOT \
+                 automatically mean the intent is unsatisfied — use your judgment about \
+                 whether failures are related to the task's intent or are pre-existing/unrelated. \
+                 If new security vulnerabilities were introduced by the work, this is a strong \
+                 signal against satisfaction unless the task explicitly involves security \
+                 trade-offs. Your assessment of intent satisfaction is the authoritative \
+                 finality decision.\n\n",
             );
 
             if let Some(ref build) = signals.build_result {
-                signal_summary.push_str(&format!(
+                evidence.push_str(&format!(
                     "- **Build**: {} ({})\n",
                     if build.success { "PASS" } else { "FAIL" },
                     if build.error_count > 0 {
@@ -896,50 +905,76 @@ where
                         "clean".to_string()
                     },
                 ));
-            }
-
-            if let Some(ref tests) = signals.test_results {
-                signal_summary.push_str(&format!(
-                    "- **Tests**: {}/{} passing ({} failed, {} regressions)\n",
-                    tests.passed, tests.total, tests.failed, tests.regression_count,
-                ));
+                if !build.errors.is_empty() {
+                    for err in build.errors.iter().take(5) {
+                        evidence.push_str(&format!("  - {}\n", err));
+                    }
+                }
             }
 
             if let Some(ref tc) = signals.type_check {
-                signal_summary.push_str(&format!(
-                    "- **Type check**: {} ({})\n",
-                    if tc.clean { "PASS" } else { "FAIL" },
+                evidence.push_str(&format!(
+                    "- **Type Check**: {} ({})\n",
+                    if tc.clean { "CLEAN" } else { "FAIL" },
                     if tc.error_count > 0 {
                         format!("{} error(s)", tc.error_count)
                     } else {
                         "clean".to_string()
                     },
                 ));
+                if !tc.errors.is_empty() {
+                    for err in tc.errors.iter().take(5) {
+                        evidence.push_str(&format!("  - {}\n", err));
+                    }
+                }
+            }
+
+            if let Some(ref tests) = signals.test_results {
+                evidence.push_str(&format!(
+                    "- **Tests**: {}/{} passing ({} failed, {} regressions)\n",
+                    tests.passed, tests.total, tests.failed, tests.regression_count,
+                ));
+                if !tests.failing_test_names.is_empty() {
+                    evidence.push_str("  Failing tests:\n");
+                    for name in tests.failing_test_names.iter().take(10) {
+                        evidence.push_str(&format!("  - {}\n", name));
+                    }
+                }
             }
 
             if let Some(ref lint) = signals.lint_results {
-                signal_summary.push_str(&format!(
+                evidence.push_str(&format!(
                     "- **Lint**: {} error(s), {} warning(s)\n",
                     lint.error_count, lint.warning_count,
                 ));
             }
 
             if let Some(ref sec) = signals.security_scan {
-                signal_summary.push_str(&format!(
+                evidence.push_str(&format!(
                     "- **Security**: {} critical, {} high, {} medium finding(s)\n",
                     sec.critical_count, sec.high_count, sec.medium_count,
                 ));
+                if !sec.findings.is_empty() {
+                    for finding in sec.findings.iter().take(5) {
+                        evidence.push_str(&format!("  - {}\n", finding));
+                    }
+                }
             }
 
             for check in &signals.custom_checks {
-                signal_summary.push_str(&format!(
-                    "- **Custom check '{}'**: {}\n",
+                evidence.push_str(&format!(
+                    "- **Custom '{}' **: {} — {}\n",
                     check.name,
                     if check.passed { "PASS" } else { "FAIL" },
+                    check.details,
                 ));
             }
 
-            intent.original_text.push_str(&signal_summary);
+            if !signals.has_any_signal() {
+                evidence.push_str("- No overseer signals available for this iteration.\n");
+            }
+
+            intent.original_text.push_str(&evidence);
         }
 
         let result = self

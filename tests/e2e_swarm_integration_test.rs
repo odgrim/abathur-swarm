@@ -1030,7 +1030,8 @@ async fn test_swarm_orchestrator_goal_execution() {
         event_bus,
         event_reactor,
         event_scheduler,
-    );
+    )
+    .with_intent_verifier(mock_substrate.clone() as Arc<dyn Substrate>);
 
     // Create a goal
     let goal = Goal::new("Test Goal", "A simple goal for orchestrator testing")

@@ -12,13 +12,19 @@ use super::*;
 /// Most variants are terminal (end the loop), except `Continue` (keep iterating),
 /// `RequestExtension` (attempt a budget extension then continue), and `Decompose`
 /// (transition to coordination phase).
+///
+/// Intent verification is the sole finality mechanism. The engine emits
+/// `IntentCheck` when conditions suggest the trajectory may be ready, and
+/// the orchestrator's LLM-based intent verifier makes the finality decision.
 #[derive(Debug, Clone)]
 pub enum LoopControl {
     /// Keep iterating -- no termination condition met.
     Continue,
-    /// The trajectory has reached the acceptance threshold and passed verification.
-    Converged,
-    /// Overseer signals suggest readiness — request intent verification for finality.
+    /// Conditions suggest readiness — request intent verification for finality.
+    ///
+    /// Triggered by: iteration interval, budget fraction threshold, or
+    /// FixedPoint attractor detection. The orchestrator calls the LLM-based
+    /// intent verifier, which is the sole authority on task finality.
     IntentCheck,
     /// The convergence budget has been fully consumed without converging.
     Exhausted,

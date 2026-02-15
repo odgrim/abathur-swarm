@@ -437,49 +437,13 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
 
             match control {
                 LoopControl::IntentCheck => {
-                    // The engine's internal converge() loop doesn't have
-                    // access to the LLM intent verifier. Use summarize_signals
-                    // as a best-effort approximation: only finalize when the
-                    // signal summary says "satisfied."
-                    if let Some(obs) = trajectory.observations.last() {
-                        let level = obs
-                            .metrics
-                            .as_ref()
-                            .map(|m| m.convergence_level)
-                            .unwrap_or(0.0);
-                        let summary = self.summarize_signals(
-                            &obs.overseer_signals,
-                            &trajectory.specification.effective,
-                            trajectory.task_id,
-                            level,
-                        );
-                        if summary.satisfaction == "satisfied" {
-                            let outcome = ConvergenceOutcome::Converged {
-                                trajectory_id: trajectory.id.to_string(),
-                                final_observation_sequence: obs.sequence,
-                            };
-                            self.finalize(&mut trajectory, &outcome, &bandit)
-                                .await?;
-                            return Ok(outcome);
-                        }
-                    }
-                    // Not satisfied — keep iterating
+                    // The engine's internal converge() method does not have
+                    // access to the LLM intent verifier. When running standalone
+                    // (without the orchestrator), IntentCheck simply continues
+                    // iterating. The orchestrator's run_convergent_execution
+                    // handles IntentCheck by calling the LLM-based intent
+                    // verifier, which is the sole authority on finality.
                     continue;
-                }
-                LoopControl::Converged => {
-                    // check_loop_control no longer returns Converged directly
-                    // (IntentCheck replaced it), but handle for safety.
-                    let final_seq = trajectory
-                        .observations
-                        .last()
-                        .map(|o| o.sequence)
-                        .unwrap_or(0);
-                    let outcome = ConvergenceOutcome::Converged {
-                        trajectory_id: trajectory.id.to_string(),
-                        final_observation_sequence: final_seq,
-                    };
-                    self.finalize(&mut trajectory, &outcome, &bandit).await?;
-                    return Ok(outcome);
                 }
                 LoopControl::Exhausted => {
                     // Try extension first
@@ -569,7 +533,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         let mut obs_with_metrics = observation;
         if let Some(prev) = trajectory.observations.last() {
             let health = estimate_context_health(&trajectory.observations);
-            let delta = compute_convergence_delta(
+            let delta = compute_convergence_delta_with_intent(
                 prev,
                 &obs_with_metrics.overseer_signals,
                 obs_with_metrics
@@ -579,6 +543,8 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                     .unwrap_or(0),
                 &health,
                 &ConvergenceWeights::default(),
+                trajectory.prev_intent_confidence,
+                trajectory.last_intent_confidence,
             );
             let level = convergence_level(&obs_with_metrics.overseer_signals);
             let metrics = ObservationMetrics {
@@ -678,14 +644,19 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
     // 6.4 check_loop_control -- Determine if the loop should continue
     // -----------------------------------------------------------------------
 
-    /// Determine whether the convergence loop should continue (spec 6.4).
+    /// Determine whether the convergence loop should continue.
+    ///
+    /// Intent verification is the sole finality mechanism. The engine emits
+    /// `IntentCheck` when conditions suggest readiness; the orchestrator's
+    /// LLM-based intent verifier makes the finality decision.
     ///
     /// Evaluates, in priority order:
     /// 1. Budget exhausted -> Exhausted or RequestExtension
-    /// 2. Converged -> acceptance threshold met
+    /// 2. IntentCheck -> iteration interval, budget fraction, or FixedPoint trigger
     /// 3. Trapped -> limit cycle with no escape strategies
-    /// 4. Decompose -> convergence delta suggests decomposition
-    /// 5. Continue -> keep iterating
+    /// 4. Decompose -> divergent trajectory with sufficient budget
+    /// 5. Near-budget extension check
+    /// 6. Continue -> keep iterating
     pub fn check_loop_control(
         &self,
         trajectory: &Trajectory,
@@ -704,25 +675,28 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             return Ok(LoopControl::Exhausted);
         }
 
-        // 2. Intent-readiness check -- should we ask the intent verifier?
+        // 2. Intent verification triggers — independent of overseer scores.
         //
-        // Uses convergence_readiness() (no hard gates) rather than
-        // convergence_level, and a lower threshold (intent_readiness_threshold,
-        // default 0.7 vs acceptance_threshold 0.95). Also triggers on
-        // FixedPoint attractor (stable state = natural point to check intent).
-        //
-        // The orchestrator handles IntentCheck by calling the LLM intent
-        // verifier. Converged stays in the enum for backward compat but
-        // check_loop_control no longer returns it.
-        if let Some(obs) = trajectory.observations.last() {
-            let readiness = convergence_readiness(&obs.overseer_signals);
-            let at_fixed_point = matches!(
-                &trajectory.attractor_state.classification,
-                AttractorType::FixedPoint { .. }
-            );
-            if readiness >= trajectory.policy.intent_readiness_threshold || at_fixed_point {
-                return Ok(LoopControl::IntentCheck);
-            }
+        // Intent is the sole finality mechanism. We trigger IntentCheck on:
+        //   a) Every `intent_check_interval` iterations (policy-driven frequency)
+        //   b) FixedPoint attractor (stable state = natural point to verify)
+        //   c) Budget usage exceeds `intent_check_at_budget_fraction`
+        let iteration = trajectory.observations.len() as u32;
+        let interval = trajectory.policy.intent_check_interval.max(1);
+
+        let interval_trigger = iteration > 0 && iteration % interval == 0;
+
+        let at_fixed_point = matches!(
+            &trajectory.attractor_state.classification,
+            AttractorType::FixedPoint { .. }
+        );
+
+        let budget_fraction_used = 1.0 - trajectory.budget.remaining_fraction();
+        let budget_trigger = budget_fraction_used
+            >= trajectory.policy.intent_check_at_budget_fraction;
+
+        if interval_trigger || at_fixed_point || budget_trigger {
+            return Ok(LoopControl::IntentCheck);
         }
 
         // 3. Trapped check -- limit cycle with no eligible escape strategies
@@ -741,8 +715,6 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
 
         // 4. Decomposition check -- divergent trajectory with sufficient budget
         if let AttractorType::Divergent { .. } = &trajectory.attractor_state.classification {
-            // If the trajectory has been diverging for a while and the budget
-            // allows decomposition, suggest it
             let divergent_observations = trajectory
                 .observations
                 .iter()
@@ -948,42 +920,22 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                 });
             }
 
-            // Check if any active trajectory is ready for finality.
+            // Check if any active trajectory is exhausted.
             //
             // The parallel path doesn't have access to the LLM intent
-            // verifier, so we use summarize_signals as a best-effort
-            // approximation: readiness must meet the threshold AND the
-            // signal summary must report "satisfied."
-            let mut best_converged: Option<usize> = None;
+            // verifier, so IntentCheck signals are treated as "continue
+            // iterating" — same as the single-trajectory converge() path.
+            // Finality decisions require the orchestrator's LLM verifier.
             let mut all_exhausted = true;
             for i in 0..n {
                 if !active[i] {
                     continue;
                 }
-                if let Some(obs) = trajectories[i].observations.last() {
-                    let readiness = convergence_readiness(&obs.overseer_signals);
-                    if readiness >= trajectories[i].policy.intent_readiness_threshold {
-                        let level = obs
-                            .metrics
-                            .as_ref()
-                            .map(|m| m.convergence_level)
-                            .unwrap_or(0.0);
-                        let summary = self.summarize_signals(
-                            &obs.overseer_signals,
-                            &trajectories[i].specification.effective,
-                            trajectories[i].task_id,
-                            level,
-                        );
-                        if summary.satisfaction == "satisfied" {
-                            best_converged = Some(i);
-                            break;
-                        }
-                    }
-                }
                 if trajectories[i].budget.has_remaining() {
                     all_exhausted = false;
                 }
             }
+            let best_converged: Option<usize> = None;
 
             // If a trajectory converged, finalize and return.
             if let Some(idx) = best_converged {
@@ -1297,8 +1249,8 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
     /// This is a deterministic, signal-based summary — not an LLM call and
     /// **not a finality check**. The result feeds into attractor
     /// classification (ambiguity detection) and strategy selection (remaining
-    /// gaps inform `FocusedRepair` targets). Finality decisions are made by
-    /// the LLM-based intent verifier via `LoopControl::IntentCheck`.
+    /// gaps inform `FocusedRepair` targets). Finality decisions are made
+    /// exclusively by the LLM-based intent verifier.
     ///
     /// Satisfaction levels (descriptive, not authoritative):
     /// - **"satisfied"** — all present overseers pass, convergence level >= acceptance threshold
@@ -2584,42 +2536,44 @@ mod tests {
     }
 
     #[test]
-    fn test_loop_control_intent_check_when_readiness_met() {
+    fn test_loop_control_intent_check_at_interval() {
         let engine = test_engine();
         let mut trajectory = test_trajectory();
+        // Default intent_check_interval is 2, so iteration 2 should trigger
 
-        // Add an observation with all passing signals (readiness = 1.0 > 0.7 threshold)
-        let all_passing_signals = signals_with_tests(10, 10);
-        let obs = Observation::new(
-            0,
-            test_artifact(0),
-            all_passing_signals,
-            StrategyKind::RetryWithFeedback,
-            10_000,
-            5_000,
-        )
-        .with_metrics(metrics_with(0.1, 0.95));
-        trajectory.observations.push(obs);
+        // Add 2 observations (iterations 0 and 1)
+        for i in 0..2 {
+            let signals = signals_with_tests(2, 10);
+            let obs = Observation::new(
+                i,
+                test_artifact(i),
+                signals,
+                StrategyKind::RetryWithFeedback,
+                10_000,
+                5_000,
+            )
+            .with_metrics(metrics_with(0.1, 0.56));
+            trajectory.observations.push(obs);
+        }
         let bandit = StrategyBandit::with_default_priors();
 
         let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
         assert!(matches!(result, LoopControl::IntentCheck),
-            "Expected IntentCheck when readiness >= threshold, got {:?}", result);
+            "Expected IntentCheck at iteration 2 (interval=2), got {:?}", result);
     }
 
     #[test]
-    fn test_loop_control_continue_when_readiness_below_threshold() {
+    fn test_loop_control_continue_between_intervals() {
         let engine = test_engine();
         let mut trajectory = test_trajectory();
+        // Default intent_check_interval is 2, so iteration 1 should NOT trigger
 
-        // 2/10 tests passing with build and type passing:
-        // readiness = 0.55 * 0.2 + 0.20 * 1.0 + 0.10 * 1.0 + 0.15 * 1.0 = 0.56
-        // Below default threshold of 0.7
-        let low_signals = signals_with_tests(2, 10);
+        // Add 1 observation (iteration 0)
+        let signals = signals_with_tests(2, 10);
         let obs = Observation::new(
             0,
             test_artifact(0),
-            low_signals,
+            signals,
             StrategyKind::RetryWithFeedback,
             10_000,
             5_000,
@@ -2630,38 +2584,21 @@ mod tests {
 
         let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
         assert!(matches!(result, LoopControl::Continue),
-            "Expected Continue when readiness < threshold, got {:?}", result);
+            "Expected Continue at iteration 1 (between intervals), got {:?}", result);
     }
 
     #[test]
-    fn test_loop_control_intent_check_with_build_failure() {
+    fn test_loop_control_intent_check_at_budget_fraction() {
         let engine = test_engine();
         let mut trajectory = test_trajectory();
+        // Default intent_check_at_budget_fraction is 0.5
 
-        // Build failure but 10/10 tests pass + type passes:
-        // readiness = 0.55 * 1.0 + 0.20 * 0.0 + 0.10 * 1.0 + 0.15 * 1.0 = 0.80
-        // Above default threshold of 0.7 — IntentCheck should be emitted
-        let signals = OverseerSignals {
-            test_results: Some(TestResults {
-                passed: 10,
-                failed: 0,
-                skipped: 0,
-                total: 10,
-                regression_count: 0,
-                failing_test_names: Vec::new(),
-            }),
-            build_result: Some(BuildResult {
-                success: false,
-                error_count: 1,
-                errors: Vec::new(),
-            }),
-            type_check: Some(TypeCheckResult {
-                clean: true,
-                error_count: 0,
-                errors: Vec::new(),
-            }),
-            ..OverseerSignals::default()
-        };
+        // Consume >50% of the budget
+        trajectory.budget.tokens_used = (trajectory.budget.max_tokens as f64 * 0.6) as u64;
+        trajectory.budget.iterations_used = (trajectory.budget.max_iterations as f64 * 0.6) as u32;
+
+        // Add 1 observation (iteration 1 — not on interval boundary)
+        let signals = signals_with_tests(2, 10);
         let obs = Observation::new(
             0,
             test_artifact(0),
@@ -2670,14 +2607,13 @@ mod tests {
             10_000,
             5_000,
         )
-        .with_metrics(metrics_with(0.1, 0.3)); // convergence_level capped at 0.3 by hard gate
+        .with_metrics(metrics_with(0.1, 0.3));
         trajectory.observations.push(obs);
         let bandit = StrategyBandit::with_default_priors();
 
         let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
-        // IntentCheck uses convergence_readiness (no hard gates), not convergence_level
         assert!(matches!(result, LoopControl::IntentCheck),
-            "Expected IntentCheck even with build failure (readiness 0.80 > 0.7), got {:?}", result);
+            "Expected IntentCheck when budget fraction exceeded, got {:?}", result);
     }
 
     #[test]
@@ -2685,7 +2621,7 @@ mod tests {
         let engine = test_engine();
         let mut trajectory = test_trajectory();
 
-        // Low readiness signals (below threshold)
+        // Low signals, iteration 1 (not on interval boundary)
         let low_signals = signals_with_tests(2, 10);
         let obs = Observation::new(
             0,
@@ -2698,7 +2634,7 @@ mod tests {
         .with_metrics(metrics_with(0.01, 0.4));
         trajectory.observations.push(obs);
 
-        // Set FixedPoint attractor — should trigger IntentCheck regardless of readiness
+        // Set FixedPoint attractor — should trigger IntentCheck regardless
         trajectory.attractor_state = AttractorState {
             classification: AttractorType::FixedPoint {
                 estimated_remaining_iterations: 2,
@@ -2723,6 +2659,10 @@ mod tests {
     fn test_loop_control_trapped_when_limit_cycle_no_strategies() {
         let engine = test_engine();
         let mut trajectory = test_trajectory();
+
+        // Disable intent triggers so we can test the Trapped path
+        trajectory.policy.intent_check_interval = u32::MAX;
+        trajectory.policy.intent_check_at_budget_fraction = 1.0;
 
         // Set up a limit cycle classification
         trajectory.attractor_state = AttractorState {
@@ -2760,6 +2700,10 @@ mod tests {
         let engine = test_engine();
         let mut trajectory = test_trajectory();
 
+        // Disable intent triggers so we can test the RequestExtension path
+        trajectory.policy.intent_check_interval = u32::MAX;
+        trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
         // Set up near-budget-exhaustion with positive delta
         trajectory.budget.tokens_used =
             (trajectory.budget.max_tokens as f64 * 0.9) as u64;
@@ -2782,6 +2726,10 @@ mod tests {
     fn test_loop_control_no_extension_when_extensions_exhausted() {
         let engine = test_engine();
         let mut trajectory = test_trajectory();
+
+        // Disable intent triggers so we can test the Continue path
+        trajectory.policy.intent_check_interval = u32::MAX;
+        trajectory.policy.intent_check_at_budget_fraction = 1.0;
 
         // Near budget exhaustion, converging, but extensions already requested
         trajectory.budget.tokens_used =

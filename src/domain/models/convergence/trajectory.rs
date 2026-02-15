@@ -91,6 +91,15 @@ pub struct Trajectory {
     /// Total fresh starts in this trajectory (guards against infinite reset loops).
     pub total_fresh_starts: u32,
 
+    /// Confidence from the second-to-last LLM intent verification, if any.
+    /// Used together with `last_intent_confidence` to compute intent-weighted
+    /// convergence delta.
+    pub prev_intent_confidence: Option<f64>,
+
+    /// Confidence from the most recent LLM intent verification, if any.
+    /// Updated by the orchestrator after each intent check.
+    pub last_intent_confidence: Option<f64>,
+
     /// When this trajectory was created.
     pub created_at: DateTime<Utc>,
 
@@ -128,6 +137,8 @@ impl Trajectory {
             hints: Vec::new(),
             forced_strategy: None,
             total_fresh_starts: 0,
+            prev_intent_confidence: None,
+            last_intent_confidence: None,
             created_at: now,
             updated_at: now,
         }

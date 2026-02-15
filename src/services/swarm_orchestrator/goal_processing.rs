@@ -482,11 +482,13 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
             // Cast the generic IntentVerifierService to the trait object for
             // convergent execution. This erases the <G, T> generics.
-            let convergent_intent_verifier: Option<
-                std::sync::Arc<dyn super::convergent_execution::ConvergentIntentVerifier>,
+            // Intent verification is required for convergent execution.
+            let convergent_intent_verifier: std::sync::Arc<
+                dyn super::convergent_execution::ConvergentIntentVerifier,
             > = self.intent_verifier.as_ref().map(|iv| {
                 Arc::clone(iv) as Arc<dyn super::convergent_execution::ConvergentIntentVerifier>
-            });
+            }).expect("intent_verifier is required for convergent execution; \
+                       call with_intent_verifier() on SwarmOrchestrator before submitting convergent tasks");
 
             tokio::spawn(async move {
                 let _permit = permit;

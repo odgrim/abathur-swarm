@@ -15,11 +15,11 @@
 //! iterations. When context becomes noisy, convergence signals become unreliable and the
 //! system must trigger a fresh start to restore productive iteration.
 //!
-//! # Security Invariant
+//! # Security Evidence
 //!
-//! Strategies that introduce new vulnerabilities never receive positive convergence credit,
-//! regardless of other progress. This trains the strategy bandit to avoid approaches that
-//! trade functional progress for security regressions.
+//! Security regressions are passed as evidence to the LLM-based intent verifier rather
+//! than imposing a hard veto on convergence delta. The intent verifier decides whether
+//! security regressions are acceptable given the task's intent.
 //!
 //! # Context Degradation Guard
 //!
@@ -75,7 +75,7 @@ pub struct ObservationMetrics {
 
     /// Absolute convergence position: how close to "done."
     /// Range: 0.0 (nothing works) to 1.0 (fully converged).
-    /// Subject to hard gates: build failure caps at 0.3, type failure caps at 0.6.
+    /// Straight weighted composite of overseer signals — no hard gates.
     pub convergence_level: f64,
 }
 
@@ -268,26 +268,11 @@ impl Default for ConvergenceWeights {
 /// previous observation. This is the primary signal for attractor classification
 /// and strategy bandit updates.
 ///
-/// # Formula
+/// When intent verification confidence is available (from a prior verification),
+/// the weights shift to prioritize intent satisfaction:
 ///
-/// ```text
-/// test_delta     = (curr_pass - prev_pass) / total_tests
-/// error_delta    = (prev_errors - curr_errors) / prev_errors
-/// regression_pen = regression_count / total_tests
-/// structural     = 1.0 - min(ast_diff / 200, 1.0)
-///
-/// delta = w_test * test_delta
-///       + w_error * error_delta
-///       + w_regression * (1.0 - regression_penalty)
-///       + w_structural * structural
-/// ```
-///
-/// # Security Veto
-///
-/// If the current observation introduces new vulnerabilities (critical or high severity)
-/// compared to the previous observation, the delta is capped at 0.0. This prevents
-/// the strategy bandit from learning that vulnerability-introducing approaches are
-/// productive, even if they make progress on other dimensions.
+/// - **With intent signal**: intent=40%, test=25%, error=20%, regression=10%, structural=5%
+/// - **Without intent signal**: test=40%, error=30%, regression=20%, structural=10%
 ///
 /// # Context Degradation Penalty
 ///
@@ -314,6 +299,39 @@ pub fn compute_convergence_delta(
     current_ast_diff: u32,
     context_health: &ContextHealth,
     weights: &ConvergenceWeights,
+) -> f64 {
+    compute_convergence_delta_with_intent(
+        prev,
+        current_signals,
+        current_ast_diff,
+        context_health,
+        weights,
+        None,
+        None,
+    )
+}
+
+/// Computes convergence delta with optional intent verification signal.
+///
+/// When `current_intent_confidence` is provided (from an intent verification
+/// result), the delta computation includes an intent satisfaction component
+/// and reweights all dimensions to prioritize intent.
+///
+/// # Arguments
+///
+/// * `prev_intent_confidence` - Confidence from the previous verification (if any).
+/// * `current_intent_confidence` - Confidence from the current verification (if any).
+///
+/// Both must be `Some` for the intent component to be included. If either is
+/// `None`, the original weight distribution is used.
+pub fn compute_convergence_delta_with_intent(
+    prev: &Observation,
+    current_signals: &OverseerSignals,
+    current_ast_diff: u32,
+    context_health: &ContextHealth,
+    weights: &ConvergenceWeights,
+    prev_intent_confidence: Option<f64>,
+    current_intent_confidence: Option<f64>,
 ) -> f64 {
     let prev_signals = &prev.overseer_signals;
 
@@ -361,19 +379,27 @@ pub fn compute_convergence_delta(
     let structural_churn = 1.0 - (current_ast_diff as f64 / 200.0).min(1.0);
 
     // --- Weighted composite ---
-    let mut delta = weights.w_test * test_delta
-        + weights.w_error * error_delta
-        + weights.w_regression * (1.0 - regression_penalty)
-        + weights.w_structural * structural_churn;
-
-    // --- Security veto ---
-    // Strategies that introduce vulnerabilities never get credit for "progress."
-    // This trains the bandit to avoid vulnerability-introducing approaches.
-    let prev_vulns = prev_signals.vulnerability_count();
-    let curr_vulns = current_signals.vulnerability_count();
-    if curr_vulns > prev_vulns {
-        delta = delta.min(0.0);
-    }
+    // When intent confidence is available from both previous and current
+    // verifications, include an intent satisfaction delta and reweight
+    // all dimensions to prioritize intent.
+    let mut delta = match (prev_intent_confidence, current_intent_confidence) {
+        (Some(prev_conf), Some(curr_conf)) => {
+            let intent_delta = curr_conf - prev_conf;
+            // Intent-aware weights: intent dominates at 40%
+            0.40 * intent_delta
+                + 0.25 * test_delta
+                + 0.20 * error_delta
+                + 0.10 * (1.0 - regression_penalty)
+                + 0.05 * structural_churn
+        }
+        _ => {
+            // No intent signal — use standard overseer weights
+            weights.w_test * test_delta
+                + weights.w_error * error_delta
+                + weights.w_regression * (1.0 - regression_penalty)
+                + weights.w_structural * structural_churn
+        }
+    };
 
     // --- Context degradation penalty ---
     // When context health degrades, the convergence signal itself becomes unreliable.
@@ -410,14 +436,10 @@ pub fn compute_convergence_delta(
 /// Absent overseers default to 1.0 (assumed passing) to avoid penalizing tasks that
 /// don't use all overseer types.
 ///
-/// # Hard Gates
-///
-/// Regardless of the weighted score, certain failures impose hard caps:
-///
-/// - **Build failure**: caps the level at 0.3. Code that doesn't build cannot be
-///   more than 30% converged, no matter how many tests are defined.
-/// - **Type check failure**: caps the level at 0.6. Type errors indicate structural
-///   problems that limit confidence in functional correctness.
+/// This function produces a straight weighted composite with no hard gates.
+/// Build/type failures contribute naturally low scores through their weighted
+/// contribution. Finality decisions are made exclusively by the LLM-based
+/// intent verifier, which receives overseer signals as evidence.
 ///
 /// # No-Signal Rule
 ///
@@ -433,60 +455,8 @@ pub fn compute_convergence_delta(
 ///
 /// The convergence level in the range [0.0, 1.0].
 pub fn convergence_level(signals: &OverseerSignals) -> f64 {
-    // No overseers configured means level is 0.0.
-    // The system must have at least one signal source to assess convergence.
-    if !signals.has_any_signal() {
-        return 0.0;
-    }
-
-    // --- Individual dimension levels ---
-    // Absent overseers default to 1.0 (assumed passing) to avoid penalizing tasks
-    // that don't use all overseer types.
-
-    let test_level = signals
-        .test_results
-        .as_ref()
-        .map(|t| t.passed as f64 / t.total.max(1) as f64)
-        .unwrap_or(1.0);
-
-    let build_level = signals
-        .build_result
-        .as_ref()
-        .map(|b| if b.success { 1.0 } else { 0.0 })
-        .unwrap_or(1.0);
-
-    let type_level = signals
-        .type_check
-        .as_ref()
-        .map(|t| if t.clean { 1.0 } else { 0.0 })
-        .unwrap_or(1.0);
-
-    let custom_level = if signals.custom_checks.is_empty() {
-        1.0
-    } else {
-        signals
-            .custom_checks
-            .iter()
-            .filter(|c| c.passed)
-            .count() as f64
-            / signals.custom_checks.len() as f64
-    };
-
-    // --- Weighted composite ---
-    let level =
-        0.55 * test_level + 0.20 * build_level + 0.10 * type_level + 0.15 * custom_level;
-
-    // --- Hard gates ---
-    // Build failure caps at 0.3: code that doesn't compile cannot be more than 30% done.
-    if build_level < 1.0 {
-        return level.min(0.3);
-    }
-    // Type check failure caps at 0.6: type errors limit confidence in correctness.
-    if type_level < 1.0 {
-        return level.min(0.6);
-    }
-
-    level
+    // Identical to convergence_readiness — no hard gates.
+    convergence_readiness(signals)
 }
 
 // ============================================================================
@@ -782,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn test_convergence_level_build_failure_cap() {
+    fn test_convergence_level_build_failure_no_hard_gate() {
         let signals = OverseerSignals {
             test_results: Some(TestResults {
                 passed: 10,
@@ -803,15 +773,16 @@ mod tests {
             custom_checks: vec![],
         };
         let level = convergence_level(&signals);
-        // Build failure caps at 0.3
+        // No hard gate — build failure contributes naturally low score via weight:
+        // 0.55 * 1.0 + 0.20 * 0.0 + 0.10 * 1.0 + 0.15 * 1.0 = 0.80
         assert!(
-            level <= 0.3,
-            "Build failure should cap level at 0.3, got {level}"
+            (level - 0.80).abs() < 1e-10,
+            "Build failure should produce 0.80 (no hard gate), got {level}"
         );
     }
 
     #[test]
-    fn test_convergence_level_type_failure_cap() {
+    fn test_convergence_level_type_failure_no_hard_gate() {
         let signals = OverseerSignals {
             test_results: Some(TestResults {
                 passed: 10,
@@ -836,10 +807,11 @@ mod tests {
             custom_checks: vec![],
         };
         let level = convergence_level(&signals);
-        // Type failure caps at 0.6
+        // No hard gate — type failure contributes naturally low score via weight:
+        // 0.55 * 1.0 + 0.20 * 1.0 + 0.10 * 0.0 + 0.15 * 1.0 = 0.90
         assert!(
-            level <= 0.6,
-            "Type failure should cap level at 0.6, got {level}"
+            (level - 0.90).abs() < 1e-10,
+            "Type failure should produce 0.90 (no hard gate), got {level}"
         );
     }
 
@@ -912,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn test_delta_security_veto() {
+    fn test_delta_no_security_veto_with_vuln_increase() {
         let prev_signals = OverseerSignals {
             test_results: Some(TestResults {
                 passed: 5,
@@ -935,7 +907,8 @@ mod tests {
         };
         let prev = make_observation(1, prev_signals, None);
 
-        // More tests pass, but vulnerabilities introduced.
+        // More tests pass, vulnerabilities introduced — no veto, delta reflects
+        // test progress. Security regressions are handled by intent verifier.
         let current_signals = OverseerSignals {
             test_results: Some(TestResults {
                 passed: 8,
@@ -961,63 +934,8 @@ mod tests {
 
         let delta = compute_convergence_delta(&prev, &current_signals, 10, &health, &weights);
         assert!(
-            delta <= 0.0,
-            "Security veto should cap delta at 0.0, got {delta}"
-        );
-    }
-
-    #[test]
-    fn test_delta_no_security_veto_when_vulns_decrease() {
-        let prev_signals = OverseerSignals {
-            test_results: Some(TestResults {
-                passed: 5,
-                failed: 5,
-                skipped: 0,
-                total: 10,
-                regression_count: 0,
-                failing_test_names: Vec::new(),
-            }),
-            security_scan: Some(SecurityScanResult {
-                critical_count: 3,
-                high_count: 2,
-                medium_count: 0,
-                findings: Vec::new(),
-            }),
-            type_check: None,
-            lint_results: None,
-            build_result: None,
-            custom_checks: vec![],
-        };
-        let prev = make_observation(1, prev_signals, None);
-
-        // Tests improve and vulnerabilities decrease -- no veto.
-        let current_signals = OverseerSignals {
-            test_results: Some(TestResults {
-                passed: 8,
-                failed: 2,
-                skipped: 0,
-                total: 10,
-                regression_count: 0,
-                failing_test_names: Vec::new(),
-            }),
-            security_scan: Some(SecurityScanResult {
-                critical_count: 1,
-                high_count: 0,
-                medium_count: 0,
-                findings: Vec::new(),
-            }),
-            type_check: None,
-            lint_results: None,
-            build_result: None,
-            custom_checks: vec![],
-        };
-        let health = ContextHealth::default();
-        let weights = ConvergenceWeights::default();
-
-        let delta = compute_convergence_delta(&prev, &current_signals, 10, &health, &weights);
-        assert!(
             delta > 0.0,
-            "No security veto when vulns decrease, delta should be positive, got {delta}"
+            "No security veto — delta should reflect test progress, got {delta}"
         );
     }
 
@@ -1084,6 +1002,104 @@ mod tests {
         assert!(
             (delta_borderline - delta_healthy).abs() < 1e-10,
             "No penalty should apply at or above 0.5 threshold"
+        );
+    }
+
+    // --- compute_convergence_delta_with_intent tests ---
+
+    #[test]
+    fn test_delta_with_intent_reweights() {
+        let prev_signals = signals_with_tests(5, 10, 0);
+        let prev = make_observation(1, prev_signals, None);
+
+        let current_signals = signals_with_tests(8, 10, 0);
+        let health = ContextHealth::default();
+        let weights = ConvergenceWeights::default();
+
+        // Without intent — uses standard weights
+        let delta_no_intent = compute_convergence_delta_with_intent(
+            &prev, &current_signals, 20, &health, &weights,
+            None, None,
+        );
+
+        // With intent — reweights to prioritize intent satisfaction
+        let delta_with_intent = compute_convergence_delta_with_intent(
+            &prev, &current_signals, 20, &health, &weights,
+            Some(0.5), Some(0.9), // confidence improved significantly
+        );
+
+        // Both should be positive (progress on tests + intent improvement)
+        assert!(delta_no_intent > 0.0, "Expected positive delta without intent");
+        assert!(delta_with_intent > 0.0, "Expected positive delta with intent");
+
+        // Weight redistribution produces different results: intent-weighted
+        // delta differs from standard because 40% weight goes to intent delta
+        // instead of being distributed across overseer signals.
+        assert!(
+            (delta_with_intent - delta_no_intent).abs() > 0.01,
+            "Intent weighting should produce different delta: with={delta_with_intent}, without={delta_no_intent}"
+        );
+
+        // The intent component is 0.40 * (0.9 - 0.5) = 0.16.
+        // Verify by comparing to a zero-change intent (0.7 -> 0.7):
+        let delta_flat_intent = compute_convergence_delta_with_intent(
+            &prev, &current_signals, 20, &health, &weights,
+            Some(0.7), Some(0.7),
+        );
+        assert!(
+            delta_with_intent > delta_flat_intent,
+            "Rising intent should produce larger delta than flat intent: rising={delta_with_intent}, flat={delta_flat_intent}"
+        );
+    }
+
+    #[test]
+    fn test_delta_with_declining_intent() {
+        let prev_signals = signals_with_tests(5, 10, 0);
+        let prev = make_observation(1, prev_signals, None);
+
+        let current_signals = signals_with_tests(8, 10, 0);
+        let health = ContextHealth::default();
+        let weights = ConvergenceWeights::default();
+
+        // Intent confidence dropped despite test progress
+        let delta = compute_convergence_delta_with_intent(
+            &prev, &current_signals, 20, &health, &weights,
+            Some(0.9), Some(0.3), // confidence dropped
+        );
+
+        let delta_no_intent = compute_convergence_delta_with_intent(
+            &prev, &current_signals, 20, &health, &weights,
+            None, None,
+        );
+
+        // Declining intent (0.9 -> 0.3 = -0.6) should reduce delta vs no-intent
+        assert!(
+            delta < delta_no_intent,
+            "Declining intent should reduce delta: with={delta}, without={delta_no_intent}"
+        );
+    }
+
+    #[test]
+    fn test_delta_with_partial_intent_uses_standard_weights() {
+        let prev_signals = signals_with_tests(5, 10, 0);
+        let prev = make_observation(1, prev_signals, None);
+
+        let current_signals = signals_with_tests(8, 10, 0);
+        let health = ContextHealth::default();
+        let weights = ConvergenceWeights::default();
+
+        // Only one side has intent confidence — should use standard weights
+        let delta_one_side = compute_convergence_delta_with_intent(
+            &prev, &current_signals, 20, &health, &weights,
+            None, Some(0.8),
+        );
+        let delta_standard = compute_convergence_delta(
+            &prev, &current_signals, 20, &health, &weights,
+        );
+
+        assert!(
+            (delta_one_side - delta_standard).abs() < f64::EPSILON,
+            "With only one intent confidence, should use standard weights"
         );
     }
 
@@ -1406,7 +1422,8 @@ mod tests {
     }
 
     #[test]
-    fn test_convergence_readiness_build_failure_no_hard_gate() {
+    fn test_convergence_level_equals_readiness() {
+        // convergence_level and convergence_readiness are now identical (no hard gates)
         let signals = OverseerSignals {
             test_results: Some(TestResults {
                 passed: 10,
@@ -1428,63 +1445,20 @@ mod tests {
         };
         let readiness = convergence_readiness(&signals);
         let level = convergence_level(&signals);
-
-        // convergence_level caps at 0.3 due to build failure
-        assert!(level <= 0.3, "convergence_level should be capped at 0.3, got {level}");
-
-        // convergence_readiness does NOT cap — build_level=0.0 just produces a naturally lower score
+        assert!((readiness - level).abs() < f64::EPSILON,
+            "convergence_level ({level}) should equal convergence_readiness ({readiness})");
         // 0.55 * 1.0 + 0.20 * 0.0 + 0.10 * 1.0 + 0.15 * 1.0 = 0.80
-        assert!((readiness - 0.80).abs() < 1e-10,
-            "convergence_readiness should be 0.80 (no hard gate), got {readiness}");
-        assert!(readiness > 0.3,
-            "convergence_readiness should NOT be capped at 0.3 by build failure");
+        assert!((level - 0.80).abs() < 1e-10,
+            "Expected 0.80, got {level}");
     }
 
     #[test]
-    fn test_convergence_readiness_type_failure_no_hard_gate() {
-        let signals = OverseerSignals {
-            test_results: Some(TestResults {
-                passed: 10,
-                failed: 0,
-                skipped: 0,
-                total: 10,
-                regression_count: 0,
-                failing_test_names: Vec::new(),
-            }),
-            build_result: Some(BuildResult {
-                success: true,
-                error_count: 0,
-                errors: Vec::new(),
-            }),
-            type_check: Some(TypeCheckResult {
-                clean: false,
-                error_count: 2,
-                errors: Vec::new(),
-            }),
-            lint_results: None,
-            security_scan: None,
-            custom_checks: vec![],
-        };
-        let readiness = convergence_readiness(&signals);
-        let level = convergence_level(&signals);
-
-        // convergence_level caps at 0.6 due to type failure
-        assert!(level <= 0.6, "convergence_level should be capped at 0.6, got {level}");
-
-        // convergence_readiness: 0.55 * 1.0 + 0.20 * 1.0 + 0.10 * 0.0 + 0.15 * 1.0 = 0.90
-        assert!((readiness - 0.90).abs() < 1e-10,
-            "convergence_readiness should be 0.90 (no hard gate), got {readiness}");
-        assert!(readiness > 0.6,
-            "convergence_readiness should NOT be capped at 0.6 by type failure");
-    }
-
-    #[test]
-    fn test_convergence_readiness_same_as_level_when_all_passing() {
-        // When there are no hard-gate triggers, readiness == level
+    fn test_convergence_level_always_equals_readiness() {
+        // Verify identity holds across different signal configurations
         let signals = signals_with_tests(8, 10, 0);
         let readiness = convergence_readiness(&signals);
         let level = convergence_level(&signals);
         assert!((readiness - level).abs() < f64::EPSILON,
-            "readiness ({readiness}) should equal level ({level}) when no hard gates apply");
+            "readiness ({readiness}) should always equal level ({level})");
     }
 }
