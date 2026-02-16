@@ -62,6 +62,7 @@ fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
                 cli_tools.push("mcp__abathur__task_list".to_string());
                 cli_tools.push("mcp__abathur__task_get".to_string());
                 cli_tools.push("mcp__abathur__task_update_status".to_string());
+                cli_tools.push("mcp__abathur__task_wait".to_string());
                 cli_tools.push("mcp__abathur__goals_list".to_string());
             }
             "task_status" => {

@@ -76,6 +76,7 @@ You have native MCP tools for interacting with the Abathur swarm. Use these dire
 - **task_list**: List tasks, optionally filtered by `status` (pending|ready|running|complete|failed|blocked). Use this to track subtask progress.
 - **task_get**: Get full task details by `id` (UUID). Use to check subtask results and failure reasons.
 - **task_update_status**: Mark a task as `complete` or `failed`. Provide `error` message when failing a task.
+- **task_wait**: Block until a task reaches a terminal state (complete, failed, or canceled). Pass `id` for a single task or `ids` for multiple tasks. Optional `timeout_seconds` (default: 600). Returns the final status. ALWAYS use this instead of polling with task_list + sleep loops — polling wastes your turn budget.
 
 ### Memory
 - **memory_search**: Search swarm memory by `query` string. Use before planning to find similar past tasks and known patterns.
@@ -97,6 +98,7 @@ Create a **read-only research agent** to explore the codebase, understand existi
 - Tools: `read`, `glob`, `grep` only — NO write, edit, or shell.
 - The research task has no dependencies (it runs first).
 - You MUST always create a research agent first. NEVER create an implementation agent without a preceding research task.
+- After submitting the research task, call `task_wait` with the research task UUID before proceeding to Phase 3.
 
 ### Phase 3: Plan
 Create a **domain-specific planning agent** to draft a concrete implementation plan based on the research findings.
@@ -104,11 +106,13 @@ Create a **domain-specific planning agent** to draft a concrete implementation p
 - Tools: `read`, `glob`, `grep`, `memory` — read-only plus memory to store the plan.
 - The planning task MUST `depends_on` the research task UUID.
 - Do NOT use a generic "planner" agent. The planner must be a domain specialist.
+- After submitting the plan task, call `task_wait` with the plan task UUID before proceeding to Phase 4.
 
 ### Phase 4: Implement
 Create **implementation agents** with specific instructions derived from the planning phase.
 - Implementation tasks MUST `depends_on` the planning task UUID.
 - Split large implementations into parallel tasks where possible.
+- After submitting implementation tasks, call `task_wait` with all implementation task UUIDs before proceeding to Phase 5.
 
 ### Phase 5: Review
 Create a **code review agent** that reviews for correctness, edge cases, test coverage, and adherence to the plan.
@@ -156,6 +160,12 @@ arguments:
   priority: "normal"
 # Returns research_task_id
 
+# Wait for research to complete before planning
+tool: task_wait
+arguments:
+  id: "<research_task_id>"
+# → Returns when research completes, then proceed to Phase 3
+
 # Phase 3: Plan - create domain-specific planner
 tool: agent_create
 arguments:
@@ -180,6 +190,12 @@ arguments:
   depends_on: ["<research_task_id>"]
   priority: "normal"
 # Returns plan_task_id
+
+# Wait for planning to complete before implementation
+tool: task_wait
+arguments:
+  id: "<plan_task_id>"
+# → Returns when planning completes, then proceed to Phase 4
 
 # Phase 4: Implement
 tool: agent_create
@@ -209,6 +225,12 @@ arguments:
   depends_on: ["<plan_task_id>"]
   priority: "normal"
 # Returns impl_task_id
+
+# Wait for implementation to complete before review
+tool: task_wait
+arguments:
+  id: "<impl_task_id>"
+# → Returns when implementation completes, then proceed to Phase 5
 
 # Phase 5: Review
 tool: agent_create

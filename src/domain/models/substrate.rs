@@ -318,6 +318,8 @@ pub enum SubstrateOutput {
     TurnComplete { turn_number: u32, input_tokens: u64, output_tokens: u64 },
     /// Session complete
     SessionComplete { result: String },
+    /// Agent ran out of turns before completing
+    MaxTurnsExceeded { result: String },
     /// Error occurred
     Error { message: String },
     /// Status update

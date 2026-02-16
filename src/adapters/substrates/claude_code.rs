@@ -266,6 +266,11 @@ impl ClaudeCodeSubstrate {
                     })
                     .unwrap_or_else(|| "Completed".to_string());
 
+                // Check for error_max_turns subtype
+                let is_max_turns = json.get("subtype")
+                    .and_then(|s| s.as_str())
+                    == Some("error_max_turns");
+
                 // Extract final usage if present
                 if let Some(usage) = json.get("usage") {
                     let input = usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
@@ -281,7 +286,11 @@ impl ClaudeCodeSubstrate {
                     }
                 }
 
-                Some(SubstrateOutput::SessionComplete { result })
+                if is_max_turns {
+                    Some(SubstrateOutput::MaxTurnsExceeded { result })
+                } else {
+                    Some(SubstrateOutput::SessionComplete { result })
+                }
             }
 
             // Error events
@@ -550,7 +559,19 @@ impl Substrate for ClaudeCodeSubstrate {
 
         // Determine success based on exit code
         if exit_status.success() {
-            session.complete(&result_text);
+            let is_max_turns = result_json.as_ref()
+                .and_then(|j| j.get("subtype"))
+                .and_then(|s| s.as_str())
+                == Some("error_max_turns");
+            if is_max_turns {
+                session.fail(&format!(
+                    "error_max_turns: Agent exhausted {} turns without completing. Last output: {}",
+                    session.turns_completed,
+                    result_text.chars().take(500).collect::<String>()
+                ));
+            } else {
+                session.complete(&result_text);
+            }
         } else {
             let error_msg = if !error_text.trim().is_empty() {
                 error_text.trim().to_string()
@@ -649,6 +670,7 @@ impl Substrate for ClaudeCodeSubstrate {
             let mut all_output = String::new();
             let mut total_input = 0u64;
             let mut total_output = 0u64;
+            let mut max_turns_exceeded = false;
 
             // Read stdout
             while let Ok(Some(line)) = stdout_lines.next_line().await {
@@ -667,6 +689,9 @@ impl Substrate for ClaudeCodeSubstrate {
                         SubstrateOutput::TurnComplete { input_tokens, output_tokens, .. } => {
                             total_input += input_tokens;
                             total_output += output_tokens;
+                        }
+                        SubstrateOutput::MaxTurnsExceeded { .. } => {
+                            max_turns_exceeded = true;
                         }
                         _ => {}
                     }
@@ -709,12 +734,21 @@ impl Substrate for ClaudeCodeSubstrate {
 
                     match exit_result {
                         Ok(status) if status.success() => {
-                            if session.status == SessionStatus::Active {
-                                session.complete(all_output.trim());
+                            if max_turns_exceeded {
+                                let error_msg = format!(
+                                    "error_max_turns: Agent exhausted turns without completing. Last output: {}",
+                                    all_output.trim().chars().take(500).collect::<String>()
+                                );
+                                session.fail(&error_msg);
+                                let _ = tx.send(SubstrateOutput::Error { message: error_msg }).await;
+                            } else {
+                                if session.status == SessionStatus::Active {
+                                    session.complete(all_output.trim());
+                                }
+                                let _ = tx.send(SubstrateOutput::SessionComplete {
+                                    result: "Completed successfully".to_string(),
+                                }).await;
                             }
-                            let _ = tx.send(SubstrateOutput::SessionComplete {
-                                result: "Completed successfully".to_string(),
-                            }).await;
                         }
                         Ok(status) => {
                             let error = if !error_output.trim().is_empty() {
@@ -893,6 +927,20 @@ mod tests {
 
         let output = ClaudeCodeSubstrate::parse_output_line("   ");
         assert!(output.is_none());
+    }
+
+    #[test]
+    fn test_parse_stream_json_result_max_turns() {
+        let line = r#"{"type":"result","subtype":"error_max_turns","result":"Agent ran out of turns","cost_usd":0.5,"num_turns":25}"#;
+        let output = ClaudeCodeSubstrate::parse_stream_json(line);
+        assert!(matches!(output, Some(SubstrateOutput::MaxTurnsExceeded { result }) if result == "Agent ran out of turns"));
+    }
+
+    #[test]
+    fn test_parse_stream_json_result_normal() {
+        let line = r#"{"type":"result","result":"Task completed successfully","cost_usd":0.3,"num_turns":5}"#;
+        let output = ClaudeCodeSubstrate::parse_stream_json(line);
+        assert!(matches!(output, Some(SubstrateOutput::SessionComplete { result }) if result == "Task completed successfully"));
     }
 
     #[test]

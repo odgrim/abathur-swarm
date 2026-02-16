@@ -15,6 +15,7 @@ pub const ABATHUR_ALLOWED_TOOLS: &[&str] = &[
     "mcp__abathur__task_list",
     "mcp__abathur__task_get",
     "mcp__abathur__task_update_status",
+    "mcp__abathur__task_wait",
     "mcp__abathur__agent_create",
     "mcp__abathur__agent_list",
     "mcp__abathur__agent_get",

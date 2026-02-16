@@ -306,6 +306,18 @@ where
                         "type": "object",
                         "properties": {}
                     }
+                },
+                {
+                    "name": "task_wait",
+                    "description": "Block until one or more tasks reach a terminal state (complete, failed, or canceled). Use this instead of polling with task_list + sleep. Returns the final status of each task. This is the recommended way to wait for subtask completion.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "description": "Single task UUID to wait for" },
+                            "ids": { "type": "array", "items": { "type": "string" }, "description": "Array of task UUIDs to wait for (all must reach terminal state)" },
+                            "timeout_seconds": { "type": "integer", "description": "Maximum seconds to wait. Default: 600 (10 minutes). Returns current status on timeout." }
+                        }
+                    }
                 }
             ]
         });
@@ -334,6 +346,7 @@ where
             "memory_store" => self.tool_memory_store(&arguments).await,
             "memory_get" => self.tool_memory_get(&arguments).await,
             "goals_list" => self.tool_goals_list(&arguments).await,
+            "task_wait" => self.tool_task_wait(&arguments).await,
             _ => Err(format!("Unknown tool: {}", tool_name)),
         };
 
@@ -858,6 +871,94 @@ where
             .collect();
 
         serde_json::to_string_pretty(&results).map_err(|e| e.to_string())
+    }
+
+    // ========================================================================
+    // Task wait tool
+    // ========================================================================
+
+    async fn tool_task_wait(&self, args: &serde_json::Value) -> Result<String, String> {
+        // Parse task IDs from either `id` (single) or `ids` (array)
+        let mut task_ids: Vec<Uuid> = Vec::new();
+
+        if let Some(id_str) = args.get("id").and_then(|i| i.as_str()) {
+            let id = Uuid::parse_str(id_str).map_err(|e| format!("Invalid UUID: {}", e))?;
+            task_ids.push(id);
+        }
+
+        if let Some(ids_arr) = args.get("ids").and_then(|i| i.as_array()) {
+            for v in ids_arr {
+                if let Some(id_str) = v.as_str() {
+                    let id = Uuid::parse_str(id_str).map_err(|e| format!("Invalid UUID '{}': {}", id_str, e))?;
+                    task_ids.push(id);
+                }
+            }
+        }
+
+        if task_ids.is_empty() {
+            return Err("Must provide either 'id' (single UUID) or 'ids' (array of UUIDs)".to_string());
+        }
+
+        let timeout_secs = args
+            .get("timeout_seconds")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(600);
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
+        let mut backoff = tokio::time::Duration::from_secs(2);
+        let max_backoff = tokio::time::Duration::from_secs(15);
+
+        loop {
+            let mut all_terminal = true;
+            let mut results: Vec<serde_json::Value> = Vec::new();
+
+            for task_id in &task_ids {
+                match self.task_service.get_task(*task_id).await {
+                    Ok(Some(task)) => {
+                        if !task.status.is_terminal() {
+                            all_terminal = false;
+                        }
+                        results.push(serde_json::json!({
+                            "id": task_id.to_string(),
+                            "status": task.status.as_str(),
+                        }));
+                    }
+                    Ok(None) => {
+                        all_terminal = false;
+                        results.push(serde_json::json!({
+                            "id": task_id.to_string(),
+                            "status": "not_found",
+                            "error": format!("Task {} not found", task_id),
+                        }));
+                    }
+                    Err(e) => {
+                        all_terminal = false;
+                        results.push(serde_json::json!({
+                            "id": task_id.to_string(),
+                            "status": "error",
+                            "error": format!("Failed to fetch task: {}", e),
+                        }));
+                    }
+                }
+            }
+
+            if all_terminal {
+                return serde_json::to_string_pretty(&results).map_err(|e| e.to_string());
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                // Timeout: return current statuses with timed_out flag
+                let response = serde_json::json!({
+                    "timed_out": true,
+                    "tasks": results,
+                });
+                return serde_json::to_string_pretty(&response).map_err(|e| e.to_string());
+            }
+
+            // Sleep with exponential backoff (server-side, does NOT consume agent turns)
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(max_backoff);
+        }
     }
 
     // ========================================================================
