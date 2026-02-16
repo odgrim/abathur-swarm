@@ -136,6 +136,10 @@ pub enum SwarmCommand {
         /// Start MCP servers automatically (memory, tasks, a2a, events)
         #[arg(long)]
         with_mcp_servers: bool,
+
+        /// Default execution mode: "convergent" (default), "direct", or "auto" (heuristic)
+        #[arg(long, default_value = "convergent")]
+        default_execution_mode: String,
     },
     /// Stop the running swarm orchestrator
     Stop,
@@ -175,6 +179,7 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
             a2a_gateway,
             events_server,
             with_mcp_servers,
+            default_execution_mode,
         } => {
             start_swarm(
                 max_agents,
@@ -187,6 +192,7 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
                 a2a_gateway,
                 events_server,
                 with_mcp_servers,
+                default_execution_mode,
             ).await
         }
         SwarmCommand::Stop => stop_swarm(json_mode).await,
@@ -286,6 +292,7 @@ async fn start_swarm(
     a2a_gateway: Option<String>,
     events_server: Option<String>,
     with_mcp_servers: bool,
+    default_execution_mode: String,
 ) -> Result<()> {
     // Check if swarm is already running
     if let Some(pid) = check_existing_swarm() {
@@ -322,10 +329,10 @@ async fn start_swarm(
 
     if foreground {
         // Run in foreground (original behavior)
-        run_swarm_foreground(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers).await
+        run_swarm_foreground(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode).await
     } else {
         // Background the swarm
-        start_swarm_background(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers)
+        start_swarm_background(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode)
     }
 }
 
@@ -335,6 +342,7 @@ fn start_swarm_background(
     json_mode: bool,
     mcp_urls: McpServerUrls,
     with_mcp_servers: bool,
+    default_execution_mode: &str,
 ) -> Result<()> {
     use std::process::{Command, Stdio};
 
@@ -367,6 +375,7 @@ fn start_swarm_background(
     if with_mcp_servers {
         cmd.arg("--with-mcp-servers");
     }
+    cmd.arg("--default-execution-mode").arg(default_execution_mode);
 
     // Ensure .abathur directory exists for log file
     std::fs::create_dir_all(".abathur")?;
@@ -486,12 +495,13 @@ async fn run_swarm_foreground(
     json_mode: bool,
     mcp_urls: McpServerUrls,
     with_mcp_servers: bool,
+    default_execution_mode: &str,
 ) -> Result<()> {
     use crate::adapters::sqlite::{
         create_pool, Migrator, all_embedded_migrations,
     };
     use crate::adapters::substrates::SubstrateRegistry;
-    use crate::domain::models::SubstrateType;
+    use crate::domain::models::{ExecutionMode, SubstrateType};
     use crate::services::McpServerConfig;
 
     // Write PID file for foreground mode too (so status works)
@@ -541,9 +551,20 @@ async fn run_swarm_foreground(
         base_port: 9100,
     };
 
+    let execution_mode = match default_execution_mode.to_lowercase().as_str() {
+        "convergent" => Some(ExecutionMode::Convergent { parallel_samples: None }),
+        "direct" => Some(ExecutionMode::Direct),
+        "auto" | "none" => None,
+        other => {
+            tracing::warn!("Unknown execution mode '{}', using convergent", other);
+            Some(ExecutionMode::Convergent { parallel_samples: None })
+        }
+    };
+
     let config = SwarmConfig {
         max_agents,
         mcp_servers: mcp_server_config,
+        default_execution_mode: execution_mode,
         ..Default::default()
     };
 

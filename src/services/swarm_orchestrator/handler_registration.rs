@@ -252,7 +252,7 @@ where
 
             let task_service = Arc::new(TaskService::new(
                 self.task_repo.clone(),
-            ));
+            ).with_default_execution_mode(self.config.default_execution_mode.clone()));
             let goal_service = Arc::new(GoalService::new(
                 self.goal_repo.clone(),
             ));

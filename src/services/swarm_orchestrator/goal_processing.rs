@@ -454,7 +454,8 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             // Spawn task execution
             let task_id = task.id;
             let is_convergent = task.execution_mode.is_convergent()
-                && self.config.convergence_enabled;
+                && self.config.convergence_enabled
+                && !is_read_only_role;
             let task_clone = task.clone();
             let substrate = self.substrate.clone();
             let task_repo = self.task_repo.clone();

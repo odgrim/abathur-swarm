@@ -59,7 +59,8 @@ where
         use crate::services::task_service::TaskService;
 
         tracing::warn!("CommandBus not initialized — building ephemeral instance");
-        let task_service = Arc::new(TaskService::new(self.task_repo.clone()));
+        let task_service = Arc::new(TaskService::new(self.task_repo.clone())
+            .with_default_execution_mode(self.config.default_execution_mode.clone()));
         let goal_service = Arc::new(GoalService::new(self.goal_repo.clone()));
 
         if let Some(ref memory_repo) = self.memory_repo {

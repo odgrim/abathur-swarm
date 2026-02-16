@@ -409,6 +409,13 @@ impl EventReactor {
                                                 handler.handle(missed_event, &ctx),
                                             ).await;
                                         }
+                                        // Advance watermarks for all handlers (processed or filter-skipped)
+                                        {
+                                            let mut wm_buf = watermark_buffer.write().await;
+                                            for handler in hs.iter() {
+                                                wm_buf.insert(handler.metadata().name.clone(), missed_event.sequence);
+                                            }
+                                        }
                                         if missed_event.sequence.0 > last_processed_sequence {
                                             last_processed_sequence = missed_event.sequence.0;
                                         }
@@ -484,6 +491,9 @@ impl EventReactor {
                 let mut reactions: Vec<UnifiedEvent> = Vec::new();
                 // Track handlers that successfully processed this event (for watermark updates)
                 let mut successful_handlers: Vec<String> = Vec::new();
+                // Track handlers that skipped this event due to filter mismatch
+                // (their watermarks should still advance — a replayed event would be skipped again)
+                let mut skipped_handlers: Vec<String> = Vec::new();
 
                 for handler in handlers_snapshot.iter() {
                     let meta = handler.metadata();
@@ -501,6 +511,7 @@ impl EventReactor {
 
                     // Check filter match
                     if !meta.filter.matches(&event) {
+                        skipped_handlers.push(meta.name.clone());
                         continue;
                     }
 
@@ -606,10 +617,11 @@ impl EventReactor {
                     last_processed_sequence = event.sequence.0;
                 }
 
-                // Buffer watermark updates only for handlers that successfully processed this event
+                // Buffer watermark updates for handlers that successfully processed
+                // or were filter-skipped (but NOT circuit-breaker-skipped) for this event
                 if event_store.is_some() {
                     let mut wm_buf = watermark_buffer.write().await;
-                    for handler_name in &successful_handlers {
+                    for handler_name in successful_handlers.iter().chain(skipped_handlers.iter()) {
                         wm_buf.insert(handler_name.clone(), event.sequence);
                     }
 
@@ -829,6 +841,8 @@ impl EventReactor {
                 }
 
                 if !meta.filter.matches(event) {
+                    // Filter-skipped: still advance watermark (replay would skip again)
+                    handler_watermarks.insert(meta.name.clone(), event.sequence);
                     continue;
                 }
 

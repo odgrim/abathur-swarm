@@ -310,7 +310,7 @@ impl Default for SwarmConfig {
             polling: PollingConfig::default(),
             event_retention_days: 30,
             convergence_enabled: true,
-            default_execution_mode: None,
+            default_execution_mode: Some(crate::domain::models::ExecutionMode::Convergent { parallel_samples: None }),
         }
     }
 }
