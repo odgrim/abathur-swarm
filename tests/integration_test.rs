@@ -194,6 +194,7 @@ async fn test_agent_system_integration() {
         vec![],
         vec![],
         Some(25),
+        false,
     ).await.expect("Failed to register template");
 
     assert_eq!(template.name, "test-worker");

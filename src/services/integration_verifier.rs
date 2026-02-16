@@ -722,6 +722,18 @@ mod tests {
     }
 
     #[test]
+    fn test_verifier_config_read_only_agent() {
+        let config = VerifierConfig {
+            require_commits: false,
+            ..Default::default()
+        };
+        assert!(!config.require_commits);
+        assert!(config.run_tests);
+        assert!(config.run_lint);
+        assert!(config.check_format);
+    }
+
+    #[test]
     fn test_parse_test_output() {
         // Mock output parsing
         let output = r#"

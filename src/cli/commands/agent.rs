@@ -527,6 +527,7 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
                 tools,
                 vec![],
                 max_turns,
+                false,
             ).await?;
 
             let out = AgentActionOutput {

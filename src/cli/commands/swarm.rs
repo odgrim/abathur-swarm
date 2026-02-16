@@ -8,7 +8,11 @@ use std::sync::Arc;
 
 use crate::adapters::sqlite::{
     SqliteAgentRepository, SqliteGoalRepository, SqliteMemoryRepository, SqliteTaskRepository,
-    SqliteWorktreeRepository,
+    SqliteTrajectoryRepository, SqliteWorktreeRepository,
+};
+use crate::services::overseers::{
+    BuildOverseer, CompilationOverseer, LintOverseer, OverseerClusterService,
+    SecurityScanOverseer, TestSuiteOverseer, TypeCheckOverseer,
 };
 use crate::services::{SwarmConfig, SwarmOrchestrator, SwarmEvent};
 
@@ -19,6 +23,21 @@ type CliOrchestrator = SwarmOrchestrator<
     SqliteAgentRepository,
     SqliteMemoryRepository,
 >;
+
+/// Build the default overseer cluster for a Rust project.
+fn build_rust_overseer_cluster() -> OverseerClusterService {
+    let mut cluster = OverseerClusterService::new();
+    // Phase 1 (Cheap): compilation & type checking
+    cluster.add(Box::new(CompilationOverseer::cargo_check()));
+    cluster.add(Box::new(TypeCheckOverseer::cargo_check()));
+    cluster.add(Box::new(BuildOverseer::cargo_build()));
+    // Phase 2 (Moderate): lint & security
+    cluster.add(Box::new(LintOverseer::cargo_clippy()));
+    cluster.add(Box::new(SecurityScanOverseer::cargo_audit()));
+    // Phase 3 (Expensive): test suite
+    cluster.add(Box::new(TestSuiteOverseer::cargo_test()));
+    cluster
+}
 
 /// Build an orchestrator with mock substrate for CLI commands.
 async fn build_cli_orchestrator(config: SwarmConfig) -> Result<CliOrchestrator> {
@@ -57,6 +76,9 @@ async fn build_cli_orchestrator(config: SwarmConfig) -> Result<CliOrchestrator> 
         crate::adapters::sqlite::SqliteTriggerRuleRepository::new(pool.clone()),
     );
 
+    let trajectory_repo = Arc::new(SqliteTrajectoryRepository::new(pool.clone()));
+    let overseer_cluster = Arc::new(build_rust_overseer_cluster());
+
     Ok(SwarmOrchestrator::new(
         goal_repo, task_repo, worktree_repo, agent_repo, substrate.clone(), config,
         event_bus, event_reactor, event_scheduler,
@@ -64,6 +86,8 @@ async fn build_cli_orchestrator(config: SwarmConfig) -> Result<CliOrchestrator> 
     .with_memory_repo(memory_repo)
     .with_trigger_rule_repo(trigger_rule_repo)
     .with_intent_verifier(substrate)
+    .with_trajectory_repo(trajectory_repo)
+    .with_overseer_cluster(overseer_cluster)
     .with_pool(pool.clone()))
 }
 
@@ -554,6 +578,9 @@ async fn run_swarm_foreground(
         crate::adapters::sqlite::SqliteTriggerRuleRepository::new(pool.clone()),
     );
 
+    let trajectory_repo = Arc::new(SqliteTrajectoryRepository::new(pool.clone()));
+    let overseer_cluster = Arc::new(build_rust_overseer_cluster());
+
     let orchestrator = SwarmOrchestrator::new(
         goal_repo,
         task_repo,
@@ -568,6 +595,8 @@ async fn run_swarm_foreground(
     .with_memory_repo(memory_repo)
     .with_trigger_rule_repo(trigger_rule_repo)
     .with_intent_verifier(substrate)
+    .with_trajectory_repo(trajectory_repo)
+    .with_overseer_cluster(overseer_cluster)
     .with_pool(pool.clone());
 
     if !json_mode {

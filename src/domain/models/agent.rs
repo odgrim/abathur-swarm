@@ -189,6 +189,9 @@ pub struct AgentTemplate {
     pub agent_card: AgentCard,
     /// Maximum turns per task
     pub max_turns: u32,
+    /// Whether this agent is read-only (produces findings via memory, not code commits).
+    /// When true, commit verification is disabled and memory verification is enabled.
+    pub read_only: bool,
     /// Status
     pub status: AgentStatus,
     /// When created
@@ -212,6 +215,7 @@ impl AgentTemplate {
             constraints: Vec::new(),
             agent_card: AgentCard::default(),
             max_turns: 25,
+            read_only: false,
             status: AgentStatus::Active,
             created_at: now,
             updated_at: now,
@@ -245,6 +249,13 @@ impl AgentTemplate {
     /// Set max turns.
     pub fn with_max_turns(mut self, turns: u32) -> Self {
         self.max_turns = turns;
+        self
+    }
+
+    /// Set read-only mode.
+    /// Read-only agents produce findings via memory rather than code commits.
+    pub fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
         self
     }
 
@@ -415,7 +426,22 @@ mod tests {
 
         assert_eq!(template.name, "test-agent");
         assert_eq!(template.tier, AgentTier::Worker);
+        assert!(!template.read_only);
         assert!(template.validate().is_ok());
+    }
+
+    #[test]
+    fn test_agent_template_read_only() {
+        let template = AgentTemplate::new("researcher", AgentTier::Worker)
+            .with_description("A read-only research agent")
+            .with_prompt("You are a researcher.")
+            .with_read_only(true);
+
+        assert!(template.read_only);
+
+        // Verify it can be toggled back
+        let template = template.with_read_only(false);
+        assert!(!template.read_only);
     }
 
     #[test]

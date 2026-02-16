@@ -57,6 +57,8 @@ pub struct CreateAgentRequest {
     pub constraints: Vec<ConstraintSpec>,
     #[serde(default)]
     pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 fn default_tier() -> String {
@@ -92,6 +94,7 @@ pub struct AgentResponse {
     pub capabilities: Vec<String>,
     pub status: String,
     pub max_turns: u32,
+    pub read_only: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -221,6 +224,7 @@ async fn create_agent<A: AgentRepository + Clone + Send + Sync + 'static>(
         tools,
         constraints,
         req.max_turns,
+        req.read_only,
     ).await {
         Ok(template) => Ok((StatusCode::CREATED, Json(to_response(&template)))),
         Err(e) => Err((
@@ -311,6 +315,7 @@ fn to_response(template: &crate::domain::models::agent::AgentTemplate) -> AgentR
         capabilities: template.agent_card.capabilities.clone(),
         status: template.status.as_str().to_string(),
         max_turns: template.max_turns,
+        read_only: template.read_only,
         created_at: template.created_at.to_rfc3339(),
         updated_at: template.updated_at.to_rfc3339(),
     }
@@ -377,6 +382,7 @@ mod tests {
             capabilities: vec!["coding".to_string()],
             status: "active".to_string(),
             max_turns: 25,
+            read_only: false,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
         };

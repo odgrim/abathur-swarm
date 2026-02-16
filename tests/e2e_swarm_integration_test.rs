@@ -403,6 +403,7 @@ async fn test_agent_template_and_instance_management() {
             ],
             vec![],
             Some(25),
+            false,
         )
         .await
         .expect("Failed to register worker template");
@@ -427,6 +428,7 @@ async fn test_agent_template_and_instance_management() {
                 AgentConstraint::new("jest", "Use jest for JavaScript tests"),
             ],
             Some(30),
+            false,
         )
         .await
         .expect("Failed to register specialist template");
@@ -891,6 +893,7 @@ async fn test_full_end_to_end_workflow() {
             ],
             vec![],
             Some(20),
+            false,
         )
         .await
         .expect("Failed to register template");
@@ -1286,6 +1289,7 @@ async fn test_e2e_all_critical_paths() {
             vec![],
             vec![],
             Some(10),
+            false,
         )
         .await
         .expect("Template registration failed");
@@ -1776,6 +1780,7 @@ async fn test_real_e2e_full_workflow() {
             vec![],
             vec![],
             Some(1),
+            false,
         )
         .await
         .expect("Failed to register template");

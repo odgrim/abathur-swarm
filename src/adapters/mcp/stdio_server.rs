@@ -235,7 +235,8 @@ where
                                 },
                                 "description": "Behavioral constraints to keep the agent on track (e.g., 'always run tests', 'read-only', 'no file deletion')"
                             },
-                            "max_turns": { "type": "integer", "description": "Maximum agentic turns before the agent is stopped. Default: 25. Use higher values (30-50) for complex implementation tasks." }
+                            "max_turns": { "type": "integer", "description": "Maximum agentic turns before the agent is stopped. Default: 25. Use higher values (30-50) for complex implementation tasks." },
+                            "read_only": { "type": "boolean", "description": "Set to true for research, analysis, and planning agents that produce findings via memory rather than code commits. Disables commit verification and enables memory verification. Default: false." }
                         },
                         "required": ["name", "description", "system_prompt"]
                     }
@@ -623,10 +624,11 @@ where
             .unwrap_or_default();
 
         let max_turns = args.get("max_turns").and_then(|m| m.as_u64()).map(|m| m as u32);
+        let read_only = args.get("read_only").and_then(|r| r.as_bool()).unwrap_or(false);
 
         let template = self
             .agent_service
-            .register_template(name, description, tier, system_prompt, tools, constraints, max_turns)
+            .register_template(name, description, tier, system_prompt, tools, constraints, max_turns, read_only)
             .await
             .map_err(|e| format!("Failed to create agent: {}", e))?;
 
@@ -635,6 +637,7 @@ where
             "tier": template.tier.as_str(),
             "version": template.version,
             "status": template.status.as_str(),
+            "read_only": template.read_only,
         });
         serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
     }
@@ -656,6 +659,7 @@ where
                     "version": t.version,
                     "status": t.status.as_str(),
                     "tools": t.tools.iter().map(|tool| tool.name.clone()).collect::<Vec<_>>(),
+                    "read_only": t.read_only,
                 })
             })
             .collect();
@@ -693,6 +697,7 @@ where
             })).collect::<Vec<_>>(),
             "status": template.status.as_str(),
             "max_turns": template.max_turns,
+            "read_only": template.read_only,
         });
         serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
     }

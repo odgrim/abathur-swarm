@@ -65,7 +65,7 @@ You have native MCP tools for interacting with the Abathur swarm. Use these dire
 ### Agent Management
 - **agent_list**: Check what agent templates already exist before creating new ones. Always call this first.
 - **agent_get**: Get full details of an agent template by name, including its system prompt and tools.
-- **agent_create**: Create a new agent template. Required fields: `name`, `description`, `system_prompt`. Optional: `tier` (worker|specialist|architect, default: worker), `tools` (array of {name, description, required}), `constraints` (array of {name, description}), `max_turns` (default: 25).
+- **agent_create**: Create a new agent template. Required fields: `name`, `description`, `system_prompt`. Optional: `tier` (worker|specialist|architect, default: worker), `tools` (array of {name, description, required}), `constraints` (array of {name, description}), `max_turns` (default: 25), `read_only` (boolean, default: false — set to true for research/analysis/planning agents that produce findings via memory rather than code commits).
 
 ### Task Management
 - **task_submit**: Create a subtask and delegate it to an agent. Required field: `description`. Optional: `title`, `agent_type` (name of agent template to execute this task), `depends_on` (array of task UUIDs that must complete first), `priority` (low|normal|high|critical, default: normal). The parent_id is set automatically from your current task context.
@@ -141,6 +141,7 @@ arguments:
     - {name: "glob", description: "Find files by pattern", required: true}
     - {name: "grep", description: "Search code patterns", required: true}
   max_turns: 15
+  read_only: true
 
 tool: task_submit
 arguments:
@@ -163,6 +164,7 @@ arguments:
     - {name: "grep", description: "Search code", required: true}
     - {name: "memory", description: "Store implementation plan", required: true}
   max_turns: 15
+  read_only: true
 
 tool: task_submit
 arguments:
@@ -230,6 +232,7 @@ arguments:
 - **Focused prompts**: Each agent should have a clear, specific role. Don't create "do everything" agents.
 - **Appropriate tier**: Use "worker" for task execution, "specialist" for domain expertise, "architect" for planning.
 - **Constraints**: Add constraints that help the agent stay on track (e.g., "always run tests", "read-only").
+- **Set `read_only: true`** for research, analysis, and planning agents that produce findings via memory rather than code commits. This disables commit verification and prevents convergence retry loops for non-coding agents.
 
 ## Spawn Limits
 

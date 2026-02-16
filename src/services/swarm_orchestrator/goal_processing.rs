@@ -304,7 +304,7 @@ where
             let system_prompt = self.get_agent_system_prompt(&agent_type).await;
 
             // Get agent template for version tracking, capabilities, and tool restrictions
-            let (template_version, capabilities, cli_tools, agent_can_write) = match self.agent_repo.get_template_by_name(&agent_type).await {
+            let (template_version, capabilities, cli_tools, agent_can_write, is_template_read_only) = match self.agent_repo.get_template_by_name(&agent_type).await {
                 Ok(Some(template)) => {
                     let caps: Vec<String> = template.tools.iter()
                         .map(|t| t.name.clone())
@@ -314,16 +314,17 @@ where
                         let lower = c.to_lowercase();
                         lower == "write" || lower == "edit" || lower == "shell"
                     });
-                    (template.version, caps, tools, can_write)
+                    (template.version, caps, tools, can_write, template.read_only)
                 }
                 // Default to true when template lookup fails (safer to require commits from unknown agents)
-                _ => (1, vec!["task-execution".to_string()], vec![], true),
+                _ => (1, vec!["task-execution".to_string()], vec![], true, false),
             };
 
             // Read-only agent roles never produce commits regardless of tool capabilities.
-            // Agents like researchers and the overmind may have shell access for reading
-            // but don't create code changes — requiring commits causes infinite retry loops.
-            let is_read_only_role = {
+            // The template's `read_only` field is the primary signal (set at creation time).
+            // The name-based heuristic is kept as a legacy fallback for agents created
+            // before the `read_only` field existed.
+            let is_read_only_role = is_template_read_only || {
                 let lower = agent_type.to_lowercase();
                 lower == "overmind"
                     || lower.contains("researcher")

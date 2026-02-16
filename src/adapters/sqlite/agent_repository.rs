@@ -32,8 +32,8 @@ impl AgentRepository for SqliteAgentRepository {
 
         sqlx::query(
             r#"INSERT INTO agent_templates (id, name, description, tier, version, system_prompt,
-               tools, constraints, handoff_targets, max_turns, is_active, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+               tools, constraints, handoff_targets, max_turns, read_only, is_active, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
         )
         .bind(template.id.to_string())
         .bind(&template.name)
@@ -45,6 +45,7 @@ impl AgentRepository for SqliteAgentRepository {
         .bind(&constraints_json)
         .bind(&handoff_json)
         .bind(template.max_turns as i32)
+        .bind(template.read_only as i32)
         .bind(if template.status == AgentStatus::Active { 1i32 } else { 0i32 })
         .bind(template.created_at.to_rfc3339())
         .bind(template.updated_at.to_rfc3339())
@@ -96,7 +97,7 @@ impl AgentRepository for SqliteAgentRepository {
         let result = sqlx::query(
             r#"UPDATE agent_templates SET name = ?, description = ?, tier = ?, version = ?,
                system_prompt = ?, tools = ?, constraints = ?, handoff_targets = ?,
-               max_turns = ?, is_active = ?, updated_at = ?
+               max_turns = ?, read_only = ?, is_active = ?, updated_at = ?
                WHERE id = ?"#
         )
         .bind(&template.name)
@@ -108,6 +109,7 @@ impl AgentRepository for SqliteAgentRepository {
         .bind(&constraints_json)
         .bind(&handoff_json)
         .bind(template.max_turns as i32)
+        .bind(template.read_only as i32)
         .bind(if template.status == AgentStatus::Active { 1i32 } else { 0i32 })
         .bind(template.updated_at.to_rfc3339())
         .bind(template.id.to_string())
@@ -282,6 +284,7 @@ struct TemplateRow {
     constraints: Option<String>,
     handoff_targets: Option<String>,
     max_turns: i32,
+    read_only: Option<i32>,
     is_active: i32,
     created_at: String,
     updated_at: String,
@@ -323,6 +326,7 @@ impl TryFrom<TemplateRow> for AgentTemplate {
                 ..Default::default()
             },
             max_turns: row.max_turns as u32,
+            read_only: row.read_only.unwrap_or(0) != 0,
             status,
             created_at,
             updated_at,

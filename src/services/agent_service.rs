@@ -41,6 +41,7 @@ impl<R: AgentRepository> AgentService<R> {
         tools: Vec<ToolCapability>,
         constraints: Vec<AgentConstraint>,
         max_turns: Option<u32>,
+        read_only: bool,
     ) -> DomainResult<AgentTemplate> {
         // Check if template with same name exists
         if let Some(existing) = self.repository.get_template_by_name(&name).await? {
@@ -48,7 +49,8 @@ impl<R: AgentRepository> AgentService<R> {
             let mut template = AgentTemplate::new(&name, tier)
                 .with_description(description)
                 .with_prompt(system_prompt)
-                .with_max_turns(max_turns.unwrap_or(25));
+                .with_max_turns(max_turns.unwrap_or(25))
+                .with_read_only(read_only);
 
             template.version = existing.version + 1;
 
@@ -86,7 +88,8 @@ impl<R: AgentRepository> AgentService<R> {
         let mut template = AgentTemplate::new(name, tier)
             .with_description(description)
             .with_prompt(system_prompt)
-            .with_max_turns(max_turns.unwrap_or(25));
+            .with_max_turns(max_turns.unwrap_or(25))
+            .with_read_only(read_only);
 
         for tool in tools {
             template = template.with_tool(tool);
@@ -459,6 +462,7 @@ mod tests {
             vec![ToolCapability::new("read", "Read files")],
             vec![],
             None,
+            false,
         ).await.unwrap();
 
         assert_eq!(template.name, "test-agent");
@@ -478,6 +482,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            false,
         ).await.unwrap();
 
         // Create second version
@@ -489,6 +494,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            false,
         ).await.unwrap();
 
         assert_eq!(v2.version, 2);
@@ -507,6 +513,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            false,
         ).await.unwrap();
 
         let instance = service.spawn_instance("spawnable").await.unwrap();
@@ -526,6 +533,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            false,
         ).await.unwrap();
 
         let instance = service.spawn_instance("lifecycle").await.unwrap();
@@ -602,6 +610,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            false,
         ).await.unwrap();
 
         let disabled = service.set_template_status("toggleable", AgentStatus::Disabled).await.unwrap();

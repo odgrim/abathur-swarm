@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS agent_templates (
     constraints TEXT,
     handoff_targets TEXT,
     max_turns INTEGER DEFAULT 25,
+    read_only INTEGER DEFAULT 0,
     is_active INTEGER DEFAULT 1,
     description TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
