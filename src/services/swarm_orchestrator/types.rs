@@ -309,7 +309,7 @@ impl Default for SwarmConfig {
             reconciliation_interval_secs: None,
             polling: PollingConfig::default(),
             event_retention_days: 30,
-            convergence_enabled: false,
+            convergence_enabled: true,
             default_execution_mode: None,
         }
     }

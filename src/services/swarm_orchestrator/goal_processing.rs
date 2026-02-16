@@ -483,12 +483,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             // Cast the generic IntentVerifierService to the trait object for
             // convergent execution. This erases the <G, T> generics.
             // Intent verification is required for convergent execution.
-            let convergent_intent_verifier: std::sync::Arc<
+            let convergent_intent_verifier: Option<Arc<
                 dyn super::convergent_execution::ConvergentIntentVerifier,
-            > = self.intent_verifier.as_ref().map(|iv| {
+            >> = self.intent_verifier.as_ref().map(|iv| {
                 Arc::clone(iv) as Arc<dyn super::convergent_execution::ConvergentIntentVerifier>
-            }).expect("intent_verifier is required for convergent execution; \
-                       call with_intent_verifier() on SwarmOrchestrator before submitting convergent tasks");
+            });
 
             tokio::spawn(async move {
                 let _permit = permit;
@@ -503,12 +502,14 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                     // If any piece is missing, fall back to direct execution with a warning.
                     let can_converge = overseer_cluster.is_some()
                         && trajectory_repo.is_some()
-                        && memory_repo.is_some();
+                        && memory_repo.is_some()
+                        && convergent_intent_verifier.is_some();
 
                     if can_converge {
                         let overseer_cluster = overseer_cluster.unwrap();
                         let trajectory_repo_arc = trajectory_repo.unwrap();
                         let memory_repo = memory_repo.unwrap();
+                        let convergent_intent_verifier = convergent_intent_verifier.unwrap();
 
                         // Wrap the dyn TrajectoryRepository in a Sized newtype so
                         // it can satisfy the generic T parameter of ConvergenceEngine.
@@ -963,11 +964,12 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                         tracing::warn!(
                             "Task {} has convergent execution mode but convergence infrastructure \
                              is not fully configured (overseer_cluster={}, trajectory_repo={}, \
-                             memory_repo={}). Falling back to direct execution.",
+                             memory_repo={}, intent_verifier={}). Falling back to direct execution.",
                             task_id,
                             overseer_cluster.is_some(),
                             trajectory_repo.is_some(),
                             memory_repo.is_some(),
+                            convergent_intent_verifier.is_some(),
                         );
                         audit_log.log(
                             crate::services::AuditEntry::new(

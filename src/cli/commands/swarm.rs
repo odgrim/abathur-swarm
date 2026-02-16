@@ -58,11 +58,12 @@ async fn build_cli_orchestrator(config: SwarmConfig) -> Result<CliOrchestrator> 
     );
 
     Ok(SwarmOrchestrator::new(
-        goal_repo, task_repo, worktree_repo, agent_repo, substrate, config,
+        goal_repo, task_repo, worktree_repo, agent_repo, substrate.clone(), config,
         event_bus, event_reactor, event_scheduler,
     )
     .with_memory_repo(memory_repo)
     .with_trigger_rule_repo(trigger_rule_repo)
+    .with_intent_verifier(substrate)
     .with_pool(pool.clone()))
 }
 
@@ -558,7 +559,7 @@ async fn run_swarm_foreground(
         task_repo,
         worktree_repo,
         agent_repo,
-        substrate,
+        substrate.clone(),
         config.clone(),
         event_bus.clone(),
         reactor,
@@ -566,6 +567,7 @@ async fn run_swarm_foreground(
     )
     .with_memory_repo(memory_repo)
     .with_trigger_rule_repo(trigger_rule_repo)
+    .with_intent_verifier(substrate)
     .with_pool(pool.clone());
 
     if !json_mode {
