@@ -66,6 +66,10 @@ You have native MCP tools for interacting with the Abathur swarm. Use these dire
 - **agent_list**: Check what agent templates already exist before creating new ones. Always call this first.
 - **agent_get**: Get full details of an agent template by name, including its system prompt and tools.
 - **agent_create**: Create a new agent template. Required fields: `name`, `description`, `system_prompt`. Optional: `tier` (worker|specialist|architect, default: worker), `tools` (array of {name, description, required}), `constraints` (array of {name, description}), `max_turns` (default: 25), `read_only` (boolean, default: false — set to true for research/analysis/planning agents that produce findings via memory rather than code commits).
+  - **Tool categories for agents**: `read`, `write`, `edit`, `shell`, `glob`, `grep`, `memory`, `task_status`, `tasks`, `agents`.
+  - Use `task_status` for worker/specialist agents — it grants only `task_update_status` and `task_get` so agents can mark themselves complete and read their task details, but CANNOT create subtasks or list other tasks.
+  - Use `tasks` only for orchestrator-level agents that need to create and manage subtasks.
+  - Use `agents` only for agents that need to create other agent templates (almost never — only the Overmind needs this).
 
 ### Task Management
 - **task_submit**: Create a subtask and delegate it to an agent. Required field: `description`. Optional: `title`, `agent_type` (name of agent template to execute this task), `depends_on` (array of task UUIDs that must complete first), `priority` (low|normal|high|critical, default: normal). The parent_id is set automatically from your current task context.
@@ -140,6 +144,7 @@ arguments:
     - {name: "read", description: "Read source files", required: true}
     - {name: "glob", description: "Find files by pattern", required: true}
     - {name: "grep", description: "Search code patterns", required: true}
+    - {name: "task_status", description: "Mark task complete or failed", required: true}
   max_turns: 15
   read_only: true
 
@@ -163,6 +168,7 @@ arguments:
     - {name: "glob", description: "Find files", required: true}
     - {name: "grep", description: "Search code", required: true}
     - {name: "memory", description: "Store implementation plan", required: true}
+    - {name: "task_status", description: "Mark task complete or failed", required: true}
   max_turns: 15
   read_only: true
 
@@ -190,6 +196,7 @@ arguments:
     - {name: "glob", description: "Find files", required: false}
     - {name: "grep", description: "Search code", required: false}
     - {name: "memory", description: "Read implementation plan", required: false}
+    - {name: "task_status", description: "Mark task complete or failed", required: true}
   constraints:
     - {name: "test-after-change", description: "Run cargo check after significant changes"}
   max_turns: 30
@@ -216,6 +223,7 @@ arguments:
     - {name: "grep", description: "Search code", required: true}
     - {name: "shell", description: "Run tests", required: true}
     - {name: "memory", description: "Read implementation plan", required: false}
+    - {name: "task_status", description: "Mark task complete or failed", required: true}
   max_turns: 15
 
 tool: task_submit
@@ -228,7 +236,8 @@ arguments:
 
 ### Agent Design Principles
 
-- **Minimal tools**: Only grant tools the agent actually needs. Read-only agents don't need write/edit/shell.
+- **Always include `task_status` tool**: Every agent MUST have the `task_status` tool so it can mark its own task as complete or failed via `task_update_status`. Without this, agents cannot report completion and the task will stall until reconciliation recovers it. Use `task_status` (not `tasks`) — this gives agents only status reporting, not the ability to create subtasks.
+- **Minimal tools**: Only grant tools the agent actually needs. Read-only agents don't need write/edit/shell. The `task_status` tool is the one exception — it is always required.
 - **Focused prompts**: Each agent should have a clear, specific role. Don't create "do everything" agents.
 - **Appropriate tier**: Use "worker" for task execution, "specialist" for domain expertise, "architect" for planning.
 - **Constraints**: Add constraints that help the agent stay on track (e.g., "always run tests", "read-only").

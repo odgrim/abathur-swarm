@@ -31,8 +31,9 @@ use super::SwarmOrchestrator;
 ///
 /// Template tools like "read", "shell", "memory" need to be translated to
 /// the PascalCase names that `claude --allowedTools` expects.
-/// Tools like "memory" and "tasks" are Abathur REST APIs accessed via WebFetch,
-/// not Claude Code built-in tools, so they map to WebFetch access.
+/// Tools like "memory" and "tasks" are Abathur MCP tools, mapped to specific
+/// `mcp__abathur__*` tool names. Use "task_status" for worker agents
+/// (only task_update_status + task_get) and "tasks" for orchestrators.
 fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
     let mut cli_tools = Vec::new();
 
@@ -62,6 +63,10 @@ fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
                 cli_tools.push("mcp__abathur__task_get".to_string());
                 cli_tools.push("mcp__abathur__task_update_status".to_string());
                 cli_tools.push("mcp__abathur__goals_list".to_string());
+            }
+            "task_status" => {
+                cli_tools.push("mcp__abathur__task_update_status".to_string());
+                cli_tools.push("mcp__abathur__task_get".to_string());
             }
             "agents" => {
                 cli_tools.push("mcp__abathur__agent_create".to_string());
