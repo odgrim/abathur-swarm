@@ -284,13 +284,28 @@ where
                         .with_entity(task_id, "task"),
                     ).await;
                 } else {
-                    // Transition Validating -> Failed
-                    if let Ok(Some(mut task)) = task_repo.get(task_id).await {
+                    // Transition Validating -> Failed and increment retry_count
+                    let retry_count = if let Ok(Some(mut task)) = task_repo.get(task_id).await {
                         if task.status == TaskStatus::Validating {
+                            task.retry_count += 1;
                             let _ = task.transition_to(TaskStatus::Failed);
                             let _ = task_repo.update(&task).await;
                         }
-                    }
+                        task.retry_count
+                    } else {
+                        0
+                    };
+
+                    // Emit TaskFailed event so handlers (retry, evolution, review-failure-loop) can react
+                    let failure_msg = format!(
+                        "verification-failed: {}",
+                        result.failures_summary.clone().unwrap_or_default()
+                    );
+                    let _ = event_tx.send(SwarmEvent::TaskFailed {
+                        task_id,
+                        error: failure_msg,
+                        retry_count,
+                    }).await;
 
                     // Also mark worktree as failed so retry can create a fresh one
                     if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
@@ -305,8 +320,8 @@ where
                             AuditAction::TaskFailed,
                             AuditActor::System,
                             format!(
-                                "Task {} failed verification: {}",
-                                task_id, result.failures_summary.clone().unwrap_or_default()
+                                "Task {} failed verification (retry_count={}): {}",
+                                task_id, retry_count, result.failures_summary.clone().unwrap_or_default()
                             ),
                         )
                         .with_entity(task_id, "task"),
@@ -349,13 +364,24 @@ where
                     ).await;
                     true
                 } else {
-                    // Transition Validating -> Failed on verification error
-                    if let Ok(Some(mut task)) = task_repo.get(task_id).await {
+                    // Transition Validating -> Failed on verification error and increment retry_count
+                    let retry_count = if let Ok(Some(mut task)) = task_repo.get(task_id).await {
                         if task.status == TaskStatus::Validating {
+                            task.retry_count += 1;
                             let _ = task.transition_to(TaskStatus::Failed);
                             let _ = task_repo.update(&task).await;
                         }
-                    }
+                        task.retry_count
+                    } else {
+                        0
+                    };
+
+                    // Emit TaskFailed event so handlers can react
+                    let _ = event_tx.send(SwarmEvent::TaskFailed {
+                        task_id,
+                        error: format!("verification-error: {}", e),
+                        retry_count,
+                    }).await;
 
                     // Also mark worktree as failed so retry can create a fresh one
                     if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
@@ -369,7 +395,7 @@ where
                             AuditCategory::Task,
                             AuditAction::TaskFailed,
                             AuditActor::System,
-                            format!("Task {} verification error: {}", task_id, e),
+                            format!("Task {} verification error (retry_count={}): {}", task_id, retry_count, e),
                         )
                         .with_entity(task_id, "task"),
                     ).await;

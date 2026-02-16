@@ -1091,21 +1091,6 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             // Record success with circuit breaker
                             circuit_breaker.record_success(circuit_scope.clone()).await;
 
-                            // Record success in evolution loop for template improvement
-                            if track_evolution {
-                                let execution = TaskExecution {
-                                    task_id,
-                                    template_name: agent_type_for_evolution.clone(),
-                                    template_version: template_version_for_evolution,
-                                    outcome: TaskOutcome::Success,
-                                    executed_at: chrono::Utc::now(),
-                                    turns_used: turns,
-                                    tokens_used: tokens,
-                                    downstream_tasks: vec![],
-                                };
-                                evolution_loop.record_execution(execution).await;
-                            }
-
                             // Log task completion
                             audit_log.log(
                                 AuditEntry::new(
@@ -1169,6 +1154,31 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         .with_entity(task_id, "task"),
                                     ).await;
                                 }
+                            }
+
+                            // Record execution in evolution loop AFTER verification
+                            // so we capture the true outcome (success vs verification failure)
+                            if track_evolution {
+                                let outcome = if let Ok(Some(post_task)) = task_repo.get(task_id).await {
+                                    if post_task.status == TaskStatus::Failed {
+                                        TaskOutcome::Failure
+                                    } else {
+                                        TaskOutcome::Success
+                                    }
+                                } else {
+                                    TaskOutcome::Success // fallback if we can't read task
+                                };
+                                let execution = TaskExecution {
+                                    task_id,
+                                    template_name: agent_type_for_evolution.clone(),
+                                    template_version: template_version_for_evolution,
+                                    outcome,
+                                    executed_at: chrono::Utc::now(),
+                                    turns_used: turns,
+                                    tokens_used: tokens,
+                                    downstream_tasks: vec![],
+                                };
+                                evolution_loop.record_execution(execution).await;
                             }
 
                             // Evaluate evolution loop for potential refinements
