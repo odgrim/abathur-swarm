@@ -879,6 +879,7 @@ mod tests {
     }
 
     /// Build an observation with specific overseer signals for fingerprinting tests.
+    #[allow(dead_code)]
     fn make_observation_with_signals(
         seq: u32,
         delta: Option<f64>,

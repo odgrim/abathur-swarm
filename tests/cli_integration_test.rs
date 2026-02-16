@@ -26,7 +26,7 @@ impl AssertExt for assert_cmd::assert::Assert {
 /// Build an `assert_cmd::Command` pointing at the `abathur` binary,
 /// with its working directory set to `dir`.
 fn abathur_cmd(dir: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("abathur").unwrap();
+    let mut cmd = assert_cmd::cargo_bin_cmd!("abathur");
     cmd.current_dir(dir);
     cmd
 }
