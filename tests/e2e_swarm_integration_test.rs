@@ -124,7 +124,7 @@ async fn test_swarm_orchestrator_initialization_and_tick() {
 async fn test_goal_lifecycle_with_constraints() {
     let (goal_repo, _, _, _, _) = setup_test_environment().await;
 
-    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let _event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
     let goal_service = GoalService::new(goal_repo.clone());
 
     // Create a goal with constraints
@@ -201,7 +201,7 @@ async fn test_goal_lifecycle_with_constraints() {
 async fn test_task_dag_with_dependencies() {
     let (goal_repo, task_repo, _, _, _) = setup_test_environment().await;
 
-    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let _event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
     let goal_service = GoalService::new(goal_repo.clone());
     let task_service = TaskService::new(task_repo.clone());
 
@@ -1145,7 +1145,7 @@ async fn test_memory_system_integration() {
 async fn test_task_idempotency() {
     let (_goal_repo, task_repo, _, _, _) = setup_test_environment().await;
 
-    let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
+    let _event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
     let task_service = TaskService::new(task_repo.clone());
 
     // Submit task with idempotency key

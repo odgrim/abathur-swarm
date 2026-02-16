@@ -4139,7 +4139,7 @@ mod tests {
             // If the raw overseer from obs0 is still higher, obs0 wins.
             // Either way, the blended level is being compared — not just
             // the raw overseer. Verify intent_blended_level exists.
-            let best = trajectory.best_observation().unwrap();
+            let _best = trajectory.best_observation().unwrap();
             assert!(
                 trajectory.observations[1].metrics.as_ref().unwrap().intent_blended_level.is_some(),
                 "Observation should have intent_blended_level set"

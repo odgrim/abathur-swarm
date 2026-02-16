@@ -373,24 +373,87 @@ where
         }
     }
 
-    /// Evaluate a single constraint.
+    /// Evaluate a single constraint against a task using keyword-matching heuristics.
+    ///
+    /// Checks the task's title, description, and context against the constraint's
+    /// description to detect potential violations. This is a text-based heuristic —
+    /// not a semantic guarantee — but provides useful signal for invariant/boundary checks.
     #[allow(dead_code)]
-    fn evaluate_constraint(&self, _task: &Task, constraint: &GoalConstraint) -> (bool, Option<String>) {
-        // Basic constraint evaluation
-        // In a full implementation, this would analyze the task output
-        // and verify specific conditions
+    fn evaluate_constraint(&self, task: &Task, constraint: &GoalConstraint) -> (bool, Option<String>) {
+        // Build a searchable text corpus from the task
+        let task_text = format!(
+            "{} {} {} {}",
+            task.title.to_lowercase(),
+            task.description.to_lowercase(),
+            task.context.input.to_lowercase(),
+            task.context.hints.join(" ").to_lowercase(),
+        );
+
+        let constraint_desc = constraint.description.to_lowercase();
+
+        // Extract key terms from the constraint description (words > 3 chars,
+        // excluding common stop words)
+        let stop_words = [
+            "must", "should", "shall", "will", "with", "from",
+            "that", "this", "have", "been", "were", "they",
+            "their", "about", "which", "when", "make", "than",
+            "each", "does", "into", "over", "such", "after",
+            "before", "only", "also", "more", "some", "your",
+            "them", "then", "what", "very", "just", "like",
+            "under", "using", "used", "every", "need", "needs",
+            "cannot", "without",
+        ];
+        let key_terms: Vec<&str> = constraint_desc
+            .split_whitespace()
+            .filter(|w| w.len() > 3 && !stop_words.contains(w))
+            .collect();
+
+        // Count how many key terms appear in the task text
+        let matched_count = key_terms
+            .iter()
+            .filter(|term| task_text.contains(**term))
+            .count();
+
+        let coverage = if key_terms.is_empty() {
+            1.0
+        } else {
+            matched_count as f64 / key_terms.len() as f64
+        };
+
         match constraint.constraint_type {
             ConstraintType::Invariant => {
-                // Invariants should always be true - would need code analysis
-                (true, None)
+                // Invariants are strict: flag if the task touches the domain
+                // but doesn't address the constraint
+                if coverage < 0.3 && key_terms.len() > 2 {
+                    (false, Some(format!(
+                        "Invariant '{}' may not be satisfied: only {}/{} key terms found in task output",
+                        constraint.name, matched_count, key_terms.len()
+                    )))
+                } else {
+                    (true, None)
+                }
             }
             ConstraintType::Boundary => {
-                // Hard limits - check for explicit violations
-                (true, None)
+                // Boundaries define limits — check if at least some key terms are addressed
+                if coverage < 0.2 && key_terms.len() > 2 {
+                    (false, Some(format!(
+                        "Boundary '{}' may be violated: constraint terms not found in task output",
+                        constraint.name
+                    )))
+                } else {
+                    (true, None)
+                }
             }
             ConstraintType::Preference => {
-                // Soft preferences - always satisfied but may note issues
-                (true, None)
+                // Preferences are soft — always pass, but note if not addressed
+                if coverage < 0.2 && key_terms.len() > 2 {
+                    (true, Some(format!(
+                        "Preference '{}' may not be addressed (advisory only)",
+                        constraint.name
+                    )))
+                } else {
+                    (true, None)
+                }
             }
         }
     }
