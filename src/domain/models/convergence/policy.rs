@@ -32,10 +32,13 @@ pub struct ConvergencePolicy {
     /// Used as the exploration parameter in Thompson Sampling.
     pub exploration_weight: f64,
 
-    /// Minimum convergence level to accept as "done."
+    /// Convergence level threshold for logging and observability.
     ///
-    /// A trajectory must reach this level before the engine will classify it
-    /// as having reached a fixed-point attractor and accept the result.
+    /// This threshold is used for monitoring and diagnostics. It does **not**
+    /// gate finality decisions — the LLM-based intent verifier is the sole
+    /// authority on whether a trajectory has converged. Overseer-derived
+    /// convergence levels may still be compared against this value for
+    /// dashboard reporting and progress tracking.
     pub acceptance_threshold: f64,
 
     /// Whether to accept the best result when the budget is exhausted,

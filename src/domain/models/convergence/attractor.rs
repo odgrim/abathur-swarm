@@ -398,7 +398,7 @@ pub fn classify_attractor(observations: &[Observation], window: usize) -> Attrac
         let plateau_level = recent
             .last()
             .and_then(|o| o.metrics.as_ref())
-            .map(|m| m.convergence_level)
+            .map(|m| m.intent_blended_level.unwrap_or(m.convergence_level))
             .unwrap_or(0.0);
 
         return AttractorState {
@@ -454,7 +454,7 @@ pub fn classify_attractor(observations: &[Observation], window: usize) -> Attrac
         let level = recent
             .last()
             .and_then(|o| o.metrics.as_ref())
-            .map(|m| m.convergence_level)
+            .map(|m| m.intent_blended_level.unwrap_or(m.convergence_level))
             .unwrap_or(0.0);
         let remaining = estimate_remaining_iterations(rate, level);
         let avg_tokens_per_iter = recent
@@ -870,6 +870,7 @@ mod tests {
                 vulnerability_delta: 0,
                 convergence_delta: d,
                 convergence_level: level,
+                intent_blended_level: None,
             }),
             tokens_used: 20_000,
             wall_time_ms: 5_000,
@@ -899,6 +900,7 @@ mod tests {
                 vulnerability_delta: 0,
                 convergence_delta: d,
                 convergence_level: level,
+                intent_blended_level: None,
             }),
             tokens_used: 20_000,
             wall_time_ms: 5_000,

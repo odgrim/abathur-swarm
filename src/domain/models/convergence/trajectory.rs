@@ -341,8 +341,10 @@ impl Trajectory {
             .iter()
             .filter(|o| o.metrics.is_some())
             .max_by(|a, b| {
-                let a_level = a.metrics.as_ref().unwrap().convergence_level;
-                let b_level = b.metrics.as_ref().unwrap().convergence_level;
+                let a_m = a.metrics.as_ref().unwrap();
+                let b_m = b.metrics.as_ref().unwrap();
+                let a_level = a_m.intent_blended_level.unwrap_or(a_m.convergence_level);
+                let b_level = b_m.intent_blended_level.unwrap_or(b_m.convergence_level);
                 a_level
                     .partial_cmp(&b_level)
                     .unwrap_or(std::cmp::Ordering::Equal)
@@ -696,6 +698,7 @@ mod tests {
             vulnerability_delta: 0,
             convergence_delta,
             convergence_level,
+            intent_blended_level: None,
         }
     }
 

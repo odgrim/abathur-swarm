@@ -492,12 +492,12 @@ where
             let a_level = a
                 .best_observation()
                 .and_then(|o| o.metrics.as_ref())
-                .map(|m| m.convergence_level)
+                .map(|m| m.intent_blended_level.unwrap_or(m.convergence_level))
                 .unwrap_or(0.0);
             let b_level = b
                 .best_observation()
                 .and_then(|o| o.metrics.as_ref())
-                .map(|m| m.convergence_level)
+                .map(|m| m.intent_blended_level.unwrap_or(m.convergence_level))
                 .unwrap_or(0.0);
             a_level.partial_cmp(&b_level).unwrap_or(std::cmp::Ordering::Equal)
         })

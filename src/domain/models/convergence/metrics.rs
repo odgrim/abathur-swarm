@@ -77,6 +77,14 @@ pub struct ObservationMetrics {
     /// Range: 0.0 (nothing works) to 1.0 (fully converged).
     /// Straight weighted composite of overseer signals — no hard gates.
     pub convergence_level: f64,
+
+    /// Intent-blended convergence level: combines overseer readiness with
+    /// intent verification confidence when available.
+    ///
+    /// Formula: `0.60 * intent_confidence + 0.40 * overseer_readiness`.
+    /// `None` when no intent verification has been performed yet, in which
+    /// case consumers should fall back to `convergence_level`.
+    pub intent_blended_level: Option<f64>,
 }
 
 impl Default for ObservationMetrics {
@@ -93,6 +101,7 @@ impl Default for ObservationMetrics {
             vulnerability_delta: 0,
             convergence_delta: 0.0,
             convergence_level: 0.0,
+            intent_blended_level: None,
         }
     }
 }
@@ -271,7 +280,7 @@ impl Default for ConvergenceWeights {
 /// When intent verification confidence is available (from a prior verification),
 /// the weights shift to prioritize intent satisfaction:
 ///
-/// - **With intent signal**: intent=40%, test=25%, error=20%, regression=10%, structural=5%
+/// - **With intent signal**: intent=55%, test=20%, error=15%, regression=5%, structural=5%
 /// - **Without intent signal**: test=40%, error=30%, regression=20%, structural=10%
 ///
 /// # Context Degradation Penalty
@@ -385,11 +394,11 @@ pub fn compute_convergence_delta_with_intent(
     let mut delta = match (prev_intent_confidence, current_intent_confidence) {
         (Some(prev_conf), Some(curr_conf)) => {
             let intent_delta = curr_conf - prev_conf;
-            // Intent-aware weights: intent dominates at 40%
-            0.40 * intent_delta
-                + 0.25 * test_delta
-                + 0.20 * error_delta
-                + 0.10 * (1.0 - regression_penalty)
+            // Intent-aware weights: intent is clear majority at 55%
+            0.55 * intent_delta
+                + 0.20 * test_delta
+                + 0.15 * error_delta
+                + 0.05 * (1.0 - regression_penalty)
                 + 0.05 * structural_churn
         }
         _ => {
@@ -457,6 +466,38 @@ pub fn compute_convergence_delta_with_intent(
 pub fn convergence_level(signals: &OverseerSignals) -> f64 {
     // Identical to convergence_readiness — no hard gates.
     convergence_readiness(signals)
+}
+
+/// Computes an intent-blended convergence level from overseer signals and
+/// optional intent verification confidence.
+///
+/// When `intent_confidence` is available (from a prior intent verification),
+/// the level blends both sources: 60% intent confidence + 40% overseer
+/// readiness. When intent confidence is not available, falls back to the
+/// pure overseer readiness score (identical to [`convergence_level`]).
+///
+/// This metric is used by attractor classification and best-observation
+/// ranking to ensure the trajectory reflects intent progress, not just
+/// overseer pass rates.
+///
+/// # Arguments
+///
+/// * `signals` - The overseer signals from the current observation.
+/// * `intent_confidence` - Confidence from the most recent intent
+///   verification, if any.
+///
+/// # Returns
+///
+/// The blended convergence level in the range [0.0, 1.0].
+pub fn convergence_level_with_intent(
+    signals: &OverseerSignals,
+    intent_confidence: Option<f64>,
+) -> f64 {
+    let overseer_readiness = convergence_readiness(signals);
+    match intent_confidence {
+        Some(confidence) => 0.60 * confidence + 0.40 * overseer_readiness,
+        None => overseer_readiness,
+    }
 }
 
 // ============================================================================
@@ -724,6 +765,7 @@ mod tests {
         assert_eq!(metrics.vulnerability_delta, 0);
         assert_eq!(metrics.convergence_delta, 0.0);
         assert_eq!(metrics.convergence_level, 0.0);
+        assert!(metrics.intent_blended_level.is_none());
     }
 
     // --- convergence_level tests ---
@@ -1040,7 +1082,7 @@ mod tests {
             "Intent weighting should produce different delta: with={delta_with_intent}, without={delta_no_intent}"
         );
 
-        // The intent component is 0.40 * (0.9 - 0.5) = 0.16.
+        // The intent component is 0.55 * (0.9 - 0.5) = 0.22.
         // Verify by comparing to a zero-change intent (0.7 -> 0.7):
         let delta_flat_intent = compute_convergence_delta_with_intent(
             &prev, &current_signals, 20, &health, &weights,
@@ -1370,6 +1412,7 @@ mod tests {
             vulnerability_delta: 0,
             convergence_delta: 0.15,
             convergence_level: 0.72,
+            intent_blended_level: Some(0.68),
         };
         let json = serde_json::to_string(&metrics).unwrap();
         let deserialized: ObservationMetrics = serde_json::from_str(&json).unwrap();
@@ -1460,5 +1503,73 @@ mod tests {
         let level = convergence_level(&signals);
         assert!((readiness - level).abs() < f64::EPSILON,
             "readiness ({readiness}) should always equal level ({level})");
+    }
+
+    // --- convergence_level_with_intent tests ---
+
+    #[test]
+    fn test_convergence_level_with_intent_no_intent() {
+        let signals = signals_with_tests(8, 10, 0);
+        let level = convergence_level(&signals);
+        let blended = convergence_level_with_intent(&signals, None);
+        assert!((blended - level).abs() < f64::EPSILON,
+            "Without intent, blended ({blended}) should equal level ({level})");
+    }
+
+    #[test]
+    fn test_convergence_level_with_intent_blends_correctly() {
+        let signals = signals_with_tests(10, 10, 0);
+        // All tests pass => overseer_readiness = 1.0
+        let intent_confidence = 0.8;
+        let blended = convergence_level_with_intent(&signals, Some(intent_confidence));
+        // 0.60 * 0.8 + 0.40 * 1.0 = 0.48 + 0.40 = 0.88
+        assert!((blended - 0.88).abs() < 1e-10,
+            "Expected 0.88, got {blended}");
+    }
+
+    #[test]
+    fn test_convergence_level_with_intent_low_intent_high_overseers() {
+        let signals = signals_with_tests(10, 10, 0);
+        // All tests pass but intent is low
+        let blended = convergence_level_with_intent(&signals, Some(0.3));
+        // 0.60 * 0.3 + 0.40 * 1.0 = 0.18 + 0.40 = 0.58
+        assert!((blended - 0.58).abs() < 1e-10,
+            "Expected 0.58, got {blended}");
+    }
+
+    #[test]
+    fn test_convergence_level_with_intent_high_intent_low_overseers() {
+        let signals = signals_with_tests(0, 10, 0);
+        // No tests pass but intent is high
+        let blended = convergence_level_with_intent(&signals, Some(0.95));
+        // overseer_readiness: 0.55 * 0.0 + 0.20 * 1.0 + 0.10 * 1.0 + 0.15 * 1.0 = 0.45
+        // 0.60 * 0.95 + 0.40 * 0.45 = 0.57 + 0.18 = 0.75
+        let expected = 0.60 * 0.95 + 0.40 * 0.45;
+        assert!((blended - expected).abs() < 1e-10,
+            "Expected {expected}, got {blended}");
+    }
+
+    // --- convergence_delta intent reweight tests ---
+
+    #[test]
+    fn test_delta_with_intent_new_weights() {
+        let prev_signals = signals_with_tests(5, 10, 0);
+        let prev = make_observation(1, prev_signals, None);
+
+        let current_signals = signals_with_tests(8, 10, 0);
+        let health = ContextHealth::default();
+        let weights = ConvergenceWeights::default();
+
+        // With intent — uses 55/20/15/5/5 weights
+        let delta = compute_convergence_delta_with_intent(
+            &prev, &current_signals, 20, &health, &weights,
+            Some(0.5), Some(0.9),
+        );
+
+        // Intent component: 0.55 * (0.9 - 0.5) = 0.22
+        // Test component: 0.20 * (8-5)/10 = 0.06
+        // The intent at 55% should dominate
+        assert!(delta > 0.2,
+            "Intent-weighted delta with rising intent should be > 0.2, got {delta}");
     }
 }
