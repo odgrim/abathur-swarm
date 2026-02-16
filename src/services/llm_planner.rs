@@ -106,11 +106,16 @@ impl LlmTaskSpec {
 /// LLM Planner for goal decomposition.
 pub struct LlmPlanner {
     config: LlmPlannerConfig,
+    http_client: reqwest::Client,
 }
 
 impl LlmPlanner {
     pub fn new(config: LlmPlannerConfig) -> Self {
-        Self { config }
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self { config, http_client }
     }
 
     pub fn with_default_config() -> Self {
@@ -128,10 +133,7 @@ impl LlmPlanner {
         let response = if self.config.use_claude_code {
             self.query_claude_code(&prompt).await?
         } else {
-            // Direct API call would go here
-            return Err(DomainError::ValidationFailed(
-                "Direct API not yet implemented".to_string(),
-            ));
+            self.query_direct_api(&prompt).await?
         };
 
         self.parse_decomposition(&response)
@@ -262,6 +264,78 @@ IMPORTANT: Output ONLY the JSON object, no other text."#,
 
         let response = String::from_utf8_lossy(&output.stdout).to_string();
         Ok(response)
+    }
+
+    /// Query the Anthropic Messages API directly.
+    async fn query_direct_api(&self, prompt: &str) -> DomainResult<String> {
+        let api_key = self.config.api_key.clone()
+            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+            .ok_or_else(|| DomainError::ValidationFailed(
+                "API key required for direct API mode. Set api_key in config or ANTHROPIC_API_KEY env var.".to_string()
+            ))?;
+
+        let request_body = serde_json::json!({
+            "model": self.config.model,
+            "max_tokens": self.config.max_tokens,
+            "temperature": self.config.temperature,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        });
+
+        let response = self.http_client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("content-type", "application/json")
+            .header("x-api-key", &api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| DomainError::ValidationFailed(
+                format!("Direct API request failed: {}", e)
+            ))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(DomainError::ValidationFailed(
+                format!("Anthropic API error {}: {}", status, body)
+            ));
+        }
+
+        // Parse the Messages API response
+        let result: serde_json::Value = response.json().await
+            .map_err(|e| DomainError::ValidationFailed(
+                format!("Failed to parse API response: {}", e)
+            ))?;
+
+        // Extract text from content blocks
+        let text = result["content"]
+            .as_array()
+            .map(|blocks| {
+                blocks.iter()
+                    .filter_map(|block| {
+                        if block["type"].as_str() == Some("text") {
+                            block["text"].as_str().map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+
+        if text.is_empty() {
+            return Err(DomainError::ValidationFailed(
+                "API returned no text content".to_string()
+            ));
+        }
+
+        Ok(text)
     }
 
     /// Parse the LLM response into a decomposition.

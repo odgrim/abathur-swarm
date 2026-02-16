@@ -908,7 +908,6 @@ where
                                     task_id = %task.id,
                                     "Intent verification confirmed convergence"
                                 );
-                                consecutive_indeterminate = 0;
                                 // Fall through to finalize below
                             }
                             IntentSatisfaction::Partial | IntentSatisfaction::Unsatisfied => {
