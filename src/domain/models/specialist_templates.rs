@@ -216,11 +216,9 @@ fn generate_workflow_example(template: &WorkflowTemplate) -> String {
         ));
 
         // agent_create example
-        let tier = if phase.read_only { "worker" } else { "worker" };
         let tier_str = match phase.name.as_str() {
-            "plan" => "specialist",
-            "review" => "specialist",
-            _ => tier,
+            "plan" | "review" => "specialist",
+            _ => "worker",
         };
 
         example.push_str(&format!(

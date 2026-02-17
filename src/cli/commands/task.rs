@@ -49,9 +49,6 @@ pub enum TaskCommands {
         /// Deadline for SLA enforcement (ISO 8601 datetime, e.g. "2025-12-31T23:59:59Z")
         #[arg(long)]
         deadline: Option<String>,
-        /// Workflow to use for this task (e.g., "code", "analysis", "writing")
-        #[arg(short = 'w', long)]
-        workflow: Option<String>,
     },
     /// List tasks
     List {
@@ -281,7 +278,6 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
             input,
             idempotency_key,
             deadline,
-            workflow: _workflow,
         } => {
             let priority = TaskPriority::from_str(&priority)
                 .ok_or_else(|| anyhow::anyhow!("Invalid priority: {}", priority))?;
