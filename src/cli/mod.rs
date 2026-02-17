@@ -52,6 +52,8 @@ pub enum Commands {
     Trigger(commands::trigger::TriggerArgs),
     /// Query and inspect the event store
     Event(commands::event::EventArgs),
+    /// Manage workflow templates
+    Workflow(commands::workflow::WorkflowArgs),
 }
 
 pub fn handle_error(err: anyhow::Error, json_mode: bool) -> ! {

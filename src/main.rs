@@ -25,6 +25,7 @@ async fn main() {
         Commands::Mcp(args) => abathur::cli::commands::mcp::execute(args, cli.json).await,
         Commands::Trigger(args) => abathur::cli::commands::trigger::execute(args, cli.json).await,
         Commands::Event(args) => abathur::cli::commands::event::execute(args, cli.json).await,
+        Commands::Workflow(args) => abathur::cli::commands::workflow::execute(args, cli.json).await,
     };
 
     if let Err(err) = result {

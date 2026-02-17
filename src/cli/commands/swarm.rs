@@ -140,6 +140,10 @@ pub enum SwarmCommand {
         /// Default execution mode: "convergent" (default), "direct", or "auto" (heuristic)
         #[arg(long, default_value = "convergent")]
         default_execution_mode: String,
+
+        /// Default workflow for this swarm session
+        #[arg(long)]
+        workflow: Option<String>,
     },
     /// Stop the running swarm orchestrator
     Stop,
@@ -180,6 +184,7 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
             events_server,
             with_mcp_servers,
             default_execution_mode,
+            workflow,
         } => {
             start_swarm(
                 max_agents,
@@ -193,6 +198,7 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
                 events_server,
                 with_mcp_servers,
                 default_execution_mode,
+                workflow,
             ).await
         }
         SwarmCommand::Stop => stop_swarm(json_mode).await,
@@ -293,6 +299,7 @@ async fn start_swarm(
     events_server: Option<String>,
     with_mcp_servers: bool,
     default_execution_mode: String,
+    workflow: Option<String>,
 ) -> Result<()> {
     // Check if swarm is already running
     if let Some(pid) = check_existing_swarm() {
@@ -329,10 +336,10 @@ async fn start_swarm(
 
     if foreground {
         // Run in foreground (original behavior)
-        run_swarm_foreground(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode).await
+        run_swarm_foreground(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref()).await
     } else {
         // Background the swarm
-        start_swarm_background(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode)
+        start_swarm_background(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref())
     }
 }
 
@@ -343,6 +350,7 @@ fn start_swarm_background(
     mcp_urls: McpServerUrls,
     with_mcp_servers: bool,
     default_execution_mode: &str,
+    workflow: Option<&str>,
 ) -> Result<()> {
     use std::process::{Command, Stdio};
 
@@ -376,6 +384,9 @@ fn start_swarm_background(
         cmd.arg("--with-mcp-servers");
     }
     cmd.arg("--default-execution-mode").arg(default_execution_mode);
+    if let Some(wf) = workflow {
+        cmd.arg("--workflow").arg(wf);
+    }
 
     // Ensure .abathur directory exists for log file
     std::fs::create_dir_all(".abathur")?;
@@ -496,6 +507,7 @@ async fn run_swarm_foreground(
     mcp_urls: McpServerUrls,
     with_mcp_servers: bool,
     default_execution_mode: &str,
+    workflow: Option<&str>,
 ) -> Result<()> {
     use crate::adapters::sqlite::{
         create_pool, Migrator, all_embedded_migrations,
@@ -561,10 +573,22 @@ async fn run_swarm_foreground(
         }
     };
 
+    // Resolve workflow template from config file
+    let workflow_template = if let Some(wf_name) = workflow {
+        let app_config = crate::services::config::Config::load()
+            .unwrap_or_default();
+        let wf = app_config.resolve_workflow(wf_name)
+            .ok_or_else(|| anyhow::anyhow!("Workflow '{}' not found", wf_name))?;
+        Some(wf)
+    } else {
+        None
+    };
+
     let config = SwarmConfig {
         max_agents,
         mcp_servers: mcp_server_config,
         default_execution_mode: execution_mode,
+        workflow_template,
         ..Default::default()
     };
 

@@ -9,4 +9,5 @@ pub mod memory;
 pub mod swarm;
 pub mod task;
 pub mod trigger;
+pub mod workflow;
 pub mod worktree;

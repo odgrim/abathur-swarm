@@ -6,6 +6,8 @@
 use std::path::PathBuf;
 use uuid::Uuid;
 
+use crate::domain::models::workflow_template::WorkflowTemplate;
+
 /// Configuration for the swarm orchestrator.
 #[derive(Debug, Clone)]
 pub struct SwarmConfig {
@@ -67,6 +69,9 @@ pub struct SwarmConfig {
     /// When set to Some(mode), all tasks without an explicit mode use this.
     /// When None, the classification heuristic decides.
     pub default_execution_mode: Option<crate::domain::models::ExecutionMode>,
+
+    /// Optional workflow template for configuring the Overmind's phase sequence.
+    pub workflow_template: Option<WorkflowTemplate>,
 }
 
 /// Configurable polling intervals (seconds) for all scheduled handlers.
@@ -311,6 +316,7 @@ impl Default for SwarmConfig {
             event_retention_days: 30,
             convergence_enabled: true,
             default_execution_mode: Some(crate::domain::models::ExecutionMode::Convergent { parallel_samples: None }),
+            workflow_template: None,
         }
     }
 }

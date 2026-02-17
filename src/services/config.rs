@@ -1,5 +1,6 @@
 //! Configuration management for the Abathur swarm system.
 
+use crate::domain::models::workflow_template::WorkflowTemplate;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -16,9 +17,13 @@ pub enum ConfigError {
     ValidationError { field: String, reason: String },
 }
 
+/// Default workflow name.
+fn default_workflow_name() -> String {
+    "code".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
 pub struct Config {
     pub limits: LimitsConfig,
     pub spawn_limits: SpawnLimitsConfig,
@@ -29,6 +34,30 @@ pub struct Config {
     pub a2a: A2AConfig,
     pub database: DatabaseConfig,
     pub logging: LoggingConfig,
+    /// Name of the default workflow to use.
+    #[serde(default = "default_workflow_name")]
+    pub default_workflow: String,
+    /// User-defined workflow templates.
+    #[serde(default)]
+    pub workflows: Vec<WorkflowTemplate>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            limits: LimitsConfig::default(),
+            spawn_limits: SpawnLimitsConfig::default(),
+            restructure_limits: RestructureLimitsConfig::default(),
+            evolution: EvolutionConfig::default(),
+            memory: MemoryConfig::default(),
+            worktrees: WorktreeConfig::default(),
+            a2a: A2AConfig::default(),
+            database: DatabaseConfig::default(),
+            logging: LoggingConfig::default(),
+            default_workflow: default_workflow_name(),
+            workflows: Vec::new(),
+        }
+    }
 }
 
 
@@ -454,6 +483,9 @@ impl Config {
         if let Ok(val) = std::env::var("ABATHUR_LOG_LEVEL") {
             self.logging.level = val;
         }
+        if let Ok(val) = std::env::var("ABATHUR_DEFAULT_WORKFLOW") {
+            self.default_workflow = val;
+        }
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
@@ -469,7 +501,93 @@ impl Config {
                 reason: "must be between 0.0 and 1.0".to_string(),
             });
         }
+
+        // Validate each workflow template.
+        for wf in &self.workflows {
+            if let Err(reason) = wf.validate() {
+                return Err(ConfigError::ValidationError {
+                    field: format!("workflows.{}", wf.name),
+                    reason,
+                });
+            }
+        }
+
+        // Check for duplicate workflow names.
+        let mut seen_names = std::collections::HashSet::new();
+        for wf in &self.workflows {
+            if !seen_names.insert(&wf.name) {
+                return Err(ConfigError::ValidationError {
+                    field: "workflows".to_string(),
+                    reason: format!("duplicate workflow name '{}'", wf.name),
+                });
+            }
+        }
+
+        // Verify default_workflow references a known workflow (user-defined or built-in "code").
+        if self.default_workflow != "code"
+            && !self.workflows.iter().any(|wf| wf.name == self.default_workflow)
+        {
+            return Err(ConfigError::ValidationError {
+                field: "default_workflow".to_string(),
+                reason: format!(
+                    "default workflow '{}' not found in defined workflows or built-in workflows",
+                    self.default_workflow
+                ),
+            });
+        }
+
         Ok(())
+    }
+
+    /// Resolve a workflow template by name.
+    ///
+    /// Checks user-defined workflows first, then falls back to the built-in "code" workflow.
+    pub fn resolve_workflow(&self, name: &str) -> Option<WorkflowTemplate> {
+        // Check user-defined workflows first.
+        if let Some(wf) = self.workflows.iter().find(|wf| wf.name == name) {
+            return Some(wf.clone());
+        }
+
+        // Fall back to built-in "code" workflow.
+        if name == "code" {
+            return Some(WorkflowTemplate::default_code_workflow());
+        }
+
+        None
+    }
+
+    /// Returns the default workflow template.
+    pub fn default_workflow_template(&self) -> WorkflowTemplate {
+        self.resolve_workflow(&self.default_workflow)
+            .unwrap_or_else(WorkflowTemplate::default_code_workflow)
+    }
+
+    /// Returns available workflows as (name, description, phase_count, is_default).
+    pub fn available_workflows(&self) -> Vec<(String, String, usize, bool)> {
+        let mut workflows = Vec::new();
+
+        // Add the built-in "code" workflow if not overridden by user.
+        if !self.workflows.iter().any(|wf| wf.name == "code") {
+            let builtin = WorkflowTemplate::default_code_workflow();
+            workflows.push((
+                builtin.name.clone(),
+                builtin.description.clone(),
+                builtin.phases.len(),
+                self.default_workflow == "code",
+            ));
+        }
+
+        // Add user-defined workflows.
+        for wf in &self.workflows {
+            workflows.push((
+                wf.name.clone(),
+                wf.description.clone(),
+                wf.phases.len(),
+                self.default_workflow == wf.name,
+            ));
+        }
+
+        workflows
     }
 
     pub fn sample_toml() -> String {
