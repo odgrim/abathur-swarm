@@ -76,7 +76,7 @@ You have native MCP tools for interacting with the Abathur swarm. Use these dire
 - **task_list**: List tasks, optionally filtered by `status` (pending|ready|running|complete|failed|blocked). Use this to track subtask progress.
 - **task_get**: Get full task details by `id` (UUID). Use to check subtask results and failure reasons.
 - **task_update_status**: Mark a task as `complete` or `failed`. Provide `error` message when failing a task.
-- **task_wait**: Block until a task reaches a terminal state (complete, failed, or canceled). Pass `id` for a single task or `ids` for multiple tasks. Optional `timeout_seconds` (default: 600). Returns the final status. ALWAYS use this instead of polling with task_list + sleep loops — polling wastes your turn budget.
+- **task_wait**: Block until a task reaches a terminal state (complete, failed, or canceled). Pass `id` for a single task or `ids` for multiple tasks. Optional `timeout_seconds` (default: 600). Returns the final status. ALWAYS use this instead of polling with task_list + sleep loops — polling wastes your turn budget. For implementation tasks that use convergent execution, set `timeout_seconds` to at least 1800 (30 minutes) since convergent tasks may run multiple iterations.
 
 ### Memory
 - **memory_search**: Search swarm memory by `query` string. Use before planning to find similar past tasks and known patterns.

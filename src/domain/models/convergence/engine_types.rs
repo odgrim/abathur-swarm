@@ -34,6 +34,11 @@ pub enum LoopControl {
     RequestExtension,
     /// The task should be decomposed into subtasks.
     Decompose,
+    /// Overseers confirm convergence: FixedPoint or LimitCycle attractor with
+    /// all overseers passing for 2+ consecutive observations. Bypasses LLM
+    /// intent verification entirely since static checks objectively confirm
+    /// the work is correct and the trajectory has stabilized.
+    OverseerConverged,
 }
 
 // ---------------------------------------------------------------------------

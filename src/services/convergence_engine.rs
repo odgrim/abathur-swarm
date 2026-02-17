@@ -501,6 +501,19 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                     }
                     continue;
                 }
+                LoopControl::OverseerConverged => {
+                    let final_seq = trajectory
+                        .observations
+                        .last()
+                        .map(|o| o.sequence)
+                        .unwrap_or(0);
+                    let outcome = ConvergenceOutcome::Converged {
+                        trajectory_id: trajectory.id.to_string(),
+                        final_observation_sequence: final_seq,
+                    };
+                    self.finalize(&mut trajectory, &outcome, &bandit).await?;
+                    return Ok(outcome);
+                }
                 LoopControl::Continue => continue,
             }
         }
@@ -667,6 +680,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         trajectory: &Trajectory,
         _bandit: &StrategyBandit,
     ) -> DomainResult<LoopControl> {
+        let lint_baseline = trajectory.lint_baseline;
         // 1. Budget exhaustion check
         if !trajectory.budget.has_remaining() {
             // Check if we should request an extension
@@ -709,14 +723,33 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
 
         // All-overseers-passing trigger: first transition to all-passing
         // means static checks have nothing more to report — ask intent if
-        // work is complete.
+        // work is complete. Uses relative lint check so pre-existing warnings
+        // don't block the transition.
         let all_passing_transition = if trajectory.observations.len() >= 2 {
             let curr = &trajectory.observations[trajectory.observations.len() - 1];
             let prev = &trajectory.observations[trajectory.observations.len() - 2];
-            curr.overseer_signals.all_passing() && !prev.overseer_signals.all_passing()
+            curr.overseer_signals.all_passing_relative(lint_baseline)
+                && !prev.overseer_signals.all_passing_relative(lint_baseline)
         } else {
             false
         };
+
+        // 2b. OverseerConverged shortcircuit: FixedPoint + all overseers passing
+        // for 2+ consecutive observations = overseer-confirmed convergence.
+        // Skip IntentCheck entirely since static checks objectively confirm
+        // the work is correct and the trajectory has stabilized.
+        if at_fixed_point {
+            let consecutive_all_passing = trajectory.observations.iter().rev()
+                .take_while(|o| {
+                    o.overseer_signals.all_passing_relative(lint_baseline)
+                        && o.overseer_signals.has_any_signal()
+                })
+                .count();
+
+            if consecutive_all_passing >= 2 {
+                return Ok(LoopControl::OverseerConverged);
+            }
+        }
 
         if interval_trigger || at_fixed_point || budget_trigger || at_plateau || all_passing_transition {
             return Ok(LoopControl::IntentCheck);
@@ -724,6 +757,18 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
 
         // 3. Trapped check -- limit cycle with no eligible escape strategies
         if let AttractorType::LimitCycle { .. } = &trajectory.attractor_state.classification {
+            // If overseers confirm work is correct, don't try escape strategies —
+            // the work is done, escape strategies just waste tokens.
+            let latest_passing = trajectory.observations.last()
+                .map(|o| {
+                    o.overseer_signals.all_passing_relative(lint_baseline)
+                        && o.overseer_signals.has_any_signal()
+                })
+                .unwrap_or(false);
+            if latest_passing {
+                return Ok(LoopControl::OverseerConverged);
+            }
+
             let eligible = eligible_strategies(
                 &trajectory.strategy_log,
                 &trajectory.attractor_state,

@@ -623,6 +623,19 @@ where
     // Track consecutive Indeterminate results for escalation.
     let mut consecutive_indeterminate: u32 = 0;
 
+    // Lint baseline: captures the lint error count from the first observation
+    // so that pre-existing warnings (e.g. from `cargo clippy -- -D warnings`)
+    // don't permanently block convergence via `all_passing()`.
+    // Initialize from existing observations if resuming a trajectory.
+    if trajectory.lint_baseline == 0 {
+        if let Some(baseline) = trajectory.observations.first()
+            .and_then(|o| o.overseer_signals.lint_results.as_ref())
+            .map(|l| l.error_count)
+        {
+            trajectory.lint_baseline = baseline;
+        }
+    }
+
     loop {
         // Check cancellation
         if cancellation_token.is_cancelled() {
@@ -750,6 +763,14 @@ where
                 );
                 OverseerSignals::default()
             });
+
+        // Set lint baseline from the first iteration's measurement if not already set
+        // (i.e. when this is the very first observation and no prior observations existed).
+        if trajectory.observations.is_empty() && trajectory.lint_baseline == 0 {
+            trajectory.lint_baseline = overseer_signals.lint_results.as_ref()
+                .map(|l| l.error_count)
+                .unwrap_or(0);
+        }
 
         let tokens_used = session.total_tokens();
         let sequence = trajectory.observations.len() as u32;
@@ -953,16 +974,55 @@ where
                                     ).await;
                                 }
 
-                                last_intent_verification = Some(ivr);
-                                continue;
+                                // Hard cap: after 3 consecutive indeterminates, fall back
+                                // to overseer verdict to avoid infinite loops.
+                                if consecutive_indeterminate >= 3 {
+                                    let signals = trajectory.observations.last()
+                                        .map(|o| &o.overseer_signals);
+                                    let overseers_clean = signals
+                                        .map(|s| {
+                                            s.all_passing_relative(trajectory.lint_baseline)
+                                                && s.has_any_signal()
+                                        })
+                                        .unwrap_or(false);
+
+                                    if overseers_clean {
+                                        tracing::info!(
+                                            task_id = %task.id,
+                                            "Intent verification indeterminate 3x; overseers all passing — accepting convergence"
+                                        );
+                                        // Fall through to finalize as converged below
+                                    } else {
+                                        tracing::warn!(
+                                            task_id = %task.id,
+                                            "Intent verification indeterminate 3x; overseers NOT passing — failing task"
+                                        );
+                                        let best_seq = trajectory.best_observation().map(|o| o.sequence);
+                                        let outcome = ConvergenceOutcome::Exhausted {
+                                            trajectory_id: trajectory.id.to_string(),
+                                            best_observation_sequence: best_seq,
+                                        };
+                                        engine.finalize(&mut trajectory, &outcome, &bandit).await?;
+                                        emit_convergence_terminated(
+                                            event_bus, task, goal_id, &trajectory, "exhausted",
+                                        ).await;
+                                        return Ok(ConvergentOutcome::Failed(
+                                            "intent verification indeterminate 3x with failing overseers".into()
+                                        ));
+                                    }
+                                } else {
+                                    last_intent_verification = Some(ivr);
+                                    continue;
+                                }
                             }
                         }
                     }
                     Ok(None) => {
-                        // No intent extractable — this is an error state.
-                        // Log, escalate, and continue iterating.
+                        // No intent extractable — counts toward indeterminate cap.
+                        consecutive_indeterminate += 1;
                         tracing::error!(
                             task_id = %task.id,
+                            consecutive = consecutive_indeterminate,
                             "IntentCheck: no intent extractable from task or goal"
                         );
                         let escalation = crate::domain::models::HumanEscalation::ambiguous_requirements(
@@ -973,17 +1033,94 @@ where
                         emit_escalation_from_verification(
                             event_bus, task, goal_id, &escalation,
                         ).await;
-                        continue;
+
+                        // Apply same hard cap as Indeterminate
+                        if consecutive_indeterminate >= 3 {
+                            let signals = trajectory.observations.last()
+                                .map(|o| &o.overseer_signals);
+                            let overseers_clean = signals
+                                .map(|s| {
+                                    s.all_passing_relative(trajectory.lint_baseline)
+                                        && s.has_any_signal()
+                                })
+                                .unwrap_or(false);
+
+                            if overseers_clean {
+                                tracing::info!(
+                                    task_id = %task.id,
+                                    "Intent extraction failed 3x; overseers all passing — accepting convergence"
+                                );
+                                // Fall through to finalize as converged below
+                            } else {
+                                tracing::warn!(
+                                    task_id = %task.id,
+                                    "Intent extraction failed 3x; overseers NOT passing — failing task"
+                                );
+                                let best_seq = trajectory.best_observation().map(|o| o.sequence);
+                                let outcome = ConvergenceOutcome::Exhausted {
+                                    trajectory_id: trajectory.id.to_string(),
+                                    best_observation_sequence: best_seq,
+                                };
+                                engine.finalize(&mut trajectory, &outcome, &bandit).await?;
+                                emit_convergence_terminated(
+                                    event_bus, task, goal_id, &trajectory, "exhausted",
+                                ).await;
+                                return Ok(ConvergentOutcome::Failed(
+                                    "intent extraction failed 3x with failing overseers".into()
+                                ));
+                            }
+                        } else {
+                            continue;
+                        }
                     }
                     Err(e) => {
-                        // Infrastructure failure — continue iterating,
-                        // never silently accept convergence.
+                        // Infrastructure failure — counts toward indeterminate cap.
+                        consecutive_indeterminate += 1;
                         tracing::warn!(
                             task_id = %task.id,
                             error = %e,
+                            consecutive = consecutive_indeterminate,
                             "Intent verification infrastructure failure; continuing iteration"
                         );
-                        continue;
+
+                        // Apply same hard cap as Indeterminate
+                        if consecutive_indeterminate >= 3 {
+                            let signals = trajectory.observations.last()
+                                .map(|o| &o.overseer_signals);
+                            let overseers_clean = signals
+                                .map(|s| {
+                                    s.all_passing_relative(trajectory.lint_baseline)
+                                        && s.has_any_signal()
+                                })
+                                .unwrap_or(false);
+
+                            if overseers_clean {
+                                tracing::info!(
+                                    task_id = %task.id,
+                                    "Intent verification failed 3x; overseers all passing — accepting convergence"
+                                );
+                                // Fall through to finalize as converged below
+                            } else {
+                                tracing::warn!(
+                                    task_id = %task.id,
+                                    "Intent verification failed 3x; overseers NOT passing — failing task"
+                                );
+                                let best_seq = trajectory.best_observation().map(|o| o.sequence);
+                                let outcome = ConvergenceOutcome::Exhausted {
+                                    trajectory_id: trajectory.id.to_string(),
+                                    best_observation_sequence: best_seq,
+                                };
+                                engine.finalize(&mut trajectory, &outcome, &bandit).await?;
+                                emit_convergence_terminated(
+                                    event_bus, task, goal_id, &trajectory, "exhausted",
+                                ).await;
+                                return Ok(ConvergentOutcome::Failed(
+                                    "intent verification infrastructure failure 3x with failing overseers".into()
+                                ));
+                            }
+                        } else {
+                            continue;
+                        }
                     }
                 }
 
@@ -1116,6 +1253,28 @@ where
                     event_bus, task, goal_id, &trajectory, "decomposed",
                 ).await;
                 return Ok(ConvergentOutcome::Decomposed(trajectory));
+            }
+            LoopControl::OverseerConverged => {
+                // All overseers passing + stable attractor = overseer-confirmed
+                // convergence. No LLM intent verification needed.
+                tracing::info!(
+                    task_id = %task.id,
+                    "Overseer-confirmed convergence (all overseers passing at stable attractor)"
+                );
+                let final_seq = trajectory
+                    .observations
+                    .last()
+                    .map(|o| o.sequence)
+                    .unwrap_or(0);
+                let outcome = ConvergenceOutcome::Converged {
+                    trajectory_id: trajectory.id.to_string(),
+                    final_observation_sequence: final_seq,
+                };
+                engine.finalize(&mut trajectory, &outcome, &bandit).await?;
+                emit_convergence_terminated(
+                    event_bus, task, goal_id, &trajectory, "converged",
+                ).await;
+                return Ok(ConvergentOutcome::Converged);
             }
             LoopControl::RequestExtension => {
                 let additional_iterations = 3u32;

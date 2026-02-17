@@ -310,7 +310,7 @@ where
             let system_prompt = self.get_agent_system_prompt(&agent_type).await;
 
             // Get agent template for version tracking, capabilities, and tool restrictions
-            let (template_version, capabilities, cli_tools, agent_can_write, is_template_read_only) = match self.agent_repo.get_template_by_name(&agent_type).await {
+            let (template_version, capabilities, cli_tools, agent_can_write, is_template_read_only, template_max_turns) = match self.agent_repo.get_template_by_name(&agent_type).await {
                 Ok(Some(template)) => {
                     let caps: Vec<String> = template.tools.iter()
                         .map(|t| t.name.clone())
@@ -320,10 +320,10 @@ where
                         let lower = c.to_lowercase();
                         lower == "write" || lower == "edit" || lower == "shell"
                     });
-                    (template.version, caps, tools, can_write, template.read_only)
+                    (template.version, caps, tools, can_write, template.read_only, template.max_turns)
                 }
                 // Default to true when template lookup fails (safer to require commits from unknown agents)
-                _ => (1, vec!["task-execution".to_string()], vec![], true, false),
+                _ => (1, vec!["task-execution".to_string()], vec![], true, false, 0),
             };
 
             // Read-only agent roles never produce commits regardless of tool capabilities.
@@ -465,7 +465,14 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let event_tx = event_tx.clone();
             let event_bus = self.event_bus.clone();
             let command_bus = self.command_bus.read().await.clone();
-            let max_turns = self.config.default_max_turns;
+            // Use agent template's max_turns if set (non-zero), otherwise fall
+            // back to the orchestrator's default. This ensures agents like the
+            // overmind (max_turns=50) get their configured turn budget.
+            let max_turns = if template_max_turns > 0 {
+                template_max_turns
+            } else {
+                self.config.default_max_turns
+            };
             let total_tokens = self.total_tokens.clone();
             let use_worktrees = self.config.use_worktrees;
             let circuit_breaker = self.circuit_breaker.clone();

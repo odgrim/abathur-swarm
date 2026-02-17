@@ -226,6 +226,39 @@ impl OverseerSignals {
             && self.custom_checks.iter().all(|c| c.passed)
     }
 
+    /// Returns `true` when no NEW errors were introduced relative to a lint baseline.
+    ///
+    /// This is like `all_passing()` but treats lint errors at or below the baseline
+    /// count as acceptable. Pre-existing lint warnings (e.g. from `cargo clippy -- -D warnings`)
+    /// should not block convergence when the agent's changes didn't introduce them.
+    pub fn all_passing_relative(&self, lint_baseline: u32) -> bool {
+        self.test_results
+            .as_ref()
+            .map(|t| t.all_passing())
+            .unwrap_or(true)
+            && self
+                .type_check
+                .as_ref()
+                .map(|t| t.clean)
+                .unwrap_or(true)
+            && self
+                .lint_results
+                .as_ref()
+                .map(|l| l.error_count <= lint_baseline)
+                .unwrap_or(true)
+            && self
+                .build_result
+                .as_ref()
+                .map(|b| b.success)
+                .unwrap_or(true)
+            && self
+                .security_scan
+                .as_ref()
+                .map(|s| s.critical_count == 0)
+                .unwrap_or(true)
+            && self.custom_checks.iter().all(|c| c.passed)
+    }
+
     /// Total error count across build, type check, and lint results.
     ///
     /// Used in convergence delta computation (spec 1.4) to measure the
@@ -764,6 +797,47 @@ mod tests {
             details: "coverage below threshold".into(),
         });
         assert!(!signals.all_passing());
+    }
+
+    #[test]
+    fn all_passing_relative_true_when_lint_at_baseline() {
+        let signals = OverseerSignals {
+            test_results: Some(TestResults {
+                passed: 10, failed: 0, skipped: 0, total: 10,
+                regression_count: 0, failing_test_names: vec![],
+            }),
+            type_check: Some(TypeCheckResult { clean: true, error_count: 0, errors: vec![] }),
+            lint_results: Some(LintResults { error_count: 87, warning_count: 0, errors: vec![] }),
+            build_result: Some(BuildResult { success: true, error_count: 0, errors: vec![] }),
+            security_scan: None,
+            custom_checks: vec![],
+        };
+        // Lint errors at baseline: should pass
+        assert!(signals.all_passing_relative(87));
+        // Lint errors below baseline: should also pass
+        assert!(signals.all_passing_relative(100));
+        // Lint errors above baseline: should fail
+        assert!(!signals.all_passing_relative(50));
+        // Original all_passing should fail (lint errors > 0)
+        assert!(!signals.all_passing());
+    }
+
+    #[test]
+    fn all_passing_relative_true_when_no_lint() {
+        let signals = OverseerSignals::empty();
+        assert!(signals.all_passing_relative(87));
+    }
+
+    #[test]
+    fn all_passing_relative_false_on_test_failure() {
+        let mut signals = OverseerSignals::empty();
+        signals.test_results = Some(TestResults {
+            passed: 8, failed: 2, skipped: 0, total: 10,
+            regression_count: 0, failing_test_names: vec![],
+        });
+        signals.lint_results = Some(LintResults { error_count: 5, warning_count: 0, errors: vec![] });
+        // Even though lint is at baseline, test failures should still fail
+        assert!(!signals.all_passing_relative(5));
     }
 
     #[test]

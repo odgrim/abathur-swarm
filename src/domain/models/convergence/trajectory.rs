@@ -100,6 +100,12 @@ pub struct Trajectory {
     /// Updated by the orchestrator after each intent check.
     pub last_intent_confidence: Option<f64>,
 
+    /// Lint error count from the first observation, used as a baseline for
+    /// `all_passing_relative()`. Pre-existing lint warnings should not block
+    /// convergence when the agent's changes didn't introduce them.
+    #[serde(default)]
+    pub lint_baseline: u32,
+
     /// When this trajectory was created.
     pub created_at: DateTime<Utc>,
 
@@ -139,6 +145,7 @@ impl Trajectory {
             total_fresh_starts: 0,
             prev_intent_confidence: None,
             last_intent_confidence: None,
+            lint_baseline: 0,
             created_at: now,
             updated_at: now,
         }

@@ -496,6 +496,7 @@ impl TryFrom<TrajectoryRow> for Trajectory {
             total_fresh_starts: row.total_fresh_starts as u32,
             prev_intent_confidence: None,
             last_intent_confidence: None,
+            lint_baseline: 0,
             created_at,
             updated_at,
         })
