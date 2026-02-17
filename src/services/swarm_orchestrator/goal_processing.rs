@@ -468,11 +468,18 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             // Use agent template's max_turns if set (non-zero), otherwise fall
             // back to the orchestrator's default. This ensures agents like the
             // overmind (max_turns=50) get their configured turn budget.
-            let max_turns = if template_max_turns > 0 {
+            let mut max_turns = if template_max_turns > 0 {
                 template_max_turns
             } else {
                 self.config.default_max_turns
             };
+
+            // Bump turn budget for tasks retrying after max_turns exhaustion.
+            // Increase by 50% per retry, capped at architect-tier limit (50).
+            if task.context.hints.iter().any(|h| h == "retry:max_turns_exceeded") {
+                let multiplier = 1.5_f64.powi(task.retry_count as i32);
+                max_turns = ((max_turns as f64 * multiplier) as u32).min(50);
+            }
             let total_tokens = self.total_tokens.clone();
             let use_worktrees = self.config.use_worktrees;
             let circuit_breaker = self.circuit_breaker.clone();

@@ -472,8 +472,8 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
     }
 
     async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
-        let task_id = match &event.payload {
-            EventPayload::TaskFailed { task_id, .. } => *task_id,
+        let (task_id, error) = match &event.payload {
+            EventPayload::TaskFailed { task_id, error, .. } => (*task_id, error.as_str()),
             _ => return Ok(Reaction::None),
         };
 
@@ -496,17 +496,31 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
             return Ok(Reaction::None);
         }
 
-        // Exponential backoff: 2^retry_count seconds minimum wait
-        let backoff_secs = 2u64.pow(task.retry_count.min(10));
-        if let Some(completed_at) = task.completed_at {
-            let elapsed = (chrono::Utc::now() - completed_at).num_seconds();
-            if elapsed < backoff_secs as i64 {
-                // Not ready to retry yet; the scheduled retry-check will try again
-                return Ok(Reaction::None);
+        let is_max_turns = error.starts_with("error_max_turns");
+
+        // Skip exponential backoff for structural failures (max_turns) — immediate retry
+        if !is_max_turns {
+            let backoff_secs = 2u64.pow(task.retry_count.min(10));
+            if let Some(completed_at) = task.completed_at {
+                let elapsed = (chrono::Utc::now() - completed_at).num_seconds();
+                if elapsed < backoff_secs as i64 {
+                    // Not ready to retry yet; the scheduled retry-check will try again
+                    return Ok(Reaction::None);
+                }
             }
         }
 
         let mut updated = task.clone();
+
+        // For max_turns failures, inject hint so the spawner can increase the turn budget
+        if is_max_turns {
+            updated.context.hints.push("retry:max_turns_exceeded".to_string());
+            updated.context.custom.insert(
+                "last_failure_reason".to_string(),
+                serde_json::Value::String(error.to_string()),
+            );
+        }
+
         if updated.retry().is_ok() {
             self.task_repo.update(&updated).await
                 .map_err(|e| format!("Failed to update task: {}", e))?;
@@ -4833,6 +4847,105 @@ mod tests {
         // Downstream should NOT be blocked since retries remain
         let updated = repo.get(downstream.id).await.unwrap().unwrap();
         assert_eq!(updated.status, TaskStatus::Pending);
+    }
+
+    // ========================================================================
+    // TaskFailedRetryHandler tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_retry_handler_injects_max_turns_hint() {
+        let repo = setup_task_repo().await;
+        let handler = TaskFailedRetryHandler::new(repo.clone(), 3);
+
+        // Create a task that has failed due to max_turns
+        let mut task = Task::new("Research codebase");
+        task.max_retries = 3;
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task.transition_to(TaskStatus::Failed).unwrap();
+        repo.create(&task).await.unwrap();
+
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Error,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(task.id),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::TaskFailed {
+                task_id: task.id,
+                error: "error_max_turns: agent exceeded 25 turns".to_string(),
+                retry_count: 0,
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should have emitted retry events
+        assert!(matches!(reaction, Reaction::EmitEvents(_)));
+
+        // Verify the retried task has the hint and custom field
+        let updated = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Ready);
+        assert!(updated.context.hints.contains(&"retry:max_turns_exceeded".to_string()));
+        assert!(updated.context.custom.contains_key("last_failure_reason"));
+    }
+
+    #[tokio::test]
+    async fn test_retry_handler_skips_backoff_for_max_turns() {
+        let repo = setup_task_repo().await;
+        let handler = TaskFailedRetryHandler::new(repo.clone(), 3);
+
+        // Create a task that has already been retried once (retry_count=1)
+        // and just failed again. With normal backoff, 2^1 = 2s wait would apply.
+        let mut task = Task::new("Research codebase");
+        task.max_retries = 3;
+        task.retry_count = 1;
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task.transition_to(TaskStatus::Failed).unwrap();
+        // Set completed_at to "just now" so backoff would normally block
+        task.completed_at = Some(chrono::Utc::now());
+        repo.create(&task).await.unwrap();
+
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Error,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(task.id),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::TaskFailed {
+                task_id: task.id,
+                error: "error_max_turns: agent exceeded 25 turns".to_string(),
+                retry_count: 1,
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        // Should retry immediately despite completed_at being "just now"
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::EmitEvents(_)));
+
+        let updated = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Ready);
+        assert_eq!(updated.retry_count, 2);
     }
 
     // ========================================================================

@@ -921,6 +921,8 @@ where
                         results.push(serde_json::json!({
                             "id": task_id.to_string(),
                             "status": task.status.as_str(),
+                            "retry_count": task.retry_count,
+                            "max_retries": task.max_retries,
                         }));
                     }
                     Ok(None) => {

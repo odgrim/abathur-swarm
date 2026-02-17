@@ -147,6 +147,12 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
                 section.push_str(
                     "- This phase has no dependencies (it runs first).\n",
                 );
+                // Fan-out guidance for root phases (typically research)
+                if phase.read_only {
+                    section.push_str(
+                        "- **Fan-out heuristic**: If the task touches 3+ distinct codebase areas, create one subtask per area running in parallel. Each stores findings via `memory_store` with a shared namespace and unique key. Use `task_wait` with `ids` array to wait for all.\n",
+                    );
+                }
             }
             PhaseDependency::Sequential => {
                 if i == 0 {
@@ -286,12 +292,22 @@ fn generate_workflow_example(template: &WorkflowTemplate) -> String {
 
         // task_wait
         if i < template.phases.len() - 1 {
-            example.push_str(&format!(
-                "\n# Wait for {} to complete\n\
-                 tool: task_wait\narguments:\n\
-                 \x20 id: \"<{}>\"\n",
-                phase.name, var_name,
-            ));
+            // Root phases may fan-out; show ids array pattern
+            if phase.dependency == PhaseDependency::Root && phase.read_only {
+                example.push_str(&format!(
+                    "\n# Wait for all {} tasks to complete\n\
+                     tool: task_wait\narguments:\n\
+                     \x20 ids: [\"<{}_1>\", \"<{}_2>\"]\n",
+                    phase.name, var_name, var_name,
+                ));
+            } else {
+                example.push_str(&format!(
+                    "\n# Wait for {} to complete\n\
+                     tool: task_wait\narguments:\n\
+                     \x20 id: \"<{}>\"\n",
+                    phase.name, var_name,
+                ));
+            }
         }
     }
 
@@ -370,11 +386,13 @@ Every task MUST follow this 5-phase spine. Do NOT skip phases or jump straight t
 Query swarm memory for similar past tasks, known patterns, and prior decisions via `memory_search`.
 
 ### Phase 2: Research
-Create a **read-only research agent** to explore the codebase, understand existing patterns, identify files that need to change, and report findings back via task completion.
-- Tools: `read`, `glob`, `grep` only — NO write, edit, or shell.
-- The research task has no dependencies (it runs first).
-- You MUST always create a research agent first. NEVER create an implementation agent without a preceding research task.
-- After submitting the research task, call `task_wait` with the research task UUID before proceeding to Phase 3.
+Create **read-only research agents** to explore the codebase. Decompose the research into parallel, domain-scoped subtasks.
+- Tools: `read`, `glob`, `grep`, `memory` — read-only. Include `task_status` so agents can mark completion.
+- Research tasks have no dependencies (they run first).
+- **Fan-out heuristic**: If the task touches 3+ distinct codebase areas (e.g., config system, CLI, domain models), create one research subtask per area. Each subtask should store its findings via `memory_store` with a shared namespace and a unique key. If the task is narrow (1-2 areas), a single research task is fine.
+- Include `memory` in the researcher's tools so findings survive even if the agent hits its turn limit.
+- After submitting all research tasks, call `task_wait` with ALL research task UUIDs (using the `ids` array parameter) before proceeding to Phase 3.
+- You MUST always create research tasks first. NEVER create an implementation agent without preceding research.
 
 ### Phase 3: Plan
 Create a **domain-specific planning agent** to draft a concrete implementation plan based on the research findings.
@@ -417,30 +435,40 @@ tool: agent_list
 tool: agent_create
 arguments:
   name: "codebase-researcher"
-  description: "Read-only agent that explores codebases and reports findings"
+  description: "Read-only agent that explores codebases and reports findings via memory"
   tier: "worker"
-  system_prompt: "You are a codebase research specialist. Explore the code, identify patterns, relevant files, and dependencies. Report your findings clearly. You are read-only — do NOT attempt to modify any files."
+  system_prompt: "You are a codebase research specialist. Explore the code, identify patterns, relevant files, and dependencies. Store your findings via memory_store with the namespace given in your task description. You are read-only — do NOT attempt to modify any files."
   tools:
     - {name: "read", description: "Read source files", required: true}
     - {name: "glob", description: "Find files by pattern", required: true}
     - {name: "grep", description: "Search code patterns", required: true}
+    - {name: "memory", description: "Store research findings", required: true}
     - {name: "task_status", description: "Mark task complete or failed", required: true}
   max_turns: 15
   read_only: true
 
+# Fan-out: one task per research domain
 tool: task_submit
 arguments:
-  title: "Research: rate limiting patterns and middleware stack"
-  description: "Explore the codebase to find: 1) existing middleware patterns, 2) tower service usage, 3) configuration patterns, 4) test patterns for middleware. Report all findings."
+  title: "Research: middleware stack and tower service usage"
+  description: "Explore the codebase to find existing middleware patterns and tower service usage. Store findings via memory_store with namespace 'rate-limiting-research' and key 'middleware-stack'."
   agent_type: "codebase-researcher"
   priority: "normal"
-# Returns research_task_id
+# Returns research_task_id_1
 
-# Wait for research to complete before planning
+tool: task_submit
+arguments:
+  title: "Research: configuration and test patterns"
+  description: "Explore configuration patterns and test patterns for middleware. Store findings via memory_store with namespace 'rate-limiting-research' and key 'config-and-tests'."
+  agent_type: "codebase-researcher"
+  priority: "normal"
+# Returns research_task_id_2
+
+# Wait for ALL research to complete before planning
 tool: task_wait
 arguments:
-  id: "<research_task_id>"
-# → Returns when research completes, then proceed to Phase 3
+  ids: ["<research_task_id_1>", "<research_task_id_2>"]
+# → Returns when all research completes, then proceed to Phase 3
 
 # Phase 3: Plan - create domain-specific planner
 tool: agent_create
@@ -721,6 +749,18 @@ mod tests {
         assert!(prompt.contains("Agent Design Principles"));
         assert!(prompt.contains("Spawn Limits"));
         assert!(prompt.contains("Error Handling"));
+    }
+
+    #[test]
+    fn test_generate_overmind_prompt_fan_out_heuristic() {
+        let wf = WorkflowTemplate::default_code_workflow();
+        let prompt = generate_overmind_prompt(&wf);
+
+        // Dynamic path should contain fan-out heuristic for read-only root phases
+        assert!(prompt.contains("Fan-out heuristic"));
+        assert!(prompt.contains("memory_store"));
+        // Example should use ids array for root read-only phases
+        assert!(prompt.contains("ids: ["));
     }
 
     #[test]
