@@ -7,6 +7,7 @@ use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
     AgentConstraint, AgentInstance, AgentStatus, AgentTemplate, AgentTier,
     InstanceStatus, ToolCapability, specialist_templates,
+    workflow_template::WorkflowTemplate,
 };
 use crate::domain::ports::{AgentFilter, AgentRepository};
 use crate::services::event_bus::{
@@ -395,6 +396,44 @@ impl<R: AgentRepository> AgentService<R> {
     /// - If the DB version >= hardcoded version: skip (no downgrade).
     pub async fn seed_baseline_agents(&self) -> DomainResult<Vec<String>> {
         let baseline = specialist_templates::create_baseline_agents();
+        let mut seeded = Vec::new();
+
+        for template in baseline {
+            match self.repository.get_template_by_name(&template.name).await? {
+                None => {
+                    self.repository.create_template(&template).await?;
+                    seeded.push(template.name.clone());
+                    tracing::info!("Seeded baseline agent '{}'", template.name);
+                }
+                Some(existing) if template.version > existing.version => {
+                    // Upgrade: hardcoded version is newer
+                    let mut upgraded = template.clone();
+                    upgraded.id = existing.id;
+                    self.repository.update_template(&upgraded).await?;
+                    seeded.push(upgraded.name.clone());
+                    tracing::info!(
+                        "Upgraded baseline agent '{}' from v{} to v{}",
+                        upgraded.name, existing.version, upgraded.version
+                    );
+                }
+                Some(_) => {
+                    // DB version is current or newer, skip
+                }
+            }
+        }
+
+        Ok(seeded)
+    }
+
+    /// Seed baseline agent templates with an optional workflow template.
+    ///
+    /// Like [`seed_baseline_agents`], but passes the workflow template to the
+    /// overmind prompt generator so it knows the phase sequence.
+    pub async fn seed_baseline_agents_with_workflow(
+        &self,
+        workflow: Option<&WorkflowTemplate>,
+    ) -> DomainResult<Vec<String>> {
+        let baseline = specialist_templates::create_baseline_agents_with_workflow(workflow);
         let mut seeded = Vec::new();
 
         for template in baseline {

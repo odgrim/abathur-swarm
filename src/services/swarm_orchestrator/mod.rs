@@ -458,7 +458,7 @@ where
         {
             use crate::services::AgentService;
             let agent_service = AgentService::new(self.agent_repo.clone(), self.event_bus.clone());
-            match agent_service.seed_baseline_agents().await {
+            match agent_service.seed_baseline_agents_with_workflow(self.config.workflow_template.as_ref()).await {
                 Ok(seeded) if !seeded.is_empty() => {
                     self.audit_log.info(
                         AuditCategory::Agent,
