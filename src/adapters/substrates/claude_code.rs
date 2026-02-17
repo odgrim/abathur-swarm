@@ -143,15 +143,18 @@ impl ClaudeCodeSubstrate {
         }
 
         // Allowed tools - use agent-specific tools if provided, otherwise default set
+        // Always include ABATHUR_ALLOWED_TOOLS so MCP tools are explicitly whitelisted
         if request.config.allow_tools {
             args.push("--allowedTools".to_string());
-            if request.config.allowed_tool_names.is_empty() {
+            let mut all_tools: Vec<&str> = if request.config.allowed_tool_names.is_empty() {
                 // Use default tool set
-                args.push(crate::domain::models::DEFAULT_TOOLS.join(","));
+                crate::domain::models::DEFAULT_TOOLS.to_vec()
             } else {
                 // Use agent-specific tools
-                args.push(request.config.allowed_tool_names.join(","));
-            }
+                request.config.allowed_tool_names.iter().map(|s| s.as_str()).collect()
+            };
+            all_tools.extend_from_slice(crate::ABATHUR_ALLOWED_TOOLS);
+            args.push(all_tools.join(","));
         }
 
         // Explicitly block Claude Code orchestration tools that bypass Abathur

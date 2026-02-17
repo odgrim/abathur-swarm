@@ -839,17 +839,17 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                             task_id, e
                                         );
                                         if let Ok(Some(mut t)) = task_repo.get(task_id).await {
-                                            t.retry_count += 1;
                                             let _ = t.transition_to(TaskStatus::Failed);
                                             let _ = task_repo.update(&t).await;
                                         }
                                     }
                                 } else if let Ok(Some(mut t)) = task_repo.get(task_id).await {
-                                    t.retry_count += 1;
                                     let _ = t.transition_to(TaskStatus::Failed);
                                     let _ = task_repo.update(&t).await;
                                 }
 
+                                let current_retry_count = task_repo.get(task_id).await
+                                    .ok().flatten().map(|t| t.retry_count).unwrap_or(0);
                                 event_bus.publish(crate::services::event_factory::task_event(
                                     crate::services::event_bus::EventSeverity::Warning,
                                     None,
@@ -857,7 +857,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     crate::services::event_bus::EventPayload::TaskFailed {
                                         task_id,
                                         error: msg.clone(),
-                                        retry_count: 0,
+                                        retry_count: current_retry_count,
                                     },
                                 )).await;
 
@@ -938,7 +938,6 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     );
                                     let _ = cb.dispatch(envelope).await;
                                 } else if let Ok(Some(mut t)) = task_repo.get(task_id).await {
-                                    t.retry_count += 1;
                                     let _ = t.transition_to(TaskStatus::Failed);
                                     let _ = task_repo.update(&t).await;
                                 }
@@ -1233,7 +1232,6 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 );
                                 if let Err(e) = cb.dispatch(envelope).await {
                                     tracing::warn!("Failed to fail task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
-                                    completed_task.retry_count += 1;
                                     let _ = completed_task.transition_to(TaskStatus::Failed);
                                     let _ = task_repo.update(&completed_task).await;
                                     event_bus.publish(crate::services::event_factory::task_event(
@@ -1249,7 +1247,6 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 }
                             } else {
                                 tracing::warn!("CommandBus not available for task {} failure, using non-atomic fallback", task_id);
-                                completed_task.retry_count += 1;
                                 let _ = completed_task.transition_to(TaskStatus::Failed);
                                 let _ = task_repo.update(&completed_task).await;
                                 event_bus.publish(crate::services::event_factory::task_event(
@@ -1321,7 +1318,6 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 );
                                 if let Err(e) = cb.dispatch(envelope).await {
                                     tracing::warn!("Failed to fail task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
-                                    completed_task.retry_count += 1;
                                     let _ = completed_task.transition_to(TaskStatus::Failed);
                                     let _ = task_repo.update(&completed_task).await;
                                     event_bus.publish(crate::services::event_factory::task_event(
@@ -1337,7 +1333,6 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 }
                             } else {
                                 tracing::warn!("CommandBus not available for task {} failure, using non-atomic fallback", task_id);
-                                completed_task.retry_count += 1;
                                 let _ = completed_task.transition_to(TaskStatus::Failed);
                                 let _ = task_repo.update(&completed_task).await;
                                 event_bus.publish(crate::services::event_factory::task_event(

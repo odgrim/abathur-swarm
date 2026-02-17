@@ -472,14 +472,10 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
     }
 
     async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
-        let (task_id, retry_count) = match &event.payload {
-            EventPayload::TaskFailed { task_id, retry_count, .. } => (*task_id, *retry_count),
+        let task_id = match &event.payload {
+            EventPayload::TaskFailed { task_id, .. } => *task_id,
             _ => return Ok(Reaction::None),
         };
-
-        if retry_count >= self.max_retries {
-            return Ok(Reaction::None);
-        }
 
         // Re-fetch task to check it's still Failed (idempotency)
         let task = self.task_repo.get(task_id).await
@@ -487,6 +483,11 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
             .ok_or_else(|| format!("Task {} not found", task_id))?;
 
         if task.status != TaskStatus::Failed {
+            return Ok(Reaction::None);
+        }
+
+        // Use task.can_retry() which checks retry_count < max_retries atomically
+        if !task.can_retry() {
             return Ok(Reaction::None);
         }
 
@@ -506,7 +507,7 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
         }
 
         let mut updated = task.clone();
-        if updated.transition_to(TaskStatus::Ready).is_ok() {
+        if updated.retry().is_ok() {
             self.task_repo.update(&updated).await
                 .map_err(|e| format!("Failed to update task: {}", e))?;
 
@@ -523,8 +524,8 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
                     source_process_id: None,
                     payload: EventPayload::TaskRetrying {
                         task_id,
-                        attempt: retry_count + 1,
-                        max_attempts: self.max_retries,
+                        attempt: updated.retry_count,
+                        max_attempts: updated.max_retries,
                     },
                 },
                 UnifiedEvent {
