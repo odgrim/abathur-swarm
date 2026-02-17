@@ -12,6 +12,7 @@ pub mod specialist_templates;
 pub mod substrate;
 pub mod task;
 pub mod workflow;
+pub mod workflow_template;
 pub mod worktree;
 
 pub use a2a::*;
@@ -26,4 +27,5 @@ pub use specialist_templates::*;
 pub use substrate::*;
 pub use task::*;
 pub use workflow::*;
+pub use workflow_template::*;
 pub use worktree::*;
