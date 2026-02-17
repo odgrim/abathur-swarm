@@ -109,6 +109,11 @@ where
     /// Pre-built convergence engine config derived from SwarmConfig.
     /// Stored here to avoid recomputing on every convergent task spawn.
     pub(super) convergence_engine_config: Option<crate::domain::models::convergence::ConvergenceEngineConfig>,
+
+    // -- Phase orchestrator --
+
+    /// Optional phase orchestrator for workflow-based execution.
+    pub(super) phase_orchestrator: Option<Arc<crate::services::phase_orchestrator::PhaseOrchestrator<T, A, G>>>,
 }
 
 // ============================================================================
@@ -174,6 +179,7 @@ where
             overseer_cluster: None,
             trajectory_repo: None,
             convergence_engine_config: None,
+            phase_orchestrator: None,
         }
     }
 
@@ -294,6 +300,15 @@ where
         self
     }
 
+    /// Create orchestrator with a phase orchestrator for workflow-based execution.
+    pub fn with_phase_orchestrator(
+        mut self,
+        phase_orchestrator: Arc<crate::services::phase_orchestrator::PhaseOrchestrator<T, A, G>>,
+    ) -> Self {
+        self.phase_orchestrator = Some(phase_orchestrator);
+        self
+    }
+
     // -- Service Accessors --
 
     /// Get the Overmind service if configured.
@@ -319,6 +334,11 @@ where
     /// Get the evolution loop service for external use.
     pub fn evolution_loop(&self) -> &Arc<EvolutionLoop> {
         &self.evolution_loop
+    }
+
+    /// Get the phase orchestrator if configured.
+    pub fn phase_orchestrator(&self) -> Option<&Arc<crate::services::phase_orchestrator::PhaseOrchestrator<T, A, G>>> {
+        self.phase_orchestrator.as_ref()
     }
 
     /// Get the command bus (available after `register_builtin_handlers()`).

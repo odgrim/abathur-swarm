@@ -5589,3 +5589,63 @@ mod tests {
         }
     }
 }
+
+// ============================================================================
+// WorkflowPhaseCompletionHandler
+// ============================================================================
+
+/// Handler that forwards workflow phase completion/failure events
+/// through a channel for the phase orchestrator to process.
+///
+/// Listens for `PhaseCompleted` and `PhaseFailed` events from the
+/// workflow event category and sends (workflow_instance_id, phase_id)
+/// to a channel that the phase orchestrator drains.
+pub struct WorkflowPhaseCompletionHandler {
+    tx: tokio::sync::mpsc::Sender<(uuid::Uuid, uuid::Uuid)>,
+}
+
+impl WorkflowPhaseCompletionHandler {
+    pub fn new(tx: tokio::sync::mpsc::Sender<(uuid::Uuid, uuid::Uuid)>) -> Self {
+        Self { tx }
+    }
+}
+
+#[async_trait]
+impl EventHandler for WorkflowPhaseCompletionHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "WorkflowPhaseCompletionHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Workflow])
+                .payload_types(vec![
+                    "PhaseCompleted".to_string(),
+                    "PhaseFailed".to_string(),
+                ]),
+            priority: HandlerPriority::HIGH,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let ids = match &event.payload {
+            EventPayload::PhaseCompleted {
+                workflow_instance_id,
+                phase_id,
+                ..
+            } => Some((*workflow_instance_id, *phase_id)),
+            EventPayload::PhaseFailed {
+                workflow_instance_id,
+                phase_id,
+                ..
+            } => Some((*workflow_instance_id, *phase_id)),
+            _ => None,
+        };
+
+        if let Some((wf_id, phase_id)) = ids {
+            let _ = self.tx.send((wf_id, phase_id)).await;
+        }
+
+        Ok(Reaction::None)
+    }
+}

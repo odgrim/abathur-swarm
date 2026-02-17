@@ -74,3 +74,12 @@ pub fn agent_event(
 ) -> UnifiedEvent {
     make_event(severity, EventCategory::Agent, None, task_id, payload)
 }
+
+/// Build a workflow-category event.
+pub fn workflow_event(
+    severity: EventSeverity,
+    goal_id: Option<Uuid>,
+    payload: EventPayload,
+) -> UnifiedEvent {
+    make_event(severity, EventCategory::Workflow, goal_id, None, payload)
+}

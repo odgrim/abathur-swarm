@@ -89,5 +89,10 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
             description: "Initial schema".to_string(),
             sql: include_str!("../../../migrations/001_initial_schema.sql").to_string(),
         },
+        Migration {
+            version: 2,
+            description: "Workflow schema".to_string(),
+            sql: include_str!("../../../migrations/002_workflow_schema.sql").to_string(),
+        },
     ]
 }

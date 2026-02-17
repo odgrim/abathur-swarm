@@ -89,6 +89,7 @@ pub enum EventCategory {
     Memory,
     Scheduler,
     Convergence,
+    Workflow,
 }
 
 impl std::fmt::Display for EventCategory {
@@ -104,6 +105,7 @@ impl std::fmt::Display for EventCategory {
             Self::Memory => write!(f, "memory"),
             Self::Scheduler => write!(f, "scheduler"),
             Self::Convergence => write!(f, "convergence"),
+            Self::Workflow => write!(f, "workflow"),
         }
     }
 }
@@ -691,6 +693,61 @@ pub enum EventPayload {
         task_id: Uuid,
         feature_branch: String,
     },
+
+    // Workflow lifecycle events
+
+    /// Workflow execution started.
+    WorkflowStarted {
+        workflow_instance_id: Uuid,
+        workflow_name: String,
+        goal_id: Uuid,
+        phase_count: usize,
+    },
+
+    /// Workflow execution completed.
+    WorkflowCompleted {
+        workflow_instance_id: Uuid,
+        goal_id: Uuid,
+        status: String,
+        tokens_consumed: u64,
+    },
+
+    /// A workflow phase started executing.
+    PhaseStarted {
+        workflow_instance_id: Uuid,
+        phase_id: Uuid,
+        phase_name: String,
+        task_count: usize,
+    },
+
+    /// A workflow phase completed successfully.
+    PhaseCompleted {
+        workflow_instance_id: Uuid,
+        phase_id: Uuid,
+        phase_name: String,
+    },
+
+    /// A workflow phase failed.
+    PhaseFailed {
+        workflow_instance_id: Uuid,
+        phase_id: Uuid,
+        phase_name: String,
+        error: String,
+    },
+
+    /// Phase verification gate completed.
+    PhaseVerificationCompleted {
+        workflow_instance_id: Uuid,
+        phase_id: Uuid,
+        passed: bool,
+    },
+
+    /// Phase recovery started (overmind invoked).
+    PhaseRecoveryStarted {
+        workflow_instance_id: Uuid,
+        phase_id: Uuid,
+        retry_count: u32,
+    },
 }
 
 impl EventPayload {
@@ -798,6 +855,13 @@ impl EventPayload {
             Self::ConvergenceTerminated { .. } => "ConvergenceTerminated",
             Self::TaskExecutionRecorded { .. } => "TaskExecutionRecorded",
             Self::SubtaskMergedToFeature { .. } => "SubtaskMergedToFeature",
+            Self::WorkflowStarted { .. } => "WorkflowStarted",
+            Self::WorkflowCompleted { .. } => "WorkflowCompleted",
+            Self::PhaseStarted { .. } => "PhaseStarted",
+            Self::PhaseCompleted { .. } => "PhaseCompleted",
+            Self::PhaseFailed { .. } => "PhaseFailed",
+            Self::PhaseVerificationCompleted { .. } => "PhaseVerificationCompleted",
+            Self::PhaseRecoveryStarted { .. } => "PhaseRecoveryStarted",
         }
     }
 }

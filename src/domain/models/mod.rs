@@ -11,6 +11,7 @@ pub mod overmind;
 pub mod specialist_templates;
 pub mod substrate;
 pub mod task;
+pub mod workflow;
 pub mod worktree;
 
 pub use a2a::*;
@@ -24,4 +25,5 @@ pub use overmind::*;
 pub use specialist_templates::*;
 pub use substrate::*;
 pub use task::*;
+pub use workflow::*;
 pub use worktree::*;

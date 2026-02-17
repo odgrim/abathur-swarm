@@ -26,6 +26,7 @@ use crate::services::builtin_handlers::{
     TaskCompletedReadinessHandler, TaskFailedBlockHandler, TaskFailedRetryHandler,
     TaskReadySpawnHandler, TaskSLAEnforcementHandler,
     TriggerCatchupHandler, WatermarkAuditHandler,
+    WorkflowPhaseCompletionHandler,
     WorktreeReconciliationHandler,
 };
 use crate::services::command_bus::CommandBus;
@@ -277,6 +278,32 @@ where
 
             bus
         };
+
+        // WorkflowPhaseCompletionHandler (HIGH) — forward phase events to phase orchestrator
+        if self.phase_orchestrator.is_some() {
+            let (wf_tx, mut wf_rx) = tokio::sync::mpsc::channel::<(uuid::Uuid, uuid::Uuid)>(64);
+            reactor
+                .register(Arc::new(WorkflowPhaseCompletionHandler::new(wf_tx)))
+                .await;
+
+            // Spawn a background task that drains the channel and calls into the phase orchestrator
+            let phase_orch = self.phase_orchestrator.clone().unwrap();
+            tokio::spawn(async move {
+                while let Some((workflow_instance_id, phase_id)) = wf_rx.recv().await {
+                    if let Err(e) = phase_orch
+                        .on_phase_tasks_completed(workflow_instance_id, phase_id)
+                        .await
+                    {
+                        tracing::error!(
+                            workflow_id = %workflow_instance_id,
+                            phase_id = %phase_id,
+                            error = %e,
+                            "Failed to handle phase completion"
+                        );
+                    }
+                }
+            });
+        }
 
         // ReviewFailureLoopHandler (HIGH) — loop review failures back to plan+implement
         reactor

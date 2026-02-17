@@ -9,6 +9,7 @@ pub mod migrations;
 pub mod task_repository;
 pub mod trajectory_repository;
 pub mod trigger_rule_repository;
+pub mod workflow_repository;
 pub mod worktree_repository;
 
 pub use agent_repository::SqliteAgentRepository;
@@ -20,6 +21,7 @@ pub use migrations::{all_embedded_migrations, Migration, MigrationError, Migrato
 pub use task_repository::SqliteTaskRepository;
 pub use trajectory_repository::SqliteTrajectoryRepository;
 pub use trigger_rule_repository::SqliteTriggerRuleRepository;
+pub use workflow_repository::SqliteWorkflowRepository;
 pub use worktree_repository::SqliteWorktreeRepository;
 
 use chrono::{DateTime, Utc};

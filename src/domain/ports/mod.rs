@@ -10,6 +10,7 @@ pub mod substrate;
 pub mod task_repository;
 pub mod trajectory_repository;
 pub mod trigger_rule_repository;
+pub mod workflow_repository;
 pub mod worktree_repository;
 
 pub use agent_repository::{AgentFilter, AgentRepository};
@@ -22,4 +23,5 @@ pub use substrate::{Substrate, SubstrateFactory};
 pub use task_repository::{TaskFilter, TaskRepository};
 pub use trajectory_repository::*;
 pub use trigger_rule_repository::TriggerRuleRepository;
+pub use workflow_repository::WorkflowRepository;
 pub use worktree_repository::WorktreeRepository;

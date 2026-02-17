@@ -31,9 +31,11 @@ pub mod memory_service;
 pub mod merge_queue;
 pub mod meta_planner; // Rust service module for decomposition planning
 pub mod overmind;
+pub mod phase_orchestrator;
 pub mod swarm_orchestrator;
 pub mod task_service;
 pub mod trigger_rules;
+pub mod workflow_builder;
 pub mod convergence_bridge;
 pub mod convergence_engine;
 pub mod overseers;
@@ -65,6 +67,8 @@ pub use memory_service::{DecayConfig, MaintenanceReport, MemoryService, MemorySt
 pub use merge_queue::{MergeQueue, MergeQueueConfig, MergeQueueStats, MergeRequest, MergeResult, MergeStage, MergeStatus};
 pub use meta_planner::{AgentMetrics, AgentSpec, Complexity, DecompositionPlan, MetaPlanner, MetaPlannerConfig, TaskSpec};
 pub use overmind::{OvermindConfig, OvermindService};
+pub use phase_orchestrator::{PhaseOrchestrator, PhaseOrchestratorConfig};
+pub use workflow_builder::build_workflow_from_decomposition;
 pub use swarm_orchestrator::{ConvergenceLoopConfig, McpServerConfig, OrchestratorStatus, SwarmConfig, SwarmEvent, SwarmOrchestrator, SwarmStats, VerificationLevel};
 pub use task_service::{TaskService, SpawnLimitConfig, SpawnLimitResult, SpawnLimitType};
 pub use worktree_service::{WorktreeConfig, WorktreeService, WorktreeStats};
