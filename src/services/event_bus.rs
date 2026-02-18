@@ -530,6 +530,26 @@ pub enum EventPayload {
         conflicts_resolved: u64,
     },
 
+    /// A single memory maintenance cycle failed.
+    MemoryMaintenanceFailed {
+        run_number: u64,
+        error: String,
+        consecutive_failures: u32,
+        max_consecutive_failures: u32,
+    },
+
+    /// Memory daemon is approaching failure threshold (pre-failure alert).
+    MemoryDaemonDegraded {
+        consecutive_failures: u32,
+        max_consecutive_failures: u32,
+        latest_error: String,
+    },
+
+    /// Memory daemon stopped (requested, too many failures, or channel closed).
+    MemoryDaemonStopped {
+        reason: String,
+    },
+
     // Handler error events (emitted by reactor for monitoring)
     HandlerError {
         handler_name: String,
@@ -833,6 +853,9 @@ impl EventPayload {
             Self::TriggerRuleToggled { .. } => "TriggerRuleToggled",
             Self::TriggerRuleDeleted { .. } => "TriggerRuleDeleted",
             Self::MemoryMaintenanceCompleted { .. } => "MemoryMaintenanceCompleted",
+            Self::MemoryMaintenanceFailed { .. } => "MemoryMaintenanceFailed",
+            Self::MemoryDaemonDegraded { .. } => "MemoryDaemonDegraded",
+            Self::MemoryDaemonStopped { .. } => "MemoryDaemonStopped",
             Self::HandlerError { .. } => "HandlerError",
             Self::TaskDependencyChanged { .. } => "TaskDependencyChanged",
             Self::TaskPriorityChanged { .. } => "TaskPriorityChanged",

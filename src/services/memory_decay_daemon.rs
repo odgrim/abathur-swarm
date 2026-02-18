@@ -25,6 +25,9 @@ pub struct DecayDaemonConfig {
     pub run_on_startup: bool,
     /// Maximum consecutive failures before stopping.
     pub max_consecutive_failures: u32,
+    /// Number of consecutive failures that triggers a degraded warning.
+    /// Must be less than `max_consecutive_failures`.
+    pub warning_threshold: u32,
     /// Enable verbose logging.
     pub verbose: bool,
 }
@@ -35,6 +38,7 @@ impl Default for DecayDaemonConfig {
             maintenance_interval: Duration::from_secs(300), // 5 minutes
             run_on_startup: true,
             max_consecutive_failures: 5,
+            warning_threshold: 3,
             verbose: false,
         }
     }
@@ -55,6 +59,7 @@ impl DecayDaemonConfig {
             maintenance_interval: Duration::from_secs(10),
             run_on_startup: true,
             max_consecutive_failures: 3,
+            warning_threshold: 2,
             verbose: true,
         }
     }
@@ -77,6 +82,15 @@ pub enum DecayDaemonEvent {
     MaintenanceFailed {
         run_number: u64,
         error: String,
+        consecutive_failures: u32,
+        max_consecutive_failures: u32,
+    },
+    /// Warning: consecutive failures have reached the warning threshold.
+    /// Emitted once when `consecutive_failures == warning_threshold`.
+    FailureThresholdWarning {
+        consecutive_failures: u32,
+        max_consecutive_failures: u32,
+        latest_error: String,
     },
     /// Daemon stopped.
     Stopped { reason: StopReason },
@@ -104,6 +118,8 @@ pub struct DaemonStatus {
     pub successful_runs: u64,
     /// Failed runs.
     pub failed_runs: u64,
+    /// Current consecutive failure count.
+    pub consecutive_failures: u32,
     /// Last run time.
     pub last_run: Option<Instant>,
     /// Total memories pruned.
@@ -119,6 +135,7 @@ impl Default for DaemonStatus {
             total_runs: 0,
             successful_runs: 0,
             failed_runs: 0,
+            consecutive_failures: 0,
             last_run: None,
             total_pruned: 0,
             total_promoted: 0,
@@ -223,6 +240,9 @@ where
 
         let mut consecutive_failures = 0u32;
         let mut interval_timer = interval(self.config.maintenance_interval);
+        // Track the stop reason so we emit exactly one Stopped event at the end.
+        #[allow(unused_assignments)]
+        let mut stopped_reason: Option<StopReason> = None;
 
         // Run on startup if configured
         if self.config.run_on_startup {
@@ -234,6 +254,7 @@ where
             tokio::select! {
                 _ = interval_timer.tick() => {
                     if self.stop_flag.load(Ordering::Acquire) {
+                        stopped_reason = Some(StopReason::Requested);
                         break;
                     }
 
@@ -241,9 +262,7 @@ where
 
                     // Check for too many failures
                     if consecutive_failures >= self.config.max_consecutive_failures {
-                        let _ = tx.send(DecayDaemonEvent::Stopped {
-                            reason: StopReason::TooManyFailures,
-                        }).await;
+                        stopped_reason = Some(StopReason::TooManyFailures);
                         break;
                     }
                 }
@@ -251,6 +270,7 @@ where
 
             // Check stop flag
             if self.stop_flag.load(Ordering::Acquire) {
+                stopped_reason = Some(StopReason::Requested);
                 break;
             }
         }
@@ -261,15 +281,9 @@ where
             status.running = false;
         }
 
-        if !self.stop_flag.load(Ordering::Acquire) {
-            let _ = tx.send(DecayDaemonEvent::Stopped {
-                reason: StopReason::TooManyFailures,
-            }).await;
-        } else {
-            let _ = tx.send(DecayDaemonEvent::Stopped {
-                reason: StopReason::Requested,
-            }).await;
-        }
+        // Emit exactly one Stopped event.
+        let reason = stopped_reason.unwrap_or(StopReason::ChannelClosed);
+        let _ = tx.send(DecayDaemonEvent::Stopped { reason }).await;
     }
 
     /// Run a single maintenance cycle.
@@ -304,6 +318,7 @@ where
                 {
                     let mut status = self.status.write().await;
                     status.successful_runs += 1;
+                    status.consecutive_failures = 0;
                     status.last_run = Some(Instant::now());
                     status.total_pruned += report.expired_pruned + report.decayed_pruned;
                     status.total_promoted += report.promoted;
@@ -317,16 +332,37 @@ where
             }
             Err(e) => {
                 *consecutive_failures += 1;
+                let error_str = e.to_string();
 
                 {
                     let mut status = self.status.write().await;
                     status.failed_runs += 1;
+                    status.consecutive_failures = *consecutive_failures;
                 }
 
                 let _ = tx.send(DecayDaemonEvent::MaintenanceFailed {
                     run_number,
-                    error: e.to_string(),
+                    error: error_str.clone(),
+                    consecutive_failures: *consecutive_failures,
+                    max_consecutive_failures: self.config.max_consecutive_failures,
                 }).await;
+
+                // Emit a warning when we hit the warning threshold (exactly once).
+                if *consecutive_failures == self.config.warning_threshold
+                    && self.config.warning_threshold > 0
+                    && self.config.warning_threshold < self.config.max_consecutive_failures
+                {
+                    tracing::warn!(
+                        consecutive_failures = *consecutive_failures,
+                        max = self.config.max_consecutive_failures,
+                        "Memory decay daemon approaching failure limit"
+                    );
+                    let _ = tx.send(DecayDaemonEvent::FailureThresholdWarning {
+                        consecutive_failures: *consecutive_failures,
+                        max_consecutive_failures: self.config.max_consecutive_failures,
+                        latest_error: error_str,
+                    }).await;
+                }
             }
         }
     }
@@ -366,6 +402,7 @@ mod tests {
         assert_eq!(config.maintenance_interval, Duration::from_secs(300));
         assert!(config.run_on_startup);
         assert_eq!(config.max_consecutive_failures, 5);
+        assert_eq!(config.warning_threshold, 3);
     }
 
     #[test]
@@ -388,6 +425,7 @@ mod tests {
         assert_eq!(status.total_runs, 0);
         assert_eq!(status.successful_runs, 0);
         assert_eq!(status.failed_runs, 0);
+        assert_eq!(status.consecutive_failures, 0);
         assert!(status.last_run.is_none());
     }
 
@@ -395,5 +433,106 @@ mod tests {
     fn test_stop_reason_equality() {
         assert_eq!(StopReason::Requested, StopReason::Requested);
         assert_ne!(StopReason::Requested, StopReason::TooManyFailures);
+    }
+
+    #[test]
+    fn test_warning_threshold_less_than_max_failures() {
+        let config = DecayDaemonConfig::default();
+        assert!(
+            config.warning_threshold < config.max_consecutive_failures,
+            "warning_threshold ({}) must be < max_consecutive_failures ({})",
+            config.warning_threshold,
+            config.max_consecutive_failures,
+        );
+    }
+
+    #[test]
+    fn test_frequent_config_warning_threshold() {
+        let config = DecayDaemonConfig::frequent();
+        assert_eq!(config.warning_threshold, 2);
+        assert_eq!(config.max_consecutive_failures, 3);
+        assert!(config.warning_threshold < config.max_consecutive_failures);
+    }
+
+    #[test]
+    fn test_maintenance_failed_event_carries_consecutive_counts() {
+        let event = DecayDaemonEvent::MaintenanceFailed {
+            run_number: 5,
+            error: "connection timeout".to_string(),
+            consecutive_failures: 3,
+            max_consecutive_failures: 5,
+        };
+
+        match event {
+            DecayDaemonEvent::MaintenanceFailed {
+                consecutive_failures,
+                max_consecutive_failures,
+                ..
+            } => {
+                assert_eq!(consecutive_failures, 3);
+                assert_eq!(max_consecutive_failures, 5);
+            }
+            _ => panic!("Expected MaintenanceFailed"),
+        }
+    }
+
+    #[test]
+    fn test_failure_threshold_warning_event_structure() {
+        let event = DecayDaemonEvent::FailureThresholdWarning {
+            consecutive_failures: 3,
+            max_consecutive_failures: 5,
+            latest_error: "disk full".to_string(),
+        };
+
+        match event {
+            DecayDaemonEvent::FailureThresholdWarning {
+                consecutive_failures,
+                max_consecutive_failures,
+                latest_error,
+            } => {
+                assert_eq!(consecutive_failures, 3);
+                assert_eq!(max_consecutive_failures, 5);
+                assert_eq!(latest_error, "disk full");
+            }
+            _ => panic!("Expected FailureThresholdWarning"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_status_tracks_consecutive_failures() {
+        let mut status = DaemonStatus::default();
+        assert_eq!(status.consecutive_failures, 0);
+
+        status.consecutive_failures = 3;
+        status.failed_runs = 3;
+        assert_eq!(status.consecutive_failures, 3);
+
+        // Reset on success
+        status.consecutive_failures = 0;
+        status.successful_runs = 1;
+        assert_eq!(status.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn test_stopped_event_carries_reason() {
+        let event = DecayDaemonEvent::Stopped {
+            reason: StopReason::TooManyFailures,
+        };
+        match event {
+            DecayDaemonEvent::Stopped { reason } => {
+                assert_eq!(reason, StopReason::TooManyFailures);
+            }
+            _ => panic!("Expected Stopped"),
+        }
+
+        let event2 = DecayDaemonEvent::Stopped {
+            reason: StopReason::Requested,
+        };
+        match event2 {
+            DecayDaemonEvent::Stopped { reason } => {
+                assert_eq!(reason, StopReason::Requested);
+            }
+            _ => panic!("Expected Stopped"),
+        }
     }
 }
