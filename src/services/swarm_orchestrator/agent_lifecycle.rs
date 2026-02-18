@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::domain::errors::DomainResult;
-use crate::domain::models::{GoalStatus, SubstrateRequest};
+use crate::domain::models::{AgentStatus, GoalStatus, SubstrateRequest};
 use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
@@ -164,33 +164,65 @@ where
             ).await;
         }
 
-        // Handle revert events — rollback template version
+        // Handle revert events — rollback template version by restoring the exact
+        // previous version content, disabling the broken version, and re-activating
+        // the previous version.
         for event in &evolution_events {
             if let EvolutionAction::Reverted { from_version, to_version } = &event.action_taken {
-                if let Ok(Some(mut template)) = self.agent_repo.get_template_by_name(&event.template_name).await {
-                    template.version = *to_version;
-                    template.system_prompt = format!(
-                        "{}\n\n## Reverted (v{} → v{})\n\nReverted due to regression detected after version upgrade.",
-                        template.system_prompt, from_version, to_version
-                    );
+                // Fetch the exact previous version's template content
+                let previous_template = self.agent_repo
+                    .get_template_version(&event.template_name, *to_version)
+                    .await;
 
-                    if let Ok(_) = self.agent_repo.update_template(&template).await {
-                        self.evolution_loop.record_version_change(
-                            &event.template_name,
-                            *to_version,
-                        ).await;
+                match previous_template {
+                    Ok(Some(mut restored)) => {
+                        // Disable the broken (current) version
+                        if let Ok(Some(mut broken)) = self.agent_repo
+                            .get_template_version(&event.template_name, *from_version)
+                            .await
+                        {
+                            broken.status = AgentStatus::Disabled;
+                            broken.updated_at = chrono::Utc::now();
+                            let _ = self.agent_repo.update_template(&broken).await;
+                        }
 
-                        let _ = event_tx.send(SwarmEvent::EvolutionTriggered {
-                            template_name: event.template_name.clone(),
-                            trigger: format!("Reverted from v{} to v{}", from_version, to_version),
-                        }).await;
+                        // Re-activate the previous version
+                        restored.status = AgentStatus::Active;
+                        restored.updated_at = chrono::Utc::now();
 
-                        self.audit_log.info(
-                            AuditCategory::Agent,
-                            AuditAction::AgentSpawned,
-                            format!(
-                                "Agent '{}' reverted from v{} to v{} due to regression",
-                                event.template_name, from_version, to_version
+                        if self.agent_repo.update_template(&restored).await.is_ok() {
+                            self.evolution_loop.record_version_change(
+                                &event.template_name,
+                                *to_version,
+                            ).await;
+
+                            let _ = event_tx.send(SwarmEvent::EvolutionTriggered {
+                                template_name: event.template_name.clone(),
+                                trigger: format!("Reverted from v{} to v{}", from_version, to_version),
+                            }).await;
+
+                            self.audit_log.info(
+                                AuditCategory::Agent,
+                                AuditAction::AgentSpawned,
+                                format!(
+                                    "Agent '{}' reverted from v{} to v{} due to regression (restored original content)",
+                                    event.template_name, from_version, to_version
+                                ),
+                            ).await;
+                        }
+                    }
+                    _ => {
+                        // Previous version not found in DB — log and skip
+                        self.audit_log.log(
+                            AuditEntry::new(
+                                AuditLevel::Warning,
+                                AuditCategory::Agent,
+                                AuditAction::AgentSpawned,
+                                AuditActor::System,
+                                format!(
+                                    "Cannot revert agent '{}': version {} not found in repository",
+                                    event.template_name, to_version
+                                ),
                             ),
                         ).await;
                     }
@@ -273,12 +305,24 @@ where
                 Self::heuristic_refinement_prompt(&template.system_prompt, &request)
             };
 
-            // Create new version of the template
+            // Create a new row for the refined version (preserving version history)
+            // — the old version stays in the DB as a separate row so reverts can
+            //   restore the exact original content.
             let mut new_template = template.clone();
+            new_template.id = Uuid::new_v4();
             new_template.version += 1;
             new_template.system_prompt = refined_prompt;
+            new_template.status = AgentStatus::Active;
+            new_template.created_at = chrono::Utc::now();
+            new_template.updated_at = chrono::Utc::now();
 
-            match self.agent_repo.update_template(&new_template).await {
+            // Disable the old version so get_template_by_name returns the new one
+            let mut old_template = template.clone();
+            old_template.status = AgentStatus::Disabled;
+            old_template.updated_at = chrono::Utc::now();
+            let _ = self.agent_repo.update_template(&old_template).await;
+
+            match self.agent_repo.create_template(&new_template).await {
                 Ok(_) => {
                     // Record version change for regression detection
                     self.evolution_loop.record_version_change(

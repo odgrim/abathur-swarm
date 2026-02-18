@@ -23,7 +23,8 @@ use crate::services::builtin_handlers::{
     MemoryMaintenanceHandler, MemoryReconciliationHandler,
     PriorityAgingHandler, ReconciliationHandler,
     ReviewFailureLoopHandler, RetryProcessingHandler, SpecialistCheckHandler,
-    StartupCatchUpHandler, StatsUpdateHandler, TaskCompletionLearningHandler,
+    StartupCatchUpHandler, StatsUpdateHandler, SystemStallDetectorHandler,
+    TaskCompletionLearningHandler,
     TaskCompletedReadinessHandler, TaskFailedBlockHandler, TaskFailedRetryHandler,
     TaskReadySpawnHandler, TaskScheduleHandler, TaskSLAEnforcementHandler,
     TriggerCatchupHandler, WatermarkAuditHandler,
@@ -191,6 +192,17 @@ where
                 self.goal_repo.clone(),
             )))
             .await;
+
+        // SystemStallDetectorHandler (LOW) — detect system-wide idle stalls
+        {
+            let threshold = p.goal_convergence_check_interval_secs.saturating_mul(2);
+            reactor
+                .register(Arc::new(SystemStallDetectorHandler::new(
+                    self.task_repo.clone(),
+                    threshold,
+                )))
+                .await;
+        }
 
         // TaskReadySpawnHandler (NORMAL) — push ready tasks to spawn channel
         reactor
@@ -635,6 +647,16 @@ where
             .register(interval_schedule(
                 "goal-reconciliation",
                 Duration::from_secs(p.goal_reconciliation_interval_secs),
+                EventCategory::Scheduler,
+                EventSeverity::Debug,
+            ))
+            .await;
+
+        // System stall check — detect idle swarm (no task activity)
+        scheduler
+            .register(interval_schedule(
+                "system-stall-check",
+                Duration::from_secs(p.system_stall_check_interval_secs),
                 EventCategory::Scheduler,
                 EventSeverity::Debug,
             ))

@@ -97,6 +97,10 @@ pub struct PollingConfig {
     pub goal_evaluation_interval_secs: u64,
     pub a2a_poll_interval_secs: u64,
 
+    // --- System stall detection ---
+    /// Interval for system stall check (default: 60s).
+    pub system_stall_check_interval_secs: u64,
+
     // --- Goal convergence check ---
     /// Interval for deep goal convergence check (default: 14400s = 4 hours).
     pub goal_convergence_check_interval_secs: u64,
@@ -178,6 +182,9 @@ impl Default for PollingConfig {
             escalation_check_interval_secs: 30,
             goal_evaluation_interval_secs: 60,
             a2a_poll_interval_secs: 15,
+
+            // System stall detection
+            system_stall_check_interval_secs: 60,
 
             // Goal convergence check
             goal_convergence_check_interval_secs: 14400, // 4 hours

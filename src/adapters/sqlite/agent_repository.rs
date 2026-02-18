@@ -68,7 +68,7 @@ impl AgentRepository for SqliteAgentRepository {
 
     async fn get_template_by_name(&self, name: &str) -> DomainResult<Option<AgentTemplate>> {
         let row: Option<TemplateRow> = sqlx::query_as(
-            "SELECT * FROM agent_templates WHERE name = ? ORDER BY version DESC LIMIT 1"
+            "SELECT * FROM agent_templates WHERE name = ? ORDER BY is_active DESC, version DESC LIMIT 1"
         )
         .bind(name)
         .fetch_optional(&self.pool)
@@ -455,5 +455,117 @@ mod tests {
 
         let running = repo.get_running_instances("instance-test").await.unwrap();
         assert_eq!(running.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_by_name_prefers_active_template() {
+        let repo = setup_test_repo().await;
+
+        // Create version 1 (active)
+        let mut v1 = AgentTemplate::new("evolving-agent", AgentTier::Worker)
+            .with_prompt("Original prompt v1");
+        v1.version = 1;
+        repo.create_template(&v1).await.unwrap();
+
+        // Create version 2 (active) — simulates a refined version
+        let mut v2 = AgentTemplate::new("evolving-agent", AgentTier::Worker)
+            .with_prompt("Refined prompt v2");
+        v2.id = Uuid::new_v4(); // Different row
+        v2.version = 2;
+        repo.create_template(&v2).await.unwrap();
+
+        // Both active — should return the highest version (v2)
+        let found = repo.get_template_by_name("evolving-agent").await.unwrap().unwrap();
+        assert_eq!(found.version, 2);
+        assert_eq!(found.system_prompt, "Refined prompt v2");
+
+        // Disable v2 (simulate revert)
+        let mut disabled_v2 = v2.clone();
+        disabled_v2.status = AgentStatus::Disabled;
+        repo.update_template(&disabled_v2).await.unwrap();
+
+        // Now get_template_by_name should prefer active v1
+        let found = repo.get_template_by_name("evolving-agent").await.unwrap().unwrap();
+        assert_eq!(found.version, 1);
+        assert_eq!(found.system_prompt, "Original prompt v1");
+        assert_eq!(found.status, AgentStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn test_revert_restores_exact_previous_version_content() {
+        let repo = setup_test_repo().await;
+
+        // Create v1 with specific content
+        let mut v1 = AgentTemplate::new("revert-agent", AgentTier::Worker)
+            .with_prompt("You are a code reviewer. Check for bugs.");
+        v1.version = 1;
+        repo.create_template(&v1).await.unwrap();
+
+        // Create v2 (refined but broken)
+        let mut v2 = AgentTemplate::new("revert-agent", AgentTier::Worker)
+            .with_prompt("You are a broken prompt that causes failures.");
+        v2.id = Uuid::new_v4();
+        v2.version = 2;
+        repo.create_template(&v2).await.unwrap();
+
+        // Simulate the revert: disable v2, re-activate v1
+        let mut disabled_v2 = v2.clone();
+        disabled_v2.status = AgentStatus::Disabled;
+        repo.update_template(&disabled_v2).await.unwrap();
+
+        let mut restored_v1 = v1.clone();
+        restored_v1.status = AgentStatus::Active;
+        repo.update_template(&restored_v1).await.unwrap();
+
+        // Verify: get_template_by_name returns v1 with exact original content
+        let current = repo.get_template_by_name("revert-agent").await.unwrap().unwrap();
+        assert_eq!(current.version, 1);
+        assert_eq!(current.system_prompt, "You are a code reviewer. Check for bugs.");
+        assert_eq!(current.status, AgentStatus::Active);
+
+        // Verify: get_template_version still returns the disabled v2
+        let v2_check = repo.get_template_version("revert-agent", 2).await.unwrap().unwrap();
+        assert_eq!(v2_check.status, AgentStatus::Disabled);
+        assert_eq!(v2_check.system_prompt, "You are a broken prompt that causes failures.");
+
+        // Verify: v1 content is untouched via version lookup
+        let v1_check = repo.get_template_version("revert-agent", 1).await.unwrap().unwrap();
+        assert_eq!(v1_check.system_prompt, "You are a code reviewer. Check for bugs.");
+    }
+
+    #[tokio::test]
+    async fn test_version_history_preserved_on_refinement() {
+        let repo = setup_test_repo().await;
+
+        // Create v1
+        let mut v1 = AgentTemplate::new("history-agent", AgentTier::Worker)
+            .with_prompt("Version 1 prompt");
+        v1.version = 1;
+        repo.create_template(&v1).await.unwrap();
+
+        // Simulate refinement: disable v1, create v2 as a new row
+        let mut disabled_v1 = v1.clone();
+        disabled_v1.status = AgentStatus::Disabled;
+        repo.update_template(&disabled_v1).await.unwrap();
+
+        let mut v2 = AgentTemplate::new("history-agent", AgentTier::Worker)
+            .with_prompt("Version 2 prompt (refined)");
+        v2.id = Uuid::new_v4();
+        v2.version = 2;
+        v2.status = AgentStatus::Active;
+        repo.create_template(&v2).await.unwrap();
+
+        // Both versions should be retrievable by version number
+        let v1_check = repo.get_template_version("history-agent", 1).await.unwrap().unwrap();
+        assert_eq!(v1_check.system_prompt, "Version 1 prompt");
+        assert_eq!(v1_check.status, AgentStatus::Disabled);
+
+        let v2_check = repo.get_template_version("history-agent", 2).await.unwrap().unwrap();
+        assert_eq!(v2_check.system_prompt, "Version 2 prompt (refined)");
+        assert_eq!(v2_check.status, AgentStatus::Active);
+
+        // get_template_by_name returns active v2
+        let current = repo.get_template_by_name("history-agent").await.unwrap().unwrap();
+        assert_eq!(current.version, 2);
     }
 }
