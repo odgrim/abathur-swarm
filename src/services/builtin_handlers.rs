@@ -6016,11 +6016,21 @@ impl<G: GoalRepository, T: TaskRepository> GoalConvergenceCheckHandler<G, T> {
         ready_count: usize,
         pending_count: usize,
     ) -> String {
-        let mut desc = String::with_capacity(4096);
+        use crate::domain::models::OVERMIND_PROMPT_PREFIX;
+        use crate::domain::models::OVERMIND_PROMPT_SUFFIX;
+
+        let mut desc = String::with_capacity(16384);
 
         desc.push_str("# Goal Convergence Check\n\n");
         desc.push_str("You are the Overmind performing a periodic strategic evaluation of all active goals.\n");
-        desc.push_str("Assess overall progress toward each goal, identify gaps, and create concrete incremental tasks to move the swarm closer to convergence.\n\n");
+        desc.push_str("Assess overall progress toward each goal, identify gaps, and use your MCP tools to create concrete incremental tasks to move the swarm closer to convergence.\n\n");
+
+        // Inject the full Overmind MCP tools reference and agent design principles
+        desc.push_str("---\n\n");
+        desc.push_str(OVERMIND_PROMPT_PREFIX);
+        desc.push_str("\n");
+        desc.push_str(OVERMIND_PROMPT_SUFFIX);
+        desc.push_str("\n---\n\n");
 
         // Task statistics summary
         desc.push_str("## Current Task Statistics\n\n");
@@ -6052,12 +6062,17 @@ impl<G: GoalRepository, T: TaskRepository> GoalConvergenceCheckHandler<G, T> {
 
         // Instructions
         desc.push_str("## Instructions\n\n");
-        desc.push_str("1. **Evaluate Progress**: For each active goal, assess how the completed and running tasks contribute toward convergence. Consider the ratio of completed vs failed tasks.\n");
-        desc.push_str("2. **Identify Gaps**: Determine what work is missing or insufficient to make meaningful progress on each goal. Consider constraint satisfaction.\n");
-        desc.push_str("3. **Prioritize**: Rank the goals by urgency and impact. Focus on goals with the least progress or most failures.\n");
-        desc.push_str("4. **Create Incremental Tasks**: Submit 1-3 concrete, actionable tasks that will move the swarm closer to goal convergence. Each task should be small enough to complete in a single agent session.\n");
-        desc.push_str("5. **Avoid Redundancy**: Do not create tasks that duplicate existing running or ready tasks. Focus on genuine gaps.\n\n");
-        desc.push_str("Remember: Goals are convergent attractors — they are never 'completed.' Your job is to identify the highest-impact incremental work that moves the swarm closer to each goal.\n");
+        desc.push_str("1. **Search Memory**: Call `memory_search` to find prior convergence evaluations, known patterns, and recent task outcomes.\n");
+        desc.push_str("2. **Review Existing Work**: Call `task_list` with each status (running, ready, pending, complete, failed) to understand what's already in flight and what has been tried.\n");
+        desc.push_str("3. **Evaluate Progress**: For each active goal, assess how the completed and running tasks contribute toward convergence. Consider the ratio of completed vs failed tasks.\n");
+        desc.push_str("4. **Identify Gaps**: Determine what work is missing or insufficient to make meaningful progress on each goal. Consider constraint satisfaction.\n");
+        desc.push_str("5. **Check Failed Tasks**: For any failed tasks, call `task_get` on them to understand failure reasons. Store failure patterns via `memory_store` for future reference.\n");
+        desc.push_str("6. **Prioritize**: Rank the goals by urgency and impact. Focus on goals with the least progress or most failures.\n");
+        desc.push_str("7. **Reuse Agents**: Call `agent_list` to see what agent templates already exist. Reuse existing agents whenever possible.\n");
+        desc.push_str("8. **Create Incremental Tasks**: Use `task_submit` to create 1-3 concrete, actionable tasks per under-served goal. Each task should follow the workflow spine (research → plan → implement → review). Assign appropriate `agent_type`, `priority`, and `depends_on` relationships. Set `execution_mode: \"convergent\"` for implementation tasks.\n");
+        desc.push_str("9. **Avoid Redundancy**: Do not create tasks that duplicate existing running or ready tasks. Focus on genuine gaps.\n");
+        desc.push_str("10. **Store Evaluation**: Call `memory_store` with your convergence evaluation summary (namespace: `convergence-checks`, memory_type: `decision`) so future checks can build on your findings.\n\n");
+        desc.push_str("Remember: Goals are convergent attractors — they are never 'completed.' Your job is to identify the highest-impact incremental work that moves the swarm closer to each goal. You MUST use `task_submit` to create tasks — do not simply list recommendations as text output.\n");
 
         desc
     }
