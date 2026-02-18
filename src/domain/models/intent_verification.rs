@@ -164,6 +164,8 @@ pub enum GapCategory {
     Documentation,
     /// Code quality or design issues
     Maintainability,
+    /// Goal constraint violation or non-conformance
+    ConstraintViolation,
 }
 
 impl GapCategory {
@@ -178,6 +180,7 @@ impl GapCategory {
             Self::Observability => "observability",
             Self::Documentation => "documentation",
             Self::Maintainability => "maintainability",
+            Self::ConstraintViolation => "constraint_violation",
         }
     }
 
@@ -192,6 +195,7 @@ impl GapCategory {
             "observability" => Some(Self::Observability),
             "documentation" => Some(Self::Documentation),
             "maintainability" => Some(Self::Maintainability),
+            "constraint_violation" | "constraintviolation" => Some(Self::ConstraintViolation),
             _ => None,
         }
     }
@@ -313,6 +317,48 @@ impl IntentSource {
     }
 }
 
+/// Evaluation of a single constraint's conformance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConstraintEvaluation {
+    /// The constraint text (as provided in key requirements)
+    pub constraint: String,
+    /// Conformance status
+    pub status: ConstraintConformance,
+    /// Explanation of the evaluation
+    pub explanation: String,
+}
+
+/// Conformance status for a constraint evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstraintConformance {
+    /// Work conforms to the constraint
+    Conforming,
+    /// Work deviates but has justification
+    Deviating,
+    /// Work violates the constraint
+    Violating,
+}
+
+impl ConstraintConformance {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Conforming => "conforming",
+            Self::Deviating => "deviating",
+            Self::Violating => "violating",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "conforming" => Some(Self::Conforming),
+            "deviating" => Some(Self::Deviating),
+            "violating" => Some(Self::Violating),
+            _ => None,
+        }
+    }
+}
+
 /// Result of an intent verification.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IntentVerificationResult {
@@ -338,6 +384,8 @@ pub struct IntentVerificationResult {
     pub iteration: u32,
     /// When this verification was performed
     pub verified_at: DateTime<Utc>,
+    /// Per-constraint conformance evaluations
+    pub constraint_evaluations: Vec<ConstraintEvaluation>,
     /// Human escalation information
     pub escalation: Option<HumanEscalation>,
 }
@@ -489,6 +537,7 @@ impl IntentVerificationResult {
             reprompt_guidance: None,
             iteration: 1,
             verified_at: Utc::now(),
+            constraint_evaluations: Vec::new(),
             escalation: None,
         }
     }
@@ -525,6 +574,11 @@ impl IntentVerificationResult {
 
     pub fn with_implicit_gap(mut self, gap: IntentGap) -> Self {
         self.implicit_gaps.push(gap);
+        self
+    }
+
+    pub fn with_constraint_evaluation(mut self, eval: ConstraintEvaluation) -> Self {
+        self.constraint_evaluations.push(eval);
         self
     }
 
@@ -595,6 +649,25 @@ impl IntentVerificationResult {
 
     /// Determine if this result should trigger human escalation based on gap patterns.
     pub fn should_escalate(&self) -> Option<HumanEscalation> {
+        // Invariant ([MUST]) constraint violations always escalate
+        if self.constraint_evaluations.iter().any(|eval| {
+            eval.status == ConstraintConformance::Violating
+                && eval.constraint.starts_with("[MUST]")
+        }) {
+            let violated: Vec<_> = self.constraint_evaluations.iter()
+                .filter(|eval| eval.status == ConstraintConformance::Violating && eval.constraint.starts_with("[MUST]"))
+                .map(|eval| eval.constraint.clone())
+                .collect();
+            return Some(HumanEscalation::new(
+                format!("Invariant constraint violation: {}", violated.join("; "))
+            ).with_urgency(EscalationUrgency::High)
+             .with_context(format!(
+                 "The following invariant constraints were violated: {}",
+                 violated.join("; ")
+             ))
+             .with_question("Should work continue despite these invariant violations?"));
+        }
+
         // Critical security gaps always escalate
         if self.has_security_gaps() && self.gaps_by_category(GapCategory::Security)
             .iter().any(|g| g.severity >= GapSeverity::Major)
@@ -2231,5 +2304,73 @@ mod tests {
         let formatted = context.format_for_prompt();
         assert!(formatted.contains("WARNING: Semantic drift detected"));
         assert!(formatted.contains("### Recurring Gaps"));
+    }
+
+    #[test]
+    fn test_constraint_conformance_from_str() {
+        assert_eq!(ConstraintConformance::from_str("conforming"), Some(ConstraintConformance::Conforming));
+        assert_eq!(ConstraintConformance::from_str("deviating"), Some(ConstraintConformance::Deviating));
+        assert_eq!(ConstraintConformance::from_str("violating"), Some(ConstraintConformance::Violating));
+        assert_eq!(ConstraintConformance::from_str("Conforming"), Some(ConstraintConformance::Conforming));
+        assert_eq!(ConstraintConformance::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn test_constraint_evaluation_on_result() {
+        let intent_id = Uuid::new_v4();
+        let result = IntentVerificationResult::new(intent_id, IntentSatisfaction::Partial)
+            .with_constraint_evaluation(ConstraintEvaluation {
+                constraint: "[MUST] No unsafe code".to_string(),
+                status: ConstraintConformance::Conforming,
+                explanation: "No unsafe blocks found".to_string(),
+            })
+            .with_constraint_evaluation(ConstraintEvaluation {
+                constraint: "[SHOULD] Use logging".to_string(),
+                status: ConstraintConformance::Deviating,
+                explanation: "Logging not yet added".to_string(),
+            });
+
+        assert_eq!(result.constraint_evaluations.len(), 2);
+        assert_eq!(result.constraint_evaluations[0].status, ConstraintConformance::Conforming);
+        assert_eq!(result.constraint_evaluations[1].status, ConstraintConformance::Deviating);
+    }
+
+    #[test]
+    fn test_should_escalate_on_must_violation() {
+        let intent_id = Uuid::new_v4();
+        let result = IntentVerificationResult::new(intent_id, IntentSatisfaction::Partial)
+            .with_constraint_evaluation(ConstraintEvaluation {
+                constraint: "[MUST] No unsafe code".to_string(),
+                status: ConstraintConformance::Violating,
+                explanation: "Found unsafe blocks".to_string(),
+            });
+
+        let escalation = result.should_escalate();
+        assert!(escalation.is_some());
+        let esc = escalation.unwrap();
+        assert!(esc.reason.contains("Invariant constraint violation"));
+        assert_eq!(esc.urgency, EscalationUrgency::High);
+    }
+
+    #[test]
+    fn test_should_not_escalate_on_should_violation() {
+        let intent_id = Uuid::new_v4();
+        let result = IntentVerificationResult::new(intent_id, IntentSatisfaction::Partial)
+            .with_constraint_evaluation(ConstraintEvaluation {
+                constraint: "[SHOULD] Use logging".to_string(),
+                status: ConstraintConformance::Violating,
+                explanation: "No logging found".to_string(),
+            });
+
+        // SHOULD violations don't trigger escalation on their own
+        let escalation = result.should_escalate();
+        assert!(escalation.is_none());
+    }
+
+    #[test]
+    fn test_gap_category_constraint_violation() {
+        assert_eq!(GapCategory::ConstraintViolation.as_str(), "constraint_violation");
+        assert_eq!(GapCategory::from_str("constraint_violation"), Some(GapCategory::ConstraintViolation));
+        assert_eq!(GapCategory::from_str("constraintviolation"), Some(GapCategory::ConstraintViolation));
     }
 }

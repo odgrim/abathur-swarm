@@ -27,7 +27,8 @@ use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    BranchVerificationRequest, BranchVerificationResult, ConvergenceConfig, ConvergenceState,
+    BranchVerificationRequest, BranchVerificationResult, ConstraintConformance,
+    ConstraintEvaluation, ConvergenceConfig, ConvergenceState,
     DependentTaskAugmentation, GapCategory, GapSeverity, HumanEscalation, IntentGap,
     IntentSatisfaction, IntentVerificationResult, NewTaskGuidance, OriginalIntent,
     RepromptApproach, RepromptGuidance, RepromptStrategySelector, SessionStatus,
@@ -145,7 +146,17 @@ where
             .await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
-        let intent = OriginalIntent::from_task(task_id, &task.description);
+        let mut intent = OriginalIntent::from_task(task_id, &task.description);
+
+        // Include constraint hints as key requirements so the verifier
+        // evaluates task output against them.
+        for hint in &task.context.hints {
+            if let Some(constraint) = hint.strip_prefix("constraint:") {
+                intent.key_requirements.push(
+                    format!("[CONSTRAINT] {}", constraint.trim())
+                );
+            }
+        }
 
         Ok(intent)
     }
@@ -182,9 +193,21 @@ where
             captured_at: chrono::Utc::now(),
         };
 
-        // Gather requirements from all tasks
+        // Gather requirements from all tasks, including constraint hints
+        let mut seen_constraints = std::collections::HashSet::new();
         for task in tasks {
             intent.key_requirements.push(format!("Task '{}': {}", task.title, task.description));
+
+            for hint in &task.context.hints {
+                if let Some(constraint) = hint.strip_prefix("constraint:") {
+                    let trimmed = constraint.trim().to_string();
+                    if seen_constraints.insert(trimmed.clone()) {
+                        intent.key_requirements.push(
+                            format!("[CONSTRAINT] {}", trimmed)
+                        );
+                    }
+                }
+            }
         }
 
         // Verify using the standard method
@@ -491,7 +514,8 @@ where
                 continue;
             }
             if in_gaps {
-                if line.starts_with("IMPLICIT_GAPS:") || line.starts_with("FOCUS_AREAS:")
+                if line.starts_with("IMPLICIT_GAPS:") || line.starts_with("CONSTRAINT_CONFORMANCE:")
+                   || line.starts_with("FOCUS_AREAS:")
                    || line.starts_with("NEW_TASKS:") || line.is_empty() {
                     in_gaps = false;
                     continue;
@@ -512,13 +536,66 @@ where
                 continue;
             }
             if in_implicit {
-                if line.starts_with("FOCUS_AREAS:") || line.starts_with("NEW_TASKS:") || line.is_empty() {
+                if line.starts_with("CONSTRAINT_CONFORMANCE:") || line.starts_with("FOCUS_AREAS:")
+                   || line.starts_with("NEW_TASKS:") || line.is_empty() {
                     in_implicit = false;
                     continue;
                 }
                 if line.starts_with("- ") {
                     if let Some(gap) = Self::parse_gap_line(line, true) {
                         result = result.with_implicit_gap(gap);
+                    }
+                }
+            }
+        }
+
+        // Parse CONSTRAINT_CONFORMANCE (format: constraint text | status | explanation)
+        let mut in_constraints = false;
+        for line in response_text.lines() {
+            if line.starts_with("CONSTRAINT_CONFORMANCE:") {
+                in_constraints = true;
+                continue;
+            }
+            if in_constraints {
+                if line.starts_with("FOCUS_AREAS:") || line.starts_with("NEW_TASKS:")
+                   || line.starts_with("REPROMPT_STRATEGY:") || line.is_empty() {
+                    in_constraints = false;
+                    continue;
+                }
+                if line.starts_with("- ") {
+                    let parts: Vec<&str> = line.trim_start_matches("- ").split('|').collect();
+                    if parts.len() >= 2 {
+                        let constraint = parts[0].trim().to_string();
+                        let status = ConstraintConformance::from_str(parts[1].trim())
+                            .unwrap_or(ConstraintConformance::Deviating);
+                        let explanation = if parts.len() > 2 {
+                            parts[2].trim().to_string()
+                        } else {
+                            String::new()
+                        };
+
+                        result = result.with_constraint_evaluation(ConstraintEvaluation {
+                            constraint: constraint.clone(),
+                            status,
+                            explanation,
+                        });
+
+                        // For violating constraints, also create a corresponding IntentGap
+                        if status == ConstraintConformance::Violating {
+                            let severity = if constraint.starts_with("[MUST]") {
+                                GapSeverity::Critical
+                            } else if constraint.starts_with("[WITHIN]") || constraint.starts_with("[CONSTRAINT]") {
+                                GapSeverity::Major
+                            } else {
+                                GapSeverity::Moderate
+                            };
+                            result = result.with_gap(
+                                IntentGap::new(
+                                    format!("Constraint violation: {}", constraint),
+                                    severity,
+                                ).with_category(GapCategory::ConstraintViolation)
+                            );
+                        }
                     }
                 }
             }
@@ -1241,6 +1318,22 @@ Consider multiple viewpoints:
 5. "How would a new developer understand this?" (clarity)
 6. "How would we know if this broke in production?" (observability)
 
+## Goal Constraint Evaluation
+
+When Key Requirements include tagged constraints ([MUST], [SHOULD], [WITHIN], [CONSTRAINT]),
+evaluate each one explicitly:
+
+- **[MUST] (Invariant)**: These MUST NOT be violated. Any violation is a critical gap.
+  Invariant violations should be severity: critical and category: constraint_violation.
+- **[SHOULD] (Preference)**: These SHOULD be followed. Deviations are acceptable when
+  justified but should be noted. Unjustified deviations are moderate gaps.
+- **[WITHIN] (Boundary)**: Work must stay within these boundaries. Exceeding boundaries
+  is a major gap.
+- **[CONSTRAINT]**: Treat as a strong requirement (between SHOULD and MUST). Violations
+  are major gaps unless justified.
+
+Report constraint evaluations in the CONSTRAINT_CONFORMANCE section of your output.
+
 ## Output Format
 
 Provide your evaluation in this exact format:
@@ -1255,6 +1348,8 @@ GAPS:
 - <gap description> | <minor|moderate|major|critical> | <suggested action> | <category>
 IMPLICIT_GAPS:
 - <implied requirement that was missed> | <severity> | <why this was expected>
+CONSTRAINT_CONFORMANCE:
+- <constraint text> | <conforming|deviating|violating> | <explanation>
 FOCUS_AREAS:
 - <area to focus on if re-prompting>
 NEW_TASKS:
@@ -1324,7 +1419,10 @@ Choose based on the nature of gaps:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::{SessionStatus, SubstrateSession, SubstrateConfig, TaskPriority};
+    use crate::domain::models::{
+        ConstraintConformance, ConstraintEvaluation,
+        SessionStatus, SubstrateSession, SubstrateConfig, TaskPriority,
+    };
 
     #[test]
     fn test_intent_verifier_config_default() {
@@ -1619,6 +1717,121 @@ NEW_TASKS:
             result = result.with_reprompt_guidance(guidance);
         }
 
+        // Parse CONSTRAINT_CONFORMANCE
+        let mut in_constraints = false;
+        for line in response_text.lines() {
+            if line.starts_with("CONSTRAINT_CONFORMANCE:") {
+                in_constraints = true;
+                continue;
+            }
+            if in_constraints {
+                if line.starts_with("FOCUS_AREAS:") || line.starts_with("NEW_TASKS:")
+                   || line.starts_with("REPROMPT_STRATEGY:") || line.is_empty() {
+                    in_constraints = false;
+                    continue;
+                }
+                if line.starts_with("- ") {
+                    let parts: Vec<&str> = line.trim_start_matches("- ").split('|').collect();
+                    if parts.len() >= 2 {
+                        let constraint = parts[0].trim().to_string();
+                        let status = ConstraintConformance::from_str(parts[1].trim())
+                            .unwrap_or(ConstraintConformance::Deviating);
+                        let explanation = if parts.len() > 2 {
+                            parts[2].trim().to_string()
+                        } else {
+                            String::new()
+                        };
+                        result = result.with_constraint_evaluation(ConstraintEvaluation {
+                            constraint: constraint.clone(),
+                            status,
+                            explanation,
+                        });
+                        if status == ConstraintConformance::Violating {
+                            let severity = if constraint.starts_with("[MUST]") {
+                                GapSeverity::Critical
+                            } else if constraint.starts_with("[WITHIN]") || constraint.starts_with("[CONSTRAINT]") {
+                                GapSeverity::Major
+                            } else {
+                                GapSeverity::Moderate
+                            };
+                            result = result.with_gap(
+                                IntentGap::new(
+                                    format!("Constraint violation: {}", constraint),
+                                    severity,
+                                ).with_category(GapCategory::ConstraintViolation)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         result
+    }
+
+    #[test]
+    fn test_parse_constraint_conformance() {
+        let response = r#"SATISFACTION: partial
+CONFIDENCE: 0.7
+SUMMARY: Work partially done with some constraint issues.
+GAPS:
+IMPLICIT_GAPS:
+CONSTRAINT_CONFORMANCE:
+- [MUST] No unsafe code | conforming | No unsafe blocks found
+- [SHOULD] Use structured logging | deviating | println used instead of tracing
+- [WITHIN] Rust stable toolchain | violating | Nightly feature used
+FOCUS_AREAS:
+- Fix toolchain constraint
+NEW_TASKS:
+"#;
+
+        let session = create_mock_session(response);
+        let intent = OriginalIntent::from_goal(Uuid::new_v4(), "Test goal");
+        let tasks = vec![create_mock_task("Task 1")];
+
+        let result = parse_test_response(&session, &intent, &tasks, 1);
+
+        assert_eq!(result.constraint_evaluations.len(), 3);
+        assert_eq!(result.constraint_evaluations[0].status, ConstraintConformance::Conforming);
+        assert_eq!(result.constraint_evaluations[0].constraint, "[MUST] No unsafe code");
+        assert_eq!(result.constraint_evaluations[1].status, ConstraintConformance::Deviating);
+        assert_eq!(result.constraint_evaluations[2].status, ConstraintConformance::Violating);
+        assert_eq!(result.constraint_evaluations[2].constraint, "[WITHIN] Rust stable toolchain");
+
+        // Violating constraint should produce a gap
+        let constraint_gaps: Vec<_> = result.gaps.iter()
+            .filter(|g| g.category == GapCategory::ConstraintViolation)
+            .collect();
+        assert_eq!(constraint_gaps.len(), 1);
+        assert_eq!(constraint_gaps[0].severity, GapSeverity::Major); // [WITHIN] -> Major
+        assert!(constraint_gaps[0].description.contains("[WITHIN] Rust stable toolchain"));
+    }
+
+    #[test]
+    fn test_parse_must_violation_creates_critical_gap() {
+        let response = r#"SATISFACTION: unsatisfied
+CONFIDENCE: 0.3
+SUMMARY: Invariant violated.
+GAPS:
+CONSTRAINT_CONFORMANCE:
+- [MUST] No panics in production paths | violating | unwrap() used on user input
+FOCUS_AREAS:
+NEW_TASKS:
+"#;
+
+        let session = create_mock_session(response);
+        let intent = OriginalIntent::from_goal(Uuid::new_v4(), "Test goal");
+        let tasks = vec![create_mock_task("Task 1")];
+
+        let result = parse_test_response(&session, &intent, &tasks, 1);
+
+        assert_eq!(result.constraint_evaluations.len(), 1);
+        assert_eq!(result.constraint_evaluations[0].status, ConstraintConformance::Violating);
+
+        let constraint_gaps: Vec<_> = result.gaps.iter()
+            .filter(|g| g.category == GapCategory::ConstraintViolation)
+            .collect();
+        assert_eq!(constraint_gaps.len(), 1);
+        assert_eq!(constraint_gaps[0].severity, GapSeverity::Critical); // [MUST] -> Critical
     }
 }
