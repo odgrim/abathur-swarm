@@ -222,7 +222,7 @@ fn truncate_description(description: &str, max_chars: usize) -> String {
         description
             .lines()
             .find(|line| !line.starts_with('#') && !line.trim().is_empty())
-            .unwrap_or(&description[..max_chars.min(description.len())])
+            .unwrap_or(description)
             .to_string()
     } else {
         cleaned
@@ -231,7 +231,12 @@ fn truncate_description(description: &str, max_chars: usize) -> String {
     if result.len() <= max_chars {
         result
     } else {
-        format!("{}...", &result[..max_chars.min(result.len())])
+        // Find a char boundary at or before max_chars to avoid panicking on multi-byte UTF-8
+        let mut truncate_at = max_chars.min(result.len());
+        while truncate_at > 0 && !result.is_char_boundary(truncate_at) {
+            truncate_at -= 1;
+        }
+        format!("{}...", &result[..truncate_at])
     }
 }
 
