@@ -88,6 +88,8 @@ pub struct ClaimTaskRequest {
 pub struct TaskQueryParams {
     #[serde(default)]
     pub status: Option<String>,
+    #[serde(default)]
+    pub task_type: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
 }
