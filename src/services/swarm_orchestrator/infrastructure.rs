@@ -268,8 +268,9 @@ where
             *daemon_handle = Some(handle);
         }
 
-        // Run daemon and log events in background
+        // Run daemon and log events in background, publishing to EventBus
         let audit_log = self.audit_log.clone();
+        let event_bus = self.event_bus.clone();
         tokio::spawn(async move {
             let mut event_rx = daemon.run().await;
             while let Some(event) = event_rx.recv().await {
@@ -281,6 +282,9 @@ where
                             "Memory decay daemon started",
                         ).await;
                     }
+                    crate::services::DecayDaemonEvent::MaintenanceStarted { run_number } => {
+                        tracing::debug!(run_number, "Memory maintenance cycle starting");
+                    }
                     crate::services::DecayDaemonEvent::MaintenanceCompleted { run_number, report, .. } => {
                         audit_log.info(
                             AuditCategory::Memory,
@@ -291,14 +295,98 @@ where
                             ),
                         ).await;
                     }
-                    crate::services::DecayDaemonEvent::Stopped { reason } => {
-                        audit_log.info(
-                            AuditCategory::System,
-                            AuditAction::SwarmStopped,
-                            format!("Memory decay daemon stopped: {:?}", reason),
-                        ).await;
+                    crate::services::DecayDaemonEvent::MaintenanceFailed {
+                        run_number,
+                        error,
+                        consecutive_failures,
+                        max_consecutive_failures,
+                    } => {
+                        tracing::warn!(
+                            run_number,
+                            consecutive_failures,
+                            max_consecutive_failures,
+                            "Memory maintenance failed: {}",
+                            error,
+                        );
+                        // Publish to EventBus so handlers/monitors can react
+                        event_bus.publish(crate::services::event_factory::make_event(
+                            crate::services::event_bus::EventSeverity::Warning,
+                            crate::services::event_bus::EventCategory::Memory,
+                            None,
+                            None,
+                            crate::services::event_bus::EventPayload::MemoryMaintenanceFailed {
+                                run_number,
+                                error,
+                                consecutive_failures,
+                                max_consecutive_failures,
+                            },
+                        )).await;
                     }
-                    _ => {}
+                    crate::services::DecayDaemonEvent::FailureThresholdWarning {
+                        consecutive_failures,
+                        max_consecutive_failures,
+                        latest_error,
+                    } => {
+                        tracing::error!(
+                            consecutive_failures,
+                            max_consecutive_failures,
+                            "Memory daemon DEGRADED — approaching failure limit: {}",
+                            latest_error,
+                        );
+                        audit_log.log(
+                            AuditEntry::new(
+                                AuditLevel::Error,
+                                AuditCategory::System,
+                                AuditAction::SwarmStopped,
+                                AuditActor::System,
+                                format!(
+                                    "Memory daemon degraded: {}/{} consecutive failures — {}",
+                                    consecutive_failures, max_consecutive_failures, latest_error
+                                ),
+                            ),
+                        ).await;
+                        event_bus.publish(crate::services::event_factory::make_event(
+                            crate::services::event_bus::EventSeverity::Error,
+                            crate::services::event_bus::EventCategory::Memory,
+                            None,
+                            None,
+                            crate::services::event_bus::EventPayload::MemoryDaemonDegraded {
+                                consecutive_failures,
+                                max_consecutive_failures,
+                                latest_error,
+                            },
+                        )).await;
+                    }
+                    crate::services::DecayDaemonEvent::Stopped { reason } => {
+                        let reason_str = format!("{:?}", reason);
+                        let severity = if reason == crate::services::StopReason::TooManyFailures {
+                            AuditLevel::Error
+                        } else {
+                            AuditLevel::Info
+                        };
+                        audit_log.log(
+                            AuditEntry::new(
+                                severity,
+                                AuditCategory::System,
+                                AuditAction::SwarmStopped,
+                                AuditActor::System,
+                                format!("Memory decay daemon stopped: {}", reason_str),
+                            ),
+                        ).await;
+                        event_bus.publish(crate::services::event_factory::make_event(
+                            if reason == crate::services::StopReason::TooManyFailures {
+                                crate::services::event_bus::EventSeverity::Critical
+                            } else {
+                                crate::services::event_bus::EventSeverity::Info
+                            },
+                            crate::services::event_bus::EventCategory::Memory,
+                            None,
+                            None,
+                            crate::services::event_bus::EventPayload::MemoryDaemonStopped {
+                                reason: reason_str,
+                            },
+                        )).await;
+                    }
                 }
             }
         });
