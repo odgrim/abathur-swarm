@@ -7,7 +7,7 @@ use async_trait::async_trait;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    Memory, MemoryMetadata, MemoryQuery, MemoryTier, MemoryType,
+    AccessorId, Memory, MemoryMetadata, MemoryQuery, MemoryTier, MemoryType,
     RelevanceWeights, ScoredMemory,
 };
 use crate::domain::ports::MemoryRepository;
@@ -28,6 +28,17 @@ pub struct DecayConfig {
     pub promote_to_episodic_threshold: u32,
     /// Access count threshold for promotion to semantic
     pub promote_to_semantic_threshold: u32,
+    /// Minimum distinct accessor count required for promotion to episodic.
+    ///
+    /// This prevents a single runaway task/agent from inflating access counts
+    /// to force unwarranted promotion (promotion-integrity constraint).
+    pub promote_to_episodic_distinct_accessors: usize,
+    /// Minimum distinct accessor count required for promotion to semantic.
+    ///
+    /// Semantic memories represent validated, cross-cutting knowledge. Requiring
+    /// access from multiple distinct sources ensures promotion reflects genuine
+    /// repeated utility, not a single loop.
+    pub promote_to_semantic_distinct_accessors: usize,
 }
 
 impl Default for DecayConfig {
@@ -37,6 +48,8 @@ impl Default for DecayConfig {
             episodic_prune_threshold: 0.05,
             promote_to_episodic_threshold: 5,
             promote_to_semantic_threshold: 20,
+            promote_to_episodic_distinct_accessors: 2,
+            promote_to_semantic_distinct_accessors: 3,
         }
     }
 }
@@ -144,11 +157,15 @@ impl<R: MemoryRepository> MemoryService<R> {
     }
 
     /// Get a memory by ID and record the access. Returns the memory and events.
-    pub async fn recall(&self, id: Uuid) -> DomainResult<(Option<Memory>, Vec<UnifiedEvent>)> {
+    ///
+    /// The `accessor` identifies who is accessing this memory. Distinct accessor
+    /// tracking prevents a single runaway loop from inflating access counts to
+    /// force unwarranted promotion (promotion-integrity constraint).
+    pub async fn recall(&self, id: Uuid, accessor: AccessorId) -> DomainResult<(Option<Memory>, Vec<UnifiedEvent>)> {
         let memory = self.repository.get(id).await?;
 
         if let Some(mut mem) = memory {
-            mem.record_access();
+            mem.record_access(accessor.clone());
             self.repository.update(&mem).await?;
 
             let mut events = vec![Self::make_event(
@@ -158,6 +175,8 @@ impl<R: MemoryRepository> MemoryService<R> {
                     memory_id: mem.id,
                     key: mem.key.clone(),
                     access_count: mem.access_count,
+                    accessor: accessor.to_string(),
+                    distinct_accessor_count: mem.distinct_accessor_count() as u32,
                 },
             )];
 
@@ -172,11 +191,15 @@ impl<R: MemoryRepository> MemoryService<R> {
     }
 
     /// Get a memory by key and namespace. Returns the memory and events.
-    pub async fn recall_by_key(&self, key: &str, namespace: &str) -> DomainResult<(Option<Memory>, Vec<UnifiedEvent>)> {
+    ///
+    /// The `accessor` identifies who is accessing this memory. Distinct accessor
+    /// tracking prevents a single runaway loop from inflating access counts to
+    /// force unwarranted promotion (promotion-integrity constraint).
+    pub async fn recall_by_key(&self, key: &str, namespace: &str, accessor: AccessorId) -> DomainResult<(Option<Memory>, Vec<UnifiedEvent>)> {
         let memory = self.repository.get_by_key(key, namespace).await?;
 
         if let Some(mut mem) = memory {
-            mem.record_access();
+            mem.record_access(accessor.clone());
             self.repository.update(&mem).await?;
 
             let mut events = vec![Self::make_event(
@@ -186,6 +209,8 @@ impl<R: MemoryRepository> MemoryService<R> {
                     memory_id: mem.id,
                     key: mem.key.clone(),
                     access_count: mem.access_count,
+                    accessor: accessor.to_string(),
+                    distinct_accessor_count: mem.distinct_accessor_count() as u32,
                 },
             )];
 
@@ -462,15 +487,26 @@ impl<R: MemoryRepository> MemoryService<R> {
         self.repository.query(query).await
     }
 
-    /// Check if a memory should be promoted based on access patterns.
-    /// Returns whether promotion happened and any events.
+    /// Check if a memory should be promoted based on access patterns and distinct accessor count.
+    ///
+    /// Promotion requires BOTH:
+    /// 1. Sufficient total access count (access_count >= threshold)
+    /// 2. Sufficient distinct accessors (distinct_accessor_count >= distinct threshold)
+    ///
+    /// This enforces the promotion-integrity constraint: memories promoted to higher tiers
+    /// must have demonstrated repeated utility from multiple distinct sources, not just
+    /// high access count from a single runaway loop.
     async fn check_promotion(&self, memory: &mut Memory) -> DomainResult<(bool, Vec<UnifiedEvent>)> {
         let should_promote = match memory.tier {
             MemoryTier::Working => {
                 memory.access_count >= self.decay_config.promote_to_episodic_threshold
+                    && memory.distinct_accessor_count()
+                        >= self.decay_config.promote_to_episodic_distinct_accessors
             }
             MemoryTier::Episodic => {
                 memory.access_count >= self.decay_config.promote_to_semantic_threshold
+                    && memory.distinct_accessor_count()
+                        >= self.decay_config.promote_to_semantic_distinct_accessors
             }
             MemoryTier::Semantic => false,
         };
@@ -499,6 +535,8 @@ impl<R: MemoryRepository> MemoryService<R> {
     }
 
     /// Check all non-semantic memories for promotion. Returns count and events.
+    ///
+    /// Both access count and distinct accessor count must meet thresholds.
     async fn check_all_promotions(&self) -> DomainResult<(u64, Vec<UnifiedEvent>)> {
         let mut promoted = 0;
         let mut all_events = Vec::new();
@@ -506,7 +544,10 @@ impl<R: MemoryRepository> MemoryService<R> {
         // Check working memories
         let working = self.repository.list_by_tier(MemoryTier::Working).await?;
         for mut mem in working {
-            if mem.access_count >= self.decay_config.promote_to_episodic_threshold {
+            if mem.access_count >= self.decay_config.promote_to_episodic_threshold
+                && mem.distinct_accessor_count()
+                    >= self.decay_config.promote_to_episodic_distinct_accessors
+            {
                 let (did_promote, events) = self.check_promotion(&mut mem).await?;
                 if did_promote {
                     promoted += 1;
@@ -518,7 +559,10 @@ impl<R: MemoryRepository> MemoryService<R> {
         // Check episodic memories
         let episodic = self.repository.list_by_tier(MemoryTier::Episodic).await?;
         for mut mem in episodic {
-            if mem.access_count >= self.decay_config.promote_to_semantic_threshold {
+            if mem.access_count >= self.decay_config.promote_to_semantic_threshold
+                && mem.distinct_accessor_count()
+                    >= self.decay_config.promote_to_semantic_distinct_accessors
+            {
                 let (did_promote, events) = self.check_promotion(&mut mem).await?;
                 if did_promote {
                     promoted += 1;
@@ -915,12 +959,12 @@ impl<R: MemoryRepository + 'static> MemoryCommandHandler for MemoryService<R> {
                     .await?;
                 Ok(CommandOutcome { result: CommandResult::Memory(memory), events })
             }
-            MemoryCommand::Recall { id } => {
-                let (memory, events) = self.recall(id).await?;
+            MemoryCommand::Recall { id, accessor } => {
+                let (memory, events) = self.recall(id, accessor).await?;
                 Ok(CommandOutcome { result: CommandResult::MemoryOpt(memory), events })
             }
-            MemoryCommand::RecallByKey { key, namespace } => {
-                let (memory, events) = self.recall_by_key(&key, &namespace).await?;
+            MemoryCommand::RecallByKey { key, namespace, accessor } => {
+                let (memory, events) = self.recall_by_key(&key, &namespace, accessor).await?;
                 Ok(CommandOutcome { result: CommandResult::MemoryOpt(memory), events })
             }
             MemoryCommand::Forget { id } => {
@@ -962,7 +1006,7 @@ mod tests {
 
         assert_eq!(memory.tier, MemoryTier::Working);
 
-        let (recalled, _) = service.recall(memory.id).await.unwrap();
+        let (recalled, _) = service.recall(memory.id, AccessorId::system("test")).await.unwrap();
         let recalled = recalled.unwrap();
         assert_eq!(recalled.access_count, 1);
     }
@@ -991,7 +1035,7 @@ mod tests {
             "test",
         ).await.unwrap();
 
-        let (found, _) = service.recall_by_key("lookup", "test").await.unwrap();
+        let (found, _) = service.recall_by_key("lookup", "test", AccessorId::system("test")).await.unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().content, "value to find");
     }
@@ -1024,10 +1068,11 @@ mod tests {
             "test",
         ).await.unwrap();
 
-        // Access multiple times to trigger promotion
-        service.recall(memory.id).await.unwrap();
-        service.recall(memory.id).await.unwrap();
-        let (promoted, _) = service.recall(memory.id).await.unwrap();
+        // Access multiple times with distinct accessors to trigger promotion.
+        // Promotion requires BOTH access_count >= 3 AND distinct_accessor_count >= 2.
+        service.recall(memory.id, AccessorId::agent("agent-a")).await.unwrap();
+        service.recall(memory.id, AccessorId::agent("agent-b")).await.unwrap();
+        let (promoted, _) = service.recall(memory.id, AccessorId::agent("agent-a")).await.unwrap();
         let promoted = promoted.unwrap();
 
         assert_eq!(promoted.tier, MemoryTier::Episodic);
@@ -1134,7 +1179,61 @@ mod tests {
 
         service.forget(memory.id).await.unwrap();
 
-        let (recalled, _) = service.recall(memory.id).await.unwrap();
+        let (recalled, _) = service.recall(memory.id, AccessorId::system("test")).await.unwrap();
         assert!(recalled.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_single_accessor_does_not_promote() {
+        let service = setup_service().await
+            .with_decay_config(DecayConfig {
+                promote_to_episodic_threshold: 3,
+                promote_to_episodic_distinct_accessors: 2,
+                ..Default::default()
+            });
+
+        let (memory, _) = service.remember(
+            "single_accessor".to_string(),
+            "content".to_string(),
+            "test",
+        ).await.unwrap();
+
+        // Access many times from the SAME accessor — should NOT promote
+        // because distinct_accessor_count stays at 1, below the threshold of 2.
+        let same_accessor = AccessorId::agent("lone-agent");
+        for _ in 0..10 {
+            service.recall(memory.id, same_accessor.clone()).await.unwrap();
+        }
+
+        let (mem, _) = service.recall(memory.id, same_accessor).await.unwrap();
+        let mem = mem.unwrap();
+        assert_eq!(mem.tier, MemoryTier::Working, "Single accessor must not trigger promotion regardless of access count");
+        assert!(mem.access_count >= 10, "Access count should be high");
+        assert_eq!(mem.distinct_accessor_count(), 1, "Only one distinct accessor");
+    }
+
+    #[tokio::test]
+    async fn test_distinct_accessors_enable_promotion() {
+        let service = setup_service().await
+            .with_decay_config(DecayConfig {
+                promote_to_episodic_threshold: 3,
+                promote_to_episodic_distinct_accessors: 2,
+                ..Default::default()
+            });
+
+        let (memory, _) = service.remember(
+            "multi_accessor".to_string(),
+            "content".to_string(),
+            "test",
+        ).await.unwrap();
+
+        // Access from two distinct accessors to meet both thresholds
+        service.recall(memory.id, AccessorId::task(Uuid::new_v4())).await.unwrap();
+        service.recall(memory.id, AccessorId::agent("helper-agent")).await.unwrap();
+        let (promoted, _) = service.recall(memory.id, AccessorId::system("checker")).await.unwrap();
+        let promoted = promoted.unwrap();
+
+        assert_eq!(promoted.tier, MemoryTier::Episodic, "Multiple distinct accessors should enable promotion");
+        assert!(promoted.distinct_accessor_count() >= 2, "Should have at least 2 distinct accessors");
     }
 }

@@ -40,7 +40,7 @@ use abathur::adapters::sqlite::{
 use abathur::adapters::substrates::{ClaudeCodeSubstrate, MockSubstrate};
 use abathur::adapters::substrates::mock::MockResponse;
 use abathur::domain::models::{
-    AgentConstraint, AgentTier, Goal, GoalConstraint, GoalPriority, GoalStatus, MemoryTier,
+    AccessorId, AgentConstraint, AgentTier, Goal, GoalConstraint, GoalPriority, GoalStatus, MemoryTier,
     MemoryType, Task, TaskDag, TaskPriority, TaskSource, TaskStatus, ToolCapability,
 };
 use abathur::domain::ports::{
@@ -1137,7 +1137,7 @@ async fn test_memory_system_integration() {
 
     // Test recall
     let (recalled, _events) = memory_service
-        .recall_by_key("error_handling_pattern", "session")
+        .recall_by_key("error_handling_pattern", "session", AccessorId::system("e2e-test"))
         .await
         .expect("Failed to recall");
     assert!(recalled.is_some());
@@ -1359,7 +1359,7 @@ async fn test_e2e_all_critical_paths() {
         .await
         .expect("Memory store failed");
     let (recalled, _events) = memory_service
-        .recall_by_key("test_key", "e2e")
+        .recall_by_key("test_key", "e2e", AccessorId::system("e2e-test"))
         .await
         .expect("Memory recall failed");
     assert!(recalled.is_some());

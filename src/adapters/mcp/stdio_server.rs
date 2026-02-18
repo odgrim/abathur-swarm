@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
-use crate::domain::models::{ExecutionMode, GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource, TaskStatus, TaskType};
+use crate::domain::models::{AccessorId, ExecutionMode, GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource, TaskStatus, TaskType};
 use crate::domain::ports::{AgentFilter, GoalFilter, GoalRepository, MemoryRepository, TaskRepository};
 use crate::services::command_bus::{
     CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand, MemoryCommand,
@@ -853,9 +853,13 @@ where
             .ok_or("Missing required field: id")?;
         let id = Uuid::parse_str(id_str).map_err(|e| format!("Invalid UUID: {}", e))?;
 
+        let accessor = match self.task_id {
+            Some(tid) => AccessorId::task(tid),
+            None => AccessorId::system("mcp-stdio"),
+        };
         let (memory_opt, events) = self
             .memory_service
-            .recall(id)
+            .recall(id, accessor)
             .await
             .map_err(|e| format!("Failed to get memory: {}", e))?;
 
