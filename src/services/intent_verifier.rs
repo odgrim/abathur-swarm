@@ -969,6 +969,15 @@ where
         iteration: u32,
         overseer_signals: Option<&OverseerSignals>,
     ) -> DomainResult<Option<IntentVerificationResult>> {
+        // Guard: never verify a verification task (prevents infinite recursion).
+        if task.task_type.is_verification() {
+            tracing::debug!(
+                task_id = %task.id,
+                "Skipping intent verification for verification task (recursion guard)"
+            );
+            return Ok(None);
+        }
+
         // Try to extract intent from the goal first (richer context),
         // then fall back to the task description.
         let mut intent = if let Some(gid) = goal_id {

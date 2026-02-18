@@ -16,6 +16,7 @@ use crate::services::builtin_handlers::{
     DeadLetterRetryHandler, DirectModeExecutionMemoryHandler, EscalationTimeoutHandler,
     EventPruningHandler, EventStorePollerHandler, EvolutionEvaluationHandler,
     EvolutionTriggeredTemplateUpdateHandler,
+    GoalConvergenceCheckHandler,
     GoalCreatedHandler, GoalEvaluationHandler, GoalEvaluationTaskCreationHandler,
     GoalReconciliationHandler, GoalRetiredHandler,
     MemoryConflictEscalationHandler, MemoryInformedDecompositionHandler,
@@ -514,6 +515,17 @@ where
                 .await;
         }
 
+        // GoalConvergenceCheckHandler (NORMAL) — periodic deep goal convergence evaluation
+        if p.goal_convergence_check_enabled {
+            reactor
+                .register(Arc::new(GoalConvergenceCheckHandler::new(
+                    self.goal_repo.clone(),
+                    self.task_repo.clone(),
+                    command_bus.clone(),
+                )))
+                .await;
+        }
+
         // EvolutionTriggeredTemplateUpdateHandler (LOW) — submit refinement tasks for underperforming templates
         if self.config.track_evolution {
             reactor
@@ -680,6 +692,18 @@ where
                 .register(interval_schedule(
                     "goal-evaluation",
                     Duration::from_secs(p.goal_evaluation_interval_secs),
+                    EventCategory::Scheduler,
+                    EventSeverity::Debug,
+                ))
+                .await;
+        }
+
+        // Goal convergence check — periodic deep strategic evaluation
+        if p.goal_convergence_check_enabled {
+            scheduler
+                .register(interval_schedule(
+                    "goal-convergence-check",
+                    Duration::from_secs(p.goal_convergence_check_interval_secs),
                     EventCategory::Scheduler,
                     EventSeverity::Debug,
                 ))

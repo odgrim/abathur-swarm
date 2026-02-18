@@ -90,6 +90,12 @@ pub struct PollingConfig {
     pub escalation_check_interval_secs: u64,
     pub goal_evaluation_interval_secs: u64,
     pub a2a_poll_interval_secs: u64,
+
+    // --- Goal convergence check ---
+    /// Interval for deep goal convergence check (default: 14400s = 4 hours).
+    pub goal_convergence_check_interval_secs: u64,
+    /// Whether periodic goal convergence checks are enabled (default: true).
+    pub goal_convergence_check_enabled: bool,
     /// Interval for polling EventStore for cross-process events (default: 5s).
     pub event_store_poll_interval_secs: u64,
     /// Interval for retrying dead letter queue entries (default: 60s).
@@ -166,6 +172,10 @@ impl Default for PollingConfig {
             escalation_check_interval_secs: 30,
             goal_evaluation_interval_secs: 60,
             a2a_poll_interval_secs: 15,
+
+            // Goal convergence check
+            goal_convergence_check_interval_secs: 14400, // 4 hours
+            goal_convergence_check_enabled: true,
             event_store_poll_interval_secs: 5,
             dead_letter_retry_interval_secs: 60,
             event_pruning_interval_secs: 21600, // 6 hours
