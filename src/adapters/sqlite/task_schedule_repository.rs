@@ -26,6 +26,7 @@ struct TaskScheduleRow {
     id: String,
     name: String,
     description: String,
+    #[allow(dead_code)]
     schedule_type: String,
     schedule_data: String,
     task_title: String,

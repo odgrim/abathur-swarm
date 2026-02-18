@@ -45,6 +45,12 @@ pub async fn resolve_event_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid> {
         .await
 }
 
+/// Resolve a task schedule ID prefix to a full UUID.
+pub async fn resolve_schedule_id(pool: &SqlitePool, prefix: &str) -> Result<Uuid> {
+    resolve_prefix(pool, prefix, "task_schedule", SCHEDULE_QUERY)
+        .await
+}
+
 /// Resolve a dead letter entry ID prefix to a full ID string.
 ///
 /// Returns `String` rather than `Uuid` because the `EventStore` trait uses
@@ -59,6 +65,7 @@ const WORKTREE_QUERY: &str =
     "SELECT id FROM worktrees WHERE id LIKE ?1 UNION SELECT id FROM worktrees WHERE task_id LIKE ?1";
 const MEMORY_QUERY: &str = "SELECT id FROM memories WHERE id LIKE ?";
 const TRIGGER_RULE_QUERY: &str = "SELECT id FROM trigger_rules WHERE id LIKE ?";
+const SCHEDULE_QUERY: &str = "SELECT id FROM task_schedules WHERE id LIKE ?";
 const EVENT_QUERY: &str = "SELECT id FROM events WHERE id LIKE ?";
 const DLQ_QUERY: &str = "SELECT id FROM dead_letter_events WHERE id LIKE ? AND resolved_at IS NULL";
 
