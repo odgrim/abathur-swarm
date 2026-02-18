@@ -368,6 +368,10 @@ pub enum EventPayload {
         memory_id: Uuid,
         key: String,
         access_count: u32,
+        /// String representation of the accessor that triggered this access.
+        accessor: String,
+        /// Number of distinct accessors that have accessed this memory.
+        distinct_accessor_count: u32,
     },
 
     // Goal status events

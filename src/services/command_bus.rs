@@ -13,8 +13,9 @@ use uuid::Uuid;
 
 use crate::domain::errors::DomainError;
 use crate::domain::models::{
-    ExecutionMode, Goal, GoalConstraint, GoalPriority, GoalStatus, Memory, MemoryMetadata,
-    MemoryTier, MemoryType, Task, TaskContext, TaskPriority, TaskSource, TaskStatus, TaskType,
+    AccessorId, ExecutionMode, Goal, GoalConstraint, GoalPriority, GoalStatus, Memory,
+    MemoryMetadata, MemoryTier, MemoryType, Task, TaskContext, TaskPriority, TaskSource,
+    TaskStatus, TaskType,
 };
 use crate::services::event_bus::{EventBus, UnifiedEvent};
 use crate::services::memory_service::MaintenanceReport;
@@ -192,10 +193,12 @@ pub enum MemoryCommand {
     },
     Recall {
         id: Uuid,
+        accessor: AccessorId,
     },
     RecallByKey {
         key: String,
         namespace: String,
+        accessor: AccessorId,
     },
     Forget {
         id: Uuid,

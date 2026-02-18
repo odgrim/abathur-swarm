@@ -7,7 +7,52 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use uuid::Uuid;
+
+/// Identifies the source of a memory access for promotion integrity tracking.
+///
+/// Promotion from working → episodic → semantic requires access from multiple
+/// *distinct* accessors, not just repeated access from a single runaway loop.
+/// This prevents a single agent or task from inflating access counts to force
+/// unwarranted promotion (promotion-integrity constraint).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "id")]
+pub enum AccessorId {
+    /// A specific task accessing the memory.
+    Task(Uuid),
+    /// A specific agent template accessing the memory.
+    Agent(String),
+    /// A system process (e.g., maintenance daemon, MCP server).
+    System(String),
+}
+
+impl AccessorId {
+    /// Create an accessor ID for a task.
+    pub fn task(id: Uuid) -> Self {
+        Self::Task(id)
+    }
+
+    /// Create an accessor ID for an agent template.
+    pub fn agent(name: impl Into<String>) -> Self {
+        Self::Agent(name.into())
+    }
+
+    /// Create an accessor ID for a system process.
+    pub fn system(name: impl Into<String>) -> Self {
+        Self::System(name.into())
+    }
+}
+
+impl std::fmt::Display for AccessorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Task(id) => write!(f, "task:{}", id),
+            Self::Agent(name) => write!(f, "agent:{}", name),
+            Self::System(name) => write!(f, "system:{}", name),
+        }
+    }
+}
 
 /// Memory tier classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -160,6 +205,13 @@ pub struct Memory {
     /// None if embeddings are disabled or not yet computed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<Vec<f32>>,
+    /// Set of distinct accessors that have accessed this memory.
+    ///
+    /// Used for promotion integrity: promotion requires access from multiple
+    /// *distinct* sources (tasks, agents, system processes), not just repeated
+    /// access from a single runaway loop.
+    #[serde(default)]
+    pub distinct_accessors: HashSet<AccessorId>,
 }
 
 impl Memory {
@@ -184,6 +236,7 @@ impl Memory {
             version: 1,
             tier,
             embedding: None,
+            distinct_accessors: HashSet::new(),
         }
     }
 
@@ -258,12 +311,23 @@ impl Memory {
         }
     }
 
-    /// Record an access (updates access count and last_accessed).
-    pub fn record_access(&mut self) {
+    /// Record an access (updates access count, last_accessed, and distinct accessors).
+    ///
+    /// The `accessor` identifies who is accessing this memory. Distinct accessor
+    /// tracking is used for promotion integrity: memories are only promoted when
+    /// accessed by multiple distinct sources, preventing runaway single-accessor loops
+    /// from inflating access counts to force unwarranted promotion.
+    pub fn record_access(&mut self, accessor: AccessorId) {
         self.access_count += 1;
+        self.distinct_accessors.insert(accessor);
         self.last_accessed = Utc::now();
         self.updated_at = Utc::now();
         self.version += 1;
+    }
+
+    /// Return the number of distinct accessors that have accessed this memory.
+    pub fn distinct_accessor_count(&self) -> usize {
+        self.distinct_accessors.len()
     }
 
     /// Calculate decay factor (0.0 = fully decayed, 1.0 = fresh).
@@ -719,7 +783,8 @@ mod tests {
         let mut mem = Memory::working("key", "content");
         assert_eq!(mem.access_count, 0);
 
-        mem.record_access();
+        let accessor = AccessorId::task(Uuid::new_v4());
+        mem.record_access(accessor);
         assert_eq!(mem.access_count, 1);
         assert!(mem.version > 1);
     }
@@ -752,9 +817,9 @@ mod tests {
         let mut mem = Memory::working("key", "content");
         let score_before = mem.importance_score();
 
-        // Simulate many accesses
+        // Simulate many accesses from different accessors
         for _ in 0..20 {
-            mem.record_access();
+            mem.record_access(AccessorId::task(Uuid::new_v4()));
         }
 
         let score_after = mem.importance_score();
@@ -876,5 +941,62 @@ mod tests {
             .with_embedding(vec![0.1, 0.2, 0.3]);
         assert!(mem.embedding.is_some());
         assert_eq!(mem.embedding.unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_distinct_accessor_tracking() {
+        let mut mem = Memory::working("key", "content");
+        assert_eq!(mem.distinct_accessor_count(), 0);
+
+        let task_a = AccessorId::task(Uuid::new_v4());
+        let task_b = AccessorId::task(Uuid::new_v4());
+
+        // Same accessor accessed multiple times should count as 1 distinct
+        mem.record_access(task_a.clone());
+        mem.record_access(task_a.clone());
+        assert_eq!(mem.access_count, 2);
+        assert_eq!(mem.distinct_accessor_count(), 1);
+
+        // Different accessor should increase distinct count
+        mem.record_access(task_b);
+        assert_eq!(mem.access_count, 3);
+        assert_eq!(mem.distinct_accessor_count(), 2);
+    }
+
+    #[test]
+    fn test_accessor_id_types() {
+        let mut mem = Memory::working("key", "content");
+
+        let task_accessor = AccessorId::task(Uuid::new_v4());
+        let agent_accessor = AccessorId::agent("planner");
+        let system_accessor = AccessorId::system("decay-daemon");
+
+        mem.record_access(task_accessor);
+        mem.record_access(agent_accessor);
+        mem.record_access(system_accessor);
+
+        assert_eq!(mem.distinct_accessor_count(), 3);
+        assert_eq!(mem.access_count, 3);
+    }
+
+    #[test]
+    fn test_accessor_id_display() {
+        let task_id = Uuid::nil();
+        assert_eq!(
+            AccessorId::task(task_id).to_string(),
+            "task:00000000-0000-0000-0000-000000000000"
+        );
+        assert_eq!(AccessorId::agent("planner").to_string(), "agent:planner");
+        assert_eq!(
+            AccessorId::system("decay-daemon").to_string(),
+            "system:decay-daemon"
+        );
+    }
+
+    #[test]
+    fn test_distinct_accessors_initialized_empty() {
+        let mem = Memory::working("key", "content");
+        assert!(mem.distinct_accessors.is_empty());
+        assert_eq!(mem.distinct_accessor_count(), 0);
     }
 }

@@ -813,7 +813,7 @@ impl TriggerRuleEngine {
     }
 
     async fn dispatch_command(&self, cmd: &SerializableDomainCommand, rule_name: &str) {
-        use crate::domain::models::{GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource};
+        use crate::domain::models::{AccessorId, GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource};
         use crate::services::command_bus::{GoalCommand, MemoryCommand, TaskCommand};
 
         let domain_cmd = match cmd {
@@ -837,7 +837,7 @@ impl TriggerRuleEngine {
             }
             SerializableDomainCommand::PromoteMemory { memory_id } => {
                 // Recall triggers auto-promotion; for explicit promote we recall.
-                DomainCommand::Memory(MemoryCommand::Recall { id: *memory_id })
+                DomainCommand::Memory(MemoryCommand::Recall { id: *memory_id, accessor: AccessorId::system("trigger-rule") })
             }
             SerializableDomainCommand::TransitionGoalStatus {
                 goal_id,
