@@ -360,6 +360,10 @@ pub struct DeadLetterEntry {
 #[derive(Debug, Default)]
 pub struct InMemoryEventStore {
     events: tokio::sync::RwLock<Vec<UnifiedEvent>>,
+    watermarks: tokio::sync::RwLock<std::collections::HashMap<String, SequenceNumber>>,
+    dead_letters: tokio::sync::RwLock<Vec<DeadLetterEntry>>,
+    circuit_breakers: tokio::sync::RwLock<Vec<CircuitBreakerRecord>>,
+    webhooks: tokio::sync::RwLock<Vec<WebhookSubscription>>,
 }
 
 impl InMemoryEventStore {
@@ -459,6 +463,240 @@ impl EventStore for InMemoryEventStore {
         let original_len = events.len();
         events.retain(|e| e.timestamp >= cutoff);
         Ok((original_len - events.len()) as u64)
+    }
+
+    // === Watermarks ===
+
+    async fn get_watermark(&self, handler_name: &str) -> Result<Option<SequenceNumber>, EventStoreError> {
+        let watermarks = self.watermarks.read().await;
+        Ok(watermarks.get(handler_name).copied())
+    }
+
+    async fn set_watermark(&self, handler_name: &str, seq: SequenceNumber) -> Result<(), EventStoreError> {
+        let mut watermarks = self.watermarks.write().await;
+        watermarks.insert(handler_name.to_string(), seq);
+        Ok(())
+    }
+
+    // === Sequence Gap Detection ===
+
+    async fn detect_sequence_gaps(&self, from: u64, to: u64) -> Result<Vec<(u64, u64)>, EventStoreError> {
+        let events = self.events.read().await;
+        let present: std::collections::HashSet<u64> = events
+            .iter()
+            .filter(|e| e.sequence.0 >= from && e.sequence.0 <= to)
+            .map(|e| e.sequence.0)
+            .collect();
+
+        let mut gaps = Vec::new();
+        let mut gap_start: Option<u64> = None;
+        for seq in from..=to {
+            if !present.contains(&seq) {
+                if gap_start.is_none() {
+                    gap_start = Some(seq);
+                }
+            } else if let Some(start) = gap_start.take() {
+                gaps.push((start, seq - 1));
+            }
+        }
+        if let Some(start) = gap_start {
+            gaps.push((start, to));
+        }
+        Ok(gaps)
+    }
+
+    // === Dead Letters ===
+
+    async fn append_dead_letter(
+        &self,
+        event_id: &str,
+        event_sequence: u64,
+        handler_name: &str,
+        error_message: &str,
+        max_retries: u32,
+    ) -> Result<(), EventStoreError> {
+        let mut dead_letters = self.dead_letters.write().await;
+        dead_letters.push(DeadLetterEntry {
+            id: Uuid::new_v4().to_string(),
+            event_id: event_id.to_string(),
+            event_sequence,
+            handler_name: handler_name.to_string(),
+            error_message: error_message.to_string(),
+            retry_count: 0,
+            max_retries,
+            next_retry_at: None,
+            created_at: Utc::now(),
+            resolved_at: None,
+        });
+        Ok(())
+    }
+
+    async fn get_retryable_dead_letters(&self, limit: u32) -> Result<Vec<DeadLetterEntry>, EventStoreError> {
+        let dead_letters = self.dead_letters.read().await;
+        let now = Utc::now();
+        let result: Vec<_> = dead_letters
+            .iter()
+            .filter(|dl| {
+                dl.resolved_at.is_none()
+                    && dl.retry_count < dl.max_retries
+                    && dl.next_retry_at.map_or(true, |t| t <= now)
+            })
+            .take(limit as usize)
+            .cloned()
+            .collect();
+        Ok(result)
+    }
+
+    async fn resolve_dead_letter(&self, id: &str) -> Result<(), EventStoreError> {
+        let mut dead_letters = self.dead_letters.write().await;
+        if let Some(dl) = dead_letters.iter_mut().find(|dl| dl.id == id) {
+            dl.resolved_at = Some(Utc::now());
+        }
+        Ok(())
+    }
+
+    async fn increment_dead_letter_retry(&self, id: &str, next_retry_at: DateTime<Utc>) -> Result<(), EventStoreError> {
+        let mut dead_letters = self.dead_letters.write().await;
+        if let Some(dl) = dead_letters.iter_mut().find(|dl| dl.id == id) {
+            dl.retry_count += 1;
+            dl.next_retry_at = Some(next_retry_at);
+        }
+        Ok(())
+    }
+
+    async fn list_dead_letters(
+        &self,
+        handler_name: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<DeadLetterEntry>, EventStoreError> {
+        let dead_letters = self.dead_letters.read().await;
+        let result: Vec<_> = dead_letters
+            .iter()
+            .filter(|dl| handler_name.map_or(true, |h| dl.handler_name == h))
+            .take(limit as usize)
+            .cloned()
+            .collect();
+        Ok(result)
+    }
+
+    async fn purge_dead_letters(&self, older_than: Duration) -> Result<u64, EventStoreError> {
+        let cutoff = Utc::now() - chrono::Duration::from_std(older_than).unwrap_or_default();
+        let mut dead_letters = self.dead_letters.write().await;
+        let original_len = dead_letters.len();
+        dead_letters.retain(|dl| {
+            // Only purge resolved entries older than cutoff
+            !(dl.resolved_at.is_some() && dl.created_at < cutoff)
+        });
+        Ok((original_len - dead_letters.len()) as u64)
+    }
+
+    // === Circuit Breakers ===
+
+    async fn load_circuit_breaker_states(&self) -> Result<Vec<CircuitBreakerRecord>, EventStoreError> {
+        let cbs = self.circuit_breakers.read().await;
+        Ok(cbs.clone())
+    }
+
+    async fn save_circuit_breaker_state(
+        &self,
+        handler_name: &str,
+        failure_count: u32,
+        tripped: bool,
+        tripped_at: Option<DateTime<Utc>>,
+        last_failure: Option<DateTime<Utc>>,
+    ) -> Result<(), EventStoreError> {
+        let mut cbs = self.circuit_breakers.write().await;
+        if let Some(cb) = cbs.iter_mut().find(|cb| cb.handler_name == handler_name) {
+            cb.failure_count = failure_count;
+            cb.tripped = tripped;
+            cb.tripped_at = tripped_at;
+            cb.last_failure = last_failure;
+        } else {
+            cbs.push(CircuitBreakerRecord {
+                handler_name: handler_name.to_string(),
+                failure_count,
+                tripped,
+                tripped_at,
+                last_failure,
+            });
+        }
+        Ok(())
+    }
+
+    // === Webhooks ===
+
+    async fn create_webhook(
+        &self,
+        id: &str,
+        url: &str,
+        secret: Option<&str>,
+        filter_json: &str,
+        max_failures: u32,
+        created_at: &str,
+    ) -> Result<(), EventStoreError> {
+        let mut webhooks = self.webhooks.write().await;
+        let filter_category = serde_json::from_str::<serde_json::Value>(filter_json)
+            .ok()
+            .and_then(|v| v.get("category").and_then(|c| c.as_str().map(String::from)));
+        webhooks.push(WebhookSubscription {
+            id: id.to_string(),
+            url: url.to_string(),
+            secret: secret.map(String::from),
+            filter_category,
+            active: true,
+            failure_count: 0,
+            max_failures,
+            last_delivered_sequence: 0,
+            created_at: created_at.to_string(),
+        });
+        Ok(())
+    }
+
+    async fn list_webhooks(&self) -> Result<Vec<WebhookSubscription>, EventStoreError> {
+        let webhooks = self.webhooks.read().await;
+        Ok(webhooks.clone())
+    }
+
+    async fn get_webhook(&self, id: &str) -> Result<Option<WebhookSubscription>, EventStoreError> {
+        let webhooks = self.webhooks.read().await;
+        Ok(webhooks.iter().find(|w| w.id == id).cloned())
+    }
+
+    async fn delete_webhook(&self, id: &str) -> Result<(), EventStoreError> {
+        let mut webhooks = self.webhooks.write().await;
+        webhooks.retain(|w| w.id != id);
+        Ok(())
+    }
+
+    async fn list_active_webhooks_for_category(&self, category: &str) -> Result<Vec<WebhookSubscription>, EventStoreError> {
+        let webhooks = self.webhooks.read().await;
+        let result: Vec<_> = webhooks
+            .iter()
+            .filter(|w| {
+                w.active && w.filter_category.as_deref().map_or(true, |c| c == category)
+            })
+            .cloned()
+            .collect();
+        Ok(result)
+    }
+
+    async fn record_webhook_failure(&self, id: &str) -> Result<(), EventStoreError> {
+        let mut webhooks = self.webhooks.write().await;
+        if let Some(w) = webhooks.iter_mut().find(|w| w.id == id) {
+            w.failure_count += 1;
+            if w.failure_count >= w.max_failures {
+                w.active = false;
+            }
+        }
+        Ok(())
+    }
+
+    async fn update_webhook_sequence(&self, id: &str, sequence: u64) -> Result<(), EventStoreError> {
+        let mut webhooks = self.webhooks.write().await;
+        if let Some(w) = webhooks.iter_mut().find(|w| w.id == id) {
+            w.last_delivered_sequence = sequence;
+        }
+        Ok(())
     }
 }
 
