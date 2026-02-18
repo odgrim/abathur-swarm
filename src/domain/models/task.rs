@@ -112,6 +112,57 @@ impl Default for TaskSource {
     }
 }
 
+/// What kind of work this task represents.
+///
+/// This is a semantic discriminator for the class of work, orthogonal to
+/// status, source, or execution mode. It enables filtering and display
+/// customization per task category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskType {
+    /// General-purpose implementation task (default).
+    Standard,
+    /// Intent verification — LLM-based evaluation of whether work satisfies original intent.
+    Verification,
+    /// Research or analysis task (read-only, produces findings).
+    Research,
+    /// Code review task.
+    Review,
+}
+
+impl Default for TaskType {
+    fn default() -> Self {
+        Self::Standard
+    }
+}
+
+impl TaskType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Verification => "verification",
+            Self::Research => "research",
+            Self::Review => "review",
+        }
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "standard" => Some(Self::Standard),
+            "verification" => Some(Self::Verification),
+            "research" => Some(Self::Research),
+            "review" => Some(Self::Review),
+            _ => None,
+        }
+    }
+
+    /// Whether this task type is a verification task.
+    pub fn is_verification(&self) -> bool {
+        matches!(self, Self::Verification)
+    }
+}
+
 /// Priority level for tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -372,6 +423,8 @@ pub struct Task {
     pub execution_mode: ExecutionMode,
     /// Trajectory ID for convergent tasks (links to convergence engine state).
     pub trajectory_id: Option<Uuid>,
+    /// What kind of work this task represents (standard, verification, research, review).
+    pub task_type: TaskType,
 }
 
 impl Task {
@@ -405,6 +458,7 @@ impl Task {
             idempotency_key: None,
             execution_mode: ExecutionMode::default(),
             trajectory_id: None,
+            task_type: TaskType::default(),
         }
     }
 
@@ -436,6 +490,7 @@ impl Task {
             idempotency_key: None,
             execution_mode: ExecutionMode::default(),
             trajectory_id: None,
+            task_type: TaskType::default(),
         }
     }
 
@@ -486,6 +541,12 @@ impl Task {
     /// Set execution mode.
     pub fn with_execution_mode(mut self, mode: ExecutionMode) -> Self {
         self.execution_mode = mode;
+        self
+    }
+
+    /// Set task type.
+    pub fn with_task_type(mut self, task_type: TaskType) -> Self {
+        self.task_type = task_type;
         self
     }
 

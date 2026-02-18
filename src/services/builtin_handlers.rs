@@ -704,6 +704,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReviewFailureLoopHandler<T> {
                 idempotency_key: Some(replan_idem),
                 source: TaskSource::System,
                 deadline: None,
+                task_type: None,
             }),
         );
 
@@ -741,6 +742,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReviewFailureLoopHandler<T> {
                 idempotency_key: Some(reimpl_idem),
                 source: TaskSource::System,
                 deadline: None,
+                task_type: None,
             }),
         );
 
@@ -778,6 +780,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReviewFailureLoopHandler<T> {
                 idempotency_key: Some(rereview_idem),
                 source: TaskSource::System,
                 deadline: None,
+                task_type: None,
             }),
         );
 
@@ -1601,6 +1604,7 @@ impl EventHandler for A2APollHandler {
                     idempotency_key: None,
                     source: crate::domain::models::TaskSource::System,
                     deadline: None,
+                    task_type: None,
                 }),
             );
 
@@ -3399,6 +3403,7 @@ impl EventHandler for GoalEvaluationTaskCreationHandler {
                             idempotency_key: Some(idem_key),
                             source: TaskSource::System,
                             deadline: None,
+                            task_type: None,
                         }),
                     );
 
@@ -3428,6 +3433,7 @@ impl EventHandler for GoalEvaluationTaskCreationHandler {
                         idempotency_key: Some(idem_key),
                         source: TaskSource::System,
                         deadline: None,
+                        task_type: None,
                     }),
                 );
 
@@ -3526,6 +3532,7 @@ impl EventHandler for EvolutionTriggeredTemplateUpdateHandler {
                 idempotency_key: Some(format!("evolve:{}", template_name)),
                 source: TaskSource::System,
                 deadline: None,
+                task_type: None,
             }),
         );
 
@@ -5927,6 +5934,7 @@ impl<S: TaskScheduleRepository + 'static, T: TaskRepository + 'static> EventHand
             idempotency_key: Some(idempotency_key),
             source: TaskSource::Schedule(schedule.id),
             deadline: None,
+            task_type: None,
         });
 
         let envelope = CommandEnvelope::new(

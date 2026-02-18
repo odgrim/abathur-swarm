@@ -6,7 +6,7 @@ use uuid::Uuid;
 use async_trait::async_trait;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::{Complexity, ExecutionMode, Task, TaskContext, TaskPriority, TaskSource, TaskStatus};
+use crate::domain::models::{Complexity, ExecutionMode, Task, TaskContext, TaskPriority, TaskSource, TaskStatus, TaskType};
 use crate::domain::ports::{TaskFilter, TaskRepository};
 use crate::services::command_bus::{CommandError, CommandOutcome, CommandResult, TaskCommand, TaskCommandHandler};
 use crate::services::event_bus::{
@@ -372,6 +372,7 @@ impl<T: TaskRepository> TaskService<T> {
         idempotency_key: Option<String>,
         source: TaskSource,
         deadline: Option<chrono::DateTime<chrono::Utc>>,
+        task_type: Option<TaskType>,
     ) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         let mut events = Vec::new();
 
@@ -415,6 +416,9 @@ impl<T: TaskRepository> TaskService<T> {
             task = task.with_idempotency_key(key);
         }
         task.deadline = deadline;
+        if let Some(tt) = task_type {
+            task = task.with_task_type(tt);
+        }
 
         for dep in depends_on {
             task = task.with_dependency(dep);
@@ -788,6 +792,7 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                 idempotency_key,
                 source,
                 deadline,
+                task_type,
             } => {
                 let (task, events) = self
                     .submit_task(
@@ -801,6 +806,7 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                         idempotency_key,
                         source,
                         deadline,
+                        task_type,
                     )
                     .await?;
                 Ok(CommandOutcome { result: CommandResult::Task(task), events })
@@ -910,6 +916,7 @@ mod tests {
             None,
             TaskSource::Human,
             None,
+            None,
         ).await.unwrap();
 
         assert_eq!(task.title, "Test Task");
@@ -933,6 +940,7 @@ mod tests {
             None,
             TaskSource::Human,
             None,
+            None,
         ).await.unwrap();
 
         // Create main task that depends on it
@@ -946,6 +954,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
             None,
         ).await.unwrap();
 
@@ -979,6 +988,7 @@ mod tests {
             Some("unique-key".to_string()),
             TaskSource::Human,
             None,
+            None,
         ).await.unwrap();
 
         let (task2, _) = service.submit_task(
@@ -991,6 +1001,7 @@ mod tests {
             None,
             Some("unique-key".to_string()),
             TaskSource::Human,
+            None,
             None,
         ).await.unwrap();
 
@@ -1013,6 +1024,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
             None,
         ).await.unwrap();
 
@@ -1039,6 +1051,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
             None,
         ).await.unwrap();
 
@@ -1203,6 +1216,7 @@ mod tests {
             None,
             TaskSource::Human,
             None,
+            None,
         ).await.unwrap();
 
         // Manually set convergent mode and trajectory_id (normally done by orchestrator)
@@ -1238,6 +1252,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
             None,
         ).await.unwrap();
 
@@ -1277,6 +1292,7 @@ mod tests {
             None,
             TaskSource::Human,
             None,
+            None,
         ).await.unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
@@ -1304,6 +1320,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
             None,
         ).await.unwrap();
 
@@ -1341,6 +1358,7 @@ mod tests {
             None,
             TaskSource::Human,
             None,
+            None,
         ).await.unwrap();
 
         assert!(task.execution_mode.is_direct(),
@@ -1364,6 +1382,7 @@ mod tests {
             Some(ctx),
             None,
             TaskSource::Human,
+            None,
             None,
         ).await.unwrap();
 

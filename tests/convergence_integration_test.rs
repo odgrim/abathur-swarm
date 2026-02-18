@@ -255,6 +255,7 @@ async fn test_classify_execution_mode_complex_gets_convergent() {
             None,
             abathur::domain::models::task::TaskSource::System,
             None,
+            None,
         )
         .await
         .expect("Failed to submit task");
@@ -292,6 +293,7 @@ async fn test_classify_execution_mode_trivial_stays_direct() {
             None,
             None,
             abathur::domain::models::task::TaskSource::System,
+            None,
             None,
         )
         .await
@@ -485,6 +487,7 @@ async fn test_convergent_outcome_mapping() {
             None,
             abathur::domain::models::task::TaskSource::System,
             None,
+            None,
         )
         .await
         .expect("Failed to submit task");
@@ -542,6 +545,7 @@ async fn test_convergent_outcome_mapping() {
             None,
             None,
             abathur::domain::models::task::TaskSource::System,
+            None,
             None,
         )
         .await
@@ -603,6 +607,7 @@ async fn test_task_retry_preserves_trajectory_id() {
             None,
             None,
             abathur::domain::models::task::TaskSource::System,
+            None,
             None,
         )
         .await
@@ -947,6 +952,7 @@ async fn test_apply_sla_pressure_warning() {
             None,
             None,
             abathur::domain::models::task::TaskSource::System,
+            None,
             None,
         )
         .await
@@ -1488,6 +1494,7 @@ async fn test_execution_mode_persistence_roundtrip() {
             None,
             None,
             abathur::domain::models::task::TaskSource::System,
+            None,
             None,
         )
         .await

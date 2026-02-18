@@ -113,6 +113,7 @@ async fn test_task_mutation_emits_and_persists_event() {
             None,
             TaskSource::Human,
             None,
+            None,
         )
         .await
         .expect("submit task");
@@ -413,6 +414,7 @@ async fn test_command_bus_routes_and_emits() {
             idempotency_key: None,
             source: TaskSource::Human,
             deadline: None,
+            task_type: None,
         }),
     );
 
@@ -489,6 +491,7 @@ async fn test_e2e_mutation_persist_react() {
             idempotency_key: None,
             source: TaskSource::Human,
             deadline: None,
+            task_type: None,
         }),
     );
     command_bus.dispatch(envelope).await.expect("dispatch");
