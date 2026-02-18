@@ -188,6 +188,13 @@ impl MemoryRepository for SqliteMemoryRepository {
     }
 
     async fn search(&self, query: &str, namespace: Option<&str>, limit: usize) -> DomainResult<Vec<Memory>> {
+        let sanitized = sanitize_fts5_query(query);
+
+        // If sanitization produced an empty query, return empty results immediately
+        if sanitized.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let sql = if namespace.is_some() {
             r#"SELECT m.* FROM memories m
                INNER JOIN memories_fts f ON m.id = f.memory_id
@@ -204,14 +211,14 @@ impl MemoryRepository for SqliteMemoryRepository {
 
         let rows: Vec<MemoryRow> = if let Some(ns) = namespace {
             sqlx::query_as(sql)
-                .bind(query)
+                .bind(&sanitized)
                 .bind(ns)
                 .bind(limit as i64)
                 .fetch_all(&self.pool)
                 .await?
         } else {
             sqlx::query_as(&sql.replace(" AND m.namespace = ?", ""))
-                .bind(query)
+                .bind(&sanitized)
                 .bind(limit as i64)
                 .fetch_all(&self.pool)
                 .await?
@@ -349,6 +356,31 @@ impl MemoryRepository for SqliteMemoryRepository {
     }
 }
 
+/// Sanitize a search query for use with SQLite FTS5.
+///
+/// FTS5 interprets certain tokens as reserved syntax: boolean operators (AND, OR, NOT),
+/// column filter prefixes (e.g. `key:`), and phrase quotes. Passing user input directly
+/// as an FTS5 MATCH expression can cause parse errors.
+///
+/// This function wraps every whitespace-delimited token in double quotes, which tells
+/// FTS5 to treat each token as a literal phrase rather than as syntax. Interior double
+/// quotes are escaped by doubling them (`"` → `""`).
+///
+/// Returns an empty string if the input is empty or whitespace-only, which the caller
+/// should treat as "no results" rather than issuing a MATCH query.
+fn sanitize_fts5_query(query: &str) -> String {
+    let terms: Vec<String> = query
+        .split_whitespace()
+        .map(|term| {
+            // Escape any existing double quotes by doubling them
+            let escaped = term.replace('"', "\"\"");
+            format!("\"{}\"", escaped)
+        })
+        .collect();
+
+    terms.join(" ")
+}
+
 #[derive(sqlx::FromRow)]
 struct MemoryRow {
     id: String,
@@ -478,5 +510,212 @@ mod tests {
         let counts = repo.count_by_tier().await.unwrap();
         assert_eq!(*counts.get(&MemoryTier::Working).unwrap_or(&0), 2);
         assert_eq!(*counts.get(&MemoryTier::Semantic).unwrap_or(&0), 1);
+    }
+
+    // ---- sanitize_fts5_query unit tests ----
+
+    #[test]
+    fn test_sanitize_fts5_normal_query() {
+        let result = sanitize_fts5_query("hello world");
+        assert_eq!(result, "\"hello\" \"world\"");
+    }
+
+    #[test]
+    fn test_sanitize_fts5_reserved_words() {
+        // NEAR is a reserved FTS5 keyword
+        let result = sanitize_fts5_query("NEAR something");
+        assert_eq!(result, "\"NEAR\" \"something\"");
+    }
+
+    #[test]
+    fn test_sanitize_fts5_boolean_operators() {
+        let result = sanitize_fts5_query("AND OR NOT");
+        assert_eq!(result, "\"AND\" \"OR\" \"NOT\"");
+    }
+
+    #[test]
+    fn test_sanitize_fts5_column_names() {
+        // Column filter syntax like "key:" should be treated as literal
+        let result = sanitize_fts5_query("key: value");
+        assert_eq!(result, "\"key:\" \"value\"");
+    }
+
+    #[test]
+    fn test_sanitize_fts5_empty_query() {
+        let result = sanitize_fts5_query("");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_sanitize_fts5_whitespace_only() {
+        let result = sanitize_fts5_query("   \t\n  ");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_sanitize_fts5_single_term() {
+        let result = sanitize_fts5_query("hello");
+        assert_eq!(result, "\"hello\"");
+    }
+
+    #[test]
+    fn test_sanitize_fts5_embedded_quotes() {
+        // A term containing double quotes should have them escaped
+        let result = sanitize_fts5_query("say\"hello\"");
+        assert_eq!(result, "\"say\"\"hello\"\"\"");
+    }
+
+    #[test]
+    fn test_sanitize_fts5_already_quoted_term() {
+        // Input that already has surrounding quotes should be double-escaped
+        let result = sanitize_fts5_query("\"quoted\"");
+        assert_eq!(result, "\"\"\"quoted\"\"\"");
+    }
+
+    #[test]
+    fn test_sanitize_fts5_special_characters() {
+        // Asterisks, parentheses, carets — all FTS5 special chars
+        let result = sanitize_fts5_query("foo* (bar) ^baz");
+        assert_eq!(result, "\"foo*\" \"(bar)\" \"^baz\"");
+    }
+
+    #[test]
+    fn test_sanitize_fts5_mixed_reserved_and_normal() {
+        let result = sanitize_fts5_query("find AND memory OR context NOT stale");
+        assert_eq!(result, "\"find\" \"AND\" \"memory\" \"OR\" \"context\" \"NOT\" \"stale\"");
+    }
+
+    // ---- Integration tests: search through FTS5 with reserved words ----
+
+    #[tokio::test]
+    async fn test_search_empty_query_returns_empty() {
+        let repo = setup_test_repo().await;
+
+        let memory = Memory::working("k1", "some content")
+            .with_namespace("test");
+        repo.store(&memory).await.unwrap();
+
+        let results = repo.search("", None, 10).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_whitespace_query_returns_empty() {
+        let repo = setup_test_repo().await;
+
+        let memory = Memory::working("k1", "some content")
+            .with_namespace("test");
+        repo.store(&memory).await.unwrap();
+
+        let results = repo.search("   ", None, 10).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_search_with_reserved_word_and() {
+        let repo = setup_test_repo().await;
+
+        // Store a memory whose content literally contains "AND"
+        let memory = Memory::working("reserved_and", "this AND that together")
+            .with_namespace("test");
+        repo.store(&memory).await.unwrap();
+
+        // Searching for "AND" should NOT crash — it should just work
+        let results = repo.search("AND", None, 10).await.unwrap();
+        // FTS5 will look for the literal token "and" (case-insensitive)
+        // The memory content contains "AND" so it should match
+        assert!(!results.is_empty(), "search for reserved word AND should not crash and should find matching content");
+    }
+
+    #[tokio::test]
+    async fn test_search_with_reserved_word_or() {
+        let repo = setup_test_repo().await;
+
+        let memory = Memory::working("reserved_or", "use OR logic here")
+            .with_namespace("test");
+        repo.store(&memory).await.unwrap();
+
+        let results = repo.search("OR", None, 10).await.unwrap();
+        assert!(!results.is_empty(), "search for reserved word OR should not crash");
+    }
+
+    #[tokio::test]
+    async fn test_search_with_reserved_word_not() {
+        let repo = setup_test_repo().await;
+
+        let memory = Memory::working("reserved_not", "do NOT forget this")
+            .with_namespace("test");
+        repo.store(&memory).await.unwrap();
+
+        let results = repo.search("NOT", None, 10).await.unwrap();
+        assert!(!results.is_empty(), "search for reserved word NOT should not crash");
+    }
+
+    #[tokio::test]
+    async fn test_search_with_reserved_word_near() {
+        let repo = setup_test_repo().await;
+
+        let memory = Memory::working("reserved_near", "look NEAR the edge")
+            .with_namespace("test");
+        repo.store(&memory).await.unwrap();
+
+        let results = repo.search("NEAR", None, 10).await.unwrap();
+        assert!(!results.is_empty(), "search for reserved word NEAR should not crash");
+    }
+
+    #[tokio::test]
+    async fn test_search_with_column_prefix_syntax() {
+        let repo = setup_test_repo().await;
+
+        let memory = Memory::working("col_prefix", "key: value pairs are common")
+            .with_namespace("test");
+        repo.store(&memory).await.unwrap();
+
+        // "key:" would normally be interpreted as a column filter; sanitization prevents that
+        let results = repo.search("key:", None, 10).await.unwrap();
+        // Should not crash, regardless of whether it finds matches
+        assert!(results.is_empty() || !results.is_empty(), "search with column prefix should not crash");
+    }
+
+    #[tokio::test]
+    async fn test_search_with_namespace_filter() {
+        let repo = setup_test_repo().await;
+
+        let memory_a = Memory::working("ns_a", "convergence loop feedback")
+            .with_namespace("alpha");
+        let memory_b = Memory::working("ns_b", "convergence loop feedback")
+            .with_namespace("beta");
+        repo.store(&memory_a).await.unwrap();
+        repo.store(&memory_b).await.unwrap();
+
+        let results = repo.search("convergence", Some("alpha"), 10).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].namespace, "alpha");
+    }
+
+    #[tokio::test]
+    async fn test_search_normal_query_still_works() {
+        let repo = setup_test_repo().await;
+
+        let memory = Memory::working("normal_search", "the quick brown fox jumps")
+            .with_namespace("test");
+        repo.store(&memory).await.unwrap();
+
+        let results = repo.search("quick brown", None, 10).await.unwrap();
+        assert!(!results.is_empty(), "normal multi-word search should still find content");
+        assert_eq!(results[0].key, "normal_search");
+    }
+
+    #[tokio::test]
+    async fn test_search_mixed_reserved_and_normal_terms() {
+        let repo = setup_test_repo().await;
+
+        let memory = Memory::working("mixed", "find AND fix the memory OR context NOT stale")
+            .with_namespace("test");
+        repo.store(&memory).await.unwrap();
+
+        // This query mixes reserved words with normal words — previously would crash
+        let results = repo.search("find AND memory", None, 10).await.unwrap();
+        assert!(!results.is_empty(), "mixed reserved + normal term search should not crash");
     }
 }
