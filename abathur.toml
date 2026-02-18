@@ -1,0 +1,2 @@
+[polling]
+goal_convergence_check_interval_secs = 3600
