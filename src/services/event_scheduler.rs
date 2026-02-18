@@ -466,7 +466,7 @@ pub fn interval_schedule(
         task_id: None,
         active: true,
         created_at: Utc::now(),
-        last_fired: None,
+        last_fired: Some(Utc::now()),
         fire_count: 0,
     }
 }
