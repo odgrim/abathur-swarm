@@ -50,6 +50,8 @@ pub enum Commands {
     Mcp(commands::mcp::McpArgs),
     /// Manage trigger rules for event-driven automation
     Trigger(commands::trigger::TriggerArgs),
+    /// Manage periodic task schedules
+    Schedule(commands::schedule::ScheduleArgs),
     /// Query and inspect the event store
     Event(commands::event::EventArgs),
     /// Manage workflow templates

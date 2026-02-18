@@ -24,7 +24,7 @@ use crate::services::builtin_handlers::{
     ReviewFailureLoopHandler, RetryProcessingHandler, SpecialistCheckHandler,
     StartupCatchUpHandler, StatsUpdateHandler, TaskCompletionLearningHandler,
     TaskCompletedReadinessHandler, TaskFailedBlockHandler, TaskFailedRetryHandler,
-    TaskReadySpawnHandler, TaskSLAEnforcementHandler,
+    TaskReadySpawnHandler, TaskScheduleHandler, TaskSLAEnforcementHandler,
     TriggerCatchupHandler, WatermarkAuditHandler,
     WorkflowPhaseCompletionHandler,
     WorktreeReconciliationHandler,
@@ -521,6 +521,34 @@ where
                     command_bus.clone(),
                 )))
                 .await;
+        }
+
+        // TaskScheduleHandler (NORMAL) — create tasks when periodic schedules fire
+        if let Some(ref pool) = self.pool {
+            use crate::adapters::sqlite::SqliteTaskScheduleRepository;
+            use crate::services::task_schedule_service::TaskScheduleService;
+
+            let schedule_repo = Arc::new(SqliteTaskScheduleRepository::new(pool.clone()));
+            reactor
+                .register(Arc::new(TaskScheduleHandler::new(
+                    schedule_repo.clone(),
+                    self.task_repo.clone(),
+                    command_bus.clone(),
+                )))
+                .await;
+
+            // Register all active task schedules with the EventScheduler
+            let schedule_service = TaskScheduleService::new(schedule_repo);
+            match schedule_service.register_active_schedules(&self.event_scheduler).await {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!("Registered {} active task schedule(s) with EventScheduler", count);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to register active task schedules: {}", e);
+                }
+            }
         }
     }
 

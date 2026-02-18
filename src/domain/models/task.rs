@@ -102,6 +102,8 @@ pub enum TaskSource {
     System,
     /// Subtask spawned by another task during execution
     SubtaskOf(Uuid),
+    /// Task created by a periodic schedule
+    Schedule(Uuid),
 }
 
 impl Default for TaskSource {

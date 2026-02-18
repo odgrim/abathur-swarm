@@ -33,6 +33,7 @@ pub mod meta_planner; // Rust service module for decomposition planning
 pub mod overmind;
 pub mod phase_orchestrator;
 pub mod swarm_orchestrator;
+pub mod task_schedule_service;
 pub mod task_service;
 pub mod trigger_rules;
 pub mod workflow_builder;
@@ -70,6 +71,7 @@ pub use overmind::{OvermindConfig, OvermindService};
 pub use phase_orchestrator::{PhaseOrchestrator, PhaseOrchestratorConfig};
 pub use workflow_builder::build_workflow_from_decomposition;
 pub use swarm_orchestrator::{ConvergenceLoopConfig, McpServerConfig, OrchestratorStatus, SwarmConfig, SwarmEvent, SwarmOrchestrator, SwarmStats, VerificationLevel};
+pub use task_schedule_service::TaskScheduleService;
 pub use task_service::{TaskService, SpawnLimitConfig, SpawnLimitResult, SpawnLimitType};
 pub use worktree_service::{WorktreeConfig, WorktreeService, WorktreeStats};
 pub use event_bus::{EventBus, EventBusConfig, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent};
