@@ -5971,3 +5971,202 @@ impl<S: TaskScheduleRepository + 'static, T: TaskRepository + 'static> EventHand
         }
     }
 }
+
+// ============================================================================
+// GoalConvergenceCheckHandler
+// ============================================================================
+
+/// Periodic deep goal convergence check (default: every 4 hours).
+///
+/// Unlike the lightweight `GoalEvaluationHandler` (60s) which observes and emits
+/// signal events, this handler creates an actual Overmind-processed task that
+/// performs a strategic evaluation of all active goals, assesses overall progress,
+/// and suggests concrete incremental next steps.
+///
+/// Triggered by `ScheduledEventFired { name: "goal-convergence-check" }`.
+pub struct GoalConvergenceCheckHandler<G: GoalRepository, T: TaskRepository> {
+    goal_repo: Arc<G>,
+    task_repo: Arc<T>,
+    command_bus: Arc<crate::services::command_bus::CommandBus>,
+}
+
+impl<G: GoalRepository, T: TaskRepository> GoalConvergenceCheckHandler<G, T> {
+    pub fn new(
+        goal_repo: Arc<G>,
+        task_repo: Arc<T>,
+        command_bus: Arc<crate::services::command_bus::CommandBus>,
+    ) -> Self {
+        Self { goal_repo, task_repo, command_bus }
+    }
+
+    /// Build the rich task description for the convergence check.
+    fn build_convergence_description(
+        goals: &[Goal],
+        completed_count: usize,
+        failed_count: usize,
+        running_count: usize,
+        ready_count: usize,
+        pending_count: usize,
+    ) -> String {
+        let mut desc = String::with_capacity(4096);
+
+        desc.push_str("# Goal Convergence Check\n\n");
+        desc.push_str("You are the Overmind performing a periodic strategic evaluation of all active goals.\n");
+        desc.push_str("Assess overall progress toward each goal, identify gaps, and create concrete incremental tasks to move the swarm closer to convergence.\n\n");
+
+        // Task statistics summary
+        desc.push_str("## Current Task Statistics\n\n");
+        desc.push_str(&format!("- **Completed**: {}\n", completed_count));
+        desc.push_str(&format!("- **Failed**: {}\n", failed_count));
+        desc.push_str(&format!("- **Running**: {}\n", running_count));
+        desc.push_str(&format!("- **Ready**: {}\n", ready_count));
+        desc.push_str(&format!("- **Pending/Blocked**: {}\n\n", pending_count));
+
+        // Active goals with constraints
+        desc.push_str("## Active Goals\n\n");
+        for (i, goal) in goals.iter().enumerate() {
+            desc.push_str(&format!("### {}. {} (priority: {:?})\n", i + 1, goal.name, goal.priority));
+            desc.push_str(&format!("**ID**: `{}`\n\n", goal.id));
+            desc.push_str(&format!("{}\n\n", goal.description));
+
+            if !goal.applicability_domains.is_empty() {
+                desc.push_str(&format!("**Domains**: {}\n\n", goal.applicability_domains.join(", ")));
+            }
+
+            if !goal.constraints.is_empty() {
+                desc.push_str("**Constraints**:\n");
+                for c in &goal.constraints {
+                    desc.push_str(&format!("- **{}** ({:?}): {}\n", c.name, c.constraint_type, c.description));
+                }
+                desc.push_str("\n");
+            }
+        }
+
+        // Instructions
+        desc.push_str("## Instructions\n\n");
+        desc.push_str("1. **Evaluate Progress**: For each active goal, assess how the completed and running tasks contribute toward convergence. Consider the ratio of completed vs failed tasks.\n");
+        desc.push_str("2. **Identify Gaps**: Determine what work is missing or insufficient to make meaningful progress on each goal. Consider constraint satisfaction.\n");
+        desc.push_str("3. **Prioritize**: Rank the goals by urgency and impact. Focus on goals with the least progress or most failures.\n");
+        desc.push_str("4. **Create Incremental Tasks**: Submit 1-3 concrete, actionable tasks that will move the swarm closer to goal convergence. Each task should be small enough to complete in a single agent session.\n");
+        desc.push_str("5. **Avoid Redundancy**: Do not create tasks that duplicate existing running or ready tasks. Focus on genuine gaps.\n\n");
+        desc.push_str("Remember: Goals are convergent attractors — they are never 'completed.' Your job is to identify the highest-impact incremental work that moves the swarm closer to each goal.\n");
+
+        desc
+    }
+}
+
+#[async_trait]
+impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
+    EventHandler for GoalConvergenceCheckHandler<G, T>
+{
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "GoalConvergenceCheckHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "goal-convergence-check"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        use crate::services::command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand};
+        use crate::domain::models::TaskPriority;
+
+        // Load all active goals
+        let goals = self.goal_repo.get_active_with_constraints().await
+            .map_err(|e| format!("GoalConvergenceCheckHandler: failed to get active goals: {}", e))?;
+
+        if goals.is_empty() {
+            tracing::debug!("GoalConvergenceCheckHandler: no active goals, skipping convergence check");
+            return Ok(Reaction::None);
+        }
+
+        // Gather task statistics
+        let completed = self.task_repo.list_by_status(TaskStatus::Complete).await
+            .map_err(|e| format!("GoalConvergenceCheckHandler: failed to list completed tasks: {}", e))?;
+        let failed = self.task_repo.list_by_status(TaskStatus::Failed).await
+            .map_err(|e| format!("GoalConvergenceCheckHandler: failed to list failed tasks: {}", e))?;
+        let running = self.task_repo.list_by_status(TaskStatus::Running).await
+            .map_err(|e| format!("GoalConvergenceCheckHandler: failed to list running tasks: {}", e))?;
+        let ready = self.task_repo.list_by_status(TaskStatus::Ready).await
+            .map_err(|e| format!("GoalConvergenceCheckHandler: failed to list ready tasks: {}", e))?;
+        let pending = self.task_repo.list_by_status(TaskStatus::Pending).await
+            .map_err(|e| format!("GoalConvergenceCheckHandler: failed to list pending tasks: {}", e))?;
+
+        // Overlap check: skip if a previous convergence check task is still running/ready
+        let overlap_exists = running.iter()
+            .chain(ready.iter())
+            .any(|t| t.title.starts_with("Goal Convergence Check"));
+
+        if overlap_exists {
+            tracing::debug!("GoalConvergenceCheckHandler: previous convergence check task still active, skipping");
+            return Ok(Reaction::None);
+        }
+
+        // Build idempotency key based on 4-hour time bucket.
+        // This ensures at most one task per 4-hour window.
+        let now = chrono::Utc::now();
+        let bucket = now.timestamp() / 14400; // 4-hour buckets
+        let idem_key = format!("goal-convergence-check:{}", bucket);
+
+        // Build the rich description
+        let description = Self::build_convergence_description(
+            &goals,
+            completed.len(),
+            failed.len(),
+            running.len(),
+            ready.len(),
+            pending.len(),
+        );
+
+        let title = format!(
+            "Goal Convergence Check — {} active goal(s)",
+            goals.len()
+        );
+
+        let envelope = CommandEnvelope::new(
+            CommandSource::EventHandler("GoalConvergenceCheckHandler".to_string()),
+            DomainCommand::Task(TaskCommand::Submit {
+                title: Some(title),
+                description,
+                parent_id: None,
+                priority: TaskPriority::Normal,
+                agent_type: Some("overmind".to_string()),
+                depends_on: vec![],
+                context: Box::new(None),
+                idempotency_key: Some(idem_key),
+                source: TaskSource::System,
+                deadline: None,
+                task_type: None,
+            }),
+        );
+
+        match self.command_bus.dispatch(envelope).await {
+            Ok(_) => {
+                tracing::info!(
+                    "GoalConvergenceCheckHandler: created convergence check task for {} goals",
+                    goals.len()
+                );
+            }
+            Err(crate::services::command_bus::CommandError::DuplicateCommand(_)) => {
+                tracing::debug!("GoalConvergenceCheckHandler: duplicate convergence check task, skipping");
+            }
+            Err(e) => {
+                tracing::warn!("GoalConvergenceCheckHandler: failed to create convergence check task: {}", e);
+            }
+        }
+
+        Ok(Reaction::None)
+    }
+}
