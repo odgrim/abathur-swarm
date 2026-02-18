@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    ArtifactRef, ExecutionMode, RoutingHints, Task, TaskContext, TaskPriority, TaskSource, TaskStatus,
+    ArtifactRef, ExecutionMode, RoutingHints, Task, TaskContext, TaskPriority, TaskSource, TaskStatus, TaskType,
 };
 use crate::domain::ports::{TaskFilter, TaskRepository};
 
@@ -35,8 +35,8 @@ impl TaskRepository for SqliteTaskRepository {
             r#"INSERT INTO tasks (id, parent_id, title, description, status, priority,
                agent_type, routing, artifacts, context, retry_count, max_retries, worktree_path,
                idempotency_key, source_type, source_ref, version, created_at, updated_at, started_at, completed_at, deadline,
-               execution_mode, trajectory_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+               execution_mode, trajectory_id, task_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
         )
         .bind(task.id.to_string())
         .bind(task.parent_id.map(|id| id.to_string()))
@@ -62,6 +62,7 @@ impl TaskRepository for SqliteTaskRepository {
         .bind(task.deadline.map(|t| t.to_rfc3339()))
         .bind(&execution_mode_json)
         .bind(task.trajectory_id.map(|id| id.to_string()))
+        .bind(task.task_type.as_str())
         .execute(&self.pool)
         .await?;
 
@@ -104,7 +105,7 @@ impl TaskRepository for SqliteTaskRepository {
                context = ?, retry_count = ?, max_retries = ?, worktree_path = ?,
                source_type = ?, source_ref = ?,
                version = ?, updated_at = ?, started_at = ?, completed_at = ?, deadline = ?,
-               execution_mode = ?, trajectory_id = ?
+               execution_mode = ?, trajectory_id = ?, task_type = ?
                WHERE id = ?"#
         )
         .bind(task.parent_id.map(|id| id.to_string()))
@@ -128,6 +129,7 @@ impl TaskRepository for SqliteTaskRepository {
         .bind(task.deadline.map(|t| t.to_rfc3339()))
         .bind(&execution_mode_json)
         .bind(task.trajectory_id.map(|id| id.to_string()))
+        .bind(task.task_type.as_str())
         .bind(task.id.to_string())
         .execute(&self.pool)
         .await?;
@@ -171,6 +173,10 @@ impl TaskRepository for SqliteTaskRepository {
         if let Some(agent_type) = &filter.agent_type {
             query.push_str(" AND agent_type = ?");
             bindings.push(agent_type.clone());
+        }
+        if let Some(task_type) = &filter.task_type {
+            query.push_str(" AND task_type = ?");
+            bindings.push(task_type.as_str().to_string());
         }
 
         query.push_str(" ORDER BY created_at DESC");
@@ -409,6 +415,7 @@ struct TaskRow {
     deadline: Option<String>,
     execution_mode: Option<String>,
     trajectory_id: Option<String>,
+    task_type: Option<String>,
 }
 
 impl TryFrom<TaskRow> for Task {
@@ -442,6 +449,10 @@ impl TryFrom<TaskRow> for Task {
             None => ExecutionMode::default(),
         };
         let trajectory_id = super::parse_optional_uuid(row.trajectory_id)?;
+        let task_type = row.task_type
+            .as_deref()
+            .and_then(TaskType::from_str)
+            .unwrap_or_default();
 
         Ok(Task {
             id,
@@ -468,6 +479,7 @@ impl TryFrom<TaskRow> for Task {
             idempotency_key: row.idempotency_key,
             execution_mode,
             trajectory_id,
+            task_type,
         })
     }
 }

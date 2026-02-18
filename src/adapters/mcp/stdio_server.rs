@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
-use crate::domain::models::{GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource, TaskStatus};
+use crate::domain::models::{GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource, TaskStatus, TaskType};
 use crate::domain::ports::{AgentFilter, GoalFilter, GoalRepository, MemoryRepository, TaskRepository};
 use crate::services::command_bus::{
     CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand, MemoryCommand,
@@ -160,7 +160,8 @@ where
                                 "items": { "type": "string" },
                                 "description": "UUIDs of tasks that must complete before this one starts. Use this to create task pipelines (e.g., implement before test, test before review)."
                             },
-                            "priority": { "type": "string", "enum": ["low", "normal", "high", "critical"], "description": "Task priority. Higher priority tasks are picked up first. Default: normal." }
+                            "priority": { "type": "string", "enum": ["low", "normal", "high", "critical"], "description": "Task priority. Higher priority tasks are picked up first. Default: normal." },
+                            "task_type": { "type": "string", "enum": ["standard", "verification", "research", "review"], "description": "Type of task. Default: standard. Use 'verification' for intent verification tasks." }
                         },
                         "required": ["description"]
                     }
@@ -172,6 +173,7 @@ where
                         "type": "object",
                         "properties": {
                             "status": { "type": "string", "enum": ["pending", "ready", "running", "complete", "failed", "blocked"], "description": "Filter by task status. 'running' shows in-progress work, 'failed' shows tasks needing attention, 'complete' shows finished work, 'blocked' shows tasks waiting on dependencies." },
+                            "task_type": { "type": "string", "enum": ["standard", "verification", "research", "review"], "description": "Filter by task type. Use 'verification' to see intent verification tasks." },
                             "limit": { "type": "integer", "description": "Maximum number of tasks to return (default: 50)" }
                         }
                     }
@@ -438,6 +440,11 @@ where
             format!("subtask:{}:{}:{}", pid, role, normalized_title)
         });
 
+        let task_type = args
+            .get("task_type")
+            .and_then(|t| t.as_str())
+            .and_then(TaskType::from_str);
+
         let cmd = DomainCommand::Task(TaskCommand::Submit {
             title,
             description,
@@ -449,6 +456,7 @@ where
             idempotency_key,
             source: TaskSource::Human,
             deadline: None,
+            task_type,
         });
         let envelope = CommandEnvelope::new(CommandSource::Mcp("stdio".into()), cmd);
 
@@ -474,13 +482,24 @@ where
             .unwrap_or(50) as usize;
 
         let status_filter = args.get("status").and_then(|s| s.as_str());
+        let task_type_filter = args.get("task_type").and_then(|t| t.as_str());
 
-        let tasks = if let Some(status_str) = status_filter {
-            let status = TaskStatus::from_str(status_str)
-                .ok_or_else(|| format!("Invalid status: {}", status_str))?;
+        let has_any_filter = status_filter.is_some() || task_type_filter.is_some();
+
+        let tasks = if has_any_filter {
+            let status = match status_filter {
+                Some(s) => Some(TaskStatus::from_str(s)
+                    .ok_or_else(|| format!("Invalid status: {}", s))?),
+                None => None,
+            };
+            let task_type = match task_type_filter {
+                Some(t) => Some(TaskType::from_str(t)
+                    .ok_or_else(|| format!("Invalid task_type: {}", t))?),
+                None => None,
+            };
             use crate::domain::ports::TaskFilter;
             self.task_service
-                .list_tasks(TaskFilter { status: Some(status), ..Default::default() })
+                .list_tasks(TaskFilter { status, task_type, ..Default::default() })
                 .await
                 .map_err(|e| format!("Failed to list tasks: {}", e))?
         } else {
@@ -499,6 +518,7 @@ where
                     "title": t.title,
                     "status": t.status.as_str(),
                     "priority": t.priority.as_str(),
+                    "task_type": t.task_type.as_str(),
                     "agent_type": t.agent_type,
                     "parent_id": t.parent_id.map(|id| id.to_string()),
                 })
@@ -522,18 +542,32 @@ where
             .map_err(|e| format!("Failed to get task: {}", e))?
             .ok_or_else(|| format!("Task {} not found", id))?;
 
-        let response = serde_json::json!({
+        let mut response = serde_json::json!({
             "id": task.id.to_string(),
             "title": task.title,
             "description": task.description,
             "status": task.status.as_str(),
             "priority": task.priority.as_str(),
+            "task_type": task.task_type.as_str(),
             "agent_type": task.agent_type,
             "parent_id": task.parent_id.map(|id| id.to_string()),
             "depends_on": task.depends_on.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
             "retry_count": task.retry_count,
             "created_at": task.created_at.to_rfc3339(),
         });
+
+        // Include verification-specific details when applicable
+        if task.task_type.is_verification() {
+            response["verification"] = serde_json::json!({
+                "satisfaction": task.context.custom.get("satisfaction"),
+                "confidence": task.context.custom.get("confidence"),
+                "iteration": task.context.custom.get("iteration"),
+                "gaps_count": task.context.custom.get("gaps_count"),
+                "gaps": task.context.custom.get("gaps"),
+                "accomplishment_summary": task.context.custom.get("accomplishment_summary"),
+            });
+        }
+
         serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
     }
 

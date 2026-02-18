@@ -8,7 +8,7 @@ use crate::adapters::sqlite::{SqliteTaskRepository, initialize_default_database}
 use crate::cli::command_dispatcher::CliCommandDispatcher;
 use crate::cli::id_resolver::resolve_task_id;
 use crate::cli::output::{output, truncate, CommandOutput};
-use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus};
+use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus, TaskType};
 use crate::domain::ports::TaskFilter;
 use crate::services::command_bus::{CommandResult, DomainCommand, TaskCommand};
 use crate::services::TaskService;
@@ -61,6 +61,9 @@ pub enum TaskCommands {
         /// Filter by agent type
         #[arg(short, long)]
         agent: Option<String>,
+        /// Filter by task type (standard, verification, research, review)
+        #[arg(long = "type")]
+        task_type: Option<String>,
         /// Show only ready tasks
         #[arg(long)]
         ready: bool,
@@ -96,6 +99,7 @@ pub struct TaskOutput {
     pub agent_type: Option<String>,
     pub depends_on: Vec<String>,
     pub retry_count: u32,
+    pub task_type: String,
 }
 
 impl From<&Task> for TaskOutput {
@@ -108,6 +112,7 @@ impl From<&Task> for TaskOutput {
             agent_type: task.agent_type.clone(),
             depends_on: task.depends_on.iter().map(|id| id.to_string()).collect(),
             retry_count: task.retry_count,
+            task_type: task.task_type.as_str().to_string(),
         }
     }
 }
@@ -126,18 +131,19 @@ impl CommandOutput for TaskListOutput {
 
         let mut lines = vec![format!("Found {} task(s):\n", self.total)];
         lines.push(format!(
-            "{:<12} {:<25} {:<10} {:<10} {:<12}",
-            "ID", "TITLE", "STATUS", "PRIORITY", "AGENT"
+            "{:<12} {:<25} {:<10} {:<10} {:<14} {:<12}",
+            "ID", "TITLE", "STATUS", "PRIORITY", "TYPE", "AGENT"
         ));
-        lines.push("-".repeat(70));
+        lines.push("-".repeat(84));
 
         for task in &self.tasks {
             lines.push(format!(
-                "{:<12} {:<25} {:<10} {:<10} {:<12}",
+                "{:<12} {:<25} {:<10} {:<10} {:<14} {:<12}",
                 &task.id[..8],
                 truncate(&task.title, 23),
                 task.status,
                 task.priority,
+                task.task_type,
                 task.agent_type.as_deref().unwrap_or("-")
             ));
         }
@@ -159,6 +165,7 @@ pub struct TaskDetailOutput {
     pub created_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+    pub context_custom: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl CommandOutput for TaskDetailOutput {
@@ -168,6 +175,7 @@ impl CommandOutput for TaskDetailOutput {
             format!("ID: {}", self.task.id),
             format!("Status: {}", self.task.status),
             format!("Priority: {}", self.task.priority),
+            format!("Type: {}", self.task.task_type),
         ];
 
         if let Some(agent) = &self.task.agent_type {
@@ -184,6 +192,37 @@ impl CommandOutput for TaskDetailOutput {
             lines.push(format!("\nDependencies ({}):", self.task.depends_on.len()));
             for dep in &self.task.depends_on {
                 lines.push(format!("  - {}", &dep[..8]));
+            }
+        }
+
+        // Verification-specific details
+        if self.task.task_type == "verification" {
+            lines.push(String::new());
+            lines.push("Verification Details:".to_string());
+            if let Some(serde_json::Value::String(sat)) = self.context_custom.get("satisfaction") {
+                lines.push(format!("  Satisfaction: {}", sat));
+            }
+            if let Some(serde_json::Value::Number(conf)) = self.context_custom.get("confidence") {
+                if let Some(c) = conf.as_f64() {
+                    lines.push(format!("  Confidence: {:.0}%", c * 100.0));
+                }
+            }
+            if let Some(serde_json::Value::Number(iter)) = self.context_custom.get("iteration") {
+                lines.push(format!("  Iteration: {}", iter));
+            }
+            if let Some(serde_json::Value::Number(gc)) = self.context_custom.get("gaps_count") {
+                lines.push(format!("  Gaps: {}", gc));
+            }
+            if let Some(serde_json::Value::Array(gaps)) = self.context_custom.get("gaps") {
+                for gap in gaps {
+                    if let Some(desc) = gap.get("description").and_then(|d| d.as_str()) {
+                        let severity = gap.get("severity").and_then(|s| s.as_str()).unwrap_or("?");
+                        lines.push(format!("    - [{}] {}", severity, desc));
+                    }
+                }
+            }
+            if let Some(serde_json::Value::String(summary)) = self.context_custom.get("accomplishment_summary") {
+                lines.push(format!("  Summary: {}", truncate(summary, 120)));
             }
         }
 
@@ -314,6 +353,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 idempotency_key,
                 source: TaskSource::Human,
                 deadline,
+                task_type: None,
             });
 
             let result = dispatcher.dispatch(cmd).await
@@ -332,7 +372,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
             output(&out, json_mode);
         }
 
-        TaskCommands::List { status, priority, agent, ready, limit } => {
+        TaskCommands::List { status, priority, agent, task_type, ready, limit } => {
             let tasks = if ready {
                 service.get_ready_tasks(limit).await?
             } else {
@@ -341,6 +381,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                     priority: priority.as_ref().and_then(|p| TaskPriority::from_str(p)),
                     agent_type: agent,
                     parent_id: None,
+                    task_type: task_type.as_ref().and_then(|t| TaskType::from_str(t)),
                 };
                 service.list_tasks(filter).await?
             };
@@ -365,6 +406,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 created_at: task.created_at.to_rfc3339(),
                 started_at: task.started_at.map(|t| t.to_rfc3339()),
                 completed_at: task.completed_at.map(|t| t.to_rfc3339()),
+                context_custom: task.context.custom.clone(),
             };
             output(&out, json_mode);
         }
