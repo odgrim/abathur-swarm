@@ -480,17 +480,27 @@ async fn list_ready_tasks<T: TaskRepository + Clone + Send + Sync + 'static>(
 async fn get_stats<T: TaskRepository + Clone + Send + Sync + 'static>(
     State(state): State<Arc<AppState<T>>>,
 ) -> Result<Json<QueueStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
-    // Get counts by fetching tasks for each status
-    // Note: In production, we'd add a dedicated count_by_status method
-    let ready = state.service.get_ready_tasks(1000).await.map(|t| t.len() as u64).unwrap_or(0);
+    let counts = state.service.get_status_counts().await.map_err(|e| (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: e.to_string(),
+            code: "QUERY_ERROR".to_string(),
+        }),
+    ))?;
+
+    let pending = *counts.get(&TaskStatus::Pending).unwrap_or(&0);
+    let ready = *counts.get(&TaskStatus::Ready).unwrap_or(&0);
+    let running = *counts.get(&TaskStatus::Running).unwrap_or(&0);
+    let complete = *counts.get(&TaskStatus::Complete).unwrap_or(&0);
+    let failed = *counts.get(&TaskStatus::Failed).unwrap_or(&0);
 
     Ok(Json(QueueStatsResponse {
-        pending: 0, // Would need additional query
+        pending,
         ready,
-        running: 0, // Would need additional query
-        complete: 0, // Would need additional query
-        failed: 0, // Would need additional query
-        total: ready, // Incomplete - just ready for now
+        running,
+        complete,
+        failed,
+        total: pending + ready + running + complete + failed,
     }))
 }
 

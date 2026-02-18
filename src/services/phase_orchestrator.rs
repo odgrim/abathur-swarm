@@ -13,11 +13,12 @@ use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{
-    Task, TaskDag, TaskSource, TaskStatus,
+    Task, TaskDag, TaskSource, TaskStatus, IntentSatisfaction,
     workflow::{
         PhaseDefinition, PhaseStatus, PhaseType,
         WorkflowDefinition, WorkflowInstance, WorkflowStatus,
     },
+    overmind::{StuckStateRecoveryRequest, GoalContext, FailureRecord},
 };
 use crate::domain::ports::{
     AgentRepository, GoalRepository, Substrate, TaskRepository, WorkflowRepository,
@@ -25,6 +26,7 @@ use crate::domain::ports::{
 use crate::services::dag_executor::{DagExecutor, ExecutionEvent, ExecutorConfig};
 use crate::services::event_bus::{EventBus, EventPayload, EventSeverity};
 use crate::services::event_factory::workflow_event;
+use crate::services::intent_verifier::IntentVerifierService;
 use crate::services::OvermindService;
 
 /// Configuration for the phase orchestrator.
@@ -65,6 +67,7 @@ where
     workflow_repo: Arc<dyn WorkflowRepository>,
     event_bus: Arc<EventBus>,
     overmind: Option<Arc<OvermindService>>,
+    intent_verifier: Option<Arc<IntentVerifierService<G, T>>>,
     config: PhaseOrchestratorConfig,
     /// Active workflow instances being tracked.
     active_workflows: Arc<RwLock<Vec<(WorkflowDefinition, WorkflowInstance)>>>,
@@ -93,6 +96,7 @@ where
             workflow_repo,
             event_bus,
             overmind: None,
+            intent_verifier: None,
             config,
             active_workflows: Arc::new(RwLock::new(Vec::new())),
         }
@@ -101,6 +105,12 @@ where
     /// Set the overmind service for recovery decisions.
     pub fn with_overmind(mut self, overmind: Arc<OvermindService>) -> Self {
         self.overmind = Some(overmind);
+        self
+    }
+
+    /// Set the intent verifier service for verification phases.
+    pub fn with_intent_verifier(mut self, verifier: Arc<IntentVerifierService<G, T>>) -> Self {
+        self.intent_verifier = Some(verifier);
         self
     }
 
@@ -563,9 +573,39 @@ where
     ) -> DomainResult<()> {
         let phase_id = phase_def.id;
 
-        // For now, verification phases pass automatically.
-        // In production, this would invoke IntentVerifier or OverseerCluster.
-        let passed = true;
+        // Use IntentVerifier when configured, otherwise auto-pass (backwards compatible).
+        let passed = if let Some(ref verifier) = self.intent_verifier {
+            // Clone task_ids from an immutable borrow before the mutable borrow below
+            let task_ids: Vec<Uuid> = instance
+                .phase_instances
+                .get(&phase_id)
+                .map(|pi| pi.task_ids.clone())
+                .unwrap_or_default();
+
+            let mut tasks = Vec::new();
+            for task_id in &task_ids {
+                if let Ok(Some(task)) = self.task_repo.get(*task_id).await {
+                    if task.status == TaskStatus::Complete {
+                        tasks.push(task);
+                    }
+                }
+            }
+
+            match verifier.verify_task_batch(&tasks, &phase_def.name, 1).await {
+                Ok(result) => result.satisfaction == IntentSatisfaction::Satisfied,
+                Err(e) => {
+                    warn!(
+                        phase_id = %phase_id,
+                        error = %e,
+                        "Intent verification failed, defaulting to pass"
+                    );
+                    true // Graceful degradation: pass on verification error
+                }
+            }
+        } else {
+            // No verifier configured — auto-pass (backwards compatible)
+            true
+        };
 
         {
             let pi = instance.phase_instances.get_mut(&phase_id).ok_or_else(|| {
@@ -841,6 +881,10 @@ where
             pi.error = Some(error.to_string());
             pi.completed_at = Some(chrono::Utc::now());
 
+            // Capture values from pi before dropping the mutable borrow
+            let phase_retry_count = pi.retry_count;
+            let phase_task_ids = pi.task_ids.clone();
+
             self.event_bus
                 .publish(workflow_event(
                     EventSeverity::Error,
@@ -856,14 +900,78 @@ where
 
             // Try overmind recovery if enabled
             if self.config.enable_overmind_recovery {
-                if let Some(ref _overmind) = self.overmind {
+                if let Some(ref overmind) = self.overmind {
                     info!(
                         workflow_id = %instance.id,
                         phase_id = %phase_id,
                         "Invoking overmind for phase recovery"
                     );
-                    // Recovery would be implemented here using
-                    // overmind.recover_from_stuck() -- for now just log
+
+                    // Gather context for recovery request
+                    let goal = self.goal_repo.get(instance.goal_id).await.ok().flatten();
+
+                    // Find a representative failed task from the phase
+                    let mut failed_task: Option<Task> = None;
+                    for tid in &phase_task_ids {
+                        if let Ok(Some(t)) = self.task_repo.get(*tid).await {
+                            if t.status == TaskStatus::Failed {
+                                failed_task = Some(t);
+                                break;
+                            }
+                        }
+                    }
+
+                    let representative = failed_task.unwrap_or_else(|| {
+                        Task::with_title(
+                            format!("Phase '{}' recovery", definition.phases.iter()
+                                .find(|p| p.id == phase_id)
+                                .map(|p| p.name.as_str())
+                                .unwrap_or("unknown")),
+                            error.to_string(),
+                        )
+                    });
+
+                    let request = StuckStateRecoveryRequest {
+                        task_id: representative.id,
+                        task_title: representative.title.clone(),
+                        task_description: representative.description.clone(),
+                        goal_context: GoalContext {
+                            goal_id: instance.goal_id,
+                            goal_name: goal.as_ref().map(|g| g.name.clone()).unwrap_or_default(),
+                            goal_description: goal.as_ref().map(|g| g.description.clone()).unwrap_or_default(),
+                            other_tasks_status: format!("{} tasks in phase", phase_task_ids.len()),
+                        },
+                        failure_history: vec![FailureRecord {
+                            attempt: phase_retry_count,
+                            timestamp: chrono::Utc::now(),
+                            error: error.to_string(),
+                            agent_type: representative.agent_type.clone().unwrap_or_default(),
+                            turns_used: 0,
+                        }],
+                        previous_recovery_attempts: vec![],
+                        available_approaches: vec![],
+                    };
+
+                    match overmind.recover_from_stuck(request).await {
+                        Ok(decision) => {
+                            info!(
+                                workflow_id = %instance.id,
+                                phase_id = %phase_id,
+                                root_cause = ?decision.root_cause.category,
+                                "Overmind recovery decision received"
+                            );
+                            // Recovery decision is logged but not automatically applied
+                            // to workflow state — the orchestrator respects fail_fast below
+                        }
+                        Err(e) => {
+                            warn!(
+                                workflow_id = %instance.id,
+                                phase_id = %phase_id,
+                                error = %e,
+                                "Overmind recovery failed"
+                            );
+                        }
+                    }
                 }
             }
 

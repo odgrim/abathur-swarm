@@ -487,7 +487,7 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
         }
 
         // Use task.can_retry() which checks retry_count < max_retries atomically
-        if !task.can_retry() {
+        if !task.can_retry() || task.retry_count >= self.max_retries {
             return Ok(Reaction::None);
         }
 
