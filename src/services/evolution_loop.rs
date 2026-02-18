@@ -396,30 +396,46 @@ impl EvolutionLoop {
                         EvolutionAction::FlaggedForRefinement { severity }
                     }
                 } else {
-                    // Create refinement request
-                    let failed_task_ids = state
-                        .executions
-                        .get(&template_name)
-                        .map(|execs| {
-                            execs
-                                .iter()
-                                .filter(|e| e.outcome != TaskOutcome::Success)
-                                .map(|e| e.task_id)
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                    // Deduplication: skip if a Pending or InProgress refinement
+                    // already exists for this template
+                    let has_active = state.refinement_queue.iter().any(|r| {
+                        r.template_name == template_name
+                            && matches!(r.status, RefinementStatus::Pending | RefinementStatus::InProgress)
+                    });
 
-                    let request = RefinementRequest::new(
-                        template_name.clone(),
-                        stats.template_version,
-                        severity,
-                        trig,
-                        stats.clone(),
-                        failed_task_ids,
-                    );
-                    state.refinement_queue.push(request);
+                    if has_active {
+                        EvolutionAction::NoAction {
+                            reason: format!(
+                                "Refinement already pending/in-progress for '{}'",
+                                template_name,
+                            ),
+                        }
+                    } else {
+                        // Create refinement request
+                        let failed_task_ids = state
+                            .executions
+                            .get(&template_name)
+                            .map(|execs| {
+                                execs
+                                    .iter()
+                                    .filter(|e| e.outcome != TaskOutcome::Success)
+                                    .map(|e| e.task_id)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
 
-                    EvolutionAction::FlaggedForRefinement { severity }
+                        let request = RefinementRequest::new(
+                            template_name.clone(),
+                            stats.template_version,
+                            severity,
+                            trig,
+                            stats.clone(),
+                            failed_task_ids,
+                        );
+                        state.refinement_queue.push(request);
+
+                        EvolutionAction::FlaggedForRefinement { severity }
+                    }
                 };
 
                 let event = EvolutionEvent {
@@ -461,6 +477,15 @@ impl EvolutionLoop {
             .filter(|r| r.status == RefinementStatus::Pending)
             .cloned()
             .collect()
+    }
+
+    /// Check if a template has an active (Pending or InProgress) refinement request.
+    pub async fn has_active_refinement(&self, template_name: &str) -> bool {
+        let state = self.state.read().await;
+        state.refinement_queue.iter().any(|r| {
+            r.template_name == template_name
+                && matches!(r.status, RefinementStatus::Pending | RefinementStatus::InProgress)
+        })
     }
 
     /// Mark a refinement request as in progress.
@@ -735,5 +760,154 @@ mod tests {
 
         let events = evolution.get_events(None).await;
         assert_eq!(events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_refinement_deduplication_pending() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            refinement_threshold: 0.80,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // Record a failure to trigger refinement
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+
+        // First evaluate creates a refinement request
+        let events1 = evolution.evaluate().await;
+        assert_eq!(events1.len(), 1);
+        assert!(matches!(
+            events1[0].action_taken,
+            EvolutionAction::FlaggedForRefinement { .. }
+        ));
+
+        let pending = evolution.get_pending_refinements().await;
+        assert_eq!(pending.len(), 1);
+
+        // Record another failure
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+
+        // Second evaluate should NOT create a duplicate refinement
+        let events2 = evolution.evaluate().await;
+        assert_eq!(events2.len(), 1);
+        assert!(matches!(
+            events2[0].action_taken,
+            EvolutionAction::NoAction { .. }
+        ));
+
+        // Still only one pending refinement
+        let pending = evolution.get_pending_refinements().await;
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_refinement_deduplication_in_progress() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            refinement_threshold: 0.80,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // Record a failure and trigger refinement
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+        evolution.evaluate().await;
+
+        let pending = evolution.get_pending_refinements().await;
+        let request_id = pending[0].id;
+
+        // Mark as in progress
+        assert!(evolution.start_refinement(request_id).await);
+
+        // Record another failure
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+
+        // Evaluate should not create a duplicate (InProgress blocks too)
+        let events = evolution.evaluate().await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].action_taken,
+            EvolutionAction::NoAction { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_refinement_allowed_after_completion() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            refinement_threshold: 0.80,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // First cycle: failure -> refinement -> complete
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+        evolution.evaluate().await;
+
+        let pending = evolution.get_pending_refinements().await;
+        let request_id = pending[0].id;
+        assert!(evolution.start_refinement(request_id).await);
+        evolution.complete_refinement(request_id, true).await;
+
+        // No longer active
+        assert!(!evolution.has_active_refinement("test-agent").await);
+
+        // Another failure — should be allowed to create a new refinement
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+        let events = evolution.evaluate().await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].action_taken,
+            EvolutionAction::FlaggedForRefinement { .. }
+        ));
+
+        let pending = evolution.get_pending_refinements().await;
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_has_active_refinement() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            refinement_threshold: 0.80,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // Initially no active refinements
+        assert!(!evolution.has_active_refinement("test-agent").await);
+
+        // Create a refinement
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+        evolution.evaluate().await;
+
+        // Now has active refinement (Pending)
+        assert!(evolution.has_active_refinement("test-agent").await);
+        // Different template has none
+        assert!(!evolution.has_active_refinement("other-agent").await);
+
+        // Start it — still active (InProgress)
+        let pending = evolution.get_pending_refinements().await;
+        evolution.start_refinement(pending[0].id).await;
+        assert!(evolution.has_active_refinement("test-agent").await);
+
+        // Complete it — no longer active
+        evolution.complete_refinement(pending[0].id, true).await;
+        assert!(!evolution.has_active_refinement("test-agent").await);
     }
 }
