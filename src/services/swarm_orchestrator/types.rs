@@ -72,6 +72,12 @@ pub struct SwarmConfig {
 
     /// Optional workflow template for configuring the Overmind's phase sequence.
     pub workflow_template: Option<WorkflowTemplate>,
+
+    /// When true, bypass permission checks for dangerous operations like
+    /// auto-merging to main. Similar to `--dangerously-skip-permissions` in
+    /// Claude Code. When false (default), the swarm prefers PRs and will not
+    /// directly merge into the default branch.
+    pub dangerously_skip_permissions: bool,
 }
 
 /// Configurable polling intervals (seconds) for all scheduled handlers.
@@ -327,6 +333,7 @@ impl Default for SwarmConfig {
             convergence_enabled: true,
             default_execution_mode: Some(crate::domain::models::ExecutionMode::Convergent { parallel_samples: None }),
             workflow_template: None,
+            dangerously_skip_permissions: false,
         }
     }
 }

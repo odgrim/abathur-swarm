@@ -144,6 +144,12 @@ pub enum SwarmCommand {
         /// Default workflow for this swarm session
         #[arg(long)]
         workflow: Option<String>,
+
+        /// Bypass permission checks for dangerous operations (e.g., auto-merge to main).
+        /// Without this flag, the swarm will only create pull requests and never merge
+        /// directly into the default branch.
+        #[arg(long)]
+        dangerously_skip_permissions: bool,
     },
     /// Stop the running swarm orchestrator
     Stop,
@@ -185,6 +191,7 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
             with_mcp_servers,
             default_execution_mode,
             workflow,
+            dangerously_skip_permissions,
         } => {
             start_swarm(
                 max_agents,
@@ -199,6 +206,7 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
                 with_mcp_servers,
                 default_execution_mode,
                 workflow,
+                dangerously_skip_permissions,
             ).await
         }
         SwarmCommand::Stop => stop_swarm(json_mode).await,
@@ -300,6 +308,7 @@ async fn start_swarm(
     with_mcp_servers: bool,
     default_execution_mode: String,
     workflow: Option<String>,
+    dangerously_skip_permissions: bool,
 ) -> Result<()> {
     // Check if swarm is already running
     if let Some(pid) = check_existing_swarm() {
@@ -336,10 +345,10 @@ async fn start_swarm(
 
     if foreground {
         // Run in foreground (original behavior)
-        run_swarm_foreground(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref()).await
+        run_swarm_foreground(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref(), dangerously_skip_permissions).await
     } else {
         // Background the swarm
-        start_swarm_background(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref())
+        start_swarm_background(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref(), dangerously_skip_permissions)
     }
 }
 
@@ -351,6 +360,7 @@ fn start_swarm_background(
     with_mcp_servers: bool,
     default_execution_mode: &str,
     workflow: Option<&str>,
+    dangerously_skip_permissions: bool,
 ) -> Result<()> {
     use std::process::{Command, Stdio};
 
@@ -386,6 +396,9 @@ fn start_swarm_background(
     cmd.arg("--default-execution-mode").arg(default_execution_mode);
     if let Some(wf) = workflow {
         cmd.arg("--workflow").arg(wf);
+    }
+    if dangerously_skip_permissions {
+        cmd.arg("--dangerously-skip-permissions");
     }
 
     // Ensure .abathur directory exists for log file
@@ -508,6 +521,7 @@ async fn run_swarm_foreground(
     with_mcp_servers: bool,
     default_execution_mode: &str,
     workflow: Option<&str>,
+    dangerously_skip_permissions: bool,
 ) -> Result<()> {
     use crate::adapters::sqlite::{
         create_pool, Migrator, all_embedded_migrations,
@@ -589,6 +603,7 @@ async fn run_swarm_foreground(
         mcp_servers: mcp_server_config,
         default_execution_mode: execution_mode,
         workflow_template,
+        dangerously_skip_permissions,
         ..Default::default()
     };
 
@@ -650,6 +665,9 @@ async fn run_swarm_foreground(
         println!("   Architecture: event-driven");
         if dry_run {
             println!("   Mode: DRY RUN (using mock substrate)");
+        }
+        if dangerously_skip_permissions {
+            println!("   Permissions: SKIPPED (dangerously-skip-permissions)");
         }
         if mcp_urls.memory_server.is_some() || mcp_urls.tasks_server.is_some() || mcp_urls.a2a_gateway.is_some() {
             println!("   MCP Servers:");
@@ -1287,6 +1305,7 @@ async fn show_config(json_mode: bool) -> Result<()> {
         println!("Auto-retry:         {}", config.auto_retry);
         println!("Max task retries:   {}", config.max_task_retries);
         println!("Reconciliation (s): {:?}", config.reconciliation_interval_secs);
+        println!("Skip permissions:   {}", config.dangerously_skip_permissions);
     }
 
     Ok(())

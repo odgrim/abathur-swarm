@@ -523,8 +523,12 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let agent_type_for_evolution = agent_type.clone();
             let template_version_for_evolution = template_version;
             let verify_on_completion = self.config.verify_on_completion;
-            let use_merge_queue = self.config.use_merge_queue;
-            let prefer_pull_requests = self.config.prefer_pull_requests;
+            // Without --dangerously-skip-permissions, disable direct merges to main
+            // and force PR-only mode so a human must approve before merging.
+            let use_merge_queue = self.config.use_merge_queue
+                && self.config.dangerously_skip_permissions;
+            let prefer_pull_requests = self.config.prefer_pull_requests
+                || !self.config.dangerously_skip_permissions;
             let repo_path = self.config.repo_path.clone();
             let default_base_ref = self.config.default_base_ref.clone();
             let require_commits = agent_can_write && !is_read_only_role;
