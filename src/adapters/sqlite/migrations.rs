@@ -104,5 +104,10 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
             description: "Task type".to_string(),
             sql: include_str!("../../../migrations/004_task_type.sql").to_string(),
         },
+        Migration {
+            version: 5,
+            description: "Distinct accessors for memory promotion integrity".to_string(),
+            sql: include_str!("../../../migrations/005_distinct_accessors.sql").to_string(),
+        },
     ]
 }

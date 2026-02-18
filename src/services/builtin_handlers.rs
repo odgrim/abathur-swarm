@@ -2152,6 +2152,7 @@ impl<T: TaskRepository + 'static> EventHandler for SystemStallDetectorHandler<T>
             "SystemStallDetector: swarm stalled, emitting escalation"
         );
 
+        // 1. Escalation event for observability / human notification
         let escalation = UnifiedEvent {
             id: EventId::new(),
             sequence: SequenceNumber(0),
@@ -2166,22 +2167,39 @@ impl<T: TaskRepository + 'static> EventHandler for SystemStallDetectorHandler<T>
                 goal_id: None,
                 task_id: None,
                 reason: format!(
-                    "System stall detected: no tasks created or completed for {} seconds (threshold: {}s)",
+                    "System stall detected: no tasks created or completed for {} seconds (threshold: {}s). Auto-recovery triggered via goal-convergence-check.",
                     idle_secs, self.stall_threshold_secs,
                 ),
                 urgency: "high".to_string(),
                 questions: vec![
                     "The swarm has had no task activity. Are there goals that need new work generated?".to_string(),
-                    "Should the convergence check be triggered manually?".to_string(),
+                    "Auto-recovery has been triggered — a goal convergence check is being fired.".to_string(),
                 ],
                 is_blocking: false,
+            },
+        };
+
+        // 2. Synthetic convergence-check trigger for auto-recovery
+        let convergence_trigger = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: now,
+            severity: EventSeverity::Info,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: event.correlation_id,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "goal-convergence-check".to_string(),
             },
         };
 
         // Reset activity timestamp so we don't fire repeatedly every tick
         *last_activity = now;
 
-        Ok(Reaction::EmitEvents(vec![escalation]))
+        Ok(Reaction::EmitEvents(vec![escalation, convergence_trigger]))
     }
 }
 
@@ -5968,18 +5986,76 @@ mod tests {
 
         match reaction {
             Reaction::EmitEvents(events) => {
-                assert_eq!(events.len(), 1);
+                // Should emit 2 events: escalation + convergence trigger
+                assert_eq!(events.len(), 2);
                 assert_eq!(events[0].category, EventCategory::Escalation);
                 match &events[0].payload {
                     EventPayload::HumanEscalationRequired { reason, urgency, is_blocking, .. } => {
                         assert!(reason.contains("System stall detected"));
+                        assert!(reason.contains("Auto-recovery triggered"));
                         assert_eq!(urgency, "high");
                         assert!(!is_blocking);
                     }
                     other => panic!("Expected HumanEscalationRequired, got {:?}", other),
                 }
+                assert_eq!(events[1].category, EventCategory::Scheduler);
+                match &events[1].payload {
+                    EventPayload::ScheduledEventFired { name, .. } => {
+                        assert_eq!(name, "goal-convergence-check");
+                    }
+                    other => panic!("Expected ScheduledEventFired, got {:?}", other),
+                }
             }
             Reaction::None => panic!("Expected EmitEvents escalation"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stall_detector_emits_both_escalation_and_convergence_trigger() {
+        let repo = setup_task_repo().await;
+        let handler = SystemStallDetectorHandler::new(repo.clone(), 0);
+
+        // Force last_activity into the past so the stall threshold is exceeded.
+        {
+            let mut state = handler.state.write().await;
+            state.0 = chrono::Utc::now() - chrono::Duration::seconds(500);
+        }
+
+        let event = make_stall_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        let events = match reaction {
+            Reaction::EmitEvents(events) => events,
+            Reaction::None => panic!("Expected EmitEvents, got None"),
+        };
+
+        // Verify exactly 2 events
+        assert_eq!(events.len(), 2, "Stall detector should emit exactly 2 events");
+
+        // First event: HumanEscalationRequired
+        assert_eq!(events[0].severity, EventSeverity::Warning);
+        assert_eq!(events[0].category, EventCategory::Escalation);
+        match &events[0].payload {
+            EventPayload::HumanEscalationRequired { reason, urgency, is_blocking, .. } => {
+                assert!(reason.contains("System stall detected"), "Reason should mention stall: {}", reason);
+                assert!(reason.contains("Auto-recovery triggered"), "Reason should mention auto-recovery: {}", reason);
+                assert_eq!(urgency, "high");
+                assert!(!is_blocking);
+            }
+            other => panic!("Event 0: expected HumanEscalationRequired, got {:?}", other),
+        }
+
+        // Second event: ScheduledEventFired for goal-convergence-check
+        assert_eq!(events[1].severity, EventSeverity::Info);
+        assert_eq!(events[1].category, EventCategory::Scheduler);
+        match &events[1].payload {
+            EventPayload::ScheduledEventFired { name, schedule_id } => {
+                assert_eq!(name, "goal-convergence-check");
+                // schedule_id should be a fresh UUID (non-nil)
+                assert_ne!(*schedule_id, uuid::Uuid::nil());
+            }
+            other => panic!("Event 1: expected ScheduledEventFired, got {:?}", other),
         }
     }
 

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::{Memory, MemoryMetadata, MemoryQuery, MemoryTier, MemoryType};
+use crate::domain::models::{AccessorId, Memory, MemoryMetadata, MemoryQuery, MemoryTier, MemoryType};
 use crate::domain::ports::MemoryRepository;
 
 #[derive(Clone)]
@@ -24,11 +24,12 @@ impl SqliteMemoryRepository {
 impl MemoryRepository for SqliteMemoryRepository {
     async fn store(&self, memory: &Memory) -> DomainResult<()> {
         let metadata_json = serde_json::to_string(&memory.metadata)?;
+        let accessors_json = serde_json::to_string(&memory.distinct_accessors)?;
 
         sqlx::query(
             r#"INSERT INTO memories (id, namespace, key, content, value, memory_type, tier, metadata,
-               access_count, version, created_at, updated_at, last_accessed_at, expires_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+               access_count, version, created_at, updated_at, last_accessed_at, expires_at, distinct_accessors)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
         )
         .bind(memory.id.to_string())
         .bind(&memory.namespace)
@@ -44,6 +45,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         .bind(memory.updated_at.to_rfc3339())
         .bind(memory.last_accessed.to_rfc3339())
         .bind(memory.expires_at.map(|t| t.to_rfc3339()))
+        .bind(&accessors_json)
         .execute(&self.pool)
         .await?;
 
@@ -86,11 +88,13 @@ impl MemoryRepository for SqliteMemoryRepository {
 
     async fn update(&self, memory: &Memory) -> DomainResult<()> {
         let metadata_json = serde_json::to_string(&memory.metadata)?;
+        let accessors_json = serde_json::to_string(&memory.distinct_accessors)?;
 
         let result = sqlx::query(
             r#"UPDATE memories SET namespace = ?, key = ?, content = ?, value = ?,
                memory_type = ?, tier = ?, metadata = ?, access_count = ?,
-               version = ?, updated_at = ?, last_accessed_at = ?, expires_at = ?
+               version = ?, updated_at = ?, last_accessed_at = ?, expires_at = ?,
+               distinct_accessors = ?
                WHERE id = ?"#
         )
         .bind(&memory.namespace)
@@ -105,6 +109,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         .bind(memory.updated_at.to_rfc3339())
         .bind(memory.last_accessed.to_rfc3339())
         .bind(memory.expires_at.map(|t| t.to_rfc3339()))
+        .bind(&accessors_json)
         .bind(memory.id.to_string())
         .execute(&self.pool)
         .await?;
@@ -397,6 +402,8 @@ struct MemoryRow {
     updated_at: String,
     last_accessed_at: String,
     expires_at: Option<String>,
+    /// JSON array of AccessorId values, e.g. `[{"kind":"Task","id":"..."},...]`
+    distinct_accessors: Option<String>,
 }
 
 impl TryFrom<MemoryRow> for Memory {
@@ -423,6 +430,13 @@ impl TryFrom<MemoryRow> for Memory {
         // Use content if available, fall back to value
         let content = row.content.unwrap_or(row.value);
 
+        // Deserialize distinct_accessors from JSON array; default to empty set
+        let distinct_accessors: std::collections::HashSet<AccessorId> = row
+            .distinct_accessors
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+
         Ok(Memory {
             id,
             key: row.key,
@@ -438,6 +452,7 @@ impl TryFrom<MemoryRow> for Memory {
             expires_at,
             version: row.version as u64,
             embedding: None,
+            distinct_accessors,
         })
     }
 }

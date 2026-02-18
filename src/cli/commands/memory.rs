@@ -8,7 +8,7 @@ use crate::adapters::sqlite::{SqliteMemoryRepository, initialize_default_databas
 use crate::cli::command_dispatcher::CliCommandDispatcher;
 use crate::cli::id_resolver::resolve_memory_id;
 use crate::cli::output::{output, truncate, CommandOutput};
-use crate::domain::models::{Memory, MemoryQuery, MemoryTier, MemoryType};
+use crate::domain::models::{AccessorId, Memory, MemoryQuery, MemoryTier, MemoryType};
 use crate::services::command_bus::{CommandResult, DomainCommand, MemoryCommand};
 use crate::services::MemoryService;
 
@@ -297,10 +297,10 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
 
         MemoryCommands::Recall { id_or_key, namespace } => {
             let cmd = if let Ok(uuid) = resolve_memory_id(&pool, &id_or_key).await {
-                DomainCommand::Memory(MemoryCommand::Recall { id: uuid })
+                DomainCommand::Memory(MemoryCommand::Recall { id: uuid, accessor: AccessorId::system("cli") })
             } else {
                 let ns = namespace.unwrap_or_else(|| "default".to_string());
-                DomainCommand::Memory(MemoryCommand::RecallByKey { key: id_or_key.clone(), namespace: ns })
+                DomainCommand::Memory(MemoryCommand::RecallByKey { key: id_or_key.clone(), namespace: ns, accessor: AccessorId::system("cli") })
             };
 
             let result = dispatcher.dispatch(cmd).await

@@ -18,7 +18,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-use crate::domain::models::{Memory, MemoryQuery, MemoryTier, MemoryType};
+use crate::domain::models::{AccessorId, Memory, MemoryQuery, MemoryTier, MemoryType};
 use crate::domain::ports::MemoryRepository;
 use crate::services::command_bus::{
     CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand, MemoryCommand,
@@ -348,7 +348,7 @@ async fn get_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
     State(state): State<Arc<AppState<M>>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<MemoryResponse>, (StatusCode, Json<ErrorResponse>)> {
-    match state.service.recall(id).await {
+    match state.service.recall(id, AccessorId::system("mcp-http")).await {
         Ok((Some(memory), events)) => {
             // Publish recall events via EventBus
             if let Some(ref bus) = state.event_bus {
@@ -379,7 +379,7 @@ async fn get_by_key<M: MemoryRepository + Clone + Send + Sync + 'static>(
     State(state): State<Arc<AppState<M>>>,
     Path((namespace, key)): Path<(String, String)>,
 ) -> Result<Json<MemoryResponse>, (StatusCode, Json<ErrorResponse>)> {
-    match state.service.recall_by_key(&key, &namespace).await {
+    match state.service.recall_by_key(&key, &namespace, AccessorId::system("mcp-http")).await {
         Ok((Some(memory), events)) => {
             // Publish recall events via EventBus
             if let Some(ref bus) = state.event_bus {
@@ -475,7 +475,7 @@ async fn update_memory<M: MemoryRepository + Clone + Send + Sync + 'static>(
     Json(req): Json<UpdateMemoryRequest>,
 ) -> Result<Json<MemoryResponse>, (StatusCode, Json<ErrorResponse>)> {
     // Get existing memory
-    let memory = match state.service.recall(id).await {
+    let memory = match state.service.recall(id, AccessorId::system("mcp-http")).await {
         Ok((Some(m), events)) => {
             // Publish recall events via EventBus
             if let Some(ref bus) = state.event_bus {
