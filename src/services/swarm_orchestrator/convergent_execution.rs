@@ -840,7 +840,8 @@ where
                 // -----------------------------------------------------------
                 // Periodic intent verification (on Continue iterations)
                 // -----------------------------------------------------------
-                if engine.should_verify(&trajectory) {
+                // Skip for verification tasks (defense-in-depth recursion guard).
+                if !task.task_type.is_verification() && engine.should_verify(&trajectory) {
                     let overseer_signals = trajectory
                         .observations
                         .last()
@@ -899,6 +900,16 @@ where
                 // Intent-driven finality: intent verifier is the sole
                 // authority on task completion. No fallback to static checks.
                 // -----------------------------------------------------------
+                // Defense-in-depth: verification tasks must never recurse
+                // into intent verification. Treat as converged.
+                if task.task_type.is_verification() {
+                    tracing::debug!(
+                        task_id = %task.id,
+                        "IntentCheck on verification task; converging without recursive verification"
+                    );
+                    return Ok(ConvergentOutcome::Converged);
+                }
+
                 let overseer_signals = trajectory
                     .observations
                     .last()
@@ -1145,6 +1156,18 @@ where
                 // Mandatory pre-exhaustion intent check: intent always gets
                 // a say before terminal outcomes.
                 // -----------------------------------------------------------
+                // Defense-in-depth: skip recursive verification for verification tasks.
+                if task.task_type.is_verification() {
+                    tracing::debug!(
+                        task_id = %task.id,
+                        "Pre-exhaustion intent check skipped for verification task (recursion guard)"
+                    );
+                    emit_convergence_terminated(
+                        event_bus, task, goal_id, &trajectory, "exhausted",
+                    ).await;
+                    return Ok(ConvergentOutcome::Failed("budget exhausted".to_string()));
+                }
+
                 let overseer_signals = trajectory
                     .observations
                     .last()
