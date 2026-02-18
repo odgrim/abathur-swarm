@@ -449,6 +449,7 @@ where
             idempotency_key,
             source: TaskSource::Human,
             deadline: None,
+            task_type: None,
         });
         let envelope = CommandEnvelope::new(CommandSource::Mcp("stdio".into()), cmd);
 

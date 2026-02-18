@@ -106,6 +106,7 @@ pub struct TaskResponse {
     pub status: String,
     pub priority: String,
     pub agent_type: Option<String>,
+    pub task_type: String,
     pub depends_on: Vec<Uuid>,
     pub retry_count: u32,
     pub max_retries: u32,
@@ -127,6 +128,7 @@ impl From<Task> for TaskResponse {
             status: t.status.as_str().to_string(),
             priority: t.priority.as_str().to_string(),
             agent_type: t.agent_type,
+            task_type: t.task_type.as_str().to_string(),
             depends_on: t.depends_on,
             retry_count: t.retry_count,
             max_retries: t.max_retries,
@@ -301,6 +303,7 @@ async fn submit_task<T: TaskRepository + Clone + Send + Sync + 'static>(
         idempotency_key: req.idempotency_key,
         source: TaskSource::Human,
         deadline: None,
+        task_type: None,
     });
     let envelope = CommandEnvelope::new(CommandSource::Mcp("tasks-http".into()), cmd);
 
@@ -542,6 +545,7 @@ mod tests {
             status: "pending".to_string(),
             priority: "normal".to_string(),
             agent_type: Some("developer".to_string()),
+            task_type: "standard".to_string(),
             depends_on: vec![],
             retry_count: 0,
             max_retries: 3,

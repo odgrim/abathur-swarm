@@ -335,6 +335,7 @@ where
                         idempotency_key: None,
                         source: TaskSource::System,
                         deadline: None,
+                        task_type: None,
                     }),
                 );
                 match cb.dispatch(envelope).await {
@@ -414,6 +415,7 @@ where
                     idempotency_key: None,
                     source: TaskSource::System,
                     deadline: None,
+                    task_type: None,
                 }),
             );
             match cb.dispatch(envelope).await {
@@ -597,6 +599,7 @@ where
                     idempotency_key: None,
                     source: TaskSource::System,
                     deadline: None,
+                    task_type: None,
                 }),
             );
             match cb.dispatch(envelope).await {
@@ -784,6 +787,7 @@ where
                             idempotency_key: None,
                             source: TaskSource::System,
                             deadline: None,
+                            task_type: None,
                         }),
                     );
                     match cb.dispatch(envelope).await {

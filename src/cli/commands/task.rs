@@ -406,6 +406,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 created_at: task.created_at.to_rfc3339(),
                 started_at: task.started_at.map(|t| t.to_rfc3339()),
                 completed_at: task.completed_at.map(|t| t.to_rfc3339()),
+                context_custom: task.context.custom.clone(),
             };
             output(&out, json_mode);
         }

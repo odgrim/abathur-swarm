@@ -876,6 +876,7 @@ impl TriggerRuleEngine {
                     idempotency_key: None,
                     source: TaskSource::System,
                     deadline: None,
+                    task_type: None,
                 })
             }
             SerializableDomainCommand::PauseGoal { goal_id } => {
