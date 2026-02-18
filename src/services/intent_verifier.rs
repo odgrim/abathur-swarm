@@ -31,7 +31,7 @@ use crate::domain::models::{
     DependentTaskAugmentation, GapCategory, GapSeverity, HumanEscalation, IntentGap,
     IntentSatisfaction, IntentVerificationResult, NewTaskGuidance, OriginalIntent,
     RepromptApproach, RepromptGuidance, RepromptStrategySelector, SessionStatus,
-    SubstrateConfig, SubstrateRequest, Task, TaskStatus,
+    SubstrateConfig, SubstrateRequest, Task, TaskPriority, TaskSource, TaskStatus, TaskType,
 };
 use crate::domain::models::convergence::OverseerSignals;
 use crate::domain::ports::{GoalRepository, Substrate, TaskRepository};
@@ -834,6 +834,121 @@ where
             }
         }
     }
+
+    /// Create a verification task that makes this verification run visible
+    /// in the task tree. The task is created as a child of the task being verified.
+    ///
+    /// Returns the verification task ID. The caller should complete/fail the
+    /// task when verification finishes.
+    async fn create_verification_task(
+        &self,
+        verified_task: &Task,
+        goal_id: Option<Uuid>,
+        iteration: u32,
+    ) -> DomainResult<Uuid> {
+        let title = format!(
+            "Intent verification (iteration {})",
+            iteration
+        );
+        let description = format!(
+            "LLM-based intent verification for task '{}'. \
+             Evaluating whether completed work satisfies the original intent.",
+            verified_task.title
+        );
+
+        let mut task = Task::with_title(title, description)
+            .with_parent(verified_task.id)
+            .with_task_type(TaskType::Verification)
+            .with_source(TaskSource::System)
+            .with_agent("intent-verifier")
+            .with_priority(TaskPriority::Normal);
+
+        // Store the verified task ID and goal in context for traceability
+        task.context.custom.insert(
+            "verified_task_id".to_string(),
+            serde_json::Value::String(verified_task.id.to_string()),
+        );
+        if let Some(gid) = goal_id {
+            task.context.custom.insert(
+                "goal_id".to_string(),
+                serde_json::Value::String(gid.to_string()),
+            );
+        }
+        task.context.custom.insert(
+            "iteration".to_string(),
+            serde_json::json!(iteration),
+        );
+
+        // Mark as running immediately (verification is about to execute)
+        task.status = TaskStatus::Running;
+        task.started_at = Some(chrono::Utc::now());
+
+        self.task_repo.create(&task).await?;
+        Ok(task.id)
+    }
+
+    /// Complete a verification task with the results.
+    async fn finalize_verification_task(
+        &self,
+        verification_task_id: Uuid,
+        result: &IntentVerificationResult,
+    ) -> DomainResult<()> {
+        let mut task = self.task_repo.get(verification_task_id).await?
+            .ok_or(DomainError::TaskNotFound(verification_task_id))?;
+
+        // Store verification results in task context custom map
+        task.context.custom.insert(
+            "satisfaction".to_string(),
+            serde_json::Value::String(result.satisfaction.as_str().to_string()),
+        );
+        task.context.custom.insert(
+            "confidence".to_string(),
+            serde_json::json!(result.confidence),
+        );
+        task.context.custom.insert(
+            "gaps_count".to_string(),
+            serde_json::json!(result.total_gap_count()),
+        );
+        task.context.custom.insert(
+            "accomplishment_summary".to_string(),
+            serde_json::Value::String(result.accomplishment_summary.clone()),
+        );
+
+        // Store gaps as structured JSON
+        let gaps_json: Vec<serde_json::Value> = result.all_gaps().map(|g| {
+            serde_json::json!({
+                "description": g.description,
+                "severity": g.severity.as_str(),
+                "category": g.category.as_str(),
+                "suggested_action": g.suggested_action,
+                "is_implicit": g.is_implicit,
+            })
+        }).collect();
+        task.context.custom.insert(
+            "gaps".to_string(),
+            serde_json::Value::Array(gaps_json),
+        );
+
+        // Mark complete
+        task.transition_to(TaskStatus::Complete)
+            .map_err(DomainError::ValidationFailed)?;
+        self.task_repo.update(&task).await?;
+        Ok(())
+    }
+
+    /// Fail a verification task with an error message.
+    async fn fail_verification_task(
+        &self,
+        verification_task_id: Uuid,
+        error: &str,
+    ) -> DomainResult<()> {
+        if let Ok(Some(mut task)) = self.task_repo.get(verification_task_id).await {
+            task.context.hints.push(format!("Error: {}", error));
+            let _ = task.transition_to(TaskStatus::Failed);
+            let _ = self.task_repo.update(&task).await;
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -977,11 +1092,35 @@ where
             intent.original_text.push_str(&evidence);
         }
 
-        let result = self
-            .verify_intent(&intent, &[task.clone()], iteration)
-            .await?;
+        // Create a verification task to make this run visible in the task tree.
+        // Use .ok() to avoid breaking the main verification flow if task creation fails.
+        let verification_task_id = self
+            .create_verification_task(task, goal_id, iteration)
+            .await
+            .ok();
 
-        Ok(Some(result))
+        // Execute the actual verification
+        match self
+            .verify_intent(&intent, &[task.clone()], iteration)
+            .await
+        {
+            Ok(result) => {
+                // Finalize the verification task with results
+                if let Some(vtid) = verification_task_id {
+                    let _ = self.finalize_verification_task(vtid, &result).await;
+                }
+                Ok(Some(result))
+            }
+            Err(e) => {
+                // Fail the verification task on error
+                if let Some(vtid) = verification_task_id {
+                    let _ = self
+                        .fail_verification_task(vtid, &format!("Verification infrastructure error: {}", e))
+                        .await;
+                }
+                Err(e)
+            }
+        }
     }
 }
 
