@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::domain::errors::DomainResult;
-use crate::domain::models::{Task, TaskPriority, TaskStatus};
+use crate::domain::models::{Task, TaskPriority, TaskStatus, TaskType};
 
 /// Filter criteria for listing tasks.
 #[derive(Debug, Clone, Default)]
@@ -13,6 +13,7 @@ pub struct TaskFilter {
     pub priority: Option<TaskPriority>,
     pub parent_id: Option<Uuid>,
     pub agent_type: Option<String>,
+    pub task_type: Option<TaskType>,
 }
 
 /// Repository interface for Task persistence.
