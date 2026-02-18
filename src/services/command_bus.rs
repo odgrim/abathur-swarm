@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use crate::domain::errors::DomainError;
 use crate::domain::models::{
-    Goal, GoalConstraint, GoalPriority, GoalStatus, Memory, MemoryMetadata, MemoryTier,
-    MemoryType, Task, TaskContext, TaskPriority, TaskSource, TaskStatus, TaskType,
+    ExecutionMode, Goal, GoalConstraint, GoalPriority, GoalStatus, Memory, MemoryMetadata,
+    MemoryTier, MemoryType, Task, TaskContext, TaskPriority, TaskSource, TaskStatus, TaskType,
 };
 use crate::services::event_bus::{EventBus, UnifiedEvent};
 use crate::services::memory_service::MaintenanceReport;
@@ -128,6 +128,7 @@ pub enum TaskCommand {
         source: TaskSource,
         deadline: Option<chrono::DateTime<chrono::Utc>>,
         task_type: Option<TaskType>,
+        execution_mode: Option<ExecutionMode>,
     },
     Claim {
         task_id: Uuid,

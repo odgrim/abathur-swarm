@@ -354,6 +354,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 source: TaskSource::Human,
                 deadline,
                 task_type: None,
+                execution_mode: None,
             });
 
             let result = dispatcher.dispatch(cmd).await

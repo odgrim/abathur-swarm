@@ -336,6 +336,7 @@ where
                         source: TaskSource::System,
                         deadline: None,
                         task_type: None,
+                        execution_mode: None,
                     }),
                 );
                 match cb.dispatch(envelope).await {
@@ -416,6 +417,7 @@ where
                     source: TaskSource::System,
                     deadline: None,
                     task_type: None,
+                    execution_mode: None,
                 }),
             );
             match cb.dispatch(envelope).await {
@@ -600,6 +602,7 @@ where
                     source: TaskSource::System,
                     deadline: None,
                     task_type: None,
+                    execution_mode: None,
                 }),
             );
             match cb.dispatch(envelope).await {
@@ -788,6 +791,7 @@ where
                             source: TaskSource::System,
                             deadline: None,
                             task_type: None,
+                            execution_mode: None,
                         }),
                     );
                     match cb.dispatch(envelope).await {

@@ -275,6 +275,27 @@ impl<T: TaskRepository> TaskService<T> {
 
         let mut convergent_score: i32 = 0;
 
+        // --- Agent-role signal ---
+        // Execution-focused agents strongly favor convergent mode;
+        // orchestration/research agents favor direct mode.
+        if let Some(ref agent) = task.agent_type {
+            let lower = agent.to_lowercase();
+            if lower == "overmind"
+                || lower.contains("researcher")
+                || lower.contains("planner")
+                || lower.contains("analyst")
+                || lower.contains("architect")
+            {
+                convergent_score -= 5;
+            } else if lower.contains("implement")
+                || lower.contains("develop")
+                || lower.contains("coder")
+                || lower.contains("fixer")
+            {
+                convergent_score += 5;
+            }
+        }
+
         // --- Complexity signals ---
         match task.routing_hints.complexity {
             Complexity::Complex => convergent_score += 3,
@@ -373,6 +394,7 @@ impl<T: TaskRepository> TaskService<T> {
         source: TaskSource,
         deadline: Option<chrono::DateTime<chrono::Utc>>,
         task_type: Option<TaskType>,
+        execution_mode: Option<ExecutionMode>,
     ) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         let mut events = Vec::new();
 
@@ -429,11 +451,12 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         // --- Execution mode classification heuristic (Part 1.2) ---
-        // If the task was submitted with the default Direct mode (i.e. no explicit
-        // mode was requested), run the heuristic to determine whether it should be
-        // upgraded to Convergent. Tasks explicitly set to Convergent by the caller
-        // are left untouched.
-        if task.execution_mode.is_direct() {
+        // If the caller explicitly requested an execution mode, use it directly.
+        // Otherwise, if the task has the default Direct mode, run the heuristic to
+        // determine whether it should be upgraded to Convergent.
+        if let Some(explicit_mode) = execution_mode {
+            task.execution_mode = explicit_mode;
+        } else if task.execution_mode.is_direct() {
             let parent_mode = self.resolve_parent_execution_mode(parent_id).await?;
             let inferred_mode = Self::classify_execution_mode(
                 &task,
@@ -793,6 +816,7 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                 source,
                 deadline,
                 task_type,
+                execution_mode,
             } => {
                 let (task, events) = self
                     .submit_task(
@@ -807,6 +831,7 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                         source,
                         deadline,
                         task_type,
+                        execution_mode,
                     )
                     .await?;
                 Ok(CommandOutcome { result: CommandResult::Task(task), events })
@@ -917,6 +942,7 @@ mod tests {
             TaskSource::Human,
             None,
             None,
+            None,
         ).await.unwrap();
 
         assert_eq!(task.title, "Test Task");
@@ -941,6 +967,7 @@ mod tests {
             TaskSource::Human,
             None,
             None,
+            None,
         ).await.unwrap();
 
         // Create main task that depends on it
@@ -954,6 +981,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
             None,
             None,
         ).await.unwrap();
@@ -989,6 +1017,7 @@ mod tests {
             TaskSource::Human,
             None,
             None,
+            None,
         ).await.unwrap();
 
         let (task2, _) = service.submit_task(
@@ -1001,6 +1030,7 @@ mod tests {
             None,
             Some("unique-key".to_string()),
             TaskSource::Human,
+            None,
             None,
             None,
         ).await.unwrap();
@@ -1024,6 +1054,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
             None,
             None,
         ).await.unwrap();
@@ -1051,6 +1082,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
             None,
             None,
         ).await.unwrap();
@@ -1217,6 +1249,7 @@ mod tests {
             TaskSource::Human,
             None,
             None,
+            None,
         ).await.unwrap();
 
         // Manually set convergent mode and trajectory_id (normally done by orchestrator)
@@ -1252,6 +1285,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
             None,
             None,
         ).await.unwrap();
@@ -1293,6 +1327,7 @@ mod tests {
             TaskSource::Human,
             None,
             None,
+            None,
         ).await.unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
@@ -1320,6 +1355,7 @@ mod tests {
             None,
             None,
             TaskSource::Human,
+            None,
             None,
             None,
         ).await.unwrap();
@@ -1359,6 +1395,7 @@ mod tests {
             TaskSource::Human,
             None,
             None,
+            None,
         ).await.unwrap();
 
         assert!(task.execution_mode.is_direct(),
@@ -1382,6 +1419,7 @@ mod tests {
             Some(ctx),
             None,
             TaskSource::Human,
+            None,
             None,
             None,
         ).await.unwrap();

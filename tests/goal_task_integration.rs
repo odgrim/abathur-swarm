@@ -172,6 +172,7 @@ async fn test_task_creation_with_human_source() {
             TaskSource::Human,
             None,
             None,
+            None,
         )
         .await
         .expect("Failed to submit task");
@@ -197,6 +198,7 @@ async fn test_task_creation_with_system_source() {
             None,
             None,
             TaskSource::System,
+            None,
             None,
             None,
         )

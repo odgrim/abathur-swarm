@@ -454,9 +454,43 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
             // Spawn task execution
             let task_id = task.id;
-            let is_convergent = task.execution_mode.is_convergent()
+
+            // Runtime upgrade: if the stored mode is Direct but the agent is
+            // write-capable and non-read-only, upgrade to Convergent when
+            // convergence is enabled. This ensures implementation agents always
+            // go through the convergent execution path regardless of what mode
+            // was assigned at submit time.
+            let effective_mode = if task.execution_mode.is_direct()
+                && self.config.convergence_enabled
+                && !is_read_only_role
+                && agent_can_write
+            {
+                tracing::info!(
+                    task_id = %task_id,
+                    %agent_type,
+                    "Upgrading execution mode Direct -> Convergent (write-capable, non-read-only agent)"
+                );
+                crate::domain::models::ExecutionMode::Convergent { parallel_samples: None }
+            } else {
+                task.execution_mode.clone()
+            };
+
+            let is_convergent = effective_mode.is_convergent()
                 && self.config.convergence_enabled
                 && !is_read_only_role;
+
+            tracing::info!(
+                task_id = %task_id,
+                %agent_type,
+                stored_mode = ?task.execution_mode,
+                effective_mode = ?effective_mode,
+                convergence_enabled = self.config.convergence_enabled,
+                is_read_only = is_read_only_role,
+                agent_can_write = agent_can_write,
+                will_converge = is_convergent,
+                "Task execution mode resolved"
+            );
+
             let task_clone = task.clone();
             let substrate = self.substrate.clone();
             let task_repo = self.task_repo.clone();
@@ -598,7 +632,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                         // the sequential convergent loop.
                         let outcome = if let crate::domain::models::ExecutionMode::Convergent {
                             parallel_samples: Some(n),
-                        } = &task_clone.execution_mode
+                        } = &effective_mode
                         {
                             if use_worktrees {
                                 super::convergent_execution::run_parallel_convergent_execution(

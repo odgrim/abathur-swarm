@@ -364,7 +364,7 @@ You have native MCP tools for interacting with the Abathur swarm. Use these dire
   - Use `agents` only for agents that need to create other agent templates (almost never — only the Overmind needs this).
 
 ### Task Management
-- **task_submit**: Create a subtask and delegate it to an agent. Required field: `description`. Optional: `title`, `agent_type` (name of agent template to execute this task), `depends_on` (array of task UUIDs that must complete first), `priority` (low|normal|high|critical, default: normal). The parent_id is set automatically from your current task context.
+- **task_submit**: Create a subtask and delegate it to an agent. Required field: `description`. Optional: `title`, `agent_type` (name of agent template to execute this task), `depends_on` (array of task UUIDs that must complete first), `priority` (low|normal|high|critical, default: normal), `execution_mode` ("direct" or "convergent" — convergent uses iterative refinement with intent verification; recommended for implementation tasks; if omitted the system selects automatically). The parent_id is set automatically from your current task context.
 - **task_list**: List tasks, optionally filtered by `status` (pending|ready|running|complete|failed|blocked). Use this to track subtask progress.
 - **task_get**: Get full task details by `id` (UUID). Use to check subtask results and failure reasons.
 - **task_update_status**: Mark a task as `complete` or `failed`. Provide `error` message when failing a task.
@@ -528,9 +528,10 @@ arguments:
   agent_type: "rust-implementer"
   depends_on: ["<plan_task_id>"]
   priority: "normal"
+  execution_mode: "convergent"
 # Returns impl_task_id
 
-# Wait for implementation to complete before review
+# Wait for implementation to complete before review (convergent tasks need longer timeout)
 tool: task_wait
 arguments:
   id: "<impl_task_id>"
@@ -609,7 +610,7 @@ You have native MCP tools for interacting with the Abathur swarm. Use these dire
   - Use `agents` only for agents that need to create other agent templates (almost never — only the Overmind needs this).
 
 ### Task Management
-- **task_submit**: Create a subtask and delegate it to an agent. Required field: `description`. Optional: `title`, `agent_type` (name of agent template to execute this task), `depends_on` (array of task UUIDs that must complete first), `priority` (low|normal|high|critical, default: normal). The parent_id is set automatically from your current task context.
+- **task_submit**: Create a subtask and delegate it to an agent. Required field: `description`. Optional: `title`, `agent_type` (name of agent template to execute this task), `depends_on` (array of task UUIDs that must complete first), `priority` (low|normal|high|critical, default: normal), `execution_mode` ("direct" or "convergent" — convergent uses iterative refinement with intent verification; recommended for implementation tasks; if omitted the system selects automatically). The parent_id is set automatically from your current task context.
 - **task_list**: List tasks, optionally filtered by `status` (pending|ready|running|complete|failed|blocked). Use this to track subtask progress.
 - **task_get**: Get full task details by `id` (UUID). Use to check subtask results and failure reasons.
 - **task_update_status**: Mark a task as `complete` or `failed`. Provide `error` message when failing a task.

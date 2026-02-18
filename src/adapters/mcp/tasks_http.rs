@@ -306,6 +306,7 @@ async fn submit_task<T: TaskRepository + Clone + Send + Sync + 'static>(
         source: TaskSource::Human,
         deadline: None,
         task_type: None,
+        execution_mode: None,
     });
     let envelope = CommandEnvelope::new(CommandSource::Mcp("tasks-http".into()), cmd);
 

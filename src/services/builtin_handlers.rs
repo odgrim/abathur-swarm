@@ -705,6 +705,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReviewFailureLoopHandler<T> {
                 source: TaskSource::System,
                 deadline: None,
                 task_type: None,
+                execution_mode: None,
             }),
         );
 
@@ -743,6 +744,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReviewFailureLoopHandler<T> {
                 source: TaskSource::System,
                 deadline: None,
                 task_type: None,
+                execution_mode: None,
             }),
         );
 
@@ -781,6 +783,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReviewFailureLoopHandler<T> {
                 source: TaskSource::System,
                 deadline: None,
                 task_type: None,
+                execution_mode: None,
             }),
         );
 
@@ -1605,6 +1608,7 @@ impl EventHandler for A2APollHandler {
                     source: crate::domain::models::TaskSource::System,
                     deadline: None,
                     task_type: None,
+                    execution_mode: None,
                 }),
             );
 
@@ -3404,6 +3408,7 @@ impl EventHandler for GoalEvaluationTaskCreationHandler {
                             source: TaskSource::System,
                             deadline: None,
                             task_type: None,
+                            execution_mode: None,
                         }),
                     );
 
@@ -3434,6 +3439,7 @@ impl EventHandler for GoalEvaluationTaskCreationHandler {
                         source: TaskSource::System,
                         deadline: None,
                         task_type: None,
+                        execution_mode: None,
                     }),
                 );
 
@@ -3533,6 +3539,7 @@ impl EventHandler for EvolutionTriggeredTemplateUpdateHandler {
                 source: TaskSource::System,
                 deadline: None,
                 task_type: None,
+                execution_mode: None,
             }),
         );
 
@@ -5935,6 +5942,7 @@ impl<S: TaskScheduleRepository + 'static, T: TaskRepository + 'static> EventHand
             source: TaskSource::Schedule(schedule.id),
             deadline: None,
             task_type: None,
+            execution_mode: None,
         });
 
         let envelope = CommandEnvelope::new(
@@ -6149,6 +6157,7 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
                 source: TaskSource::System,
                 deadline: None,
                 task_type: None,
+                execution_mode: None,
             }),
         );
 

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
-use crate::domain::models::{GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource, TaskStatus, TaskType};
+use crate::domain::models::{ExecutionMode, GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource, TaskStatus, TaskType};
 use crate::domain::ports::{AgentFilter, GoalFilter, GoalRepository, MemoryRepository, TaskRepository};
 use crate::services::command_bus::{
     CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand, MemoryCommand,
@@ -161,7 +161,8 @@ where
                                 "description": "UUIDs of tasks that must complete before this one starts. Use this to create task pipelines (e.g., implement before test, test before review)."
                             },
                             "priority": { "type": "string", "enum": ["low", "normal", "high", "critical"], "description": "Task priority. Higher priority tasks are picked up first. Default: normal." },
-                            "task_type": { "type": "string", "enum": ["standard", "verification", "research", "review"], "description": "Type of task. Default: standard. Use 'verification' for intent verification tasks." }
+                            "task_type": { "type": "string", "enum": ["standard", "verification", "research", "review"], "description": "Type of task. Default: standard. Use 'verification' for intent verification tasks." },
+                            "execution_mode": { "type": "string", "enum": ["direct", "convergent"], "description": "Execution mode override. 'convergent' uses iterative refinement with intent verification — recommended for implementation tasks. If omitted, the system selects automatically via heuristic." }
                         },
                         "required": ["description"]
                     }
@@ -445,6 +446,14 @@ where
             .and_then(|t| t.as_str())
             .and_then(TaskType::from_str);
 
+        let execution_mode = args
+            .get("execution_mode")
+            .and_then(|m| m.as_str())
+            .map(|s| match s.to_lowercase().as_str() {
+                "convergent" => ExecutionMode::Convergent { parallel_samples: None },
+                _ => ExecutionMode::Direct,
+            });
+
         let cmd = DomainCommand::Task(TaskCommand::Submit {
             title,
             description,
@@ -457,6 +466,7 @@ where
             source: TaskSource::Human,
             deadline: None,
             task_type,
+            execution_mode,
         });
         let envelope = CommandEnvelope::new(CommandSource::Mcp("stdio".into()), cmd);
 

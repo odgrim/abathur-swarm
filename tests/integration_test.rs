@@ -94,6 +94,7 @@ async fn test_task_lifecycle_with_dependencies() {
         TaskSource::Human,
         None,
         None,
+        None,
     ).await.expect("Failed to submit parent task");
 
     // Create a dependent task
@@ -107,6 +108,7 @@ async fn test_task_lifecycle_with_dependencies() {
         None,
         None,
         TaskSource::Human,
+        None,
         None,
         None,
     ).await.expect("Failed to submit child task");
@@ -341,6 +343,7 @@ async fn test_task_idempotency() {
         TaskSource::Human,
         None,
         None,
+        None,
     ).await.expect("First submit failed");
 
     // Second submission with same key should return the same task
@@ -354,6 +357,7 @@ async fn test_task_idempotency() {
         None,
         Some("unique-key-123".to_string()),
         TaskSource::Human,
+        None,
         None,
         None,
     ).await.expect("Second submit failed");
@@ -386,6 +390,7 @@ async fn test_task_retry_on_failure() {
         None,
         None,
         TaskSource::Human,
+        None,
         None,
         None,
     ).await.expect("Failed to submit");
