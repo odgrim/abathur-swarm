@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::TaskStatus;
+use crate::domain::models::{TaskStatus, WorktreeStatus};
 use crate::domain::ports::{GoalRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, AuditLogService,
@@ -197,7 +197,7 @@ where
     // When the convergence engine has verified intent satisfaction (e.g., "remove dead code"
     // where the code is already clean), skip the commits gate so the task can complete
     // successfully without producing any commits.
-    let effective_require_commits = require_commits && !intent_satisfied;
+    let require_commits_for_verification = require_commits && !intent_satisfied;
     if intent_satisfied && require_commits {
         tracing::info!(
             task_id = %task_id,
@@ -215,7 +215,7 @@ where
                 run_tests: false,
                 run_lint: false,
                 check_format: false,
-                require_commits: effective_require_commits,
+                require_commits: require_commits_for_verification,
                 ..VerifierConfig::default()
             },
         );
@@ -463,7 +463,7 @@ where
                 // Fall through to auto-ship check below
             } else {
                 // Normal subtask: attempt merge-back
-                if verification_passed && effective_require_commits {
+                if verification_passed && require_commits {
                     let merge_result = merge_subtask_into_feature_branch(
                         task_id,
                         task_repo.clone(),
@@ -518,7 +518,7 @@ where
 
     // Step 2: Try PR creation if preferred, then fall back to merge queue
     // (only for standalone tasks — no parent, no children)
-    if verification_passed && prefer_pull_requests && effective_require_commits {
+    if verification_passed && prefer_pull_requests && require_commits {
         if let Ok(Some(worktree)) = worktree_repo.get_by_task(task_id).await {
             // Look up task title/description for the PR
             let (pr_title, pr_body) = if let Ok(Some(task)) = task_repo.get(task_id).await {
@@ -559,7 +559,7 @@ where
     }
 
     // Step 3: Queue for merge if verification passed and merge queue is enabled
-    if verification_passed && use_merge_queue && effective_require_commits {
+    if verification_passed && use_merge_queue && require_commits {
         if let Ok(Some(worktree)) = worktree_repo.get_by_task(task_id).await {
             let verifier = IntegrationVerifierService::new(
                 task_repo.clone(),
@@ -808,6 +808,19 @@ where
     // Get root's worktree
     let root_wt = worktree_repo.get_by_task(root_id).await.ok()??;
 
+    // Safety net: collect any descendant work not yet merged into the root branch.
+    // This handles cases where individual merge-back was skipped (e.g., convergent
+    // tasks) or incomplete due to race conditions.
+    collect_descendant_work(
+        root_id,
+        &root_wt,
+        &*task_repo,
+        &*worktree_repo,
+        audit_log,
+        repo_path,
+    )
+    .await;
+
     // Check feature branch has commits ahead of base
     let has_commits = {
         use tokio::process::Command;
@@ -854,6 +867,120 @@ where
     ).await;
 
     Some(pr_url)
+}
+
+/// BFS-walk the task tree from root and merge any unmerged descendant branches
+/// into the root's worktree. This is a safety net to collect child work that
+/// wasn't merged back during individual subtask completion (e.g., convergent
+/// tasks where intent_satisfied skipped merge-back, or race conditions).
+async fn collect_descendant_work<T: TaskRepository, W: WorktreeRepository>(
+    root_id: Uuid,
+    root_wt: &crate::domain::models::Worktree,
+    task_repo: &T,
+    worktree_repo: &W,
+    audit_log: &Arc<AuditLogService>,
+    repo_path: &std::path::Path,
+) {
+    use tokio::process::Command;
+
+    let mut queue = vec![root_id];
+    while let Some(id) = queue.pop() {
+        let subtasks = match task_repo.get_subtasks(id).await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        for st in &subtasks {
+            queue.push(st.id);
+
+            // Skip if subtask has no worktree
+            let desc_wt = match worktree_repo.get_by_task(st.id).await {
+                Ok(Some(wt)) => wt,
+                _ => continue,
+            };
+
+            // Skip if already merged
+            if desc_wt.status == WorktreeStatus::Merged {
+                continue;
+            }
+
+            // Check if descendant has commits ahead of root's branch
+            let has_commits = Command::new("git")
+                .args([
+                    "log",
+                    &format!("{}..{}", root_wt.branch, desc_wt.branch),
+                    "--oneline",
+                ])
+                .current_dir(repo_path)
+                .output()
+                .await
+                .map(|out| !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+                .unwrap_or(false);
+
+            if !has_commits {
+                continue;
+            }
+
+            // Merge descendant into root's worktree
+            let merge_result = Command::new("git")
+                .args([
+                    "merge",
+                    "--no-ff",
+                    &desc_wt.branch,
+                    "-m",
+                    &format!(
+                        "Merge descendant {} ({}) into feature branch",
+                        &st.id.to_string()[..8],
+                        st.title
+                    ),
+                ])
+                .current_dir(&root_wt.path)
+                .output()
+                .await;
+
+            match merge_result {
+                Ok(output) if output.status.success() => {
+                    audit_log
+                        .info(
+                            AuditCategory::Task,
+                            AuditAction::TaskCompleted,
+                            format!(
+                                "collect_descendant_work: merged {} ({}) into feature branch '{}'",
+                                st.id, desc_wt.branch, root_wt.branch
+                            ),
+                        )
+                        .await;
+
+                    // Mark worktree as merged
+                    if let Ok(Some(mut wt)) = worktree_repo.get_by_task(st.id).await {
+                        wt.merged("collected-by-auto-ship".to_string());
+                        let _ = worktree_repo.update(&wt).await;
+                    }
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    tracing::warn!(
+                        "collect_descendant_work: merge of {} into '{}' failed: {}",
+                        st.id,
+                        root_wt.branch,
+                        stderr
+                    );
+                    // Abort the failed merge to leave the worktree clean
+                    let _ = Command::new("git")
+                        .args(["merge", "--abort"])
+                        .current_dir(&root_wt.path)
+                        .output()
+                        .await;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "collect_descendant_work: failed to run merge for {}: {}",
+                        st.id,
+                        e
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// BFS check: all descendants in terminal state.
