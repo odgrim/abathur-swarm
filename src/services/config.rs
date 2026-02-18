@@ -1,6 +1,7 @@
 //! Configuration management for the Abathur swarm system.
 
 use crate::domain::models::workflow_template::WorkflowTemplate;
+use crate::services::swarm_orchestrator::PollingConfig;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -34,6 +35,7 @@ pub struct Config {
     pub a2a: A2AConfig,
     pub database: DatabaseConfig,
     pub logging: LoggingConfig,
+    pub polling: PollingConfig,
     /// Name of the default workflow to use.
     #[serde(default = "default_workflow_name")]
     pub default_workflow: String,
@@ -54,6 +56,7 @@ impl Default for Config {
             a2a: A2AConfig::default(),
             database: DatabaseConfig::default(),
             logging: LoggingConfig::default(),
+            polling: PollingConfig::default(),
             default_workflow: default_workflow_name(),
             workflows: Vec::new(),
         }

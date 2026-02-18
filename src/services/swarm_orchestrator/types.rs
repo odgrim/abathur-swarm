@@ -81,7 +81,8 @@ pub struct SwarmConfig {
 }
 
 /// Configurable polling intervals (seconds) for all scheduled handlers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct PollingConfig {
     pub reconciliation_interval_secs: u64,
     pub stats_update_interval_secs: u64,

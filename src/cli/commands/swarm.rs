@@ -587,10 +587,12 @@ async fn run_swarm_foreground(
         }
     };
 
+    // Load application config (abathur.toml) for workflow and polling settings
+    let app_config = crate::services::config::Config::load()
+        .unwrap_or_default();
+
     // Resolve workflow template from config file
     let workflow_template = if let Some(wf_name) = workflow {
-        let app_config = crate::services::config::Config::load()
-            .unwrap_or_default();
         let wf = app_config.resolve_workflow(wf_name)
             .ok_or_else(|| anyhow::anyhow!("Workflow '{}' not found", wf_name))?;
         Some(wf)
@@ -604,6 +606,7 @@ async fn run_swarm_foreground(
         default_execution_mode: execution_mode,
         workflow_template,
         dangerously_skip_permissions,
+        polling: app_config.polling,
         ..Default::default()
     };
 
