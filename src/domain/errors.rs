@@ -41,6 +41,9 @@ pub enum DomainError {
 
     #[error("Workflow not found: {0}")]
     WorkflowNotFound(Uuid),
+
+    #[error("Task schedule not found: {0}")]
+    TaskScheduleNotFound(Uuid),
 }
 
 pub type DomainResult<T> = Result<T, DomainError>;
