@@ -40,6 +40,8 @@ jobs:
 
       - name: Build (cross)
         if: matrix.use-cross
+        env:
+          AWS_LC_SYS_CMAKE_BUILDER: "1"
         run: cross build --release --target ${{ matrix.target }}
 
       - name: Build (cargo)
