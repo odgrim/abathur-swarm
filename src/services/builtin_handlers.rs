@@ -6969,6 +6969,16 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
                     "GoalConvergenceCheckHandler: created convergence check task for {} goals",
                     goals.len()
                 );
+                // Update last_convergence_check_at for all active goals
+                for goal in &goals {
+                    if let Err(e) = self.goal_repo.update_last_check(goal.id, now).await {
+                        tracing::warn!(
+                            goal_id = %goal.id,
+                            error = %e,
+                            "GoalConvergenceCheckHandler: failed to update last_convergence_check_at"
+                        );
+                    }
+                }
             }
             Err(crate::services::command_bus::CommandError::DuplicateCommand(_)) => {
                 tracing::debug!("GoalConvergenceCheckHandler: duplicate convergence check task, skipping");
@@ -6979,6 +6989,159 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
         }
 
         Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// GoalStagnationDetectorHandler
+// ============================================================================
+
+/// Detects goals that have not been evaluated in a convergence check recently.
+///
+/// Fires a `HumanEscalationRequired` event for any active goal whose
+/// `last_convergence_check_at` exceeds the stall threshold, unless the goal
+/// was created recently (grace period) or an alert was already emitted within
+/// the threshold window (in-memory dedup).
+///
+/// Triggered by `ScheduledEventFired { name: "system-stall-check" }` — no
+/// new schedule needed.
+pub struct GoalStagnationDetectorHandler<G: GoalRepository> {
+    goal_repo: Arc<G>,
+    /// Maximum time (seconds) a goal may go without a convergence check before alerting.
+    stall_threshold_secs: u64,
+    /// In-memory dedup: maps goal_id → last alert timestamp.
+    last_alerted: RwLock<std::collections::HashMap<uuid::Uuid, chrono::DateTime<chrono::Utc>>>,
+}
+
+impl<G: GoalRepository> GoalStagnationDetectorHandler<G> {
+    pub fn new(goal_repo: Arc<G>, stall_threshold_secs: u64) -> Self {
+        Self {
+            goal_repo,
+            stall_threshold_secs,
+            last_alerted: RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl<G: GoalRepository + 'static> EventHandler for GoalStagnationDetectorHandler<G> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "GoalStagnationDetectorHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Scheduler])
+                .payload_types(vec!["ScheduledEventFired".to_string()]),
+            priority: HandlerPriority::LOW,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let name = match &event.payload {
+            EventPayload::ScheduledEventFired { name, .. } => name.as_str(),
+            _ => return Ok(Reaction::None),
+        };
+
+        if name != "system-stall-check" {
+            return Ok(Reaction::None);
+        }
+
+        let goals = self.goal_repo.get_active_with_constraints().await
+            .map_err(|e| format!("GoalStagnationDetector: failed to get active goals: {}", e))?;
+
+        if goals.is_empty() {
+            return Ok(Reaction::None);
+        }
+
+        let now = chrono::Utc::now();
+        let threshold_secs = self.stall_threshold_secs as i64;
+        let mut last_alerted = self.last_alerted.write().await;
+        let mut events = Vec::new();
+
+        for goal in &goals {
+            // Grace period: new goals without a check yet AND created recently should not alert
+            if goal.last_convergence_check_at.is_none() {
+                let age_secs = (now - goal.created_at).num_seconds();
+                if age_secs < threshold_secs {
+                    tracing::debug!(
+                        goal_id = %goal.id,
+                        age_secs,
+                        threshold = threshold_secs,
+                        "GoalStagnationDetector: goal within grace period, skipping"
+                    );
+                    continue;
+                }
+            }
+
+            // Determine if this goal is stagnant
+            let is_stagnant = match goal.last_convergence_check_at {
+                Some(last_check) => {
+                    let secs_since_check = (now - last_check).num_seconds();
+                    secs_since_check > threshold_secs
+                }
+                None => {
+                    // No check ever AND outside grace period
+                    true
+                }
+            };
+
+            if !is_stagnant {
+                continue;
+            }
+
+            // Dedup: skip if we already alerted for this goal within the threshold window
+            let should_alert = match last_alerted.get(&goal.id) {
+                Some(last_alert_time) => {
+                    let secs_since_alert = (now - *last_alert_time).num_seconds();
+                    secs_since_alert > threshold_secs
+                }
+                None => true,
+            };
+
+            if !should_alert {
+                tracing::debug!(
+                    goal_id = %goal.id,
+                    "GoalStagnationDetector: alert already emitted recently, skipping"
+                );
+                continue;
+            }
+
+            tracing::warn!(
+                goal_id = %goal.id,
+                goal_name = %goal.name,
+                "GoalStagnationDetector: goal has not been evaluated in a convergence check recently"
+            );
+
+            last_alerted.insert(goal.id, now);
+
+            events.push(crate::services::event_factory::make_event(
+                EventSeverity::Warning,
+                EventCategory::Escalation,
+                Some(goal.id),
+                None,
+                EventPayload::HumanEscalationRequired {
+                    goal_id: Some(goal.id),
+                    task_id: None,
+                    reason: format!(
+                        "Goal '{}' (id: {}) has not been evaluated in a convergence check for more than {} seconds. This may indicate goal stagnation.",
+                        goal.name, goal.id, threshold_secs
+                    ),
+                    urgency: "high".to_string(),
+                    questions: vec![
+                        format!("Goal '{}' may be stagnating. Is there work being done toward this goal?", goal.name),
+                        "Consider triggering a manual goal convergence check to generate new tasks.".to_string(),
+                    ],
+                    is_blocking: false,
+                },
+            ));
+        }
+
+        if events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(events))
+        }
     }
 }
 

@@ -662,6 +662,27 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
     // 6.4 check_loop_control -- Determine if the loop should continue
     // -----------------------------------------------------------------------
 
+    /// Returns `true` when the latest observation's overseer signals are ambiguous
+    /// for the `OverseerConverged` shortcircuit.
+    ///
+    /// "Ambiguous" means the specification has success criteria that require test
+    /// evidence to verify, but the latest observation has no `test_results`.
+    /// `all_passing_relative()` treats absent `test_results` as passing, so a
+    /// build-only result can satisfy the all-passing gate without any test evidence.
+    ///
+    /// When signals are ambiguous the caller should emit `IntentCheck` instead of
+    /// `OverseerConverged`, satisfying the no-premature-termination constraint.
+    fn overseer_signals_are_ambiguous(trajectory: &Trajectory) -> bool {
+        if trajectory.specification.effective.success_criteria.is_empty() {
+            return false; // task has no testable criteria → build-only is sufficient
+        }
+        trajectory
+            .observations
+            .last()
+            .map(|o| o.overseer_signals.test_results.is_none())
+            .unwrap_or(true)
+    }
+
     /// Determine whether the convergence loop should continue.
     ///
     /// Intent verification is the sole finality mechanism. The engine emits
@@ -747,6 +768,12 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                 .count();
 
             if consecutive_all_passing >= 2 {
+                // Guard: fall back to IntentCheck when signals are ambiguous (success
+                // criteria present but no test evidence). Satisfies the
+                // no-premature-termination constraint.
+                if Self::overseer_signals_are_ambiguous(trajectory) {
+                    return Ok(LoopControl::IntentCheck);
+                }
                 return Ok(LoopControl::OverseerConverged);
             }
         }
@@ -766,6 +793,10 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                 })
                 .unwrap_or(false);
             if latest_passing {
+                // Same ambiguity guard as FixedPoint case above.
+                if Self::overseer_signals_are_ambiguous(trajectory) {
+                    return Ok(LoopControl::IntentCheck);
+                }
                 return Ok(LoopControl::OverseerConverged);
             }
 
@@ -2992,6 +3023,270 @@ mod tests {
         assert!(
             matches!(result, LoopControl::IntentCheck),
             "All-passing transition should trigger IntentCheck, got {:?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // no-premature-termination constraint tests
+    // (overseer_signals_are_ambiguous guard on OverseerConverged)
+    // -----------------------------------------------------------------------
+
+    /// Happy path: FixedPoint + build passing + test_results present → OverseerConverged.
+    #[test]
+    fn test_loop_control_overseer_converged_fixed_point_with_full_signals() {
+        let engine = test_engine();
+        let mut trajectory = test_trajectory();
+
+        // Disable interval and budget triggers so only the FixedPoint path fires.
+        trajectory.policy.intent_check_interval = u32::MAX;
+        trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+        // Set FixedPoint attractor.
+        trajectory.attractor_state = AttractorState {
+            classification: AttractorType::FixedPoint {
+                estimated_remaining_iterations: 0,
+                estimated_remaining_tokens: 0,
+            },
+            confidence: 0.95,
+            detected_at: None,
+            evidence: AttractorEvidence {
+                recent_deltas: vec![0.001, 0.0, 0.0],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        };
+
+        // Two consecutive observations with full signals (build + tests passing).
+        let full_signals = signals_with_tests(10, 10);
+        for i in 0..2 {
+            let obs = Observation::new(
+                i,
+                test_artifact(i),
+                full_signals.clone(),
+                StrategyKind::RetryWithFeedback,
+                10_000,
+                5_000,
+            )
+            .with_metrics(metrics_with(0.0, 1.0));
+            trajectory.observations.push(obs);
+        }
+
+        let bandit = StrategyBandit::with_default_priors();
+        let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+        assert!(
+            matches!(result, LoopControl::OverseerConverged),
+            "FixedPoint + full test signals should yield OverseerConverged, got {:?}",
+            result
+        );
+    }
+
+    /// Guard: FixedPoint + build-only signals (no test_results) + success_criteria present
+    /// → must fall back to IntentCheck, not OverseerConverged.
+    #[test]
+    fn test_loop_control_no_overseer_converged_when_build_only_and_success_criteria() {
+        let engine = test_engine();
+        let mut trajectory = test_trajectory();
+
+        // Disable interval and budget triggers.
+        trajectory.policy.intent_check_interval = u32::MAX;
+        trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+        // Add a success criterion so the spec is testable.
+        trajectory
+            .specification
+            .effective
+            .success_criteria
+            .push("All endpoints return valid JSON".to_string());
+
+        // Set FixedPoint attractor.
+        trajectory.attractor_state = AttractorState {
+            classification: AttractorType::FixedPoint {
+                estimated_remaining_iterations: 0,
+                estimated_remaining_tokens: 0,
+            },
+            confidence: 0.95,
+            detected_at: None,
+            evidence: AttractorEvidence {
+                recent_deltas: vec![0.001, 0.0, 0.0],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        };
+
+        // Two consecutive observations — build passing but NO test_results.
+        let build_only = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: None, // ← no test evidence
+            ..OverseerSignals::default()
+        };
+        for i in 0..2 {
+            let obs = Observation::new(
+                i,
+                test_artifact(i),
+                build_only.clone(),
+                StrategyKind::RetryWithFeedback,
+                10_000,
+                5_000,
+            )
+            .with_metrics(metrics_with(0.0, 1.0));
+            trajectory.observations.push(obs);
+        }
+
+        let bandit = StrategyBandit::with_default_priors();
+        let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+        assert!(
+            matches!(result, LoopControl::IntentCheck),
+            "Build-only signals with success_criteria must fall back to IntentCheck \
+             (no-premature-termination), got {:?}",
+            result
+        );
+    }
+
+    /// No guard needed: build-only signals + empty success_criteria → OverseerConverged
+    /// is legitimate because there are no testable criteria to verify.
+    #[test]
+    fn test_loop_control_overseer_converged_build_only_no_success_criteria() {
+        let engine = test_engine();
+        let mut trajectory = test_trajectory();
+
+        // Disable interval and budget triggers.
+        trajectory.policy.intent_check_interval = u32::MAX;
+        trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+        // success_criteria is empty (test_trajectory() → test_spec() uses empty Vec).
+        assert!(
+            trajectory.specification.effective.success_criteria.is_empty(),
+            "test_trajectory must start with empty success_criteria"
+        );
+
+        // Set FixedPoint attractor.
+        trajectory.attractor_state = AttractorState {
+            classification: AttractorType::FixedPoint {
+                estimated_remaining_iterations: 0,
+                estimated_remaining_tokens: 0,
+            },
+            confidence: 0.95,
+            detected_at: None,
+            evidence: AttractorEvidence {
+                recent_deltas: vec![0.001, 0.0, 0.0],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        };
+
+        // Two consecutive build-only observations.
+        let build_only = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: None,
+            ..OverseerSignals::default()
+        };
+        for i in 0..2 {
+            let obs = Observation::new(
+                i,
+                test_artifact(i),
+                build_only.clone(),
+                StrategyKind::RetryWithFeedback,
+                10_000,
+                5_000,
+            )
+            .with_metrics(metrics_with(0.0, 1.0));
+            trajectory.observations.push(obs);
+        }
+
+        let bandit = StrategyBandit::with_default_priors();
+        let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+        assert!(
+            matches!(result, LoopControl::OverseerConverged),
+            "Build-only signals with no success_criteria should yield OverseerConverged, \
+             got {:?}",
+            result
+        );
+    }
+
+    /// LimitCycle path: passing build-only + success_criteria → IntentCheck, not
+    /// OverseerConverged. Verifies the same guard applies to the LimitCycle branch.
+    #[test]
+    fn test_loop_control_no_overseer_converged_limit_cycle_build_only_with_criteria() {
+        let engine = test_engine();
+        let mut trajectory = test_trajectory();
+
+        // Disable interval and budget triggers.
+        trajectory.policy.intent_check_interval = u32::MAX;
+        trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+        // Add a success criterion.
+        trajectory
+            .specification
+            .effective
+            .success_criteria
+            .push("All auth tokens expire correctly".to_string());
+
+        // Set LimitCycle attractor.
+        trajectory.attractor_state = AttractorState {
+            classification: AttractorType::LimitCycle {
+                period: 2,
+                cycle_signatures: vec!["sig1".to_string(), "sig2".to_string()],
+            },
+            confidence: 0.85,
+            detected_at: None,
+            evidence: AttractorEvidence {
+                recent_deltas: vec![],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        };
+
+        // One observation: build passing, no test_results.
+        let build_only = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: None, // ← no test evidence
+            ..OverseerSignals::default()
+        };
+        let obs = Observation::new(
+            0,
+            test_artifact(0),
+            build_only,
+            StrategyKind::RetryWithFeedback,
+            10_000,
+            5_000,
+        )
+        .with_metrics(metrics_with(0.0, 1.0));
+        trajectory.observations.push(obs);
+
+        let bandit = StrategyBandit::with_default_priors();
+        let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+        assert!(
+            matches!(result, LoopControl::IntentCheck),
+            "LimitCycle + build-only signals with success_criteria must fall back to \
+             IntentCheck (no-premature-termination), got {:?}",
             result
         );
     }

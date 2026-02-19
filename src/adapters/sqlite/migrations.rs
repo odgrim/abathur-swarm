@@ -109,5 +109,10 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
             description: "Distinct accessors for memory promotion integrity".to_string(),
             sql: include_str!("../../../migrations/005_distinct_accessors.sql").to_string(),
         },
+        Migration {
+            version: 6,
+            description: "Per-goal convergence check tracking".to_string(),
+            sql: include_str!("../../../migrations/006_goal_convergence_check_at.sql").to_string(),
+        },
     ]
 }

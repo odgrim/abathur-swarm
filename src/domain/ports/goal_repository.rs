@@ -1,6 +1,7 @@
 //! Goal repository port.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::domain::errors::DomainResult;
@@ -43,4 +44,7 @@ pub trait GoalRepository: Send + Sync {
 
     /// Find active goals whose applicability_domains overlap with the given domains.
     async fn find_by_domains(&self, domains: &[String]) -> DomainResult<Vec<Goal>>;
+
+    /// Update the last_convergence_check_at timestamp for a goal.
+    async fn update_last_check(&self, goal_id: Uuid, ts: DateTime<Utc>) -> DomainResult<()>;
 }
