@@ -491,6 +491,7 @@ fn serialize_task_source(source: &TaskSource) -> (String, Option<String>) {
         TaskSource::System => ("system".to_string(), None),
         TaskSource::SubtaskOf(uuid) => ("subtask".to_string(), Some(uuid.to_string())),
         TaskSource::Schedule(uuid) => ("schedule".to_string(), Some(uuid.to_string())),
+        TaskSource::Adapter(name) => ("adapter".to_string(), Some(name.clone())),
     }
 }
 
@@ -517,6 +518,10 @@ fn deserialize_task_source(
             let uuid = Uuid::parse_str(uuid_str)
                 .map_err(|e| DomainError::SerializationError(e.to_string()))?;
             Ok(TaskSource::Schedule(uuid))
+        }
+        Some("adapter") => {
+            let name = source_ref.unwrap_or("unknown").to_string();
+            Ok(TaskSource::Adapter(name))
         }
         // Legacy: goal_evaluation rows in DB are treated as Human
         Some("goal_evaluation") => Ok(TaskSource::Human),
