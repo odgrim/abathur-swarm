@@ -41,7 +41,7 @@ impl Default for ModelRoutingConfig {
         Self {
             enabled: true,
             trivial_model: "haiku".to_string(),
-            simple_model: "haiku".to_string(),
+            simple_model: "sonnet".to_string(),
             moderate_model: "sonnet".to_string(),
             complex_model: "opus".to_string(),
             retry_escalation: true,
@@ -166,10 +166,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_simple_task_gets_haiku() {
+    fn test_simple_task_gets_sonnet() {
         let router = ModelRouter::with_defaults();
         let selection = router.select_model(Complexity::Simple, None, 0);
-        assert_eq!(selection.model, "haiku");
+        assert_eq!(selection.model, "sonnet");
         assert!(!selection.escalated);
     }
 

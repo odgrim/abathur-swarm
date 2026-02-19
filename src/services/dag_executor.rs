@@ -899,7 +899,7 @@ where
 
     // Pre-flight context window check
     let context_guard = ContextWindowGuard::with_defaults();
-    let model_for_guard = substrate_config.model.as_deref().unwrap_or("opus");
+    let model_for_guard = substrate_config.model.as_deref().unwrap_or("sonnet");
     match context_guard.check(model_for_guard, &system_prompt, &task.description) {
         ContextWindowCheck::Block { estimated_prompt_tokens, remaining_tokens, context_window } => {
             tracing::error!(
@@ -1012,7 +1012,7 @@ where
                 }
 
                 // Estimate cost from model pricing if not already set by substrate
-                let model_name = session.config.model.as_deref().unwrap_or("opus");
+                let model_name = session.config.model.as_deref().unwrap_or("sonnet");
                 let estimated_cost_cents = session.cost_cents.or_else(|| {
                     cost_tracker::estimate_cost_cents(
                         model_name,
