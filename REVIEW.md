@@ -1,17 +1,25 @@
 # Code Review Report — Memory Context Injection & TaskOutcomeMemoryHandler
 
-**Date:** 2026-02-19
+**Date:** 2026-02-19 (second review pass)
 **Status:** ❌ FAILED — Both implementations are ABSENT from the codebase
+
+> **Re-verification note:** A prior review pass (commit `650bcae`) reached identical
+> conclusions. A second independent review cycle on 2026-02-19 confirms nothing has
+> changed — neither feature exists in the codebase.
 
 ---
 
 ## Summary
 
-Neither implementation described in the task exists in the worktree. The branch
-`abathur/task-75ff5029` has **zero commits ahead of `main`** and the working tree
-is clean. The most recent commit (`ae08873 fix updating events`, 2026-02-18) is
-unrelated (ClickUp adapter fix). The "what was implemented" description in the
-task was inaccurate — the features were **never written**.
+Neither implementation described in the task exists in the worktree.
+The most recent code commit (`ae08873 fix updating events`) is unrelated to this
+feature. The "what was implemented" description in the task is inaccurate — the
+features were **never written**.
+
+**Build/test status (current state):**
+- `cargo check`: ✅ PASSES (clean)
+- `cargo test --lib`: ✅ 885 passed, 0 failed
+- Lint: ✅ No warnings introduced (because no code was added)
 
 ---
 
@@ -21,7 +29,7 @@ task was inaccurate — the features were **never written**.
 
 | Item | Status | Detail |
 |------|--------|--------|
-| `format_memory_context` function exists | ❌ MISSING | Not found anywhere in the codebase (grep confirmed) |
+| `format_memory_context` function exists | ❌ MISSING | Not found anywhere in the codebase |
 | Memory retrieval guarded by `if let Some(ref mem_repo)` | ❌ MISSING | No memory retrieval of any kind in `spawn_task_agent` |
 | `MemoryService::new(mem_repo.clone())` called | ❌ MISSING | Never called in `goal_processing.rs` |
 | `RelevanceWeights::semantic_biased()` used | ❌ MISSING | Only appears in `memory_service.rs` and `memory.rs` tests |
@@ -84,17 +92,18 @@ All the building blocks are present but were not wired together.
    - Call `load_context_with_budget(&task.description, None, 2000, RelevanceWeights::semantic_biased())` (or equivalent)
    - Implement `format_memory_context` to produce markdown-formatted output
    - Prepend the memory context between goal context and task description
+   - Log errors at DEBUG level, do not propagate them (non-fatal path)
 
 2. **`builtin_handlers.rs`** — Add `TaskOutcomeMemoryHandler<T, M>` struct with:
    - `EventHandler` implementation subscribing to `TaskCompleted` and `TaskCompletedWithResult`
    - Idempotency guard using `memory_repo.get_by_key("task-outcome:{task_id}", "task-outcomes")`
    - Task loading from `task_repo` for metadata (agent type, complexity, mode)
-   - `ExecutionMode::is_direct()` (not Display) to determine mode tag
+   - `ExecutionMode::is_direct()` (NOT `.to_string()` / Display) to determine mode tag
    - `MemoryType::Pattern` for success, `MemoryType::Error` for failure
    - Tags: outcome, mode, complexity, agent
    - Store to namespace `"task-outcomes"`
    - Return `Reaction::EmitEvents` with a `MemoryStored` event
 
 3. **`handler_registration.rs`** — Import `TaskOutcomeMemoryHandler` and register it
-   after the `DirectModeExecutionMemoryHandler` block, gated on
+   after the `DirectModeExecutionMemoryHandler` block (lines 247-254), gated on
    `if let Some(ref memory_repo) = self.memory_repo`.
