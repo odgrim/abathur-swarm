@@ -6,6 +6,7 @@
 //! domain port traits directly.
 
 pub mod clickup;
+pub mod github_issues;
 
 use std::sync::Arc;
 
@@ -17,6 +18,10 @@ use crate::domain::ports::adapter::{EgressAdapter, IngestionAdapter};
 use self::clickup::client::ClickUpClient;
 use self::clickup::egress::ClickUpEgressAdapter;
 use self::clickup::ingestion::ClickUpIngestionAdapter;
+
+use self::github_issues::client::GitHubClient;
+use self::github_issues::egress::GitHubEgressAdapter;
+use self::github_issues::ingestion::GitHubIngestionAdapter;
 
 
 
@@ -42,22 +47,41 @@ pub struct KnownAdapter {
 }
 
 /// Registry of all adapters the binary knows about.
-pub static KNOWN_ADAPTERS: &[KnownAdapter] = &[KnownAdapter {
-    name: "clickup",
-    description: "Bidirectional adapter for ClickUp project management. Polls tasks from a list and supports status updates, comments, and task creation.",
-    adapter_type: AdapterType::Native,
-    direction: AdapterDirection::Bidirectional,
-    capabilities: &[
-        AdapterCapability::PollItems,
-        AdapterCapability::UpdateStatus,
-        AdapterCapability::PostComment,
-        AdapterCapability::CreateItem,
-        AdapterCapability::MapPriority,
-    ],
-    default_config: include_str!("clickup/default_adapter.toml"),
-    default_adapter_md: include_str!("clickup/default_adapter.md"),
-    required_env_vars: &["CLICKUP_API_KEY"],
-}];
+pub static KNOWN_ADAPTERS: &[KnownAdapter] = &[
+    KnownAdapter {
+        name: "clickup",
+        description: "Bidirectional adapter for ClickUp project management. Polls tasks from a list and supports status updates, comments, and task creation.",
+        adapter_type: AdapterType::Native,
+        direction: AdapterDirection::Bidirectional,
+        capabilities: &[
+            AdapterCapability::PollItems,
+            AdapterCapability::UpdateStatus,
+            AdapterCapability::PostComment,
+            AdapterCapability::CreateItem,
+            AdapterCapability::MapPriority,
+        ],
+        default_config: include_str!("clickup/default_adapter.toml"),
+        default_adapter_md: include_str!("clickup/default_adapter.md"),
+        required_env_vars: &["CLICKUP_API_KEY"],
+    },
+    KnownAdapter {
+        name: "github-issues",
+        description: "Bidirectional adapter for GitHub repository issues. Polls open issues and supports status updates, comments, issue creation, and pull request creation.",
+        adapter_type: AdapterType::Native,
+        direction: AdapterDirection::Bidirectional,
+        capabilities: &[
+            AdapterCapability::PollItems,
+            AdapterCapability::UpdateStatus,
+            AdapterCapability::PostComment,
+            AdapterCapability::CreateItem,
+            AdapterCapability::MapPriority,
+            AdapterCapability::Custom,
+        ],
+        default_config: include_str!("github_issues/default_adapter.toml"),
+        default_adapter_md: include_str!("github_issues/default_adapter.md"),
+        required_env_vars: &["GITHUB_TOKEN"],
+    },
+];
 
 /// Look up a known adapter by name.
 pub fn find_known_adapter(name: &str) -> Option<&'static KnownAdapter> {
@@ -111,8 +135,33 @@ pub fn create_native_adapter(
 
             Ok((ingestion, egress))
         }
+        "github-issues" => {
+            let client = Arc::new(GitHubClient::from_env()?);
+
+            let ingestion: Option<Box<dyn IngestionAdapter>> =
+                if manifest.direction.supports_ingestion() {
+                    Some(Box::new(GitHubIngestionAdapter::new(
+                        manifest.clone(),
+                        Arc::clone(&client),
+                    )))
+                } else {
+                    None
+                };
+
+            let egress: Option<Box<dyn EgressAdapter>> =
+                if manifest.direction.supports_egress() {
+                    Some(Box::new(GitHubEgressAdapter::new(
+                        manifest.clone(),
+                        Arc::clone(&client),
+                    )))
+                } else {
+                    None
+                };
+
+            Ok((ingestion, egress))
+        }
         unknown => Err(format!(
-            "Unknown native adapter: '{unknown}'. Available native adapters: clickup"
+            "Unknown native adapter: '{unknown}'. Available native adapters: clickup, github-issues"
         )),
     }
 }
