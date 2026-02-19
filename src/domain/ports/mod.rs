@@ -1,5 +1,6 @@
 //! Domain ports (interfaces) for the Abathur swarm system.
 
+pub mod adapter;
 pub mod agent_repository;
 pub mod embedding;
 pub mod goal_repository;
@@ -14,6 +15,7 @@ pub mod trigger_rule_repository;
 pub mod workflow_repository;
 pub mod worktree_repository;
 
+pub use adapter::{EgressAdapter, IngestionAdapter};
 pub use agent_repository::{AgentFilter, AgentRepository};
 pub use embedding::{EmbeddingInput, EmbeddingOutput, EmbeddingProvider};
 pub use goal_repository::{GoalFilter, GoalRepository};
