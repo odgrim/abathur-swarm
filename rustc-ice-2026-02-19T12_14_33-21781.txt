@@ -1,0 +1,21 @@
+thread 'main' panicked at compiler/rustc_driver_impl/src/lib.rs:1600:6:
+Unable to install ctrlc handler: System(Custom { kind: Other, error: ENFILE })
+stack backtrace:
+   0:        0x109a007a0 - std::backtrace::Backtrace::create::hf5e00875d40c4203
+   1:        0x106ed9c50 - std[c0fe66d2cecd3126]::panicking::update_hook::<alloc[87020fb9bebeb6ca]::boxed::Box<rustc_driver_impl[818bb05128b8c9da]::install_ice_hook::{closure#1}>>::{closure#0}
+   2:        0x109a20870 - std::panicking::rust_panic_with_hook::h1955f793405535ca
+   3:        0x109a077ac - std::panicking::begin_panic_handler::{{closure}}::heeef2a79725f622b
+   4:        0x109a0747c - std::sys::backtrace::__rust_end_short_backtrace::hdc10d5b18010a49f
+   5:        0x109a20304 - __rustc[7d5e88824d81f3b9]::rust_begin_unwind
+   6:        0x109bfc844 - core::panicking::panic_fmt::h3238823dd9a43c4e
+   7:        0x109bfc11c - core::result::unwrap_failed::h82e44600673e13e2
+   8:        0x106e93788 - rustc_driver_impl[818bb05128b8c9da]::main
+   9:        0x100e1a070 - rustc_main[1d9664019150690f]::main
+  10:        0x100e1a024 - std[c0fe66d2cecd3126]::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  11:        0x100e1a03c - std[c0fe66d2cecd3126]::rt::lang_start::<()>::{closure#0}
+  12:        0x109a1ccb4 - std::rt::lang_start_internal::h5b2b6e2cac0b4d2b
+  13:        0x100e1a0a4 - _main
+
+
+rustc version: 1.90.0 (1159e78c4 2025-09-14) (Homebrew)
+platform: aarch64-apple-darwin
