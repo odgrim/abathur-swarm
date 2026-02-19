@@ -380,8 +380,18 @@ mod tests {
         pr.pull_request = Some(GitHubPullRequestRef {
             url: "https://api.github.com/repos/org/repo/pulls/99".to_string(),
         });
-        // PRs must never produce an IngestionItem — verify via the filter logic used in poll().
-        // We replicate the filter predicate here to keep the test pure (no network call).
-        assert!(pr.pull_request.is_some(), "PR should be detected");
+        let regular = make_github_issue(100, "Regular issue", vec![]);
+
+        // Replicate the exact filter predicate from poll() to verify PRs are excluded
+        // from the IngestionItem output without requiring a live network call.
+        let issues = vec![pr, regular];
+        let items: Vec<IngestionItem> = issues
+            .iter()
+            .filter(|issue| issue.pull_request.is_none())
+            .map(GitHubIngestionAdapter::to_ingestion_item)
+            .collect();
+
+        assert_eq!(items.len(), 1, "Only the non-PR issue should be included");
+        assert_eq!(items[0].external_id, "100", "PR issue #99 must be filtered out");
     }
 }

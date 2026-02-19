@@ -76,6 +76,25 @@ impl GitHubEgressAdapter {
             _ => "open",
         }
     }
+
+    /// Format the body for a pull request creation, optionally appending a
+    /// `"Closes #N"` reference when `issue_number` is provided.
+    ///
+    /// - If `body` is empty and `issue_number` is `Some(n)`, returns `"Closes #n"`.
+    /// - If `body` is non-empty and `issue_number` is `Some(n)`, appends
+    ///   `"\n\nCloses #n"` to the body.
+    /// - If `issue_number` is `None`, returns `body` unchanged.
+    pub fn format_pr_body(body: &str, issue_number: Option<u64>) -> String {
+        if let Some(n) = issue_number {
+            if body.is_empty() {
+                format!("Closes #{n}")
+            } else {
+                format!("{body}\n\nCloses #{n}")
+            }
+        } else {
+            body.to_string()
+        }
+    }
 }
 
 #[async_trait]
@@ -234,15 +253,7 @@ impl EgressAdapter for GitHubEgressAdapter {
                         }
                     });
 
-                    let full_body = if let Some(n) = issue_number {
-                        if body.is_empty() {
-                            format!("Closes #{n}")
-                        } else {
-                            format!("{body}\n\nCloses #{n}")
-                        }
-                    } else {
-                        body.to_string()
-                    };
+                    let full_body = Self::format_pr_body(body, issue_number);
 
                     tracing::info!(
                         owner = owner,
@@ -394,5 +405,69 @@ mod tests {
         assert_eq!(adapter.manifest().name, "github-issues");
         assert!(adapter.manifest().has_capability(AdapterCapability::UpdateStatus));
         assert!(adapter.manifest().has_capability(AdapterCapability::PostComment));
+    }
+
+    // ── format_pr_body / create_pr body formatting ──────────────────────────
+
+    #[test]
+    fn test_format_pr_body_no_issue_number() {
+        let result = GitHubEgressAdapter::format_pr_body("My PR description", None);
+        assert_eq!(result, "My PR description");
+    }
+
+    #[test]
+    fn test_format_pr_body_empty_body_with_issue_number() {
+        let result = GitHubEgressAdapter::format_pr_body("", Some(42));
+        assert_eq!(result, "Closes #42");
+    }
+
+    #[test]
+    fn test_format_pr_body_non_empty_body_with_issue_number() {
+        let result = GitHubEgressAdapter::format_pr_body("Implements the new feature", Some(7));
+        assert_eq!(result, "Implements the new feature\n\nCloses #7");
+    }
+
+    #[test]
+    fn test_format_pr_body_no_issue_number_empty_body() {
+        // Without an issue number and with an empty body, body is returned as-is (empty).
+        let result = GitHubEgressAdapter::format_pr_body("", None);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_create_pr_issue_number_as_json_string() {
+        // Simulate how the issue_number param is resolved from a JSON string value,
+        // matching the logic in execute() before delegating to format_pr_body.
+        let v = serde_json::json!("15");
+        let parsed: Option<u64> = {
+            if let Some(n) = v.as_u64() {
+                Some(n)
+            } else if let Some(s) = v.as_str() {
+                s.parse::<u64>().ok()
+            } else {
+                None
+            }
+        };
+        assert_eq!(parsed, Some(15));
+        let body = GitHubEgressAdapter::format_pr_body("Fix things", parsed);
+        assert_eq!(body, "Fix things\n\nCloses #15");
+    }
+
+    #[test]
+    fn test_create_pr_issue_number_as_json_number() {
+        // Simulate how the issue_number param is resolved from a JSON numeric value.
+        let v = serde_json::json!(23u64);
+        let parsed: Option<u64> = {
+            if let Some(n) = v.as_u64() {
+                Some(n)
+            } else if let Some(s) = v.as_str() {
+                s.parse::<u64>().ok()
+            } else {
+                None
+            }
+        };
+        assert_eq!(parsed, Some(23));
+        let body = GitHubEgressAdapter::format_pr_body("", parsed);
+        assert_eq!(body, "Closes #23");
     }
 }
