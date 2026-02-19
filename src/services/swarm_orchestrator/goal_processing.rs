@@ -12,9 +12,11 @@ use tokio::sync::mpsc;
 
 use crate::domain::errors::DomainResult;
 use crate::domain::models::{
+    RelevanceWeights, ScoredMemory,
     SessionStatus, SubstrateConfig, SubstrateRequest,
     Task, TaskStatus,
 };
+use crate::services::memory_service::MemoryService;
 use crate::domain::ports::{AgentFilter, AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
@@ -101,6 +103,21 @@ fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
     cli_tools.sort();
     cli_tools.dedup();
     cli_tools
+}
+
+/// Format scored memories as contextual guidance text for agent task prompts.
+fn format_memory_context(memories: &[ScoredMemory]) -> String {
+    let mut output = String::from(
+        "## Relevant Context from Memory\nThe following memories from previous work are relevant to this task:\n\n",
+    );
+    for entry in memories {
+        let mem = &entry.memory;
+        output.push_str(&format!(
+            "**{}** *(tier: {}, score: {:.2})*\n{}\n\n",
+            mem.key, mem.tier.as_str(), entry.score, mem.content,
+        ));
+    }
+    output
 }
 
 impl<G, T, W, A, M> SwarmOrchestrator<G, T, W, A, M>
@@ -445,11 +462,38 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                 }
             };
 
-            // Build the task description with goal context prepended
-            let task_description = if let Some(ref ctx) = goal_context {
-                format!("{}\n\n---\n\n{}", ctx, task.description)
+            // Load relevant memory context for the task using budget-aware selection.
+            let memory_context = if let Some(ref mem_repo) = self.memory_repo {
+                let memory_service = MemoryService::new(mem_repo.clone());
+                let desc_preview: String = task.description.chars().take(500).collect();
+                let query = format!("{} {}", task.title, desc_preview);
+                match memory_service.load_context_with_budget(
+                    &query,
+                    None,
+                    2000, // 25% of 8000-token context budget
+                    RelevanceWeights::semantic_biased(),
+                ).await {
+                    Ok(memories) if !memories.is_empty() => Some(format_memory_context(&memories)),
+                    Ok(_) => None,
+                    Err(e) => {
+                        tracing::debug!(task_id = %task.id, "Failed to load memory context: {}", e);
+                        None
+                    }
+                }
             } else {
-                task.description.clone()
+                None
+            };
+
+            // Build the task description: goal context first, memory context second, task prompt last.
+            let task_description = {
+                let mut parts: Vec<&str> = Vec::new();
+                if let Some(ref ctx) = goal_context { parts.push(ctx.as_str()); }
+                if let Some(ref ctx) = memory_context { parts.push(ctx.as_str()); }
+                if parts.is_empty() {
+                    task.description.clone()
+                } else {
+                    format!("{}\n\n---\n\n{}", parts.join("\n\n---\n\n"), task.description)
+                }
             };
 
             // Spawn task execution
@@ -1233,38 +1277,10 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 evolution_loop.record_execution(execution).await;
                             }
 
-                            // Evaluate evolution loop for potential refinements
-                            if track_evolution {
-                                let events = evolution_loop.evaluate().await;
-                                for event in events {
-                                    if event.template_name == agent_type_for_evolution {
-                                        audit_log.log(
-                                            AuditEntry::new(
-                                                AuditLevel::Info,
-                                                AuditCategory::Agent,
-                                                AuditAction::AgentSpawned,
-                                                AuditActor::System,
-                                                format!(
-                                                    "Evolution triggered for '{}': {:?} (success rate: {:.0}%)",
-                                                    event.template_name,
-                                                    event.trigger,
-                                                    event.stats_at_trigger.success_rate * 100.0
-                                                ),
-                                            ),
-                                        ).await;
-
-                                        // Publish via EventBus (bridge forwards to event_tx)
-                                        event_bus.publish(crate::services::event_factory::agent_event(
-                                            crate::services::event_bus::EventSeverity::Info,
-                                            Some(task_id),
-                                            crate::services::event_bus::EventPayload::EvolutionTriggered {
-                                                template_name: event.template_name.clone(),
-                                                trigger: format!("{:?}", event.trigger),
-                                            },
-                                        )).await;
-                                    }
-                                }
-                            }
+                            // Note: evolution loop evaluation is handled by process_evolution_refinements()
+                            // which runs every reconciliation_interval_secs. Inline evaluation here
+                            // was removed to prevent System B (EvolutionTriggeredTemplateUpdateHandler)
+                            // from creating untracked evolve: tasks that bypass the RefinementRequest lifecycle.
                         }
                         Ok(session) => {
                             let tokens = session.total_tokens();
@@ -1450,4 +1466,59 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
         Ok(())
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::{Memory, ScoreBreakdown, ScoredMemory};
+
+    fn scored(memory: Memory, score: f32) -> ScoredMemory {
+        ScoredMemory {
+            memory,
+            score,
+            score_breakdown: ScoreBreakdown::default(),
+        }
+    }
+
+    #[test]
+    fn test_format_memory_context_empty() {
+        let output = format_memory_context(&[]);
+        assert!(
+            output.contains("## Relevant Context from Memory"),
+            "Header should be present even for empty input"
+        );
+        assert!(
+            output.contains("The following memories from previous work"),
+            "Intro text should be present"
+        );
+    }
+
+    #[test]
+    fn test_format_memory_context_single_entry() {
+        let entry = scored(
+            Memory::semantic("rust-patterns", "Use iterators and closures for idiomatic Rust."),
+            0.85,
+        );
+        let output = format_memory_context(&[entry]);
+
+        assert!(output.contains("rust-patterns"), "Key should appear in output");
+        assert!(output.contains("0.85"), "Score should appear in output");
+        assert!(output.contains("Use iterators and closures"), "Content should appear in output");
+        assert!(output.contains("semantic"), "Tier should appear in output");
+    }
+
+    #[test]
+    fn test_format_memory_context_two_entries() {
+        let first = scored(Memory::working("key-alpha", "First memory content."), 0.90);
+        let second = scored(Memory::episodic("key-beta", "Second memory content."), 0.70);
+        let output = format_memory_context(&[first, second]);
+
+        assert!(output.contains("key-alpha"), "First key should appear");
+        assert!(output.contains("First memory content."), "First content should appear");
+        assert!(output.contains("key-beta"), "Second key should appear");
+        assert!(output.contains("Second memory content."), "Second content should appear");
+        assert!(output.contains("0.90"), "First score should appear");
+        assert!(output.contains("0.70"), "Second score should appear");
+    }
 }
