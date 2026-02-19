@@ -204,6 +204,8 @@ pub struct Goal {
     pub updated_at: DateTime<Utc>,
     /// Version for optimistic locking
     pub version: u64,
+    /// When this goal was last evaluated in a convergence check (None if never checked)
+    pub last_convergence_check_at: Option<DateTime<Utc>>,
 }
 
 impl Goal {
@@ -223,6 +225,7 @@ impl Goal {
             created_at: now,
             updated_at: now,
             version: 1,
+            last_convergence_check_at: None,
         }
     }
 

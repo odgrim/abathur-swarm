@@ -18,7 +18,7 @@ use crate::services::builtin_handlers::{
     EgressRoutingHandler,
     EventPruningHandler, EventStorePollerHandler, EvolutionEvaluationHandler,
     EvolutionTriggeredTemplateUpdateHandler,
-    GoalConvergenceCheckHandler,
+    GoalConvergenceCheckHandler, GoalStagnationDetectorHandler,
     GoalCreatedHandler, GoalEvaluationHandler, GoalEvaluationTaskCreationHandler,
     GoalReconciliationHandler, GoalRetiredHandler,
     IngestionPollHandler,
@@ -539,6 +539,17 @@ where
                     command_bus.clone(),
                 )))
                 .await;
+
+            // GoalStagnationDetectorHandler (LOW) — alert when a goal hasn't been evaluated recently
+            {
+                let threshold = (p.goal_convergence_check_interval_secs * 3) / 2;
+                reactor
+                    .register(Arc::new(GoalStagnationDetectorHandler::new(
+                        self.goal_repo.clone(),
+                        threshold,
+                    )))
+                    .await;
+            }
         }
 
         // EvolutionTriggeredTemplateUpdateHandler (LOW) — submit refinement tasks for underperforming templates

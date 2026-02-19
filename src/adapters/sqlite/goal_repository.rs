@@ -5,6 +5,8 @@ use sqlx::SqlitePool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use chrono::{DateTime, Utc};
+
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{Goal, GoalConstraint, GoalMetadata, GoalPriority, GoalStatus};
 use crate::domain::ports::{GoalFilter, GoalRepository};
@@ -50,7 +52,7 @@ impl GoalRepository for SqliteGoalRepository {
 
     async fn get(&self, id: Uuid) -> DomainResult<Option<Goal>> {
         let row: Option<GoalRow> = sqlx::query_as(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at FROM goals WHERE id = ?"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at, last_convergence_check_at FROM goals WHERE id = ?"
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -105,7 +107,7 @@ impl GoalRepository for SqliteGoalRepository {
 
     async fn list(&self, filter: GoalFilter) -> DomainResult<Vec<Goal>> {
         let mut query = String::from(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at FROM goals WHERE 1=1"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at, last_convergence_check_at FROM goals WHERE 1=1"
         );
         let mut bindings: Vec<String> = Vec::new();
 
@@ -137,7 +139,7 @@ impl GoalRepository for SqliteGoalRepository {
 
     async fn get_children(&self, parent_id: Uuid) -> DomainResult<Vec<Goal>> {
         let rows: Vec<GoalRow> = sqlx::query_as(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at FROM goals WHERE parent_id = ? ORDER BY created_at"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at, last_convergence_check_at FROM goals WHERE parent_id = ? ORDER BY created_at"
         )
         .bind(parent_id.to_string())
         .fetch_all(&self.pool)
@@ -148,7 +150,7 @@ impl GoalRepository for SqliteGoalRepository {
 
     async fn get_active_with_constraints(&self) -> DomainResult<Vec<Goal>> {
         let rows: Vec<GoalRow> = sqlx::query_as(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at FROM goals WHERE status = 'active' ORDER BY priority DESC, created_at"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at, last_convergence_check_at FROM goals WHERE status = 'active' ORDER BY priority DESC, created_at"
         )
         .fetch_all(&self.pool)
         .await?;
@@ -159,7 +161,7 @@ impl GoalRepository for SqliteGoalRepository {
     async fn find_by_domains(&self, domains: &[String]) -> DomainResult<Vec<Goal>> {
         // Load all active goals, then filter in-code (SQLite JSON support is limited)
         let rows: Vec<GoalRow> = sqlx::query_as(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at FROM goals WHERE status = 'active'"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at, last_convergence_check_at FROM goals WHERE status = 'active'"
         )
         .fetch_all(&self.pool)
         .await?;
@@ -189,6 +191,22 @@ impl GoalRepository for SqliteGoalRepository {
         }
         Ok(counts)
     }
+
+    async fn update_last_check(&self, goal_id: Uuid, ts: DateTime<Utc>) -> DomainResult<()> {
+        let result = sqlx::query(
+            "UPDATE goals SET last_convergence_check_at = ? WHERE id = ?"
+        )
+        .bind(ts.to_rfc3339())
+        .bind(goal_id.to_string())
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(DomainError::GoalNotFound(goal_id));
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -205,6 +223,7 @@ struct GoalRow {
     evaluation_criteria: Option<String>,
     created_at: String,
     updated_at: String,
+    last_convergence_check_at: Option<String>,
 }
 
 impl TryFrom<GoalRow> for Goal {
@@ -228,6 +247,7 @@ impl TryFrom<GoalRow> for Goal {
 
         let created_at = super::parse_datetime(&row.created_at)?;
         let updated_at = super::parse_datetime(&row.updated_at)?;
+        let last_convergence_check_at = super::parse_optional_datetime(row.last_convergence_check_at)?;
 
         Ok(Goal {
             id,
@@ -242,6 +262,7 @@ impl TryFrom<GoalRow> for Goal {
             created_at,
             updated_at,
             version: 1,
+            last_convergence_check_at,
         })
     }
 }
@@ -310,5 +331,44 @@ mod tests {
         let active_goals = repo.list(GoalFilter { status: Some(GoalStatus::Active), ..Default::default() }).await.unwrap();
         assert_eq!(active_goals.len(), 1);
         assert_eq!(active_goals[0].name, "Active Goal");
+    }
+
+    #[tokio::test]
+    async fn test_update_last_check_initial_none() {
+        let repo = setup_test_repo().await;
+        let goal = Goal::new("Test Goal", "Description");
+        repo.create(&goal).await.unwrap();
+
+        // Initial value should be None
+        let retrieved = repo.get(goal.id).await.unwrap().unwrap();
+        assert!(retrieved.last_convergence_check_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_update_last_check_persists() {
+        let repo = setup_test_repo().await;
+        let goal = Goal::new("Test Goal", "Description");
+        repo.create(&goal).await.unwrap();
+
+        let ts = chrono::Utc::now();
+        repo.update_last_check(goal.id, ts).await.unwrap();
+
+        let retrieved = repo.get(goal.id).await.unwrap().unwrap();
+        assert!(retrieved.last_convergence_check_at.is_some());
+
+        // Timestamps are stored as RFC3339 strings, so compare with second precision
+        let retrieved_ts = retrieved.last_convergence_check_at.unwrap();
+        let diff = (retrieved_ts - ts).num_seconds().abs();
+        assert!(diff < 2, "Timestamp should be within 2 seconds of the set value");
+    }
+
+    #[tokio::test]
+    async fn test_update_last_check_not_found() {
+        let repo = setup_test_repo().await;
+        let nonexistent_id = uuid::Uuid::new_v4();
+        let ts = chrono::Utc::now();
+
+        let result = repo.update_last_check(nonexistent_id, ts).await;
+        assert!(result.is_err(), "Expected error for nonexistent goal");
     }
 }
