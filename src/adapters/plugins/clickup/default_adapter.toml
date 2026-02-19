@@ -23,5 +23,5 @@ filter_tag = ""
 # These must exactly match the status names configured in your ClickUp workspace.
 status_pending = "PENDING"
 status_in_progress = "IN PROGRESS"
-status_done = "DONE"
+status_done = "COMPLETED"
 status_failed = "PENDING"
