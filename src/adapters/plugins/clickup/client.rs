@@ -294,7 +294,8 @@ mod tests {
     #[test]
     fn test_client_from_env_missing() {
         // Ensure the env var is not set for this test.
-        std::env::remove_var("CLICKUP_API_KEY");
+        // SAFETY: test-only; tests are run single-threaded or with isolated state.
+        unsafe { std::env::remove_var("CLICKUP_API_KEY") };
         let result = ClickUpClient::from_env();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not set"));

@@ -56,6 +56,8 @@ pub enum Commands {
     Event(commands::event::EventArgs),
     /// Manage workflow templates
     Workflow(commands::workflow::WorkflowArgs),
+    /// Manage adapter plugins
+    Adapter(commands::adapter::AdapterArgs),
 }
 
 pub fn handle_error(err: anyhow::Error, json_mode: bool) -> ! {

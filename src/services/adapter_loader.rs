@@ -288,7 +288,7 @@ async fn load_native_adapter(
 ///
 /// Scans all config values for `{{ENV_VAR}}` patterns and checks whether
 /// each referenced variable is present in the environment.
-fn find_missing_env_vars(manifest: &AdapterManifest) -> Vec<String> {
+pub fn find_missing_env_vars(manifest: &AdapterManifest) -> Vec<String> {
     let mut missing = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -309,7 +309,7 @@ fn find_missing_env_vars(manifest: &AdapterManifest) -> Vec<String> {
 }
 
 /// Extract environment variable names from `{{ENV_VAR}}` patterns in text.
-fn extract_env_var_names(text: &str) -> Vec<String> {
+pub fn extract_env_var_names(text: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut remaining = text;
 
@@ -393,18 +393,21 @@ pub fn collect_prompt_content(adapters: &[LoadedAdapter]) -> HashMap<String, Str
 mod tests {
     use super::*;
 
+    // SAFETY for all unsafe blocks below: test-only env var manipulation.
+    // Tests are run with `--test-threads=1` or have unique var names to avoid races.
+
     #[test]
     fn test_resolve_env_placeholders_with_set_var() {
-        std::env::set_var("TEST_ADAPTER_VAR_1", "hello_world");
+        unsafe { std::env::set_var("TEST_ADAPTER_VAR_1", "hello_world") };
         let input = "Base URL: {{TEST_ADAPTER_VAR_1}}/api";
         let result = resolve_env_placeholders(input);
         assert_eq!(result, "Base URL: hello_world/api");
-        std::env::remove_var("TEST_ADAPTER_VAR_1");
+        unsafe { std::env::remove_var("TEST_ADAPTER_VAR_1") };
     }
 
     #[test]
     fn test_resolve_env_placeholders_unset_var_preserved() {
-        std::env::remove_var("DEFINITELY_NOT_SET_XYZZY");
+        unsafe { std::env::remove_var("DEFINITELY_NOT_SET_XYZZY") };
         let input = "Token: {{DEFINITELY_NOT_SET_XYZZY}}";
         let result = resolve_env_placeholders(input);
         assert_eq!(result, "Token: {{DEFINITELY_NOT_SET_XYZZY}}");
@@ -412,13 +415,13 @@ mod tests {
 
     #[test]
     fn test_resolve_env_placeholders_multiple() {
-        std::env::set_var("TEST_ADAPTER_HOST", "example.com");
-        std::env::set_var("TEST_ADAPTER_PORT", "8080");
+        unsafe { std::env::set_var("TEST_ADAPTER_HOST", "example.com") };
+        unsafe { std::env::set_var("TEST_ADAPTER_PORT", "8080") };
         let input = "{{TEST_ADAPTER_HOST}}:{{TEST_ADAPTER_PORT}}";
         let result = resolve_env_placeholders(input);
         assert_eq!(result, "example.com:8080");
-        std::env::remove_var("TEST_ADAPTER_HOST");
-        std::env::remove_var("TEST_ADAPTER_PORT");
+        unsafe { std::env::remove_var("TEST_ADAPTER_HOST") };
+        unsafe { std::env::remove_var("TEST_ADAPTER_PORT") };
     }
 
     #[test]
@@ -444,11 +447,11 @@ mod tests {
 
     #[test]
     fn test_resolve_env_placeholders_whitespace_trimmed() {
-        std::env::set_var("TEST_ADAPTER_TRIMMED", "trimmed");
+        unsafe { std::env::set_var("TEST_ADAPTER_TRIMMED", "trimmed") };
         let input = "{{ TEST_ADAPTER_TRIMMED }}";
         let result = resolve_env_placeholders(input);
         assert_eq!(result, "trimmed");
-        std::env::remove_var("TEST_ADAPTER_TRIMMED");
+        unsafe { std::env::remove_var("TEST_ADAPTER_TRIMMED") };
     }
 
     #[test]
@@ -467,7 +470,7 @@ mod tests {
 
     #[test]
     fn test_find_missing_env_vars_all_present() {
-        std::env::set_var("TEST_ADAPTER_PRESENT", "yes");
+        unsafe { std::env::set_var("TEST_ADAPTER_PRESENT", "yes") };
         let manifest = AdapterManifest::new(
             "test",
             AdapterType::Prompt,
@@ -478,12 +481,12 @@ mod tests {
 
         let missing = find_missing_env_vars(&manifest);
         assert!(missing.is_empty());
-        std::env::remove_var("TEST_ADAPTER_PRESENT");
+        unsafe { std::env::remove_var("TEST_ADAPTER_PRESENT") };
     }
 
     #[test]
     fn test_find_missing_env_vars_some_missing() {
-        std::env::remove_var("TEST_ADAPTER_MISSING_XYZ");
+        unsafe { std::env::remove_var("TEST_ADAPTER_MISSING_XYZ") };
         let manifest = AdapterManifest::new(
             "test",
             AdapterType::Prompt,

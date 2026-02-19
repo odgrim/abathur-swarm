@@ -9,12 +9,58 @@ pub mod clickup;
 
 use std::sync::Arc;
 
-use crate::domain::models::adapter::AdapterManifest;
+use crate::domain::models::adapter::{
+    AdapterCapability, AdapterDirection, AdapterManifest, AdapterType,
+};
 use crate::domain::ports::adapter::{EgressAdapter, IngestionAdapter};
 
 use self::clickup::client::ClickUpClient;
 use self::clickup::egress::ClickUpEgressAdapter;
 use self::clickup::ingestion::ClickUpIngestionAdapter;
+
+/// Metadata for an adapter that the binary knows how to scaffold.
+#[derive(Debug, Clone)]
+pub struct KnownAdapter {
+    /// Unique adapter name (e.g., "clickup").
+    pub name: &'static str,
+    /// Human-readable description.
+    pub description: &'static str,
+    /// Implementation strategy.
+    pub adapter_type: AdapterType,
+    /// Data-flow direction.
+    pub direction: AdapterDirection,
+    /// Declared capabilities.
+    pub capabilities: &'static [AdapterCapability],
+    /// Default `adapter.toml` content to scaffold on `enable`.
+    pub default_config: &'static str,
+    /// Default `ADAPTER.md` content to scaffold on `enable`.
+    pub default_adapter_md: &'static str,
+    /// Environment variables that must be set for this adapter.
+    pub required_env_vars: &'static [&'static str],
+}
+
+/// Registry of all adapters the binary knows about.
+pub static KNOWN_ADAPTERS: &[KnownAdapter] = &[KnownAdapter {
+    name: "clickup",
+    description: "Bidirectional adapter for ClickUp project management. Polls tasks from a list and supports status updates, comments, and task creation.",
+    adapter_type: AdapterType::Native,
+    direction: AdapterDirection::Bidirectional,
+    capabilities: &[
+        AdapterCapability::PollItems,
+        AdapterCapability::UpdateStatus,
+        AdapterCapability::PostComment,
+        AdapterCapability::CreateItem,
+        AdapterCapability::MapPriority,
+    ],
+    default_config: include_str!("clickup/default_adapter.toml"),
+    default_adapter_md: include_str!("clickup/default_adapter.md"),
+    required_env_vars: &["CLICKUP_API_KEY"],
+}];
+
+/// Look up a known adapter by name.
+pub fn find_known_adapter(name: &str) -> Option<&'static KnownAdapter> {
+    KNOWN_ADAPTERS.iter().find(|a| a.name == name)
+}
 
 /// Create native adapter instances from a manifest.
 ///
@@ -92,7 +138,8 @@ mod tests {
     #[test]
     fn test_clickup_missing_env_var() {
         // Ensure the env var is not set.
-        std::env::remove_var("CLICKUP_API_KEY");
+        // SAFETY: test-only; tests are run single-threaded or with isolated state.
+        unsafe { std::env::remove_var("CLICKUP_API_KEY") };
 
         let manifest = AdapterManifest::new(
             "clickup",

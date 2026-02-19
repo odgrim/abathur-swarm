@@ -1,0 +1,20 @@
+name = "clickup"
+description = "Bidirectional adapter for ClickUp project management. Polls tasks from a list and supports status updates, comments, and task creation."
+version = "0.1.0"
+adapter_type = "native"
+direction = "bidirectional"
+capabilities = [
+    "poll_items",
+    "update_status",
+    "post_comment",
+    "create_item",
+    "map_priority",
+]
+
+[config]
+# Required: The ClickUp list ID to poll for tasks and to create new tasks in.
+# Find this in ClickUp: open a list -> click "..." -> "Copy Link" -> extract the numeric ID.
+list_id = ""
+
+# Optional: Only ingest tasks that have this tag. Leave empty to ingest all tasks.
+filter_tag = ""
