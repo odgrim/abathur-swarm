@@ -14,11 +14,13 @@ use crate::services::builtin_handlers::{
     ConvergenceEscalationFeedbackHandler,
     ConvergenceEvolutionHandler, ConvergenceMemoryHandler, ConvergenceSLAPressureHandler,
     DeadLetterRetryHandler, DirectModeExecutionMemoryHandler, EscalationTimeoutHandler,
+    EgressRoutingHandler,
     EventPruningHandler, EventStorePollerHandler, EvolutionEvaluationHandler,
     EvolutionTriggeredTemplateUpdateHandler,
     GoalConvergenceCheckHandler,
     GoalCreatedHandler, GoalEvaluationHandler, GoalEvaluationTaskCreationHandler,
     GoalReconciliationHandler, GoalRetiredHandler,
+    IngestionPollHandler,
     MemoryConflictEscalationHandler, MemoryInformedDecompositionHandler,
     MemoryMaintenanceHandler, MemoryReconciliationHandler,
     PriorityAgingHandler, ReconciliationHandler,
@@ -574,6 +576,29 @@ where
                 }
             }
         }
+
+        // Adapter handlers — register only when an adapter registry is present
+        if let Some(ref adapter_registry) = self.adapter_registry {
+            // IngestionPollHandler (NORMAL) — poll external systems for new work items
+            if !adapter_registry.ingestion_names().is_empty() {
+                reactor
+                    .register(Arc::new(IngestionPollHandler::new(
+                        self.task_repo.clone(),
+                        adapter_registry.clone(),
+                        command_bus.clone(),
+                    )))
+                    .await;
+            }
+
+            // EgressRoutingHandler (NORMAL) — route task results to external systems
+            if !adapter_registry.egress_names().is_empty() {
+                reactor
+                    .register(Arc::new(EgressRoutingHandler::new(
+                        adapter_registry.clone(),
+                    )))
+                    .await;
+            }
+        }
     }
 
     /// Register built-in scheduled events with the scheduler.
@@ -772,6 +797,20 @@ where
                     EventSeverity::Debug,
                 ))
                 .await;
+        }
+
+        // Adapter ingestion poll — periodic external system ingestion
+        if let Some(ref adapter_registry) = self.adapter_registry {
+            if !adapter_registry.ingestion_names().is_empty() {
+                scheduler
+                    .register(interval_schedule(
+                        "adapter-ingestion-poll",
+                        Duration::from_secs(300),
+                        EventCategory::Scheduler,
+                        EventSeverity::Debug,
+                    ))
+                    .await;
+            }
         }
 
         // Event store polling — cross-process event propagation

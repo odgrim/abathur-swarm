@@ -37,6 +37,8 @@ where
     event_bus: Option<Arc<EventBus>>,
     /// When set, task_submit auto-populates parent_id
     task_id: Option<Uuid>,
+    /// Optional adapter registry for external system integration tools.
+    adapter_registry: Option<Arc<crate::services::adapter_registry::AdapterRegistry>>,
 }
 
 impl<T, A, M, G> StdioServer<T, A, M, G>
@@ -62,12 +64,22 @@ where
             command_bus,
             event_bus: None,
             task_id,
+            adapter_registry: None,
         }
     }
 
     /// Set the event bus for publishing memory events.
     pub fn with_event_bus(mut self, event_bus: Arc<EventBus>) -> Self {
         self.event_bus = Some(event_bus);
+        self
+    }
+
+    /// Set the adapter registry for external system integration tools.
+    pub fn with_adapter_registry(
+        mut self,
+        registry: Arc<crate::services::adapter_registry::AdapterRegistry>,
+    ) -> Self {
+        self.adapter_registry = Some(registry);
         self
     }
 
@@ -321,6 +333,38 @@ where
                             "timeout_seconds": { "type": "integer", "description": "Maximum seconds to wait. Default: 600 (10 minutes). Returns current status on timeout." }
                         }
                     }
+                },
+                {
+                    "name": "adapter_list",
+                    "description": "List all loaded external system adapters with their capabilities and direction (ingestion/egress/bidirectional). Use this to discover what external integrations are available.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                },
+                {
+                    "name": "egress_publish",
+                    "description": "Execute an egress action on a named adapter to push results to an external system. Supports actions like update_status, post_comment, create_item, and attach_artifact.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "adapter": { "type": "string", "description": "Name of the egress adapter to use (e.g., 'jira', 'linear', 'github-issues')" },
+                            "action": {
+                                "type": "object",
+                                "description": "The egress action to execute. Must include an 'action' field with one of: update_status, post_comment, create_item, attach_artifact, custom.",
+                                "properties": {
+                                    "action": { "type": "string", "enum": ["update_status", "post_comment", "create_item", "attach_artifact", "custom"] },
+                                    "external_id": { "type": "string", "description": "External item identifier (required for update_status, post_comment, attach_artifact)" },
+                                    "new_status": { "type": "string", "description": "New status value (for update_status)" },
+                                    "body": { "type": "string", "description": "Comment body (for post_comment)" },
+                                    "title": { "type": "string", "description": "Item title (for create_item)" },
+                                    "description": { "type": "string", "description": "Item description (for create_item)" }
+                                },
+                                "required": ["action"]
+                            }
+                        },
+                        "required": ["adapter", "action"]
+                    }
                 }
             ]
         });
@@ -350,6 +394,8 @@ where
             "memory_get" => self.tool_memory_get(&arguments).await,
             "goals_list" => self.tool_goals_list(&arguments).await,
             "task_wait" => self.tool_task_wait(&arguments).await,
+            "adapter_list" => self.tool_adapter_list(&arguments).await,
+            "egress_publish" => self.tool_egress_publish(&arguments).await,
             _ => Err(format!("Unknown tool: {}", tool_name)),
         };
 
@@ -1008,6 +1054,83 @@ where
             // Sleep with exponential backoff (server-side, does NOT consume agent turns)
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(max_backoff);
+        }
+    }
+
+    // ========================================================================
+    // Adapter tools
+    // ========================================================================
+
+    /// List all loaded adapters with their capabilities and direction.
+    async fn tool_adapter_list(&self, _args: &serde_json::Value) -> Result<String, String> {
+        let registry = match &self.adapter_registry {
+            Some(r) => r,
+            None => {
+                let response = serde_json::json!({
+                    "adapters": [],
+                    "message": "No adapter registry configured"
+                });
+                return serde_json::to_string_pretty(&response).map_err(|e| e.to_string());
+            }
+        };
+
+        let adapters: Vec<serde_json::Value> = registry
+            .manifests()
+            .values()
+            .map(|manifest| {
+                serde_json::json!({
+                    "name": manifest.name,
+                    "description": manifest.description,
+                    "version": manifest.version,
+                    "adapter_type": manifest.adapter_type.as_str(),
+                    "direction": manifest.direction.as_str(),
+                    "capabilities": manifest.capabilities.iter().map(|c| c.as_str()).collect::<Vec<_>>(),
+                    "has_ingestion": registry.get_ingestion(&manifest.name).is_some(),
+                    "has_egress": registry.get_egress(&manifest.name).is_some(),
+                })
+            })
+            .collect();
+
+        let response = serde_json::json!({ "adapters": adapters });
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    /// Execute an egress action on a named adapter.
+    async fn tool_egress_publish(&self, args: &serde_json::Value) -> Result<String, String> {
+        let registry = match &self.adapter_registry {
+            Some(r) => r,
+            None => return Err("No adapter registry configured".to_string()),
+        };
+
+        let adapter_name = args
+            .get("adapter")
+            .and_then(|a| a.as_str())
+            .ok_or("Missing required field: adapter")?;
+
+        let action_value = args
+            .get("action")
+            .ok_or("Missing required field: action")?;
+
+        let adapter = registry
+            .get_egress(adapter_name)
+            .ok_or_else(|| format!("Egress adapter '{}' not found", adapter_name))?;
+
+        // Deserialize the action from the provided JSON
+        let action: crate::domain::models::adapter::EgressAction =
+            serde_json::from_value(action_value.clone())
+                .map_err(|e| format!("Invalid egress action: {}", e))?;
+
+        match adapter.execute(&action).await {
+            Ok(result) => {
+                let response = serde_json::json!({
+                    "success": result.success,
+                    "external_id": result.external_id,
+                    "external_url": result.external_url,
+                    "error": result.error,
+                });
+                serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+            }
+            Err(e) => Err(format!("Egress action failed: {}", e)),
         }
     }
 
