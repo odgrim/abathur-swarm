@@ -1700,8 +1700,16 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             trajectory.budget.tokens_used,
         );
 
-        let memory = Memory::semantic(
-            format!("convergence-success-{}", trajectory.id),
+        let key = format!("convergence-success-{}", trajectory.id);
+
+        // Auto-increment version so retries don't hit UNIQUE(namespace, key, version).
+        let next_version = match self.memory_repository.get_by_key(&key, "convergence").await? {
+            Some(existing) => existing.version + 1,
+            None => 1,
+        };
+
+        let mut memory = Memory::semantic(
+            key,
             content,
         )
         .with_namespace("convergence")
@@ -1710,6 +1718,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         .with_task(trajectory.task_id)
         .with_tag("convergence")
         .with_tag("success");
+        memory.version = next_version;
 
         if let Some(goal_id) = trajectory.goal_id {
             let memory = memory.with_goal(goal_id);
@@ -1761,8 +1770,16 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             trajectory.budget.tokens_used,
         );
 
-        let memory = Memory::episodic(
-            format!("convergence-failure-{}", trajectory.id),
+        let key = format!("convergence-failure-{}", trajectory.id);
+
+        // Auto-increment version so retries don't hit UNIQUE(namespace, key, version).
+        let next_version = match self.memory_repository.get_by_key(&key, "convergence").await? {
+            Some(existing) => existing.version + 1,
+            None => 1,
+        };
+
+        let mut memory = Memory::episodic(
+            key,
             content,
         )
         .with_namespace("convergence")
@@ -1771,6 +1788,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         .with_task(trajectory.task_id)
         .with_tag("convergence")
         .with_tag("failure");
+        memory.version = next_version;
 
         if let Some(goal_id) = trajectory.goal_id {
             let memory = memory.with_goal(goal_id);
@@ -1798,17 +1816,26 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         let content = serde_json::to_string(bandit)
             .map_err(|e| DomainError::SerializationError(e.to_string()))?;
 
-        let memory = Memory::semantic(
-            format!("strategy-bandit-{}", trajectory.task_id),
-            content,
-        )
-        .with_namespace("convergence")
-        .with_type(MemoryType::Pattern)
-        .with_source("convergence_engine")
-        .with_task(trajectory.task_id)
-        .with_tag("strategy-bandit");
+        let key = format!("strategy-bandit-{}", trajectory.task_id);
 
-        self.memory_repository.store(&memory).await?;
+        // Bandit state is a singleton — update in place if it already exists.
+        match self.memory_repository.get_by_key(&key, "convergence").await? {
+            Some(mut existing) => {
+                existing.content = content;
+                existing.updated_at = Utc::now();
+                self.memory_repository.update(&existing).await?;
+            }
+            None => {
+                let memory = Memory::semantic(key, content)
+                    .with_namespace("convergence")
+                    .with_type(MemoryType::Pattern)
+                    .with_source("convergence_engine")
+                    .with_task(trajectory.task_id)
+                    .with_tag("strategy-bandit");
+
+                self.memory_repository.store(&memory).await?;
+            }
+        }
 
         Ok(())
     }
@@ -2367,13 +2394,23 @@ mod tests {
 
         async fn get_by_key(
             &self,
-            _key: &str,
-            _namespace: &str,
+            key: &str,
+            namespace: &str,
         ) -> DomainResult<Option<Memory>> {
-            Ok(None)
+            let memories = self.memories.lock().unwrap();
+            let found = memories
+                .iter()
+                .filter(|m| m.key == key && m.namespace == namespace)
+                .max_by_key(|m| m.version)
+                .cloned();
+            Ok(found)
         }
 
-        async fn update(&self, _memory: &Memory) -> DomainResult<()> {
+        async fn update(&self, memory: &Memory) -> DomainResult<()> {
+            let mut memories = self.memories.lock().unwrap();
+            if let Some(existing) = memories.iter_mut().find(|m| m.id == memory.id) {
+                *existing = memory.clone();
+            }
             Ok(())
         }
 
@@ -3553,6 +3590,52 @@ mod tests {
         assert_eq!(memory.tier, MemoryTier::Episodic);
     }
 
+    #[tokio::test]
+    async fn test_store_failure_memory_increments_version_on_retry() {
+        let mem_repo = Arc::new(MockMemoryRepo::new());
+        let engine = ConvergenceEngine::new(
+            Arc::new(MockTrajectoryRepo::new()),
+            mem_repo.clone(),
+            Arc::new(MockOverseerMeasurer::new()),
+            test_config(),
+        );
+
+        let trajectory = test_trajectory();
+
+        // First failure stores at version 1
+        engine.store_failure_memory(&trajectory, "exhausted").await.unwrap();
+        // Second failure (retry) should store at version 2
+        engine.store_failure_memory(&trajectory, "trapped").await.unwrap();
+
+        let memories = mem_repo.memories.lock().unwrap();
+        assert_eq!(memories.len(), 2);
+        assert_eq!(memories[0].version, 1);
+        assert_eq!(memories[1].version, 2);
+        assert!(memories[0].content.contains("exhausted"));
+        assert!(memories[1].content.contains("trapped"));
+    }
+
+    #[tokio::test]
+    async fn test_store_success_memory_increments_version_on_retry() {
+        let mem_repo = Arc::new(MockMemoryRepo::new());
+        let engine = ConvergenceEngine::new(
+            Arc::new(MockTrajectoryRepo::new()),
+            mem_repo.clone(),
+            Arc::new(MockOverseerMeasurer::new()),
+            test_config(),
+        );
+
+        let trajectory = test_trajectory();
+
+        engine.store_success_memory(&trajectory, 0).await.unwrap();
+        engine.store_success_memory(&trajectory, 1).await.unwrap();
+
+        let memories = mem_repo.memories.lock().unwrap();
+        assert_eq!(memories.len(), 2);
+        assert_eq!(memories[0].version, 1);
+        assert_eq!(memories[1].version, 2);
+    }
+
     // -----------------------------------------------------------------------
     // persist_bandit_state tests
     // -----------------------------------------------------------------------
@@ -3586,6 +3669,37 @@ mod tests {
             serde_json::from_str(&memory.content).unwrap();
         let dist = &restored.context_arms["fixed_point"]["focused_repair"];
         assert!((dist.alpha - 4.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_persist_bandit_state_updates_in_place_on_retry() {
+        let mem_repo = Arc::new(MockMemoryRepo::new());
+        let engine = ConvergenceEngine::new(
+            Arc::new(MockTrajectoryRepo::new()),
+            mem_repo.clone(),
+            Arc::new(MockOverseerMeasurer::new()),
+            test_config(),
+        );
+
+        let trajectory = test_trajectory();
+
+        // First persist — inserts
+        let mut bandit = StrategyBandit::with_default_priors();
+        bandit.nudge("fixed_point", "focused_repair", 3.0);
+        engine.persist_bandit_state(&bandit, &trajectory).await.unwrap();
+
+        // Second persist — should update in place, not insert a new row
+        bandit.nudge("fixed_point", "focused_repair", 5.0);
+        engine.persist_bandit_state(&bandit, &trajectory).await.unwrap();
+
+        let memories = mem_repo.memories.lock().unwrap();
+        assert_eq!(memories.len(), 1, "should update in place, not duplicate");
+
+        // Verify the content was updated to the second bandit state
+        let restored: StrategyBandit = serde_json::from_str(&memories[0].content).unwrap();
+        let dist = &restored.context_arms["fixed_point"]["focused_repair"];
+        // Initial alpha=1, +3 nudge, +5 nudge = 9.0
+        assert!((dist.alpha - 9.0).abs() < f64::EPSILON);
     }
 
     // -----------------------------------------------------------------------
