@@ -804,6 +804,12 @@ pub enum EventPayload {
         task_id: Option<Uuid>,
         error: String,
     },
+
+    /// A task was successfully created from an adapter ingestion item.
+    AdapterTaskIngested {
+        task_id: Uuid,
+        adapter_name: String,
+    },
 }
 
 impl EventPayload {
@@ -925,6 +931,7 @@ impl EventPayload {
             Self::AdapterIngestionFailed { .. } => "AdapterIngestionFailed",
             Self::AdapterEgressCompleted { .. } => "AdapterEgressCompleted",
             Self::AdapterEgressFailed { .. } => "AdapterEgressFailed",
+            Self::AdapterTaskIngested { .. } => "AdapterTaskIngested",
         }
     }
 }

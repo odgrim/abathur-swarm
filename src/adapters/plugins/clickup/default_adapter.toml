@@ -18,3 +18,10 @@ list_id = ""
 
 # Optional: Only ingest tasks that have this tag. Leave empty to ingest all tasks.
 filter_tag = ""
+
+# Status names to use when syncing task lifecycle events back to ClickUp.
+# These must exactly match the status names configured in your ClickUp workspace.
+status_pending = "PENDING"
+status_in_progress = "IN PROGRESS"
+status_done = "DONE"
+status_failed = "PENDING"

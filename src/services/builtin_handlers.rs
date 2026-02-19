@@ -6713,6 +6713,19 @@ impl<T: TaskRepository + 'static> EventHandler for IngestionPollHandler<T> {
                 );
 
                 match self.command_bus.dispatch(envelope).await {
+                    Ok(crate::services::command_bus::CommandResult::Task(task)) => {
+                        tasks_created += 1;
+                        all_events.push(crate::services::event_factory::make_event(
+                            EventSeverity::Info,
+                            EventCategory::Adapter,
+                            None,
+                            Some(task.id),
+                            EventPayload::AdapterTaskIngested {
+                                task_id: task.id,
+                                adapter_name: adapter_name.to_string(),
+                            },
+                        ));
+                    }
                     Ok(_) => {
                         tasks_created += 1;
                     }
@@ -6978,11 +6991,12 @@ impl<T: TaskRepository + 'static> EventHandler for AdapterLifecycleSyncHandler<T
             id: HandlerId::new(),
             name: "AdapterLifecycleSyncHandler".to_string(),
             filter: EventFilter::new()
-                .categories(vec![EventCategory::Task])
+                .categories(vec![EventCategory::Task, EventCategory::Adapter])
                 .payload_types(vec![
                     "TaskClaimed".to_string(),
                     "TaskCompleted".to_string(),
                     "TaskFailed".to_string(),
+                    "AdapterTaskIngested".to_string(),
                 ]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
@@ -6999,6 +7013,9 @@ impl<T: TaskRepository + 'static> EventHandler for AdapterLifecycleSyncHandler<T
             }
             EventPayload::TaskFailed { task_id, .. } => {
                 self.handle_lifecycle(*task_id, "status_failed", "failed").await
+            }
+            EventPayload::AdapterTaskIngested { task_id, .. } => {
+                self.handle_lifecycle(*task_id, "status_pending", "pending").await
             }
             _ => Ok(Reaction::None),
         }
