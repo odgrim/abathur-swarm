@@ -267,19 +267,23 @@ async fn load_prompt_adapter(
 
 /// Load a native (compiled Rust) adapter.
 ///
-/// Delegates to the native adapter factory. If the factory module is not
-/// yet available, returns an error.
+/// Delegates to the native adapter factory in `crate::adapters::plugins`.
 async fn load_native_adapter(
     manifest: AdapterManifest,
 ) -> Result<LoadedAdapter, AdapterLoadError> {
-    // TODO: Once crate::adapters::plugins::create_native_adapter() is implemented
-    // (Package 3), call it here to get the actual ingestion/egress implementations.
-    // For now, native adapters cannot be loaded.
-    Err(AdapterLoadError::NativeCreationFailed {
-        name: manifest.name.clone(),
-        reason: "Native adapter factory is not yet implemented. \
-                 This will be available after Package 3 is complete."
-            .to_string(),
+    let (ingestion, egress) =
+        crate::adapters::plugins::create_native_adapter(&manifest, "").map_err(|reason| {
+            AdapterLoadError::NativeCreationFailed {
+                name: manifest.name.clone(),
+                reason,
+            }
+        })?;
+
+    Ok(LoadedAdapter {
+        manifest,
+        ingestion,
+        egress,
+        prompt_content: None,
     })
 }
 
@@ -586,7 +590,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_native_adapter_returns_not_implemented() {
+    async fn test_load_unknown_native_adapter_fails() {
         let dir = tempfile::tempdir().unwrap();
         let adapter_dir = dir.path().join("native-test");
         std::fs::create_dir_all(&adapter_dir).unwrap();
@@ -604,6 +608,7 @@ mod tests {
 
         let result = load_single_adapter(&adapter_dir).await;
         assert!(result.is_err());
+        // "native-test" is not a known native adapter, so the factory returns an error
         assert!(matches!(
             result.unwrap_err(),
             AdapterLoadError::NativeCreationFailed { .. }

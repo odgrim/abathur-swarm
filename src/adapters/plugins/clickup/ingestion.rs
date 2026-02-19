@@ -50,6 +50,7 @@ impl ClickUpIngestionAdapter {
             .config
             .get("filter_tag")
             .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
     }
 
     /// Map a ClickUp priority ID to a [`TaskPriority`].
@@ -253,6 +254,15 @@ mod tests {
     #[test]
     fn test_filter_tag_absent() {
         let manifest = test_manifest();
+        let client = Arc::new(ClickUpClient::new("test-key".to_string()));
+        let adapter = ClickUpIngestionAdapter::new(manifest, client);
+        assert!(adapter.filter_tag().is_none());
+    }
+
+    #[test]
+    fn test_filter_tag_empty_string_treated_as_absent() {
+        let manifest = test_manifest()
+            .with_config("filter_tag", serde_json::json!(""));
         let client = Arc::new(ClickUpClient::new("test-key".to_string()));
         let adapter = ClickUpIngestionAdapter::new(manifest, client);
         assert!(adapter.filter_tag().is_none());

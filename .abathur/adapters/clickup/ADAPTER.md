@@ -5,7 +5,7 @@ Bidirectional adapter for the [ClickUp](https://clickup.com) project management 
 ## Setup
 
 1. **API Key**: Set the `CLICKUP_API_KEY` environment variable to your ClickUp personal API token.
-   You can generate one at: Settings → Apps → API Token.
+   You can generate one at: Settings -> Apps -> API Token.
 
 2. **List ID**: Edit `.abathur/adapters/clickup/adapter.toml` and set `config.list_id` to the
    numeric ID of the ClickUp list you want to sync with.

@@ -644,6 +644,17 @@ async fn run_swarm_foreground(
     let trajectory_repo = Arc::new(SqliteTrajectoryRepository::new(pool.clone()));
     let overseer_cluster = Arc::new(build_rust_overseer_cluster());
 
+    // Load adapters from .abathur/adapters/ and build registry
+    let adapters_base = std::path::Path::new(".abathur");
+    let loaded_adapters = crate::services::adapter_loader::load_adapters(adapters_base).await;
+    let prompt_content = crate::services::adapter_loader::collect_prompt_content(&loaded_adapters);
+    let adapter_registry = Arc::new(
+        crate::services::adapter_registry::AdapterRegistry::from_loaded(
+            loaded_adapters,
+            prompt_content,
+        ),
+    );
+
     let orchestrator = SwarmOrchestrator::new(
         goal_repo,
         task_repo,
@@ -660,7 +671,8 @@ async fn run_swarm_foreground(
     .with_intent_verifier(substrate)
     .with_trajectory_repo(trajectory_repo)
     .with_overseer_cluster(overseer_cluster)
-    .with_pool(pool.clone());
+    .with_pool(pool.clone())
+    .with_adapter_registry(adapter_registry);
 
     if !json_mode {
         println!("Starting Abathur Swarm Orchestrator");

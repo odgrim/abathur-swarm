@@ -18,6 +18,8 @@ use self::clickup::client::ClickUpClient;
 use self::clickup::egress::ClickUpEgressAdapter;
 use self::clickup::ingestion::ClickUpIngestionAdapter;
 
+
+
 /// Metadata for an adapter that the binary knows how to scaffold.
 #[derive(Debug, Clone)]
 pub struct KnownAdapter {
@@ -78,8 +80,8 @@ pub fn create_native_adapter(
     _prompt_content: &str,
 ) -> Result<
     (
-        Option<Arc<dyn IngestionAdapter>>,
-        Option<Arc<dyn EgressAdapter>>,
+        Option<Box<dyn IngestionAdapter>>,
+        Option<Box<dyn EgressAdapter>>,
     ),
     String,
 > {
@@ -87,9 +89,9 @@ pub fn create_native_adapter(
         "clickup" => {
             let client = Arc::new(ClickUpClient::from_env()?);
 
-            let ingestion: Option<Arc<dyn IngestionAdapter>> =
+            let ingestion: Option<Box<dyn IngestionAdapter>> =
                 if manifest.direction.supports_ingestion() {
-                    Some(Arc::new(ClickUpIngestionAdapter::new(
+                    Some(Box::new(ClickUpIngestionAdapter::new(
                         manifest.clone(),
                         Arc::clone(&client),
                     )))
@@ -97,9 +99,9 @@ pub fn create_native_adapter(
                     None
                 };
 
-            let egress: Option<Arc<dyn EgressAdapter>> =
+            let egress: Option<Box<dyn EgressAdapter>> =
                 if manifest.direction.supports_egress() {
-                    Some(Arc::new(ClickUpEgressAdapter::new(
+                    Some(Box::new(ClickUpEgressAdapter::new(
                         manifest.clone(),
                         Arc::clone(&client),
                     )))
