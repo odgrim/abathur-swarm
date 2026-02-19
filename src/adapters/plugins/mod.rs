@@ -209,6 +209,9 @@ mod tests {
 
     #[test]
     fn test_github_issues_missing_env_var() {
+        // Serialize access to GITHUB_TOKEN with the lock used by client.rs tests.
+        let _guard = self::github_issues::client::GITHUB_TOKEN_ENV_LOCK.lock().unwrap();
+        // SAFETY: test-only; serialized via GITHUB_TOKEN_ENV_LOCK.
         unsafe { std::env::remove_var("GITHUB_TOKEN") };
 
         let manifest = AdapterManifest::new(

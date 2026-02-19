@@ -392,6 +392,13 @@ impl GitHubClient {
     }
 }
 
+/// Process-wide lock to serialize tests that mutate the `GITHUB_TOKEN`
+/// environment variable. Tests that call `set_var` or `remove_var` on
+/// `GITHUB_TOKEN` must hold this lock for the duration of the operation.
+#[cfg(test)]
+pub(crate) static GITHUB_TOKEN_ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,8 +421,9 @@ mod tests {
 
     #[test]
     fn test_client_from_env_missing() {
-        // Ensure the env var is not set for this test.
-        // SAFETY: test-only; tests are run single-threaded or with isolated state.
+        // Serialize access to GITHUB_TOKEN across tests to prevent races.
+        let _guard = super::GITHUB_TOKEN_ENV_LOCK.lock().unwrap();
+        // SAFETY: test-only; serialized via GITHUB_TOKEN_ENV_LOCK.
         unsafe { std::env::remove_var("GITHUB_TOKEN") };
         let result = GitHubClient::from_env();
         assert!(result.is_err());
@@ -424,6 +432,9 @@ mod tests {
 
     #[test]
     fn test_client_from_env_empty() {
+        // Serialize access to GITHUB_TOKEN across tests to prevent races.
+        let _guard = super::GITHUB_TOKEN_ENV_LOCK.lock().unwrap();
+        // SAFETY: test-only; serialized via GITHUB_TOKEN_ENV_LOCK.
         unsafe { std::env::set_var("GITHUB_TOKEN", "") };
         let result = GitHubClient::from_env();
         assert!(result.is_err());
