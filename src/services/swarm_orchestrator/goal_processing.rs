@@ -1233,38 +1233,10 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 evolution_loop.record_execution(execution).await;
                             }
 
-                            // Evaluate evolution loop for potential refinements
-                            if track_evolution {
-                                let events = evolution_loop.evaluate().await;
-                                for event in events {
-                                    if event.template_name == agent_type_for_evolution {
-                                        audit_log.log(
-                                            AuditEntry::new(
-                                                AuditLevel::Info,
-                                                AuditCategory::Agent,
-                                                AuditAction::AgentSpawned,
-                                                AuditActor::System,
-                                                format!(
-                                                    "Evolution triggered for '{}': {:?} (success rate: {:.0}%)",
-                                                    event.template_name,
-                                                    event.trigger,
-                                                    event.stats_at_trigger.success_rate * 100.0
-                                                ),
-                                            ),
-                                        ).await;
-
-                                        // Publish via EventBus (bridge forwards to event_tx)
-                                        event_bus.publish(crate::services::event_factory::agent_event(
-                                            crate::services::event_bus::EventSeverity::Info,
-                                            Some(task_id),
-                                            crate::services::event_bus::EventPayload::EvolutionTriggered {
-                                                template_name: event.template_name.clone(),
-                                                trigger: format!("{:?}", event.trigger),
-                                            },
-                                        )).await;
-                                    }
-                                }
-                            }
+                            // Note: evolution loop evaluation is handled by process_evolution_refinements()
+                            // which runs every reconciliation_interval_secs. Inline evaluation here
+                            // was removed to prevent System B (EvolutionTriggeredTemplateUpdateHandler)
+                            // from creating untracked evolve: tasks that bypass the RefinementRequest lifecycle.
                         }
                         Ok(session) => {
                             let tokens = session.total_tokens();

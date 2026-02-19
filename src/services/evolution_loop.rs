@@ -910,4 +910,164 @@ mod tests {
         evolution.complete_refinement(pending[0].id, true).await;
         assert!(!evolution.has_active_refinement("test-agent").await);
     }
+
+    /// Verify that direct-mode successes (with real turns/tokens) populate EvolutionLoop stats.
+    ///
+    /// Direct-mode executions record actual turns_used and tokens_used because the substrate
+    /// runs a single-shot invocation and returns them. This test mirrors the
+    /// goal_processing.rs direct-mode success path (line ~1213).
+    #[tokio::test]
+    async fn test_direct_mode_success_populates_stats() {
+        let evolution = EvolutionLoop::with_default_config();
+
+        // Simulate direct-mode execution: turns and tokens are set from the real substrate response
+        let exec = TaskExecution {
+            task_id: Uuid::new_v4(),
+            template_name: "direct-agent".to_string(),
+            template_version: 1,
+            outcome: TaskOutcome::Success,
+            executed_at: Utc::now(),
+            turns_used: 12,   // real turn count from substrate
+            tokens_used: 5000, // real token count from substrate
+            downstream_tasks: vec![],
+        };
+        evolution.record_execution(exec).await;
+
+        let stats = evolution.get_stats("direct-agent").await.unwrap();
+        assert_eq!(stats.total_tasks, 1, "direct-mode success must increment total_tasks");
+        assert_eq!(stats.successful_tasks, 1, "direct-mode success must increment successful_tasks");
+        assert_eq!(stats.failed_tasks, 0);
+        assert!((stats.success_rate - 1.0).abs() < 0.001, "single success = 100% rate");
+        assert!((stats.avg_turns - 12.0).abs() < 0.001, "avg_turns must reflect real direct-mode turn count");
+        assert!((stats.avg_tokens - 5000.0).abs() < 1.0, "avg_tokens must reflect real direct-mode token count");
+    }
+
+    /// Verify that direct-mode failures populate EvolutionLoop stats.
+    ///
+    /// Both error paths in goal_processing.rs (session error + substrate error) record
+    /// TaskOutcome::Failure with real turn/token counts when available.
+    #[tokio::test]
+    async fn test_direct_mode_failure_populates_stats() {
+        let evolution = EvolutionLoop::with_default_config();
+
+        // Simulate a direct-mode failure (session ended in error)
+        let exec = TaskExecution {
+            task_id: Uuid::new_v4(),
+            template_name: "direct-agent".to_string(),
+            template_version: 1,
+            outcome: TaskOutcome::Failure,
+            executed_at: Utc::now(),
+            turns_used: 8,
+            tokens_used: 3200,
+            downstream_tasks: vec![],
+        };
+        evolution.record_execution(exec).await;
+
+        let stats = evolution.get_stats("direct-agent").await.unwrap();
+        assert_eq!(stats.total_tasks, 1, "direct-mode failure must increment total_tasks");
+        assert_eq!(stats.failed_tasks, 1, "direct-mode failure must increment failed_tasks");
+        assert_eq!(stats.successful_tasks, 0);
+        assert!((stats.success_rate - 0.0).abs() < 0.001, "single failure = 0% rate");
+    }
+
+    /// Verify that EvolutionLoop.stats accumulates across both direct-mode and
+    /// convergent-mode executions for the same template.
+    ///
+    /// Convergent-mode records turns_used=0 and tokens_used=0 (because iteration counts
+    /// and tokens are aggregated inside the convergence loop, not per-execution).
+    /// Both paths call record_execution(), so they should aggregate correctly.
+    #[tokio::test]
+    async fn test_stats_populated_across_both_modes() {
+        let evolution = EvolutionLoop::with_default_config();
+
+        // Convergent-mode execution: turns=0, tokens=0 (aggregated inside convergence loop)
+        let convergent_exec = TaskExecution {
+            task_id: Uuid::new_v4(),
+            template_name: "shared-agent".to_string(),
+            template_version: 1,
+            outcome: TaskOutcome::Success,
+            executed_at: Utc::now(),
+            turns_used: 0,    // convergent path: tracks iterations, not turns
+            tokens_used: 0,   // convergent path: tokens aggregated inside convergence loop
+            downstream_tasks: vec![],
+        };
+        evolution.record_execution(convergent_exec).await;
+
+        // Direct-mode execution: turns and tokens set from real substrate response
+        let direct_exec = TaskExecution {
+            task_id: Uuid::new_v4(),
+            template_name: "shared-agent".to_string(),
+            template_version: 1,
+            outcome: TaskOutcome::Success,
+            executed_at: Utc::now(),
+            turns_used: 15,
+            tokens_used: 6000,
+            downstream_tasks: vec![],
+        };
+        evolution.record_execution(direct_exec).await;
+
+        let stats = evolution.get_stats("shared-agent").await.unwrap();
+        assert_eq!(stats.total_tasks, 2, "both direct and convergent executions must count toward total");
+        assert_eq!(stats.successful_tasks, 2, "both successes must be counted");
+        assert_eq!(stats.failed_tasks, 0);
+        assert!((stats.success_rate - 1.0).abs() < 0.001, "two successes = 100% rate");
+    }
+
+    /// Verify that the statistical significance threshold (min_tasks_for_evaluation=5)
+    /// prevents premature RefinementRequest creation, even when direct-mode failures are recorded.
+    ///
+    /// This is the core constraint from the evolution feedback loop goal:
+    /// "Refinement triggers must not fire on fewer than the configured minimum tasks."
+    #[tokio::test]
+    async fn test_statistical_significance_threshold_respected() {
+        // Use the default config (min_tasks_for_evaluation = 5)
+        let evolution = EvolutionLoop::with_default_config();
+
+        // Record 4 failures (below min_tasks threshold of 5)
+        for _ in 0..4 {
+            evolution
+                .record_execution(make_execution("agent-under-test", 1, TaskOutcome::Failure))
+                .await;
+        }
+
+        // evaluate() must NOT create a RefinementRequest — sample too small
+        let events = evolution.evaluate().await;
+        let refinement_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.action_taken, EvolutionAction::FlaggedForRefinement { .. }))
+            .collect();
+        assert!(
+            refinement_events.is_empty(),
+            "evaluate() must not trigger refinement with only 4 tasks (below min_tasks=5); \
+             got {:?}",
+            events.iter().map(|e| &e.action_taken).collect::<Vec<_>>()
+        );
+
+        let pending = evolution.get_pending_refinements().await;
+        assert!(
+            pending.is_empty(),
+            "no RefinementRequest must be created before min_tasks threshold is reached"
+        );
+
+        // Record a 5th failure (now meets the threshold)
+        evolution
+            .record_execution(make_execution("agent-under-test", 1, TaskOutcome::Failure))
+            .await;
+
+        let events = evolution.evaluate().await;
+        let flagged = events
+            .iter()
+            .any(|e| matches!(e.action_taken, EvolutionAction::FlaggedForRefinement { .. }));
+        assert!(
+            flagged,
+            "evaluate() must trigger refinement once min_tasks=5 is reached with 0% success rate"
+        );
+
+        let pending = evolution.get_pending_refinements().await;
+        assert_eq!(
+            pending.len(),
+            1,
+            "exactly one RefinementRequest must be created after threshold is met"
+        );
+    }
 }

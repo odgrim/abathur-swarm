@@ -16,8 +16,7 @@ use crate::services::builtin_handlers::{
     ConvergenceEvolutionHandler, ConvergenceMemoryHandler, ConvergenceSLAPressureHandler,
     DeadLetterRetryHandler, DirectModeExecutionMemoryHandler, EscalationTimeoutHandler,
     EgressRoutingHandler,
-    EventPruningHandler, EventStorePollerHandler, EvolutionEvaluationHandler,
-    EvolutionTriggeredTemplateUpdateHandler,
+    EventPruningHandler, EventStorePollerHandler,
     GoalConvergenceCheckHandler,
     GoalCreatedHandler, GoalEvaluationHandler, GoalEvaluationTaskCreationHandler,
     GoalReconciliationHandler, GoalRetiredHandler,
@@ -225,15 +224,10 @@ where
             )))
             .await;
 
-        // EvolutionEvaluationHandler (NORMAL) — track and refine agent templates
-        if self.config.track_evolution {
-            reactor
-                .register(Arc::new(EvolutionEvaluationHandler::new(
-                    self.task_repo.clone(),
-                    self.agent_repo.clone(),
-                )))
-                .await;
-        }
+        // EvolutionEvaluationHandler is intentionally not registered.
+        // It existed solely to emit EvolutionTriggered events consumed by
+        // EvolutionTriggeredTemplateUpdateHandler (System B), which has been removed.
+        // Evolution evaluation is handled by process_evolution_refinements() (System A).
 
         // ConvergenceMemoryHandler (NORMAL) — record convergence outcomes to memory
         if let Some(ref memory_repo) = self.memory_repo {
@@ -552,14 +546,12 @@ where
                 .await;
         }
 
-        // EvolutionTriggeredTemplateUpdateHandler (LOW) — submit refinement tasks for underperforming templates
-        if self.config.track_evolution {
-            reactor
-                .register(Arc::new(EvolutionTriggeredTemplateUpdateHandler::new(
-                    command_bus.clone(),
-                )))
-                .await;
-        }
+        // EvolutionTriggeredTemplateUpdateHandler is intentionally not registered.
+        // System B (EvolutionEvaluationHandler + EvolutionTriggeredTemplateUpdateHandler)
+        // was removed because it created untracked evolve: tasks that bypassed the
+        // RefinementRequest lifecycle entirely. System A (process_evolution_refinements in
+        // agent_lifecycle.rs) handles all refinement lifecycle correctly for both convergent
+        // and direct-mode tasks.
 
         // TaskScheduleHandler (NORMAL) — create tasks when periodic schedules fire
         if let Some(ref pool) = self.pool {
@@ -731,17 +723,10 @@ where
             ))
             .await;
 
-        // Evolution evaluation — track and refine agent templates
-        if self.config.track_evolution {
-            scheduler
-                .register(interval_schedule(
-                    "evolution-evaluation",
-                    Duration::from_secs(p.evolution_evaluation_interval_secs),
-                    EventCategory::Scheduler,
-                    EventSeverity::Debug,
-                ))
-                .await;
-        }
+        // "evolution-evaluation" schedule is intentionally not registered.
+        // The EvolutionEvaluationHandler that consumed it has been removed as part of
+        // System B cleanup. Evolution refinements are driven by process_evolution_refinements()
+        // in agent_lifecycle.rs, which runs on the orchestrator's reconciliation interval.
 
         // A2A delegation polling
         if self.config.mcp_servers.a2a_gateway.is_some() {
