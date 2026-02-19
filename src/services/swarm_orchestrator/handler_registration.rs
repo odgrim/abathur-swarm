@@ -10,7 +10,8 @@ use crate::domain::ports::{
     AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository,
 };
 use crate::services::builtin_handlers::{
-    A2APollHandler, ConvergenceCancellationHandler, ConvergenceCoordinationHandler,
+    A2APollHandler, AdapterLifecycleSyncHandler, ConvergenceCancellationHandler,
+    ConvergenceCoordinationHandler,
     ConvergenceEscalationFeedbackHandler,
     ConvergenceEvolutionHandler, ConvergenceMemoryHandler, ConvergenceSLAPressureHandler,
     DeadLetterRetryHandler, DirectModeExecutionMemoryHandler, EscalationTimeoutHandler,
@@ -594,6 +595,16 @@ where
             if !adapter_registry.egress_names().is_empty() {
                 reactor
                     .register(Arc::new(EgressRoutingHandler::new(
+                        adapter_registry.clone(),
+                    )))
+                    .await;
+            }
+
+            // AdapterLifecycleSyncHandler (NORMAL) — sync task lifecycle back to external systems
+            if !adapter_registry.egress_names().is_empty() {
+                reactor
+                    .register(Arc::new(AdapterLifecycleSyncHandler::new(
+                        self.task_repo.clone(),
                         adapter_registry.clone(),
                     )))
                     .await;
