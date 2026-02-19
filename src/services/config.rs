@@ -36,6 +36,8 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub logging: LoggingConfig,
     pub polling: PollingConfig,
+    /// External adapter subsystem configuration.
+    pub adapters: AdapterConfig,
     /// Name of the default workflow to use.
     #[serde(default = "default_workflow_name")]
     pub default_workflow: String,
@@ -57,6 +59,7 @@ impl Default for Config {
             database: DatabaseConfig::default(),
             logging: LoggingConfig::default(),
             polling: PollingConfig::default(),
+            adapters: AdapterConfig::default(),
             default_workflow: default_workflow_name(),
             workflows: Vec::new(),
         }
@@ -447,6 +450,28 @@ impl Default for LoggingConfig {
         Self {
             level: "info".to_string(),
             format: "pretty".to_string(),
+        }
+    }
+}
+
+/// Configuration for the external adapter subsystem.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdapterConfig {
+    /// Whether the adapter subsystem is enabled.
+    pub enabled: bool,
+    /// Directory containing adapter definitions (relative to project root).
+    pub adapters_dir: String,
+    /// Default polling interval for ingestion adapters (seconds).
+    pub default_poll_interval_secs: u64,
+}
+
+impl Default for AdapterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            adapters_dir: ".abathur/adapters".to_string(),
+            default_poll_interval_secs: 300,
         }
     }
 }

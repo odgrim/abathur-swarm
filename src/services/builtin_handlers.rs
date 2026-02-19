@@ -6574,3 +6574,325 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
         Ok(Reaction::None)
     }
 }
+
+// ============================================================================
+// IngestionPollHandler (Adapter integration)
+// ============================================================================
+
+/// Polls all registered ingestion adapters for new work items and creates
+/// tasks for each one via the CommandBus. Deduplicates using idempotency
+/// keys of the form `adapter:{name}:{external_id}`.
+pub struct IngestionPollHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+    adapter_registry: Arc<crate::services::adapter_registry::AdapterRegistry>,
+    command_bus: Arc<crate::services::command_bus::CommandBus>,
+}
+
+impl<T: TaskRepository> IngestionPollHandler<T> {
+    /// Create a new ingestion poll handler.
+    pub fn new(
+        task_repo: Arc<T>,
+        adapter_registry: Arc<crate::services::adapter_registry::AdapterRegistry>,
+        command_bus: Arc<crate::services::command_bus::CommandBus>,
+    ) -> Self {
+        Self {
+            task_repo,
+            adapter_registry,
+            command_bus,
+        }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for IngestionPollHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "IngestionPollHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Scheduler])
+                .payload_types(vec!["ScheduledEventFired".to_string()]),
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        // Only react to the adapter-ingestion-poll schedule
+        let schedule_name = match &event.payload {
+            EventPayload::ScheduledEventFired { name, .. } => name.as_str(),
+            _ => return Ok(Reaction::None),
+        };
+        if schedule_name != "adapter-ingestion-poll" {
+            return Ok(Reaction::None);
+        }
+
+        let mut all_events = Vec::new();
+
+        for adapter_name in self.adapter_registry.ingestion_names() {
+            let adapter = match self.adapter_registry.get_ingestion(adapter_name) {
+                Some(a) => a,
+                None => continue,
+            };
+
+            let items = match adapter.poll(None).await {
+                Ok(items) => items,
+                Err(e) => {
+                    tracing::warn!(
+                        adapter = adapter_name,
+                        error = %e,
+                        "Ingestion adapter poll failed"
+                    );
+                    all_events.push(crate::services::event_factory::make_event(
+                        EventSeverity::Warning,
+                        EventCategory::Adapter,
+                        None,
+                        None,
+                        EventPayload::AdapterIngestionFailed {
+                            adapter_name: adapter_name.to_string(),
+                            error: e.to_string(),
+                        },
+                    ));
+                    continue;
+                }
+            };
+
+            let items_found = items.len();
+            let mut tasks_created: usize = 0;
+
+            for item in &items {
+                let idem_key = format!("adapter:{}:{}", adapter_name, item.external_id);
+
+                // Dedup: skip if a task with this idempotency key already exists
+                match self.task_repo.get_by_idempotency_key(&idem_key).await {
+                    Ok(Some(_)) => {
+                        tracing::debug!(
+                            adapter = adapter_name,
+                            external_id = %item.external_id,
+                            "Skipping duplicate ingestion item"
+                        );
+                        continue;
+                    }
+                    Ok(None) => {} // new item, proceed
+                    Err(e) => {
+                        tracing::warn!(
+                            adapter = adapter_name,
+                            external_id = %item.external_id,
+                            error = %e,
+                            "Failed idempotency check, creating task anyway"
+                        );
+                    }
+                }
+
+                // Map priority
+                let priority = item.priority.unwrap_or(crate::domain::models::TaskPriority::Normal);
+
+                let description = format!(
+                    "[Ingested from {} — {}]\n\n{}",
+                    adapter_name, item.external_id, item.description
+                );
+
+                let envelope = crate::services::command_bus::CommandEnvelope::new(
+                    crate::services::command_bus::CommandSource::Adapter(adapter_name.to_string()),
+                    crate::services::command_bus::DomainCommand::Task(
+                        crate::services::command_bus::TaskCommand::Submit {
+                            title: Some(item.title.clone()),
+                            description,
+                            parent_id: None,
+                            priority,
+                            agent_type: None,
+                            depends_on: vec![],
+                            context: Box::new(None),
+                            idempotency_key: Some(idem_key),
+                            source: TaskSource::Adapter(adapter_name.to_string()),
+                            deadline: None,
+                            task_type: None,
+                            execution_mode: None,
+                        },
+                    ),
+                );
+
+                match self.command_bus.dispatch(envelope).await {
+                    Ok(_) => {
+                        tasks_created += 1;
+                    }
+                    Err(crate::services::command_bus::CommandError::DuplicateCommand(_)) => {
+                        tracing::debug!(
+                            adapter = adapter_name,
+                            external_id = %item.external_id,
+                            "Duplicate command for ingestion item, skipping"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            adapter = adapter_name,
+                            external_id = %item.external_id,
+                            error = %e,
+                            "Failed to create task for ingestion item"
+                        );
+                    }
+                }
+            }
+
+            tracing::info!(
+                adapter = adapter_name,
+                items_found = items_found,
+                tasks_created = tasks_created,
+                "Ingestion poll completed"
+            );
+
+            all_events.push(crate::services::event_factory::make_event(
+                EventSeverity::Info,
+                EventCategory::Adapter,
+                None,
+                None,
+                EventPayload::AdapterIngestionCompleted {
+                    adapter_name: adapter_name.to_string(),
+                    items_found,
+                    tasks_created,
+                },
+            ));
+        }
+
+        if all_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(all_events))
+        }
+    }
+}
+
+// ============================================================================
+// EgressRoutingHandler (Adapter integration)
+// ============================================================================
+
+/// Routes task completion results to egress adapters. When a task completes
+/// with a result containing an "egress" key, this handler deserializes the
+/// [`EgressDirective`] and calls the appropriate egress adapter.
+pub struct EgressRoutingHandler {
+    adapter_registry: Arc<crate::services::adapter_registry::AdapterRegistry>,
+}
+
+impl EgressRoutingHandler {
+    /// Create a new egress routing handler.
+    pub fn new(
+        adapter_registry: Arc<crate::services::adapter_registry::AdapterRegistry>,
+    ) -> Self {
+        Self { adapter_registry }
+    }
+}
+
+#[async_trait]
+impl EventHandler for EgressRoutingHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "EgressRoutingHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Task])
+                .payload_types(vec!["TaskCompletedWithResult".to_string()]),
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let (task_id, result) = match &event.payload {
+            EventPayload::TaskCompletedWithResult { task_id, result } => (*task_id, result),
+            _ => return Ok(Reaction::None),
+        };
+
+        // Check if the result status contains egress routing info.
+        // Convention: the result status field contains JSON with an "egress" key
+        // when the completing agent wants to push results to an external system.
+        let directive: crate::domain::models::adapter::EgressDirective = {
+            // Try to parse the status field as JSON containing an egress directive
+            let status_str = &result.status;
+            match serde_json::from_str::<serde_json::Value>(status_str) {
+                Ok(val) => {
+                    if let Some(egress_val) = val.get("egress") {
+                        match serde_json::from_value::<crate::domain::models::adapter::EgressDirective>(
+                            egress_val.clone(),
+                        ) {
+                            Ok(d) => d,
+                            Err(_) => return Ok(Reaction::None),
+                        }
+                    } else {
+                        return Ok(Reaction::None);
+                    }
+                }
+                Err(_) => return Ok(Reaction::None),
+            }
+        };
+
+        let adapter_name = &directive.adapter_name;
+        let adapter = match self.adapter_registry.get_egress(adapter_name) {
+            Some(a) => a,
+            None => {
+                tracing::warn!(
+                    adapter = adapter_name.as_str(),
+                    task_id = %task_id,
+                    "Egress adapter not found"
+                );
+                let fail_event = crate::services::event_factory::make_event(
+                    EventSeverity::Warning,
+                    EventCategory::Adapter,
+                    None,
+                    Some(task_id),
+                    EventPayload::AdapterEgressFailed {
+                        adapter_name: adapter_name.clone(),
+                        task_id: Some(task_id),
+                        error: format!("Adapter '{}' not found in registry", adapter_name),
+                    },
+                );
+                return Ok(Reaction::EmitEvents(vec![fail_event]));
+            }
+        };
+
+        let action_name = format!("{:?}", directive.action);
+
+        match adapter.execute(&directive.action).await {
+            Ok(egress_result) => {
+                tracing::info!(
+                    adapter = adapter_name.as_str(),
+                    task_id = %task_id,
+                    success = egress_result.success,
+                    "Egress action completed"
+                );
+                let completed_event = crate::services::event_factory::make_event(
+                    EventSeverity::Info,
+                    EventCategory::Adapter,
+                    None,
+                    Some(task_id),
+                    EventPayload::AdapterEgressCompleted {
+                        adapter_name: adapter_name.clone(),
+                        task_id,
+                        action: action_name,
+                        success: egress_result.success,
+                    },
+                );
+                Ok(Reaction::EmitEvents(vec![completed_event]))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    adapter = adapter_name.as_str(),
+                    task_id = %task_id,
+                    error = %e,
+                    "Egress action failed"
+                );
+                let fail_event = crate::services::event_factory::make_event(
+                    EventSeverity::Warning,
+                    EventCategory::Adapter,
+                    None,
+                    Some(task_id),
+                    EventPayload::AdapterEgressFailed {
+                        adapter_name: adapter_name.clone(),
+                        task_id: Some(task_id),
+                        error: e.to_string(),
+                    },
+                );
+                Ok(Reaction::EmitEvents(vec![fail_event]))
+            }
+        }
+    }
+}

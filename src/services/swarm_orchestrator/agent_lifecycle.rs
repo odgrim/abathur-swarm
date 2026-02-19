@@ -439,10 +439,23 @@ where
 
         // Append goal context to the system prompt
         let goal_context = self.build_goal_context().await;
-        if goal_context.is_empty() {
+        let with_goals = if goal_context.is_empty() {
             with_apis
         } else {
             format!("{}\n\n{}", with_apis, goal_context)
+        };
+
+        // Append adapter egress prompt section (if adapters are loaded)
+        let adapter_section = if let Some(ref registry) = self.adapter_registry {
+            registry.build_egress_prompt_section()
+        } else {
+            String::new()
+        };
+
+        if adapter_section.is_empty() {
+            with_goals
+        } else {
+            format!("{}\n\n{}", with_goals, adapter_section)
         }
     }
 
