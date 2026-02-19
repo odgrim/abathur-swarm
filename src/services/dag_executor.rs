@@ -1068,7 +1068,7 @@ where
                     }
 
                     // Record success with circuit breaker
-                    if let (Some(ref cb), Some(gid)) = (&circuit_breaker, goal_id) {
+                    if let (Some(cb), Some(gid)) = (&circuit_breaker, goal_id) {
                         cb.record_success(CircuitScope::task_chain(gid)).await;
                     }
 
@@ -1131,7 +1131,7 @@ where
     }
 
     // Record failure with circuit breaker
-    if let (Some(ref cb), Some(gid)) = (&circuit_breaker, goal_id) {
+    if let (Some(cb), Some(gid)) = (&circuit_breaker, goal_id) {
         cb.record_failure(CircuitScope::task_chain(gid), &error_msg).await;
     }
 

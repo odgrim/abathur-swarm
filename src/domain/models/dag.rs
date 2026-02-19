@@ -239,7 +239,7 @@ impl TaskDag {
 
         // Find the node with maximum distance
         let end_node = distances.iter()
-            .max_by_key(|(_, &dist)| dist)
+            .max_by_key(|&(_, &dist)| dist)
             .map(|(&id, _)| id);
 
         if let Some(mut current) = end_node {

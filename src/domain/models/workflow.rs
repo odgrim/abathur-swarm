@@ -192,7 +192,7 @@ impl WorkflowDefinition {
 
         let mut queue: VecDeque<Uuid> = in_degree
             .iter()
-            .filter(|(_, &deg)| deg == 0)
+            .filter(|&(_, &deg)| deg == 0)
             .map(|(id, _)| *id)
             .collect();
 

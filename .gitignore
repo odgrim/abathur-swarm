@@ -26,5 +26,4 @@ site/
 target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
 .sqlx/

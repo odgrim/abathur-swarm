@@ -1,11 +1,11 @@
 [package]
 name = "abathur"
-version = "0.1.0"
-edition = "2021"
+version = "0.3.0"
+edition = "2024"
 description = "Self-evolving agentic swarm orchestrator"
 license = "MIT"
 authors = ["Abathur Team"]
-repository = "https://github.com/abathur/abathur-swarm"
+repository = "https://github.com/odgrim/abathur-swarm"
 keywords = ["ai", "agents", "swarm", "orchestration", "llm"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -24,6 +24,7 @@ toml = "0.8"
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }

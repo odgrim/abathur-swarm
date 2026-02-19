@@ -1753,7 +1753,7 @@ impl EmbeddedGapFingerprint {
     /// Check if another gap is similar to this fingerprint.
     pub fn is_similar_to(&self, other: &IntentGap, config: &EmbeddingSimilarityConfig) -> bool {
         // Try embedding similarity first
-        if let (Some(ref self_emb), Some(ref other_emb)) = (&self.embedding, &other.embedding) {
+        if let (Some(self_emb), Some(other_emb)) = (&self.embedding, &other.embedding) {
             let similarity = cosine_similarity(self_emb, other_emb);
             return similarity >= config.similarity_threshold;
         }

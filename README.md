@@ -12,10 +12,27 @@ Abathur coordinates multiple AI agents to work on complex tasks. It handles task
 - **Agent evolution**: Track success rates per agent template version. Underperforming agents get refined, regressions get reverted
 - **Meta-planning**: A meta-planner agent analyzes incoming tasks, detects capability gaps, and can spawn new specialist agents when needed
 
-## Building
+## Installation
+
+**Quick install** (Linux and macOS):
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/odgrim/abathur-swarm/main/install.sh | bash
+```
+
+**With cargo**:
+
+```bash
+cargo install --git https://github.com/odgrim/abathur-swarm.git
+```
+
+**Build from source**:
+
+```bash
+git clone https://github.com/odgrim/abathur-swarm.git
+cd abathur-swarm
 cargo build --release
+# Binary is at target/release/abathur
 ```
 
 ## Getting started
