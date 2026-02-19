@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{TaskStatus, WorktreeStatus};
+use crate::domain::models::workflow_template::OutputDelivery;
 use crate::domain::ports::{GoalRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, AuditLogService,
@@ -273,6 +274,12 @@ pub async fn find_root_ancestor_id<T: TaskRepository>(task_id: Uuid, task_repo: 
 /// into the root ancestor's feature branch and checks if the entire task tree
 /// is ready for a single PR. For standalone tasks (no parent, no children),
 /// the existing per-task PR/merge flow is used.
+///
+/// The `output_delivery` parameter controls how artifacts are delivered:
+/// - `OutputDelivery::MemoryOnly` → skip all git operations immediately (agents already
+///   persisted findings to memory).
+/// - `OutputDelivery::PullRequest` → existing PR-first flow (default).
+/// - `OutputDelivery::DirectMerge` → merge without creating a PR.
 pub async fn run_post_completion_workflow<G, T, W>(
     task_id: Uuid,
     task_repo: Arc<T>,
@@ -287,12 +294,29 @@ pub async fn run_post_completion_workflow<G, T, W>(
     default_base_ref: &str,
     require_commits: bool,
     intent_satisfied: bool,
+    output_delivery: OutputDelivery,
 ) -> DomainResult<()>
 where
     G: GoalRepository + 'static,
     T: TaskRepository + 'static,
     W: WorktreeRepository + 'static,
 {
+    // Dispatch based on output delivery mode.
+    // MemoryOnly workflows have already persisted their findings to swarm memory;
+    // no git operations are needed or appropriate.
+    match &output_delivery {
+        OutputDelivery::MemoryOnly => {
+            tracing::debug!(
+                task_id = %task_id,
+                "OutputDelivery::MemoryOnly — skipping git post-completion workflow"
+            );
+            return Ok(());
+        }
+        OutputDelivery::PullRequest | OutputDelivery::DirectMerge => {
+            // Continue with normal PR/merge flow below.
+        }
+    }
+
     // When the convergence engine has verified intent satisfaction (e.g., "remove dead code"
     // where the code is already clean), skip the commits gate so the task can complete
     // successfully without producing any commits.
@@ -615,9 +639,14 @@ where
         }
     }
 
-    // Step 2: Try PR creation if preferred, then fall back to merge queue
+    // Step 2: Try PR creation if preferred and this is not a DirectMerge workflow.
+    // DirectMerge bypasses PR creation and falls directly through to the merge queue.
     // (only for standalone tasks — no parent, no children)
-    if verification_passed && prefer_pull_requests && require_commits {
+    if verification_passed
+        && prefer_pull_requests
+        && require_commits
+        && output_delivery != OutputDelivery::DirectMerge
+    {
         if let Ok(Some(worktree)) = worktree_repo.get_by_task(task_id).await {
             // Look up task title/description for the PR
             let (pr_title, pr_body) = if let Ok(Some(task)) = task_repo.get(task_id).await {

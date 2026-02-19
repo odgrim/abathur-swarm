@@ -25,6 +25,8 @@ use crate::services::{
     command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand},
 };
 
+use crate::domain::models::workflow_template::WorkflowTemplate;
+
 use super::helpers::{auto_commit_worktree, run_post_completion_workflow};
 use super::types::SwarmEvent;
 use super::SwarmOrchestrator;
@@ -375,18 +377,24 @@ where
                 },
             )).await;
 
-            // Create worktree if configured
-            let worktree_path = if self.config.use_worktrees {
-                match self.create_worktree_for_task(task.id).await {
-                    Ok(path) => Some(path),
-                    Err(e) => {
-                        tracing::warn!("Failed to create worktree for task {}: {}", task.id, e);
-                        None
-                    }
-                }
-            } else {
-                None
-            };
+            // Resolve workflow template for this task to determine workspace kind and
+            // output delivery mode. SwarmConfig.workflow_template is set at startup
+            // from the resolved config; None falls back to the built-in code workflow.
+            let task_workflow = self
+                .config
+                .workflow_template
+                .clone()
+                .unwrap_or_else(WorkflowTemplate::default_code_workflow);
+            let task_workspace_kind = task_workflow.workspace_kind;
+            let task_output_delivery = task_workflow.output_delivery.clone();
+
+            // Provision workspace based on workflow's WorkspaceKind.
+            // WorkspaceKind::Worktree → git worktree (existing behaviour)
+            // WorkspaceKind::TempDir  → plain temp directory (no git)
+            // WorkspaceKind::None     → no workspace (read-only agents)
+            let worktree_path = self
+                .provision_workspace_for_task(task.id, task_workspace_kind)
+                .await;
 
             // Write CLAUDE.md to worktree with tool restrictions.
             // Claude Code reads CLAUDE.md as project-level instructions.
@@ -559,7 +567,6 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                 max_turns = ((max_turns as f64 * multiplier) as u32).min(50);
             }
             let total_tokens = self.total_tokens.clone();
-            let use_worktrees = self.config.use_worktrees;
             let circuit_breaker = self.circuit_breaker.clone();
             let audit_log = self.audit_log.clone();
             let evolution_loop = self.evolution_loop.clone();
@@ -576,6 +583,8 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let repo_path = self.config.repo_path.clone();
             let default_base_ref = self.config.default_base_ref.clone();
             let require_commits = agent_can_write && !is_read_only_role;
+            // Clone output_delivery so it can be moved into the spawn block.
+            let output_delivery_for_spawn = task_output_delivery.clone();
             let circuit_scope = scope;
 
             // Convergence infrastructure (cloned into spawn block only when needed)
@@ -595,6 +604,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
             tokio::spawn(async move {
                 let _permit = permit;
+                let output_delivery = output_delivery_for_spawn;
 
                 // Task is already Running (claimed atomically before spawn).
 
@@ -642,8 +652,10 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                         let goal_id: Option<uuid::Uuid> = None; // Tasks don't carry goal_id; bridge handles None
 
                         // Create worktree ONCE for the entire convergence loop
-                        // (not recreated between iterations)
-                        let convergent_worktree_path = if use_worktrees {
+                        // (not recreated between iterations).
+                        // Use worktree_path.is_some() to detect whether a workspace was
+                        // provisioned (replaces the old use_worktrees config flag check).
+                        let convergent_worktree_path = if worktree_path.is_some() {
                             match worktree_repo.get_by_task(task_id).await {
                                 Ok(Some(wt)) => Some(wt.path.clone()),
                                 _ => worktree_path.clone(),
@@ -682,7 +694,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             parallel_samples: Some(n),
                         } = &effective_mode
                         {
-                            if use_worktrees {
+                            if worktree_path.is_some() {
                                 super::convergent_execution::run_parallel_convergent_execution(
                                     &task_clone,
                                     goal_id,
@@ -801,7 +813,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 circuit_breaker.record_success(circuit_scope.clone()).await;
 
                                 // Mark worktree as completed
-                                if use_worktrees {
+                                if worktree_path.is_some() {
                                     if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
                                         wt.complete();
                                         let _ = worktree_repo.update(&wt).await;
@@ -824,6 +836,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         &default_base_ref,
                                         require_commits,
                                         true, // intent_satisfied: convergence engine verified intent
+                                        output_delivery.clone(),
                                     ).await;
                                 }
 
@@ -960,7 +973,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 circuit_breaker.record_failure(circuit_scope.clone(), &msg).await;
 
                                 // Mark worktree as failed
-                                if use_worktrees {
+                                if worktree_path.is_some() {
                                     if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
                                         wt.fail(msg.clone());
                                         let _ = worktree_repo.update(&wt).await;
@@ -1002,7 +1015,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     let _ = task_repo.update(&t).await;
                                 }
 
-                                if use_worktrees {
+                                if worktree_path.is_some() {
                                     if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
                                         wt.fail("cancelled".to_string());
                                         let _ = worktree_repo.update(&wt).await;
@@ -1040,7 +1053,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
                                 circuit_breaker.record_failure(circuit_scope.clone(), &error_msg).await;
 
-                                if use_worktrees {
+                                if worktree_path.is_some() {
                                     if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
                                         wt.fail(error_msg.clone());
                                         let _ = worktree_repo.update(&wt).await;
@@ -1200,7 +1213,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             ).await;
 
                             // Mark worktree as completed and create artifact reference
-                            if use_worktrees {
+                            if worktree_path.is_some() {
                                 if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
                                     wt.complete();
                                     let _ = worktree_repo.update(&wt).await;
@@ -1236,6 +1249,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     &default_base_ref,
                                     require_commits,
                                     false, // intent_satisfied: no convergence verification on this path
+                                    output_delivery.clone(),
                                 ).await;
 
                                 if let Err(e) = workflow_result {
@@ -1363,7 +1377,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             ).await;
 
                             // Mark worktree as failed
-                            if use_worktrees {
+                            if worktree_path.is_some() {
                                 if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
                                     wt.fail(error_msg.clone());
                                     let _ = worktree_repo.update(&wt).await;
@@ -1449,7 +1463,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             ).await;
 
                             // Mark worktree as failed
-                            if use_worktrees {
+                            if worktree_path.is_some() {
                                 if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
                                     wt.fail(error_msg.clone());
                                     let _ = worktree_repo.update(&wt).await;

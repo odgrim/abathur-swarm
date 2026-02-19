@@ -6,7 +6,9 @@
 use crate::domain::models::agent::{
     AgentConstraint, AgentTemplate, AgentTier, ToolCapability,
 };
-use crate::domain::models::workflow_template::{PhaseDependency, WorkflowTemplate};
+use crate::domain::models::workflow_template::{
+    OutputDelivery, PhaseDependency, WorkspaceKind, WorkflowTemplate,
+};
 
 /// Create all baseline agents.
 ///
@@ -192,6 +194,70 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
             \n\
             When a review task fails because the implementation has issues, the system automatically loops back to create a new plan + implement + review cycle incorporating the review feedback. This loop is bounded by `max_review_iterations`. Ensure review tasks use `agent_type: \"code-reviewer\"` so the system can identify them.\n",
         );
+    }
+
+    // Execution Environment section
+    section.push_str("\n## Execution Environment\n\n");
+
+    // Workspace
+    match template.workspace_kind {
+        WorkspaceKind::Worktree => {
+            section.push_str(
+                "**Workspace**: A dedicated git worktree is provisioned for this workflow. \
+                 All agents run in an isolated branch. Work is committed to the branch and \
+                 reviewed before merging.\n",
+            );
+        }
+        WorkspaceKind::TempDir => {
+            section.push_str(
+                "**Workspace**: A temporary directory is provisioned for this workflow. \
+                 Agents can write files but the directory is not a git repository. \
+                 Artifacts must be stored via `memory_store` or delivered via the configured \
+                 output delivery mechanism.\n",
+            );
+        }
+        WorkspaceKind::None => {
+            section.push_str(
+                "**Workspace**: No workspace is provisioned for this workflow. \
+                 Agents operate in read-only mode. All findings must be stored \
+                 via `memory_store` for downstream consumption.\n",
+            );
+        }
+    }
+
+    // Output delivery
+    match template.output_delivery {
+        OutputDelivery::PullRequest => {
+            section.push_str(
+                "**Output Delivery**: When the workflow completes, a pull request is \
+                 automatically created for the feature branch. Include a clear commit \
+                 history — commits become the PR description.\n",
+            );
+        }
+        OutputDelivery::DirectMerge => {
+            section.push_str(
+                "**Output Delivery**: When the workflow completes, the feature branch is \
+                 merged directly without a PR. Ensure all work is committed before \
+                 the final phase completes.\n",
+            );
+        }
+        OutputDelivery::MemoryOnly => {
+            section.push_str(
+                "**Output Delivery**: This workflow produces no git artifacts. All output \
+                 MUST be stored in swarm memory via `memory_store` with a meaningful \
+                 namespace and key. The task is considered complete when findings are \
+                 persisted to memory.\n",
+            );
+        }
+    }
+
+    // Template-level tool grants
+    if !template.tool_grants.is_empty() {
+        section.push_str(&format!(
+            "**Additional Tools**: The following tools are granted to all phases in this \
+             workflow in addition to phase-level grants: `{}`.\n",
+            template.tool_grants.join("`, `"),
+        ));
     }
 
     section
@@ -791,6 +857,7 @@ mod tests {
                     dependency: PhaseDependency::Sequential,
                 },
             ],
+            ..WorkflowTemplate::default()
         };
         let prompt = generate_overmind_prompt(&wf);
 
@@ -835,6 +902,7 @@ mod tests {
                     dependency: PhaseDependency::AllPrevious,
                 },
             ],
+            ..WorkflowTemplate::default()
         };
         let prompt = generate_overmind_prompt(&wf);
         assert!(prompt.contains("MUST `depends_on` ALL previous phase task UUIDs"));

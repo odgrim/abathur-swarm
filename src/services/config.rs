@@ -551,15 +551,18 @@ impl Config {
             }
         }
 
-        // Verify default_workflow references a known workflow (user-defined or built-in "code").
-        if self.default_workflow != "code"
+        // Verify default_workflow references a known workflow (user-defined or a built-in).
+        let builtin_names = ["code", "analysis", "docs", "review"];
+        if !builtin_names.contains(&self.default_workflow.as_str())
             && !self.workflows.iter().any(|wf| wf.name == self.default_workflow)
         {
             return Err(ConfigError::ValidationError {
                 field: "default_workflow".to_string(),
                 reason: format!(
-                    "default workflow '{}' not found in defined workflows or built-in workflows",
-                    self.default_workflow
+                    "default workflow '{}' not found in defined workflows or built-in workflows \
+                     (built-ins: {})",
+                    self.default_workflow,
+                    builtin_names.join(", "),
                 ),
             });
         }
@@ -569,19 +572,25 @@ impl Config {
 
     /// Resolve a workflow template by name.
     ///
-    /// Checks user-defined workflows first, then falls back to the built-in "code" workflow.
+    /// Checks user-defined workflows first, then falls back to the built-in workflows:
+    /// - `"code"` → 4-phase code workflow (research, plan, implement, review)
+    /// - `"analysis"` → 3-phase read-only analysis workflow (memory-only output)
+    /// - `"docs"` → 3-phase documentation workflow (PR output)
+    /// - `"review"` → single-phase code review workflow (memory-only output)
     pub fn resolve_workflow(&self, name: &str) -> Option<WorkflowTemplate> {
         // Check user-defined workflows first.
         if let Some(wf) = self.workflows.iter().find(|wf| wf.name == name) {
             return Some(wf.clone());
         }
 
-        // Fall back to built-in "code" workflow.
-        if name == "code" {
-            return Some(WorkflowTemplate::default_code_workflow());
+        // Fall back to built-in workflows.
+        match name {
+            "code" => Some(WorkflowTemplate::default_code_workflow()),
+            "analysis" => Some(WorkflowTemplate::analysis_workflow()),
+            "docs" => Some(WorkflowTemplate::docs_workflow()),
+            "review" => Some(WorkflowTemplate::review_only_workflow()),
+            _ => None,
         }
-
-        None
     }
 
     /// Returns the default workflow template.
@@ -591,18 +600,30 @@ impl Config {
     }
 
     /// Returns available workflows as (name, description, phase_count, is_default).
+    ///
+    /// Lists all built-in workflows followed by user-defined workflows.
+    /// A built-in workflow is omitted from the built-in list if the user has
+    /// defined a workflow with the same name (user definition takes precedence).
     pub fn available_workflows(&self) -> Vec<(String, String, usize, bool)> {
         let mut workflows = Vec::new();
 
-        // Add the built-in "code" workflow if not overridden by user.
-        if !self.workflows.iter().any(|wf| wf.name == "code") {
-            let builtin = WorkflowTemplate::default_code_workflow();
-            workflows.push((
-                builtin.name.clone(),
-                builtin.description.clone(),
-                builtin.phases.len(),
-                self.default_workflow == "code",
-            ));
+        // Add each built-in workflow unless shadowed by a user-defined one.
+        let builtins: [(&str, fn() -> WorkflowTemplate); 4] = [
+            ("code",     WorkflowTemplate::default_code_workflow),
+            ("analysis", WorkflowTemplate::analysis_workflow),
+            ("docs",     WorkflowTemplate::docs_workflow),
+            ("review",   WorkflowTemplate::review_only_workflow),
+        ];
+        for (name, constructor) in &builtins {
+            if !self.workflows.iter().any(|wf| wf.name == *name) {
+                let builtin = constructor();
+                workflows.push((
+                    builtin.name.clone(),
+                    builtin.description.clone(),
+                    builtin.phases.len(),
+                    self.default_workflow == *name,
+                ));
+            }
         }
 
         // Add user-defined workflows.

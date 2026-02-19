@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::domain::errors::DomainResult;
 use crate::domain::models::{GoalStatus, TaskStatus};
+use crate::domain::models::workflow_template::WorkspaceKind;
 use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel,
@@ -470,6 +471,65 @@ where
         )).await;
 
         Ok(worktree.path)
+    }
+
+    /// Provision a workspace for task execution based on the workflow's `WorkspaceKind`.
+    ///
+    /// - `WorkspaceKind::Worktree` → create (or reuse) a git worktree via
+    ///   [`create_worktree_for_task`].
+    /// - `WorkspaceKind::TempDir` → create an isolated temporary directory that
+    ///   is *not* a git repository.
+    /// - `WorkspaceKind::None` → no workspace; returns `None`.
+    ///
+    /// Returns `None` if the workspace kind is `None` or if provisioning fails.
+    /// The caller should treat a `None` result as "work in-process without an
+    /// isolated directory" — agents will run with the default substrate CWD.
+    pub(super) async fn provision_workspace_for_task(
+        &self,
+        task_id: Uuid,
+        workspace_kind: WorkspaceKind,
+    ) -> Option<String> {
+        match workspace_kind {
+            WorkspaceKind::Worktree => {
+                match self.create_worktree_for_task(task_id).await {
+                    Ok(path) => Some(path),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to create worktree for task {}: {}",
+                            task_id, e
+                        );
+                        None
+                    }
+                }
+            }
+            WorkspaceKind::TempDir => {
+                let tmp = std::env::temp_dir()
+                    .join(format!("abathur-task-{}", task_id));
+                match std::fs::create_dir_all(&tmp) {
+                    Ok(()) => {
+                        tracing::debug!(
+                            "Provisioned temp directory for task {} at {:?}",
+                            task_id, tmp
+                        );
+                        Some(tmp.to_string_lossy().to_string())
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to create temp directory for task {}: {}",
+                            task_id, e
+                        );
+                        None
+                    }
+                }
+            }
+            WorkspaceKind::None => {
+                tracing::debug!(
+                    "WorkspaceKind::None for task {} — no workspace provisioned",
+                    task_id
+                );
+                None
+            }
+        }
     }
 
     /// Walk up the parent_id chain to find the root ancestor task.
