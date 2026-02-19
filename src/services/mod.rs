@@ -1,5 +1,7 @@
 //! Application services for the Abathur swarm system.
 
+pub mod adapter_loader;
+pub mod adapter_registry;
 pub mod agent_service;
 pub mod audit_log;
 pub mod circuit_breaker;
@@ -31,6 +33,7 @@ pub mod memory_service;
 pub mod merge_queue;
 pub mod meta_planner; // Rust service module for decomposition planning
 pub mod overmind;
+pub mod prompt_adapter;
 pub mod phase_orchestrator;
 pub mod swarm_orchestrator;
 pub mod task_schedule_service;
@@ -42,6 +45,7 @@ pub mod convergence_engine;
 pub mod overseers;
 pub mod worktree_service;
 
+pub use adapter_registry::AdapterRegistry;
 pub use agent_service::AgentService;
 pub use audit_log::{AuditAction, AuditActor, AuditCategory, AuditEntry, AuditFilter, AuditLevel, AuditLogConfig, AuditLogService, AuditStats, DecisionRationale};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerService, CircuitCheckResult, CircuitScope, CircuitState, CircuitStats as CircuitBreakerStats, CircuitTrippedEvent, RecoveryAction, RecoveryPolicy};

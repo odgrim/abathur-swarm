@@ -114,6 +114,9 @@ where
 
     /// Optional phase orchestrator for workflow-based execution.
     pub(super) phase_orchestrator: Option<Arc<crate::services::phase_orchestrator::PhaseOrchestrator<T, A, G>>>,
+
+    /// Optional adapter registry for external system integration.
+    pub(super) adapter_registry: Option<Arc<crate::services::adapter_registry::AdapterRegistry>>,
 }
 
 // ============================================================================
@@ -180,6 +183,7 @@ where
             trajectory_repo: None,
             convergence_engine_config: None,
             phase_orchestrator: None,
+            adapter_registry: None,
         }
     }
 
@@ -306,6 +310,18 @@ where
         phase_orchestrator: Arc<crate::services::phase_orchestrator::PhaseOrchestrator<T, A, G>>,
     ) -> Self {
         self.phase_orchestrator = Some(phase_orchestrator);
+        self
+    }
+
+    /// Create orchestrator with an adapter registry for external system integration.
+    ///
+    /// The adapter registry provides ingestion (pull work in) and egress (push results
+    /// out) capabilities via external system connectors.
+    pub fn with_adapter_registry(
+        mut self,
+        registry: Arc<crate::services::adapter_registry::AdapterRegistry>,
+    ) -> Self {
+        self.adapter_registry = Some(registry);
         self
     }
 

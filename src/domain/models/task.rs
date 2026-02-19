@@ -104,6 +104,8 @@ pub enum TaskSource {
     SubtaskOf(Uuid),
     /// Task created by a periodic schedule
     Schedule(Uuid),
+    /// Task ingested from an external system via a named adapter
+    Adapter(String),
 }
 
 impl Default for TaskSource {

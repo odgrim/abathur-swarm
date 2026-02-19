@@ -59,6 +59,8 @@ pub enum CommandSource {
     Webhook(String),
     /// MCP HTTP server.
     Mcp(String),
+    /// External adapter (ingestion or egress).
+    Adapter(String),
 }
 
 impl fmt::Display for CommandSource {
@@ -71,6 +73,7 @@ impl fmt::Display for CommandSource {
             Self::A2A(swarm) => write!(f, "a2a:{}", swarm),
             Self::Webhook(name) => write!(f, "webhook:{}", name),
             Self::Mcp(server) => write!(f, "mcp:{}", server),
+            Self::Adapter(name) => write!(f, "adapter:{}", name),
         }
     }
 }

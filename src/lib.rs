@@ -23,4 +23,6 @@ pub const ABATHUR_ALLOWED_TOOLS: &[&str] = &[
     "mcp__abathur__memory_store",
     "mcp__abathur__memory_get",
     "mcp__abathur__goals_list",
+    "mcp__abathur__adapter_list",
+    "mcp__abathur__egress_publish",
 ];

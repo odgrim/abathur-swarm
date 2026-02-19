@@ -90,6 +90,7 @@ pub enum EventCategory {
     Scheduler,
     Convergence,
     Workflow,
+    Adapter,
 }
 
 impl std::fmt::Display for EventCategory {
@@ -106,6 +107,7 @@ impl std::fmt::Display for EventCategory {
             Self::Scheduler => write!(f, "scheduler"),
             Self::Convergence => write!(f, "convergence"),
             Self::Workflow => write!(f, "workflow"),
+            Self::Adapter => write!(f, "adapter"),
         }
     }
 }
@@ -772,6 +774,36 @@ pub enum EventPayload {
         phase_id: Uuid,
         retry_count: u32,
     },
+
+    // Adapter events
+
+    /// Adapter ingestion poll completed successfully.
+    AdapterIngestionCompleted {
+        adapter_name: String,
+        items_found: usize,
+        tasks_created: usize,
+    },
+
+    /// Adapter ingestion poll failed.
+    AdapterIngestionFailed {
+        adapter_name: String,
+        error: String,
+    },
+
+    /// Adapter egress action completed.
+    AdapterEgressCompleted {
+        adapter_name: String,
+        task_id: Uuid,
+        action: String,
+        success: bool,
+    },
+
+    /// Adapter egress action failed.
+    AdapterEgressFailed {
+        adapter_name: String,
+        task_id: Option<Uuid>,
+        error: String,
+    },
 }
 
 impl EventPayload {
@@ -889,6 +921,10 @@ impl EventPayload {
             Self::PhaseFailed { .. } => "PhaseFailed",
             Self::PhaseVerificationCompleted { .. } => "PhaseVerificationCompleted",
             Self::PhaseRecoveryStarted { .. } => "PhaseRecoveryStarted",
+            Self::AdapterIngestionCompleted { .. } => "AdapterIngestionCompleted",
+            Self::AdapterIngestionFailed { .. } => "AdapterIngestionFailed",
+            Self::AdapterEgressCompleted { .. } => "AdapterEgressCompleted",
+            Self::AdapterEgressFailed { .. } => "AdapterEgressFailed",
         }
     }
 }
