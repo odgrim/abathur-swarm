@@ -132,7 +132,38 @@ impl GitHubClient {
             .header("User-Agent", "abathur-swarm")
     }
 
-    /// List issues from a repository.
+    /// Parse the `rel="next"` URL from a GitHub `Link` response header.
+    ///
+    /// Returns `None` when the header is absent or there is no `next` relation,
+    /// which means we are on the last page.
+    ///
+    /// Example header value:
+    /// ```text
+    /// <https://api.github.com/repos/o/r/issues?page=2>; rel="next",
+    /// <https://api.github.com/repos/o/r/issues?page=5>; rel="last"
+    /// ```
+    fn parse_next_link(link_header: &str) -> Option<String> {
+        // Each entry is separated by commas; each entry has the form `<url>; rel="…"`.
+        for part in link_header.split(',') {
+            let part = part.trim();
+            // Split on ';' to get the URL segment and the rel parameter.
+            let mut segments = part.splitn(2, ';');
+            let url_segment = segments.next()?.trim();
+            let rel_segment = segments.next()?.trim();
+
+            // URL must be wrapped in angle brackets.
+            if url_segment.starts_with('<') && url_segment.ends_with('>') {
+                let url = &url_segment[1..url_segment.len() - 1];
+                // rel parameter must be exactly rel="next".
+                if rel_segment.replace(' ', "") == "rel=\"next\"" {
+                    return Some(url.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// List issues from a repository, following pagination automatically.
     ///
     /// `state` must be `"open"`, `"closed"`, or `"all"`.
     /// If `since` is provided it must be an ISO 8601 timestamp; only
@@ -148,33 +179,54 @@ impl GitHubClient {
         state: &str,
         since: Option<&str>,
     ) -> DomainResult<Vec<GitHubIssue>> {
-        let mut url = format!(
+        let mut first_url = format!(
             "{}/repos/{}/{}/issues?state={}&per_page=100",
             GITHUB_API_BASE, owner, repo, state
         );
         if let Some(since_ts) = since {
-            url.push_str(&format!("&since={since_ts}"));
+            first_url.push_str(&format!("&since={since_ts}"));
         }
 
-        let req = self
-            .rate_limited_request(reqwest::Method::GET, &url)
-            .await;
+        let mut all_issues: Vec<GitHubIssue> = Vec::new();
+        let mut next_url: Option<String> = Some(first_url);
+        let mut page = 1u32;
 
-        let resp = req.send().await.map_err(|e| {
-            DomainError::ExecutionFailed(format!("GitHub list_issues request failed: {e}"))
-        })?;
+        while let Some(url) = next_url.take() {
+            tracing::debug!(page = page, url = %url, "GitHub list_issues: fetching page");
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(DomainError::ExecutionFailed(format!(
-                "GitHub list_issues returned {status}: {body}"
-            )));
+            let req = self
+                .rate_limited_request(reqwest::Method::GET, &url)
+                .await;
+
+            let resp = req.send().await.map_err(|e| {
+                DomainError::ExecutionFailed(format!("GitHub list_issues request failed: {e}"))
+            })?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(DomainError::ExecutionFailed(format!(
+                    "GitHub list_issues returned {status}: {body}"
+                )));
+            }
+
+            // Extract the Link header *before* consuming the response body.
+            next_url = resp
+                .headers()
+                .get("link")
+                .and_then(|v| v.to_str().ok())
+                .and_then(Self::parse_next_link);
+
+            let page_issues = resp.json::<Vec<GitHubIssue>>().await.map_err(|e| {
+                DomainError::ExecutionFailed(format!("GitHub list_issues parse failed: {e}"))
+            })?;
+
+            tracing::debug!(count = page_issues.len(), page = page, "GitHub list_issues: page fetched");
+            all_issues.extend(page_issues);
+            page += 1;
         }
 
-        resp.json::<Vec<GitHubIssue>>().await.map_err(|e| {
-            DomainError::ExecutionFailed(format!("GitHub list_issues parse failed: {e}"))
-        })
+        Ok(all_issues)
     }
 
     /// Update the state of an issue (`"open"` or `"closed"`).
@@ -374,5 +426,45 @@ mod tests {
     fn test_client_new() {
         let client = GitHubClient::new("ghp_test_token".to_string());
         assert_eq!(client.token, "ghp_test_token");
+    }
+
+    // ── parse_next_link ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_next_link_with_next() {
+        let header = r#"<https://api.github.com/repos/o/r/issues?page=2>; rel="next", <https://api.github.com/repos/o/r/issues?page=5>; rel="last""#;
+        let result = GitHubClient::parse_next_link(header);
+        assert_eq!(
+            result,
+            Some("https://api.github.com/repos/o/r/issues?page=2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_next_link_last_page() {
+        // Only a "last" relation — no "next" means we are on the final page.
+        let header = r#"<https://api.github.com/repos/o/r/issues?page=5>; rel="last""#;
+        assert_eq!(GitHubClient::parse_next_link(header), None);
+    }
+
+    #[test]
+    fn test_parse_next_link_empty_header() {
+        assert_eq!(GitHubClient::parse_next_link(""), None);
+    }
+
+    #[test]
+    fn test_parse_next_link_only_prev_and_last() {
+        let header = r#"<https://api.github.com/repos/o/r/issues?page=4>; rel="prev", <https://api.github.com/repos/o/r/issues?page=5>; rel="last""#;
+        assert_eq!(GitHubClient::parse_next_link(header), None);
+    }
+
+    #[test]
+    fn test_parse_next_link_next_first() {
+        let header = r#"<https://api.github.com/repos/o/r/issues?page=3>; rel="next""#;
+        let result = GitHubClient::parse_next_link(header);
+        assert_eq!(
+            result,
+            Some("https://api.github.com/repos/o/r/issues?page=3".to_string())
+        );
     }
 }
