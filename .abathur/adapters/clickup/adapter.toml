@@ -18,3 +18,4 @@ list_id = "901711146339"
 
 # Optional: Only ingest tasks that have this tag. Leave empty to ingest all tasks.
 filter_tag = ""
+status_done = "COMPLETE"
