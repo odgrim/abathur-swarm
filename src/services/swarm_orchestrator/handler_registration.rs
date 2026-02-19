@@ -29,6 +29,7 @@ use crate::services::builtin_handlers::{
     StartupCatchUpHandler, StatsUpdateHandler, SystemStallDetectorHandler,
     TaskCompletionLearningHandler,
     TaskCompletedReadinessHandler, TaskFailedBlockHandler, TaskFailedRetryHandler,
+    TaskOutcomeMemoryHandler,
     TaskReadySpawnHandler, TaskScheduleHandler, TaskSLAEnforcementHandler,
     TriggerCatchupHandler, WatermarkAuditHandler,
     WorkflowPhaseCompletionHandler,
@@ -248,6 +249,16 @@ where
         if let Some(ref memory_repo) = self.memory_repo {
             reactor
                 .register(Arc::new(DirectModeExecutionMemoryHandler::new(
+                    memory_repo.clone(),
+                )))
+                .await;
+        }
+
+        // TaskOutcomeMemoryHandler (NORMAL) — episodic memory for ALL task completions
+        if let Some(ref memory_repo) = self.memory_repo {
+            reactor
+                .register(Arc::new(TaskOutcomeMemoryHandler::new(
+                    self.task_repo.clone(),
                     memory_repo.clone(),
                 )))
                 .await;
