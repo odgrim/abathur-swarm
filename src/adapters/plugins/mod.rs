@@ -206,4 +206,23 @@ mod tests {
             Ok(_) => panic!("Expected error when CLICKUP_API_KEY is not set"),
         }
     }
+
+    #[test]
+    fn test_github_issues_missing_env_var() {
+        unsafe { std::env::remove_var("GITHUB_TOKEN") };
+
+        let manifest = AdapterManifest::new(
+            "github-issues",
+            AdapterType::Native,
+            AdapterDirection::Bidirectional,
+        )
+        .with_capability(AdapterCapability::PollItems)
+        .with_capability(AdapterCapability::UpdateStatus);
+
+        let result = create_native_adapter(&manifest, "");
+        match result {
+            Err(msg) => assert!(msg.contains("GITHUB_TOKEN"), "got: {msg}"),
+            Ok(_) => panic!("Expected error when GITHUB_TOKEN is not set"),
+        }
+    }
 }

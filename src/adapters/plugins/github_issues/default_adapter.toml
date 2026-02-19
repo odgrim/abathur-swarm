@@ -27,3 +27,10 @@ state = "open"
 # Only issues that carry at least one of these labels will be ingested.
 # Leave empty to ingest all issues.
 filter_labels = ""
+
+# Status name mappings for lifecycle sync.
+# The egress adapter maps new_status values: "closed"/"done"/"completed"/
+# "resolved"/"wontfix" close the issue; all other values reopen it.
+status_open = "open"
+status_in_progress = "open"
+status_closed = "closed"

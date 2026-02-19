@@ -52,18 +52,15 @@ impl GitHubEgressAdapter {
 
     /// Parse an issue number from an `external_id` string.
     ///
-    /// Accepts plain numbers (`"42"`), hash-prefixed (`"#42"`), or
-    /// fully-qualified references (`"owner/repo#42"`).
+    /// Accepts plain numeric strings only (e.g., `"42"`).
     ///
-    /// Returns `None` if the string does not contain a parseable number.
-    pub fn parse_issue_number(external_id: &str) -> Option<u64> {
-        // Strip everything up to and including the last '#', then parse.
-        let candidate = if let Some(pos) = external_id.rfind('#') {
-            &external_id[pos + 1..]
-        } else {
-            external_id.trim()
-        };
-        candidate.trim().parse::<u64>().ok()
+    /// Returns `Err(ValidationFailed)` if the string is not a valid u64.
+    pub(crate) fn parse_issue_number(external_id: &str) -> DomainResult<u64> {
+        external_id.trim().parse::<u64>().map_err(|_| {
+            DomainError::ValidationFailed(format!(
+                "GitHub external_id must be a numeric issue number, got: '{external_id}'"
+            ))
+        })
     }
 
     /// Map a status string to a GitHub issue state.
@@ -121,12 +118,7 @@ impl EgressAdapter for GitHubEgressAdapter {
                 external_id,
                 new_status,
             } => {
-                let issue_number =
-                    Self::parse_issue_number(external_id).ok_or_else(|| {
-                        DomainError::ValidationFailed(format!(
-                            "GitHub Issues: cannot parse issue number from external_id '{external_id}'"
-                        ))
-                    })?;
+                let issue_number = Self::parse_issue_number(external_id)?;
 
                 let github_state = Self::to_github_state(new_status);
                 tracing::info!(
@@ -145,12 +137,7 @@ impl EgressAdapter for GitHubEgressAdapter {
             }
 
             EgressAction::PostComment { external_id, body } => {
-                let issue_number =
-                    Self::parse_issue_number(external_id).ok_or_else(|| {
-                        DomainError::ValidationFailed(format!(
-                            "GitHub Issues: cannot parse issue number from external_id '{external_id}'"
-                        ))
-                    })?;
+                let issue_number = Self::parse_issue_number(external_id)?;
 
                 tracing::info!(
                     owner = owner,
@@ -312,28 +299,35 @@ mod tests {
     // ── parse_issue_number ──────────────────────────────────────────────────
 
     #[test]
-    fn test_parse_issue_number_plain() {
-        assert_eq!(GitHubEgressAdapter::parse_issue_number("42"), Some(42));
+    fn test_parse_issue_number_valid() {
+        assert_eq!(GitHubEgressAdapter::parse_issue_number("42").unwrap(), 42u64);
     }
 
     #[test]
-    fn test_parse_issue_number_hash_prefix() {
-        assert_eq!(GitHubEgressAdapter::parse_issue_number("#42"), Some(42));
-    }
-
-    #[test]
-    fn test_parse_issue_number_qualified() {
-        assert_eq!(
-            GitHubEgressAdapter::parse_issue_number("my-org/my-repo#42"),
-            Some(42)
-        );
+    fn test_parse_issue_number_zero() {
+        assert_eq!(GitHubEgressAdapter::parse_issue_number("0").unwrap(), 0u64);
     }
 
     #[test]
     fn test_parse_issue_number_invalid() {
-        assert_eq!(GitHubEgressAdapter::parse_issue_number("not-a-number"), None);
-        assert_eq!(GitHubEgressAdapter::parse_issue_number(""), None);
-        assert_eq!(GitHubEgressAdapter::parse_issue_number("#"), None);
+        let result = GitHubEgressAdapter::parse_issue_number("abc");
+        assert!(result.is_err());
+        match result {
+            Err(DomainError::ValidationFailed(msg)) => {
+                assert!(msg.contains("abc"), "error message should mention the bad input, got: {msg}");
+            }
+            other => panic!("Expected ValidationFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_issue_number_empty() {
+        let result = GitHubEgressAdapter::parse_issue_number("");
+        assert!(result.is_err());
+        match result {
+            Err(DomainError::ValidationFailed(_)) => {}
+            other => panic!("Expected ValidationFailed, got: {other:?}"),
+        }
     }
 
     // ── to_github_state ─────────────────────────────────────────────────────

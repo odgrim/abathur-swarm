@@ -423,6 +423,16 @@ mod tests {
     }
 
     #[test]
+    fn test_client_from_env_empty() {
+        unsafe { std::env::set_var("GITHUB_TOKEN", "") };
+        let result = GitHubClient::from_env();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+        // Clean up
+        unsafe { std::env::remove_var("GITHUB_TOKEN") };
+    }
+
+    #[test]
     fn test_client_new() {
         let client = GitHubClient::new("ghp_test_token".to_string());
         assert_eq!(client.token, "ghp_test_token");
