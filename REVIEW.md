@@ -1,25 +1,26 @@
 # Code Review Report — Memory Context Injection & TaskOutcomeMemoryHandler
 
-**Date:** 2026-02-19 (second review pass)
+**Date:** 2026-02-19 (third review pass)
 **Status:** ❌ FAILED — Both implementations are ABSENT from the codebase
 
-> **Re-verification note:** A prior review pass (commit `650bcae`) reached identical
-> conclusions. A second independent review cycle on 2026-02-19 confirms nothing has
-> changed — neither feature exists in the codebase.
+> **Re-verification note:** This is the third independent review cycle. Prior passes
+> (commits `650bcae` and `556abc8`) reached identical conclusions. A third pass on
+> 2026-02-19 confirms **nothing has changed** — neither feature exists in the codebase.
+> The most recent code commit prior to any review is `ae08873 fix updating events`
+> which is completely unrelated to this feature.
 
 ---
 
 ## Summary
 
 Neither implementation described in the task exists in the worktree.
-The most recent code commit (`ae08873 fix updating events`) is unrelated to this
-feature. The "what was implemented" description in the task is inaccurate — the
-features were **never written**.
+The "what was implemented" description in the task is **inaccurate** — both features
+were **never written**. All builds and tests pass only because no new code was added.
 
 **Build/test status (current state):**
-- `cargo check`: ✅ PASSES (clean)
+- `cargo check`: ✅ PASSES (clean — no new code to break)
 - `cargo test --lib`: ✅ 885 passed, 0 failed
-- Lint: ✅ No warnings introduced (because no code was added)
+- Lint: ✅ No warnings (because no code was added)
 
 ---
 
@@ -30,17 +31,17 @@ features were **never written**.
 | Item | Status | Detail |
 |------|--------|--------|
 | `format_memory_context` function exists | ❌ MISSING | Not found anywhere in the codebase |
-| Memory retrieval guarded by `if let Some(ref mem_repo)` | ❌ MISSING | No memory retrieval of any kind in `spawn_task_agent` |
+| Memory retrieval guarded by `if let Some(ref mem_repo)` | ❌ MISSING | No memory retrieval block in `spawn_task_agent` |
 | `MemoryService::new(mem_repo.clone())` called | ❌ MISSING | Never called in `goal_processing.rs` |
-| `RelevanceWeights::semantic_biased()` used | ❌ MISSING | Only appears in `memory_service.rs` and `memory.rs` tests |
+| `RelevanceWeights::semantic_biased()` used | ❌ MISSING | Only in `memory_service.rs` and `memory.rs` tests |
 | Token budget of 2000 used | ❌ MISSING | `load_context_with_budget` never called from `goal_processing.rs` |
 | Memory context prepended BEFORE task description | ❌ MISSING | Lines 449-453 only prepend `goal_context`; no `memory_context` |
 | Errors handled gracefully (debug log, not fatal) | ❌ MISSING | Feature entirely absent |
 | `cargo check` passes | ✅ PASSES | Passes because no new code was added |
 
-**Root cause:** `spawn_task_agent` (lines 226–1451 of `goal_processing.rs`) was
-never modified. The task description construction at lines 449-453 only
-incorporates `goal_context` — there is no memory retrieval block.
+**Root cause:** `spawn_task_agent` (lines 226–1451 of `goal_processing.rs`) was never
+modified. The task description construction at lines 449-453 only incorporates
+`goal_context` — there is no memory retrieval block of any kind.
 
 ---
 
@@ -62,48 +63,55 @@ incorporates `goal_context` — there is no memory retrieval block.
 | `cargo check` passes | ✅ PASSES | Passes because no new code was added |
 
 **Root cause:** `TaskOutcomeMemoryHandler` was never added to `builtin_handlers.rs`.
-`handler_registration.rs` import list (lines 12-36) does not include it. The
-`register_builtin_handlers` function has no registration block for it.
+`handler_registration.rs` import list (lines 12-36) does not include it, and
+`register_builtin_handlers` has no registration block for it.
 
 ---
 
-## What Does Exist (for context)
+## What Does Exist (building blocks are present but unwired)
 
-- `DirectModeExecutionMemoryHandler` — **already existed** in `builtin_handlers.rs`
+- `DirectModeExecutionMemoryHandler` — **already exists** in `builtin_handlers.rs`
   (line 4426) and **already registered** in `handler_registration.rs` (line 250).
   This is a separate, pre-existing handler for `TaskExecutionRecorded` events.
+- `MemoryService::load_context_with_budget` — exists in `memory_service.rs` (line 283),
+  ready to use.
+- `RelevanceWeights::semantic_biased()` — exists in `domain/models/memory.rs` (line 603).
 - `goal_context_service.rs` — has a `memory_context: String` field in its context
   struct (line 87), indicating the plumbing was designed for memory injection,
-  but no caller populates it from `goal_processing.rs`.
-- `MemoryService::load_context_with_budget` — exists in `memory_service.rs` (line 283)
-  and is ready to use.
-- `RelevanceWeights::semantic_biased()` — exists in `domain/models/memory.rs` (line 603).
+  but no caller in `goal_processing.rs` populates it.
 
-All the building blocks are present but were not wired together.
+All the building blocks are present but were never wired together.
 
 ---
 
 ## Required Actions for Implementers
 
-1. **`goal_processing.rs`** — Inside `spawn_task_agent`, after the goal context
-   block (lines 427-446), add a memory retrieval block:
-   - Check `self.memory_repo` with `if let Some(ref mem_repo)`
-   - Call `MemoryService::new(mem_repo.clone())`
-   - Call `load_context_with_budget(&task.description, None, 2000, RelevanceWeights::semantic_biased())` (or equivalent)
-   - Implement `format_memory_context` to produce markdown-formatted output
-   - Prepend the memory context between goal context and task description
-   - Log errors at DEBUG level, do not propagate them (non-fatal path)
+### 1. `goal_processing.rs` — Memory context injection in `spawn_task_agent`
 
-2. **`builtin_handlers.rs`** — Add `TaskOutcomeMemoryHandler<T, M>` struct with:
-   - `EventHandler` implementation subscribing to `TaskCompleted` and `TaskCompletedWithResult`
-   - Idempotency guard using `memory_repo.get_by_key("task-outcome:{task_id}", "task-outcomes")`
-   - Task loading from `task_repo` for metadata (agent type, complexity, mode)
-   - `ExecutionMode::is_direct()` (NOT `.to_string()` / Display) to determine mode tag
-   - `MemoryType::Pattern` for success, `MemoryType::Error` for failure
-   - Tags: outcome, mode, complexity, agent
-   - Store to namespace `"task-outcomes"`
-   - Return `Reaction::EmitEvents` with a `MemoryStored` event
+Inside `spawn_task_agent`, after the goal context block (lines 427-446), add:
 
-3. **`handler_registration.rs`** — Import `TaskOutcomeMemoryHandler` and register it
-   after the `DirectModeExecutionMemoryHandler` block (lines 247-254), gated on
-   `if let Some(ref memory_repo) = self.memory_repo`.
+- Check `self.memory_repo` with `if let Some(ref mem_repo) = self.memory_repo`
+- Call `MemoryService::new(mem_repo.clone())`
+- Call `load_context_with_budget(&task.description, None, 2000, RelevanceWeights::semantic_biased())`
+- Implement a `format_memory_context` function to produce markdown-formatted output
+- Prepend the memory context between goal context and task description
+- Log errors at DEBUG level, do not propagate them (non-fatal path)
+
+### 2. `builtin_handlers.rs` — Add `TaskOutcomeMemoryHandler<T, M>`
+
+Add a new handler struct with:
+- Generic bounds `T: TaskRepository, M: MemoryRepository`
+- `EventHandler` impl subscribing to `TaskCompleted` AND `TaskCompletedWithResult`
+- Idempotency guard: `memory_repo.get_by_key("task-outcome:{task_id}", "task-outcomes")`
+- Task loading from `task_repo` for metadata (agent type, complexity, mode)
+- Use `ExecutionMode::is_direct()` predicate (NOT `.to_string()` / Display format)
+- `MemoryType::Pattern` for success, `MemoryType::Error` for failure
+- Tags: outcome, mode, complexity, agent
+- Store to namespace `"task-outcomes"`
+- Return `Reaction::EmitEvents` with a `MemoryStored` event
+
+### 3. `handler_registration.rs` — Import and register `TaskOutcomeMemoryHandler`
+
+- Add `TaskOutcomeMemoryHandler` to the import list (lines 12-36)
+- Register it after the `DirectModeExecutionMemoryHandler` block (lines 247-254)
+- Gate the registration on `if let Some(ref memory_repo) = self.memory_repo`
