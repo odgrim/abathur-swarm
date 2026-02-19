@@ -237,59 +237,57 @@ where
         instance: &mut WorkflowInstance,
         definition: &WorkflowDefinition,
     ) -> DomainResult<()> {
-        loop {
-            let completed = instance.completed_phases();
-            let ready_phase_ids = definition.ready_phases(&completed);
+        let completed = instance.completed_phases();
+        let ready_phase_ids = definition.ready_phases(&completed);
 
-            // Filter to phases not already running or terminal
-            let actionable: Vec<Uuid> = ready_phase_ids
-                .into_iter()
-                .filter(|id| {
-                    instance
-                        .phase_instances
-                        .get(id)
-                        .map(|pi| pi.status == PhaseStatus::Pending || pi.status == PhaseStatus::Ready)
-                        .unwrap_or(false)
-                })
-                .collect();
+        // Filter to phases not already running or terminal
+        let actionable: Vec<Uuid> = ready_phase_ids
+            .into_iter()
+            .filter(|id| {
+                instance
+                    .phase_instances
+                    .get(id)
+                    .map(|pi| pi.status == PhaseStatus::Pending || pi.status == PhaseStatus::Ready)
+                    .unwrap_or(false)
+            })
+            .collect();
 
-            if actionable.is_empty() {
-                // Check if workflow is complete
-                if instance.all_phases_terminal() {
-                    self.complete_workflow(instance, definition).await?;
-                }
-                // No more phases to start right now -- return and wait for events
-                return Ok(());
+        if actionable.is_empty() {
+            // Check if workflow is complete
+            if instance.all_phases_terminal() {
+                self.complete_workflow(instance, definition).await?;
             }
-
-            // Start all actionable phases
-            for phase_id in actionable {
-                if let Err(e) = self.start_phase(instance, definition, phase_id).await {
-                    error!(
-                        workflow_id = %instance.id,
-                        phase_id = %phase_id,
-                        error = %e,
-                        "Failed to start phase"
-                    );
-                    // Mark the phase as failed
-                    if let Some(pi) = instance.phase_instances.get_mut(&phase_id) {
-                        pi.status = PhaseStatus::Failed;
-                        pi.error = Some(e.to_string());
-                        pi.completed_at = Some(chrono::Utc::now());
-                    }
-
-                    if definition.config.fail_fast {
-                        self.fail_workflow(instance, definition, &e.to_string())
-                            .await?;
-                        return Ok(());
-                    }
-                }
-            }
-
-            // After starting phases, the workflow must wait for them to complete
-            // (event-driven via on_phase_tasks_completed). Don't loop.
+            // No more phases to start right now -- return and wait for events
             return Ok(());
         }
+
+        // Start all actionable phases
+        for phase_id in actionable {
+            if let Err(e) = self.start_phase(instance, definition, phase_id).await {
+                error!(
+                    workflow_id = %instance.id,
+                    phase_id = %phase_id,
+                    error = %e,
+                    "Failed to start phase"
+                );
+                // Mark the phase as failed
+                if let Some(pi) = instance.phase_instances.get_mut(&phase_id) {
+                    pi.status = PhaseStatus::Failed;
+                    pi.error = Some(e.to_string());
+                    pi.completed_at = Some(chrono::Utc::now());
+                }
+
+                if definition.config.fail_fast {
+                    self.fail_workflow(instance, definition, &e.to_string())
+                        .await?;
+                    return Ok(());
+                }
+            }
+        }
+
+        // After starting phases, the workflow must wait for them to complete
+        // (event-driven via on_phase_tasks_completed).
+        Ok(())
     }
 
     /// Start a single phase: create tasks, build TaskDag, dispatch to DagExecutor.
