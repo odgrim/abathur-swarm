@@ -295,6 +295,34 @@ where
             return Ok(());
         }
 
+        // Budget gate: defer low-priority tasks under elevated pressure
+        if let Some(ref bt) = self.budget_tracker {
+            if !bt.should_dispatch_task(task.priority).await {
+                tracing::debug!(
+                    task_id = %task.id,
+                    priority = ?task.priority,
+                    "spawn_task_agent: deferring task — budget pressure"
+                );
+                return Ok(());
+            }
+        }
+
+        // Budget gate: respect budget-adjusted concurrency ceiling
+        if let Some(ref bt) = self.budget_tracker {
+            let running = self.config.max_agents
+                .saturating_sub(self.agent_semaphore.available_permits());
+            let budget_max = bt.effective_max_agents(self.config.max_agents as u32).await as usize;
+            if running >= budget_max {
+                tracing::debug!(
+                    task_id = %task.id,
+                    running,
+                    budget_max,
+                    "spawn_task_agent: skipping — at budget-adjusted agent limit"
+                );
+                return Ok(());
+            }
+        }
+
         // Try to acquire agent permit
         if let Ok(permit) = self.agent_semaphore.clone().try_acquire_owned() {
             // Atomically claim the task (Ready→Running) BEFORE spawning.
