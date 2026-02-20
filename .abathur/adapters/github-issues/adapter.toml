@@ -1,0 +1,36 @@
+name = "github-issues"
+description = "Bidirectional adapter for GitHub repository issues. Polls open issues and supports status updates, comments, issue creation, and pull request creation."
+version = "0.1.0"
+adapter_type = "native"
+direction = "bidirectional"
+capabilities = [
+    "poll_items",
+    "update_status",
+    "post_comment",
+    "create_item",
+    "map_priority",
+    "custom",
+]
+
+[config]
+# Required: GitHub repository owner (user or organisation name).
+owner = "odgrim"
+
+# Required: GitHub repository name.
+repo = "abathur-swarm"
+
+# Optional: Issue state to poll. One of "open", "closed", or "all".
+# Defaults to "open" when left empty.
+state = "open"
+
+# Optional: Comma-separated list of label names to filter by.
+# Only issues that carry at least one of these labels will be ingested.
+# Leave empty to ingest all issues.
+filter_labels = "swarm-ingestible"
+
+# Status name mappings for lifecycle sync.
+# The egress adapter maps new_status values: "closed"/"done"/"completed"/
+# "resolved"/"wontfix" close the issue; all other values reopen it.
+status_open = "open"
+status_in_progress = "open"
+status_closed = "closed"
