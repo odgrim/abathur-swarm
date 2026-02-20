@@ -8,6 +8,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Instant;
+use tracing::{debug, error, info, warn};
 use tokio::process::Command;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -250,6 +252,13 @@ where
 
         let id = request.id;
         self.queue.write().await.push_back(request);
+        info!(
+            task_id = %task_id,
+            source = %agent_branch,
+            target = %task_branch,
+            merge_id = %id,
+            "Queued Stage 1 merge"
+        );
         Ok(id)
     }
 
@@ -269,6 +278,13 @@ where
         );
         let id = request.id;
         self.queue.write().await.push_back(request);
+        info!(
+            task_id = %task_id,
+            source = %source_branch,
+            target = %target_branch,
+            merge_id = %id,
+            "Queued merge-back"
+        );
         Ok(id)
     }
 
@@ -289,6 +305,13 @@ where
 
         let id = request.id;
         self.queue.write().await.push_back(request);
+        info!(
+            task_id = %task_id,
+            source = %worktree.branch,
+            target = %self.config.main_branch,
+            merge_id = %id,
+            "Queued Stage 2 merge"
+        );
         Ok(id)
     }
 
@@ -308,6 +331,15 @@ where
                 None => return Ok(None),
             }
         };
+
+        debug!(
+            merge_id = %request.id,
+            task_id = %request.task_id,
+            stage = ?request.stage,
+            source = %request.source_branch,
+            target = %request.target_branch,
+            "Processing merge request"
+        );
 
         // Process based on stage
         let result = match request.stage {
@@ -337,6 +369,15 @@ where
 
     /// Process a Stage 1 merge (agent → task branch).
     async fn process_stage1(&self, request: &mut MergeRequest) -> DomainResult<MergeResult> {
+        info!(
+            merge_id = %request.id,
+            task_id = %request.task_id,
+            source = %request.source_branch,
+            target = %request.target_branch,
+            "Starting Stage 1 merge"
+        );
+        let stage1_start = Instant::now();
+
         // Check for conflicts first
         let conflict_check = self.check_merge_conflicts(
             &request.workdir,
@@ -348,6 +389,12 @@ where
             request.status = MergeStatus::Conflict;
             request.error = Some(format!("Merge conflicts in: {}", conflict_check.0.join(", ")));
             request.updated_at = Utc::now();
+            warn!(
+                merge_id = %request.id,
+                task_id = %request.task_id,
+                conflict_files = ?conflict_check.0,
+                "Stage 1 merge blocked: conflicts detected"
+            );
 
             return Ok(MergeResult {
                 request_id: request.id,
@@ -365,6 +412,14 @@ where
                 request.status = MergeStatus::Completed;
                 request.commit_sha = Some(commit_sha.clone());
                 request.updated_at = Utc::now();
+                let elapsed = stage1_start.elapsed();
+                info!(
+                    merge_id = %request.id,
+                    task_id = %request.task_id,
+                    commit_sha = %commit_sha,
+                    elapsed_ms = elapsed.as_millis(),
+                    "Stage 1 merge completed"
+                );
 
                 Ok(MergeResult {
                     request_id: request.id,
@@ -379,6 +434,12 @@ where
                 request.status = MergeStatus::Failed;
                 request.error = Some(e.to_string());
                 request.updated_at = Utc::now();
+                error!(
+                    merge_id = %request.id,
+                    task_id = %request.task_id,
+                    error = %e,
+                    "Stage 1 merge failed"
+                );
 
                 Ok(MergeResult {
                     request_id: request.id,
@@ -394,8 +455,19 @@ where
 
     /// Process a Stage 2 merge (task → main with verification).
     async fn process_stage2(&self, request: &mut MergeRequest) -> DomainResult<MergeResult> {
+        info!(
+            merge_id = %request.id,
+            task_id = %request.task_id,
+            source = %request.source_branch,
+            target = %request.target_branch,
+            require_verification = %self.config.require_verification,
+            "Starting Stage 2 merge"
+        );
+        let stage2_start = Instant::now();
+
         // Run verification first if required
         if self.config.require_verification {
+            debug!(merge_id = %request.id, task_id = %request.task_id, "Running integration verification");
             let verification = self.verifier.verify_task(request.task_id).await?;
             request.verification = Some(verification.clone());
 
@@ -403,6 +475,12 @@ where
                 request.status = MergeStatus::VerificationFailed;
                 request.error = verification.failures_summary.clone();
                 request.updated_at = Utc::now();
+                warn!(
+                    merge_id = %request.id,
+                    task_id = %request.task_id,
+                    reason = ?request.error,
+                    "Stage 2 merge blocked: integration verification failed"
+                );
 
                 return Ok(MergeResult {
                     request_id: request.id,
@@ -426,6 +504,12 @@ where
             request.status = MergeStatus::Conflict;
             request.error = Some(format!("Merge conflicts in: {}", conflict_check.0.join(", ")));
             request.updated_at = Utc::now();
+            warn!(
+                merge_id = %request.id,
+                task_id = %request.task_id,
+                conflict_files = ?conflict_check.0,
+                "Stage 2 merge blocked: conflicts detected"
+            );
 
             return Ok(MergeResult {
                 request_id: request.id,
@@ -450,6 +534,16 @@ where
                     let _ = self.worktree_repo.update(&worktree).await;
                 }
 
+                let elapsed = stage2_start.elapsed();
+                info!(
+                    merge_id = %request.id,
+                    task_id = %request.task_id,
+                    commit_sha = %commit_sha,
+                    target = %request.target_branch,
+                    elapsed_ms = elapsed.as_millis(),
+                    "Stage 2 merge completed: task branch merged to main"
+                );
+
                 Ok(MergeResult {
                     request_id: request.id,
                     success: true,
@@ -463,6 +557,12 @@ where
                 request.status = MergeStatus::Failed;
                 request.error = Some(e.to_string());
                 request.updated_at = Utc::now();
+                error!(
+                    merge_id = %request.id,
+                    task_id = %request.task_id,
+                    error = %e,
+                    "Stage 2 merge failed"
+                );
 
                 Ok(MergeResult {
                     request_id: request.id,
@@ -483,6 +583,7 @@ where
         source: &str,
         target: &str,
     ) -> DomainResult<(Vec<String>, bool)> {
+        debug!(workdir = %workdir, source = %source, target = %target, "Checking for merge conflicts");
         // Use git merge-tree to check for conflicts without modifying worktree
         let output = Command::new("git")
             .args(["merge-tree", target, source])
@@ -524,6 +625,7 @@ where
         source: &str,
         target: &str,
     ) -> DomainResult<String> {
+        debug!(workdir = %workdir, source = %source, target = %target, "Running git checkout");
         // Checkout target branch
         let checkout = Command::new("git")
             .args(["checkout", target])
@@ -534,11 +636,13 @@ where
 
         if !checkout.status.success() {
             let stderr = String::from_utf8_lossy(&checkout.stderr);
+            debug!(workdir = %workdir, target = %target, output = %stderr, "git checkout failed");
             return Err(DomainError::ValidationFailed(format!("Git checkout failed: {}", stderr)));
         }
 
         // Merge source into target
         let merge_msg = format!("Merge {} into {}", source, target);
+        debug!(workdir = %workdir, source = %source, target = %target, "Running git merge");
         let merge = Command::new("git")
             .args(["merge", "--no-ff", source, "-m", &merge_msg])
             .current_dir(workdir)
@@ -555,6 +659,7 @@ where
                 .await;
 
             let stderr = String::from_utf8_lossy(&merge.stderr);
+            debug!(workdir = %workdir, source = %source, output = %stderr, "git merge failed, aborted");
             return Err(DomainError::ValidationFailed(format!("Git merge failed: {}", stderr)));
         }
 
@@ -567,6 +672,7 @@ where
             .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
 
         let commit_sha = String::from_utf8_lossy(&rev_parse.stdout).trim().to_string();
+        debug!(workdir = %workdir, source = %source, target = %target, commit_sha = %commit_sha, "git merge succeeded");
         Ok(commit_sha)
     }
 

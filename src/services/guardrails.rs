@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::{debug, warn};
 
 /// Configuration for guardrails.
 #[derive(Debug, Clone)]
@@ -160,6 +161,12 @@ impl Guardrails {
         let tasks = self.current_tasks.read().await;
 
         if tasks.len() >= self.config.max_concurrent_tasks {
+            warn!(
+                task_id = %task_id,
+                current = tasks.len(),
+                limit = self.config.max_concurrent_tasks,
+                "Task start blocked: concurrent task limit reached"
+            );
             return GuardrailResult::Blocked(format!(
                 "Maximum concurrent tasks ({}) reached",
                 self.config.max_concurrent_tasks
@@ -167,6 +174,7 @@ impl Guardrails {
         }
 
         if tasks.contains(&task_id) {
+            warn!(task_id = %task_id, "Task start blocked: task already running");
             return GuardrailResult::Blocked("Task already running".to_string());
         }
 
@@ -197,6 +205,11 @@ impl Guardrails {
         let agents = self.current_agents.read().await;
 
         if agents.len() >= self.config.max_concurrent_agents {
+            warn!(
+                current = agents.len(),
+                limit = self.config.max_concurrent_agents,
+                "Agent spawn blocked: concurrent agent limit reached"
+            );
             return GuardrailResult::Blocked(format!(
                 "Maximum concurrent agents ({}) reached",
                 self.config.max_concurrent_agents
@@ -223,6 +236,7 @@ impl Guardrails {
     pub fn check_tool(&self, tool_name: &str) -> GuardrailResult {
         for blocked in &self.config.blocked_tools {
             if tool_name.eq_ignore_ascii_case(blocked) {
+                warn!(tool = %tool_name, pattern = %blocked, "Tool use blocked by guardrails");
                 return GuardrailResult::Blocked(format!("Tool '{}' is blocked", tool_name));
             }
         }
@@ -233,6 +247,11 @@ impl Guardrails {
     pub fn check_file_path(&self, path: &str) -> GuardrailResult {
         for pattern in &self.config.blocked_files {
             if Self::matches_pattern(path, pattern) {
+                warn!(
+                    path = %path,
+                    pattern = %pattern,
+                    "File access blocked by guardrails"
+                );
                 return GuardrailResult::Blocked(format!(
                     "Access to '{}' is blocked by pattern '{}'",
                     path, pattern
@@ -246,6 +265,12 @@ impl Guardrails {
     pub fn check_tokens(&self, requested: u64) -> GuardrailResult {
         let current = self.metrics.get_tokens_this_hour();
         if current + requested > self.config.max_tokens_per_hour {
+            warn!(
+                tokens_used = current,
+                tokens_requested = requested,
+                limit = self.config.max_tokens_per_hour,
+                "Token limit would be exceeded — request blocked"
+            );
             return GuardrailResult::Blocked(format!(
                 "Token limit ({}/hour) would be exceeded",
                 self.config.max_tokens_per_hour
@@ -254,6 +279,11 @@ impl Guardrails {
 
         // Warn at 80%
         if current + requested > (self.config.max_tokens_per_hour * 80) / 100 {
+            warn!(
+                tokens_used = current + requested,
+                limit = self.config.max_tokens_per_hour,
+                "Approaching hourly token limit (>80% used)"
+            );
             return GuardrailResult::Warning(format!(
                 "Approaching token limit: {}/{} used",
                 current + requested,
@@ -261,6 +291,12 @@ impl Guardrails {
             ));
         }
 
+        debug!(
+            tokens_used = current,
+            tokens_requested = requested,
+            limit = self.config.max_tokens_per_hour,
+            "Token check passed"
+        );
         GuardrailResult::Allowed
     }
 
@@ -272,6 +308,12 @@ impl Guardrails {
 
         let current = self.metrics.get_cost_cents();
         if current + additional_cents > self.config.budget_limit_cents {
+            warn!(
+                current_cost_cents = current,
+                requested_cents = additional_cents,
+                limit_cents = self.config.budget_limit_cents,
+                "Budget limit would be exceeded — request blocked"
+            );
             return GuardrailResult::Blocked(format!(
                 "Budget limit (${:.2}) would be exceeded",
                 self.config.budget_limit_cents / 100.0

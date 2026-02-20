@@ -13,7 +13,7 @@ use crate::services::event_bus::{
     EventCategory, EventPayload, EventSeverity, UnifiedEvent,
 };
 use crate::services::event_factory;
-use tracing::warn;
+use tracing::{debug, error, info, warn};
 
 /// Configuration for spawn limits.
 #[derive(Debug, Clone)]
@@ -182,6 +182,7 @@ impl<T: TaskRepository> TaskService<T> {
             });
         }
 
+        debug!(parent_id = %parent_id, "Spawn limit check passed");
         Ok(SpawnLimitResult::Allowed)
     }
 
@@ -474,6 +475,16 @@ impl<T: TaskRepository> TaskService<T> {
         self.check_and_update_readiness(&mut task).await?;
         self.task_repo.update(&task).await?;
 
+        info!(
+            task_id = %task.id,
+            title = %task.title,
+            status = ?task.status,
+            priority = ?task.priority,
+            parent_id = ?task.parent_id,
+            agent_type = ?task.agent_type,
+            "Task submitted"
+        );
+
         // Collect TaskSubmitted event
         let goal_id = task.parent_id.unwrap_or_else(Uuid::new_v4);
         events.push(Self::make_event(
@@ -542,6 +553,13 @@ impl<T: TaskRepository> TaskService<T> {
 
         self.task_repo.update(&task).await?;
 
+        info!(
+            task_id = %task_id,
+            agent_type = %agent_type,
+            title = %task.title,
+            "Task claimed and running"
+        );
+
         let events = vec![Self::make_event(
             EventSeverity::Info,
             EventCategory::Task,
@@ -576,6 +594,14 @@ impl<T: TaskRepository> TaskService<T> {
         })?;
 
         self.task_repo.update(&task).await?;
+
+        info!(
+            task_id = %task_id,
+            title = %task.title,
+            agent_type = ?task.agent_type,
+            retry_count = task.retry_count,
+            "Task completed"
+        );
 
         let mut events = vec![Self::make_event(
             EventSeverity::Info,
@@ -636,6 +662,16 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         self.task_repo.update(&task).await?;
+
+        error!(
+            task_id = %task_id,
+            title = %task.title,
+            agent_type = ?task.agent_type,
+            retry_count = task.retry_count,
+            max_retries = task.max_retries,
+            error = %error_str,
+            "Task failed"
+        );
 
         let execution_mode_str = if task.execution_mode.is_convergent() {
             "convergent".to_string()
@@ -716,6 +752,14 @@ impl<T: TaskRepository> TaskService<T> {
         task.retry().map_err(DomainError::ValidationFailed)?;
         self.task_repo.update(&task).await?;
 
+        warn!(
+            task_id = %task_id,
+            title = %task.title,
+            retry_count = task.retry_count,
+            max_retries = task.max_retries,
+            "Task retrying"
+        );
+
         let events = vec![Self::make_event(
             EventSeverity::Warning,
             EventCategory::Task,
@@ -749,6 +793,13 @@ impl<T: TaskRepository> TaskService<T> {
         })?;
 
         self.task_repo.update(&task).await?;
+
+        warn!(
+            task_id = %task_id,
+            title = %task.title,
+            reason = %reason,
+            "Task canceled"
+        );
 
         let events = vec![Self::make_event(
             EventSeverity::Warning,

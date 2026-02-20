@@ -118,6 +118,35 @@ goal_convergence_check_interval_secs = 28800
 
 Environment variables with the `ABATHUR_` prefix override config file values (e.g. `ABATHUR_LIMITS_MAX_DEPTH`, `ABATHUR_DATABASE_PATH`, `ABATHUR_LOG_LEVEL`).
 
+## Logging
+
+Abathur uses the [`tracing`](https://docs.rs/tracing) crate for structured logging. Set the `RUST_LOG` environment variable to control log output:
+
+```bash
+# Info-level logs (task lifecycle, merge results) — recommended for normal operation
+RUST_LOG=info abathur swarm start
+
+# Debug-level logs (git command details, spawn-limit checks, conflict detection)
+RUST_LOG=debug abathur swarm start
+
+# Target specific modules for fine-grained control
+RUST_LOG=abathur::services::merge_queue=debug,abathur::services::task_service=info abathur swarm start
+
+# Quiet — only errors and warnings
+RUST_LOG=warn abathur swarm start
+```
+
+Log levels and what they emit:
+
+| Level | Examples |
+|-------|---------|
+| `error` | Task failures, git merge failures |
+| `warn` | Guardrail blocks, conflicts detected, task retries and cancels, approaching token/budget limits |
+| `info` | Task lifecycle (submitted, claimed, completed), merge queue start/complete |
+| `debug` | Git command invocations and output, conflict checks, spawn limit checks |
+
+Logs are written to **stderr** so they don't interfere with `--json` output to stdout.
+
 ## Architecture
 
 Abathur follows hexagonal architecture — domain logic is isolated from infrastructure through port interfaces:
