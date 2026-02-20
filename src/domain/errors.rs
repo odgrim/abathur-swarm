@@ -12,8 +12,8 @@ pub enum DomainError {
     #[error("Task not found: {0}")]
     TaskNotFound(Uuid),
 
-    #[error("Invalid state transition from {from} to {to}")]
-    InvalidStateTransition { from: String, to: String },
+    #[error("Invalid state transition from {from} to {to}: {reason}")]
+    InvalidStateTransition { from: String, to: String, reason: String },
 
     #[error("Task dependency cycle detected involving task: {0}")]
     DependencyCycle(Uuid),

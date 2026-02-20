@@ -99,9 +99,10 @@ impl<R: GoalRepository> GoalService<R> {
             .ok_or(DomainError::GoalNotFound(id))?;
 
         let from_status = goal.status;
-        goal.transition_to(new_status).map_err(|_| DomainError::InvalidStateTransition {
+        goal.transition_to(new_status).map_err(|e| DomainError::InvalidStateTransition {
             from: from_status.as_str().to_string(),
             to: new_status.as_str().to_string(),
+            reason: e,
         })?;
 
         self.repository.update(&goal).await?;
