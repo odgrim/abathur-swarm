@@ -492,12 +492,37 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
             return Ok(Reaction::None);
         }
 
-        // Skip tasks superseded by the review failure loop-back handler
-        if task.context.custom.contains_key("review_loop_active") {
+        // Skip tasks superseded by the review failure loop-back handler,
+        // and tasks that are part of a review loop chain (ReviewFailureLoopHandler
+        // manages their full lifecycle — independent retry would create duplicate work tracks).
+        if task.context.custom.contains_key("review_loop_active")
+            || task.context.custom.contains_key("review_iteration")
+        {
             return Ok(Reaction::None);
         }
 
         let is_max_turns = error.starts_with("error_max_turns");
+
+        // Circuit-break: tasks that repeatedly exhaust their turn budget should not retry
+        // indefinitely. After MAX_CONSECUTIVE_BUDGET_FAILURES consecutive budget failures,
+        // leave the task in Failed state so upstream handlers (review loop, specialist
+        // triggers) can respond appropriately.
+        const MAX_CONSECUTIVE_BUDGET_FAILURES: u64 = 3;
+        if is_max_turns {
+            let consecutive = task.context.custom
+                .get("consecutive_budget_failures")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                + 1;
+            if consecutive >= MAX_CONSECUTIVE_BUDGET_FAILURES {
+                tracing::info!(
+                    "Task {} circuit-breaker: {} consecutive budget failures, not retrying",
+                    task_id,
+                    consecutive
+                );
+                return Ok(Reaction::None);
+            }
+        }
 
         // Skip exponential backoff for structural failures (max_turns) — immediate retry
         if !is_max_turns {
@@ -514,12 +539,26 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
         let mut updated = task.clone();
 
         // For max_turns failures, inject hint so the spawner can increase the turn budget
+        // and track consecutive failures for the circuit-breaker above.
         if is_max_turns {
+            let consecutive = updated.context.custom
+                .get("consecutive_budget_failures")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                + 1;
+            updated.context.custom.insert(
+                "consecutive_budget_failures".to_string(),
+                serde_json::json!(consecutive),
+            );
             updated.context.hints.push("retry:max_turns_exceeded".to_string());
             updated.context.custom.insert(
                 "last_failure_reason".to_string(),
                 serde_json::Value::String(error.to_string()),
             );
+        } else {
+            // Non-budget failure — reset the consecutive budget failure counter so a
+            // later budget failure doesn't inherit a stale count from a different failure mode.
+            updated.context.custom.remove("consecutive_budget_failures");
         }
 
         if updated.retry().is_ok() {
@@ -787,9 +826,32 @@ impl<T: TaskRepository + 'static> EventHandler for ReviewFailureLoopHandler<T> {
             }),
         );
 
-        if let Err(e) = self.command_bus.dispatch(rereview_envelope).await {
-            tracing::warn!("ReviewFailureLoopHandler: failed to create re-review task: {}", e);
-        }
+        let rereview_task_id = match self.command_bus.dispatch(rereview_envelope).await {
+            Ok(crate::services::command_bus::CommandResult::Task(t)) => {
+                // Store the successor review task ID on the failing task so the parent
+                // orchestrating agent can follow the chain without spawning its own fix.
+                let mut with_successor = flagged.clone();
+                with_successor.context.custom.insert(
+                    "review_loop_successor".to_string(),
+                    serde_json::json!(t.id.to_string()),
+                );
+                if let Err(e) = self.task_repo.update(&with_successor).await {
+                    tracing::warn!(
+                        "ReviewFailureLoopHandler: failed to store successor task ID on task {}: {}",
+                        task_id, e
+                    );
+                }
+                t.id
+            }
+            Ok(_) => {
+                tracing::warn!("ReviewFailureLoopHandler: unexpected result type for re-review task");
+                uuid::Uuid::new_v4()
+            }
+            Err(e) => {
+                tracing::warn!("ReviewFailureLoopHandler: failed to create re-review task: {}", e);
+                uuid::Uuid::new_v4()
+            }
+        };
 
         tracing::info!(
             "ReviewFailureLoopHandler: created review loop-back iteration {} for task {}",
@@ -812,6 +874,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReviewFailureLoopHandler<T> {
                 iteration: next_iteration,
                 max_iterations: self.max_review_iterations,
                 new_plan_task_id,
+                new_review_task_id: rereview_task_id,
             },
         };
 
@@ -6128,7 +6191,7 @@ mod tests {
         let reaction = handler.handle(&event, &ctx).await.unwrap();
 
         // Should emit ReviewLoopTriggered event
-        match reaction {
+        let new_review_task_id = match reaction {
             Reaction::EmitEvents(events) => {
                 assert_eq!(events.len(), 1);
                 match &events[0].payload {
@@ -6136,24 +6199,32 @@ mod tests {
                         failed_review_task_id,
                         iteration,
                         max_iterations,
+                        new_review_task_id,
                         ..
                     } => {
                         assert_eq!(*failed_review_task_id, review_task.id);
                         assert_eq!(*iteration, 2); // next iteration
                         assert_eq!(*max_iterations, 3);
+                        *new_review_task_id
                     }
                     other => panic!("Expected ReviewLoopTriggered, got {:?}", other),
                 }
             }
             Reaction::None => panic!("Expected EmitEvents, got Reaction::None"),
-        }
+        };
 
-        // Verify the review_loop_active flag was set on the original task
+        // Verify the review_loop_active flag was set and review_loop_successor points to
+        // the newly created re-review task
         let updated = repo.get(review_task.id).await.unwrap().unwrap();
         assert_eq!(
             updated.context.custom.get("review_loop_active"),
             Some(&serde_json::Value::Bool(true)),
         );
+        let successor_val = updated.context.custom.get("review_loop_successor")
+            .expect("review_loop_successor should be set on the original task");
+        let successor_str = successor_val.as_str().expect("review_loop_successor should be a string");
+        let successor_id: uuid::Uuid = successor_str.parse().expect("review_loop_successor should be a valid UUID");
+        assert_eq!(successor_id, new_review_task_id, "review_loop_successor must match new_review_task_id in the event");
     }
 
     #[tokio::test]
@@ -6252,6 +6323,76 @@ mod tests {
 
         // Should skip — review_loop_active flag prevents retry
         assert!(matches!(reaction, Reaction::None));
+    }
+
+    #[tokio::test]
+    async fn test_retry_handler_skips_review_iteration_tasks() {
+        let repo = setup_task_repo().await;
+        let handler = TaskFailedRetryHandler::new(repo.clone(), 3);
+
+        // Create a task that is part of a review loop chain (has review_iteration)
+        let mut task = Task::new("Re-implement (review iteration 2)");
+        task.context.custom.insert(
+            "review_iteration".to_string(),
+            serde_json::json!(2u64),
+        );
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task.transition_to(TaskStatus::Failed).unwrap();
+        repo.create(&task).await.unwrap();
+
+        let event = make_task_failed_event(task.id, 0);
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should skip — review_iteration flag prevents independent retry
+        assert!(
+            matches!(reaction, Reaction::None),
+            "TaskFailedRetryHandler must not retry tasks with review_iteration set"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_handler_circuit_breaks_consecutive_budget_failures() {
+        let repo = setup_task_repo().await;
+        let handler = TaskFailedRetryHandler::new(repo.clone(), 10); // high max_retries to not hit that limit
+
+        // Create a task that has already seen 2 consecutive budget failures
+        let mut task = Task::new("Some long-running task");
+        task.context.custom.insert(
+            "consecutive_budget_failures".to_string(),
+            serde_json::json!(2u64),
+        );
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task.transition_to(TaskStatus::Failed).unwrap();
+        repo.create(&task).await.unwrap();
+
+        // Fire a third error_max_turns failure — consecutive becomes 3, triggering circuit-break
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Error,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(task.id),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::TaskFailed {
+                task_id: task.id,
+                error: "error_max_turns: limit reached".to_string(),
+                retry_count: 2,
+            },
+        };
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should circuit-break and not retry
+        assert!(
+            matches!(reaction, Reaction::None),
+            "TaskFailedRetryHandler must circuit-break after 3 consecutive budget failures"
+        );
     }
 
     #[tokio::test]

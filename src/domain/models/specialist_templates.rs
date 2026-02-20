@@ -192,7 +192,12 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
         section.push_str(
             "\nAfter review completion, the orchestrator's post-completion workflow automatically handles integration (PR creation or merge to main).\n\
             \n\
-            When a review task fails because the implementation has issues, the system automatically loops back to create a new plan + implement + review cycle incorporating the review feedback. This loop is bounded by `max_review_iterations`. Ensure review tasks use `agent_type: \"code-reviewer\"` so the system can identify them.\n",
+            When a review task fails because the implementation has issues, the system automatically loops back to create a new plan + implement + review cycle incorporating the review feedback. This loop is bounded by `max_review_iterations`. Ensure review tasks use `agent_type: \"code-reviewer\"` so the system can identify them.\n\
+            \n\
+            IMPORTANT — Do NOT spawn your own fix when a review task fails. After `task_wait` returns with a failed review task, call `task_get(review_task_id)` and inspect context.custom:\n\
+            - If `review_loop_successor` is present, the system has already created the next review cycle. Call `task_wait(review_loop_successor)` to wait for it. Follow the chain if that also fails.\n\
+            - If `review_loop_active` is present without a successor, the system is handling it — wait briefly then re-check before taking action.\n\
+            Never independently spawn a new plan→implement→review cycle when the review loop is active; doing so creates conflicting parallel work tracks.\n",
         );
     }
 
@@ -481,6 +486,11 @@ Create a **code review agent** that reviews for correctness, edge cases, test co
 After review completion, the orchestrator's post-completion workflow automatically handles integration (PR creation or merge to main).
 
 When a review task fails because the implementation has issues, the system automatically loops back to create a new plan + implement + review cycle incorporating the review feedback. This loop is bounded by `max_review_iterations`. Ensure review tasks use `agent_type: "code-reviewer"` so the system can identify them.
+
+IMPORTANT — Do NOT spawn your own fix when a review task fails. After `task_wait` returns with a failed review task, call `task_get(review_task_id)` and inspect context.custom:
+- If `review_loop_successor` is present, the system has already created the next review cycle. Call `task_wait(review_loop_successor)` to wait for it. Follow the chain if that also fails.
+- If `review_loop_active` is present without a successor, the system is handling it — wait briefly then re-check before taking action.
+Never independently spawn a new plan→implement→review cycle when the review loop is active; doing so creates conflicting parallel work tracks.
 
 ### Agent Reuse Policy
 
