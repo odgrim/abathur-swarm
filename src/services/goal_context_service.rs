@@ -222,11 +222,11 @@ impl<G: GoalRepository> GoalContextService<G> {
     }
 
     /// Get goals relevant to a specific task (infer domains + load matching goals).
+    ///
+    /// Goals with empty `applicability_domains` are universally applicable and will
+    /// always be returned, regardless of the inferred task domains.
     pub async fn get_goals_for_task(&self, task: &Task) -> DomainResult<Vec<Goal>> {
         let domains = Self::infer_task_domains(task);
-        if domains.is_empty() {
-            return Ok(Vec::new());
-        }
         self.get_relevant_goals(&domains).await
     }
 
