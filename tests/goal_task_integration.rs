@@ -529,7 +529,7 @@ async fn test_collect_constraints_deduplicates() {
 // =============================================================================
 
 #[tokio::test]
-async fn test_goal_with_no_domains_matches_nothing() {
+async fn test_goal_with_no_domains_is_universal() {
     let (goal_repo, _) = setup_repos().await;
     let ctx_service = GoalContextService::new(goal_repo.clone());
 
@@ -537,13 +537,13 @@ async fn test_goal_with_no_domains_matches_nothing() {
     let goal = Goal::new("Vague aspiration", "Be great at everything");
     goal_repo.create(&goal).await.unwrap();
 
-    // A task should not pick this up through domain matching
+    // A task should pick this up because empty domains = universal applicability
     let task = Task::with_title("Write some code", "Implement a feature");
     let goals = ctx_service.get_goals_for_task(&task).await.unwrap();
-    // find_by_domains only returns goals with matching domains
+    // find_by_domains returns goals with empty domains as universally applicable
     assert!(
-        goals.is_empty(),
-        "Goal with no domains should not match via domain search"
+        goals.iter().any(|g| g.name == "Vague aspiration"),
+        "Goal with no domains should be universally applicable and match all tasks"
     );
 }
 

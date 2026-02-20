@@ -60,7 +60,7 @@ pub use model_router::{ModelRouter, ModelRoutingConfig, ModelSelection, AgentTie
 pub use dag_executor::{DagExecutor, ExecutorConfig, ExecutionEvent, ExecutionResults, ExecutionStatus, TaskResult};
 pub use dag_restructure::{DagRestructureService, FailedAttempt, NewTaskSpec, RestructureConfig, RestructureContext, RestructureDecision, RestructureTrigger, TaskPriorityModifier};
 pub use embedding_service::{EmbeddingService, EmbeddingServiceConfig, BatchEmbeddingReport};
-pub use evolution_loop::{EvolutionAction, EvolutionConfig, EvolutionEvent, EvolutionLoop, EvolutionTrigger, RefinementRequest, RefinementSeverity, TaskExecution, TaskOutcome, TemplateStats};
+pub use evolution_loop::{EvolutionAction, EvolutionConfig, EvolutionEvent, EvolutionLoop, EvolutionTrigger, RefinementRepository, RefinementRequest, RefinementSeverity, RefinementStatus, TaskExecution, TaskOutcome, TemplateStats};
 pub use goal_context_service::GoalContextService;
 pub use goal_service::GoalService;
 pub use guardrails::{GuardrailResult, Guardrails, GuardrailsConfig, RuntimeMetrics};

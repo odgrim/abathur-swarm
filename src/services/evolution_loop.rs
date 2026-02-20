@@ -5,6 +5,7 @@
 //! 2. Evaluate: Measure effectiveness based on success rate
 //! 3. Evolve: Refine struggling templates, version all changes
 
+use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -223,6 +224,41 @@ impl RefinementRequest {
     }
 }
 
+/// Repository trait for persisting refinement requests across process restarts.
+///
+/// Defined here (not in domain/ports) to avoid circular imports: adapters can
+/// implement this trait by importing from `services::evolution_loop` without
+/// creating a dependency cycle.
+#[async_trait]
+pub trait RefinementRepository: Send + Sync {
+    /// Persist a new refinement request.
+    async fn create(
+        &self,
+        request: &RefinementRequest,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Retrieve all requests with status = Pending.
+    async fn get_pending(
+        &self,
+    ) -> Result<Vec<RefinementRequest>, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Update the status of a refinement request by ID.
+    async fn update_status(
+        &self,
+        id: Uuid,
+        status: RefinementStatus,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Reset all InProgress requests back to Pending.
+    ///
+    /// Returns the requests that were reset (previously InProgress).
+    /// Used during startup reconciliation to recover refinements interrupted
+    /// by a process restart.
+    async fn reset_in_progress_to_pending(
+        &self,
+    ) -> Result<Vec<RefinementRequest>, Box<dyn std::error::Error + Send + Sync>>;
+}
+
 /// In-memory state for the evolution loop.
 struct EvolutionState {
     /// Task executions by template name.
@@ -256,6 +292,7 @@ impl EvolutionState {
 pub struct EvolutionLoop {
     config: EvolutionConfig,
     state: Arc<RwLock<EvolutionState>>,
+    refinement_repo: Option<Arc<dyn RefinementRepository>>,
 }
 
 impl EvolutionLoop {
@@ -263,11 +300,21 @@ impl EvolutionLoop {
         Self {
             config,
             state: Arc::new(RwLock::new(EvolutionState::new())),
+            refinement_repo: None,
         }
     }
 
     pub fn with_default_config() -> Self {
         Self::new(EvolutionConfig::default())
+    }
+
+    /// Attach a persistence repository for refinement requests.
+    ///
+    /// When set, new requests are persisted on creation and status changes
+    /// are written through to the DB. Failures are non-fatal (logged as warnings).
+    pub fn with_repo(mut self, repo: Arc<dyn RefinementRepository>) -> Self {
+        self.refinement_repo = Some(repo);
+        self
     }
 
     /// Record a task execution.
@@ -320,136 +367,157 @@ impl EvolutionLoop {
 
     /// Evaluate templates and trigger evolution if needed.
     pub async fn evaluate(&self) -> Vec<EvolutionEvent> {
-        let mut state = self.state.write().await;
-        let mut events = Vec::new();
+        let mut new_requests: Vec<RefinementRequest> = Vec::new();
 
-        let template_names: Vec<String> = state.stats.keys().cloned().collect();
+        let events = {
+            let mut state = self.state.write().await;
+            let mut events = Vec::new();
 
-        for template_name in template_names {
-            let stats = match state.stats.get(&template_name) {
-                Some(s) => s.clone(),
-                None => continue,
-            };
+            let template_names: Vec<String> = state.stats.keys().cloned().collect();
 
-            // Skip if not enough tasks
-            if stats.total_tasks < self.config.min_tasks_for_evaluation {
-                continue;
-            }
+            for template_name in template_names {
+                let stats = match state.stats.get(&template_name) {
+                    Some(s) => s.clone(),
+                    None => continue,
+                };
 
-            let mut trigger = None;
-            let mut severity = RefinementSeverity::Minor;
+                // Skip if not enough tasks
+                if stats.total_tasks < self.config.min_tasks_for_evaluation {
+                    continue;
+                }
 
-            // Check for goal violations (immediate review)
-            if stats.goal_violations > 0 {
-                trigger = Some(EvolutionTrigger::GoalViolations);
-                severity = RefinementSeverity::Immediate;
-            }
-            // Check for very low success rate
-            else if stats.total_tasks >= self.config.major_refinement_min_tasks
-                && stats.success_rate < self.config.major_refinement_threshold
-            {
-                trigger = Some(EvolutionTrigger::VeryLowSuccessRate);
-                severity = RefinementSeverity::Major;
-            }
-            // Check for low success rate
-            else if stats.success_rate < self.config.refinement_threshold {
-                trigger = Some(EvolutionTrigger::LowSuccessRate);
-                severity = RefinementSeverity::Minor;
-            }
+                let mut trigger = None;
+                let mut severity = RefinementSeverity::Minor;
 
-            // Check for regression
-            if trigger.is_none() {
-                if let Some((new_version, change_time)) =
-                    state.version_change_times.get(&template_name)
+                // Check for goal violations (immediate review)
+                if stats.goal_violations > 0 {
+                    trigger = Some(EvolutionTrigger::GoalViolations);
+                    severity = RefinementSeverity::Immediate;
+                }
+                // Check for very low success rate
+                else if stats.total_tasks >= self.config.major_refinement_min_tasks
+                    && stats.success_rate < self.config.major_refinement_threshold
                 {
-                    if stats.template_version == *new_version {
-                        let window =
-                            Duration::hours(self.config.regression_detection_window_hours);
-                        let in_window = Utc::now() - *change_time < window;
+                    trigger = Some(EvolutionTrigger::VeryLowSuccessRate);
+                    severity = RefinementSeverity::Major;
+                }
+                // Check for low success rate
+                else if stats.success_rate < self.config.refinement_threshold {
+                    trigger = Some(EvolutionTrigger::LowSuccessRate);
+                    severity = RefinementSeverity::Minor;
+                }
 
-                        if in_window && stats.total_tasks >= self.config.regression_min_tasks {
-                            if let Some(prev_stats) =
-                                state.previous_version_stats.get(&template_name)
-                            {
-                                let rate_drop = prev_stats.success_rate - stats.success_rate;
-                                if rate_drop >= self.config.regression_threshold {
-                                    trigger = Some(EvolutionTrigger::Regression);
-                                    severity = RefinementSeverity::Immediate;
+                // Check for regression
+                if trigger.is_none() {
+                    if let Some((new_version, change_time)) =
+                        state.version_change_times.get(&template_name)
+                    {
+                        if stats.template_version == *new_version {
+                            let window =
+                                Duration::hours(self.config.regression_detection_window_hours);
+                            let in_window = Utc::now() - *change_time < window;
+
+                            if in_window && stats.total_tasks >= self.config.regression_min_tasks {
+                                if let Some(prev_stats) =
+                                    state.previous_version_stats.get(&template_name)
+                                {
+                                    let rate_drop = prev_stats.success_rate - stats.success_rate;
+                                    if rate_drop >= self.config.regression_threshold {
+                                        trigger = Some(EvolutionTrigger::Regression);
+                                        severity = RefinementSeverity::Immediate;
+                                    }
                                 }
                             }
                         }
                     }
                 }
+
+                if let Some(trig) = trigger {
+                    let action = if trig == EvolutionTrigger::Regression
+                        && self.config.auto_revert_enabled
+                    {
+                        // Auto-revert
+                        if let Some(prev_stats) = state.previous_version_stats.get(&template_name) {
+                            EvolutionAction::Reverted {
+                                from_version: stats.template_version,
+                                to_version: prev_stats.template_version,
+                            }
+                        } else {
+                            EvolutionAction::FlaggedForRefinement { severity }
+                        }
+                    } else {
+                        // Deduplication: skip if a Pending or InProgress refinement
+                        // already exists for this template
+                        let has_active = state.refinement_queue.iter().any(|r| {
+                            r.template_name == template_name
+                                && matches!(r.status, RefinementStatus::Pending | RefinementStatus::InProgress)
+                        });
+
+                        if has_active {
+                            EvolutionAction::NoAction {
+                                reason: format!(
+                                    "Refinement already pending/in-progress for '{}'",
+                                    template_name,
+                                ),
+                            }
+                        } else {
+                            // Create refinement request
+                            let failed_task_ids = state
+                                .executions
+                                .get(&template_name)
+                                .map(|execs| {
+                                    execs
+                                        .iter()
+                                        .filter(|e| e.outcome != TaskOutcome::Success)
+                                        .map(|e| e.task_id)
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+
+                            let request = RefinementRequest::new(
+                                template_name.clone(),
+                                stats.template_version,
+                                severity,
+                                trig,
+                                stats.clone(),
+                                failed_task_ids,
+                            );
+                            // Collect for persistence outside the write lock
+                            new_requests.push(request.clone());
+                            state.refinement_queue.push(request);
+
+                            EvolutionAction::FlaggedForRefinement { severity }
+                        }
+                    };
+
+                    let event = EvolutionEvent {
+                        id: Uuid::new_v4(),
+                        template_name: template_name.clone(),
+                        template_version: stats.template_version,
+                        trigger: trig,
+                        stats_at_trigger: stats.clone(),
+                        action_taken: action,
+                        occurred_at: Utc::now(),
+                    };
+
+                    state.events.push(event.clone());
+                    events.push(event);
+                }
             }
 
-            if let Some(trig) = trigger {
-                let action = if trig == EvolutionTrigger::Regression
-                    && self.config.auto_revert_enabled
-                {
-                    // Auto-revert
-                    if let Some(prev_stats) = state.previous_version_stats.get(&template_name) {
-                        EvolutionAction::Reverted {
-                            from_version: stats.template_version,
-                            to_version: prev_stats.template_version,
-                        }
-                    } else {
-                        EvolutionAction::FlaggedForRefinement { severity }
-                    }
-                } else {
-                    // Deduplication: skip if a Pending or InProgress refinement
-                    // already exists for this template
-                    let has_active = state.refinement_queue.iter().any(|r| {
-                        r.template_name == template_name
-                            && matches!(r.status, RefinementStatus::Pending | RefinementStatus::InProgress)
-                    });
+            events
+        }; // write lock dropped here
 
-                    if has_active {
-                        EvolutionAction::NoAction {
-                            reason: format!(
-                                "Refinement already pending/in-progress for '{}'",
-                                template_name,
-                            ),
-                        }
-                    } else {
-                        // Create refinement request
-                        let failed_task_ids = state
-                            .executions
-                            .get(&template_name)
-                            .map(|execs| {
-                                execs
-                                    .iter()
-                                    .filter(|e| e.outcome != TaskOutcome::Success)
-                                    .map(|e| e.task_id)
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-
-                        let request = RefinementRequest::new(
-                            template_name.clone(),
-                            stats.template_version,
-                            severity,
-                            trig,
-                            stats.clone(),
-                            failed_task_ids,
-                        );
-                        state.refinement_queue.push(request);
-
-                        EvolutionAction::FlaggedForRefinement { severity }
-                    }
-                };
-
-                let event = EvolutionEvent {
-                    id: Uuid::new_v4(),
-                    template_name: template_name.clone(),
-                    template_version: stats.template_version,
-                    trigger: trig,
-                    stats_at_trigger: stats.clone(),
-                    action_taken: action,
-                    occurred_at: Utc::now(),
-                };
-
-                state.events.push(event.clone());
-                events.push(event);
+        // Persist new requests outside the write lock (non-fatal on failure)
+        if let Some(ref repo) = self.refinement_repo {
+            for request in &new_requests {
+                if let Err(e) = repo.create(request).await {
+                    tracing::warn!(
+                        "Failed to persist refinement request {} to DB: {}",
+                        request.id,
+                        e
+                    );
+                }
             }
         }
 
@@ -490,27 +558,60 @@ impl EvolutionLoop {
 
     /// Mark a refinement request as in progress.
     pub async fn start_refinement(&self, request_id: Uuid) -> bool {
-        let mut state = self.state.write().await;
-        for request in &mut state.refinement_queue {
-            if request.id == request_id && request.status == RefinementStatus::Pending {
-                request.status = RefinementStatus::InProgress;
-                return true;
+        let found = {
+            let mut state = self.state.write().await;
+            let mut found = false;
+            for request in &mut state.refinement_queue {
+                if request.id == request_id && request.status == RefinementStatus::Pending {
+                    request.status = RefinementStatus::InProgress;
+                    found = true;
+                    break;
+                }
+            }
+            found
+        }; // write lock dropped here
+
+        if found {
+            if let Some(ref repo) = self.refinement_repo {
+                if let Err(e) = repo.update_status(request_id, RefinementStatus::InProgress).await {
+                    tracing::warn!(
+                        "Failed to persist InProgress status for refinement {}: {}",
+                        request_id,
+                        e
+                    );
+                }
             }
         }
-        false
+
+        found
     }
 
     /// Mark a refinement request as completed.
     pub async fn complete_refinement(&self, request_id: Uuid, success: bool) {
-        let mut state = self.state.write().await;
-        for request in &mut state.refinement_queue {
-            if request.id == request_id {
-                request.status = if success {
-                    RefinementStatus::Completed
-                } else {
-                    RefinementStatus::Failed
-                };
-                break;
+        let new_status = if success {
+            RefinementStatus::Completed
+        } else {
+            RefinementStatus::Failed
+        };
+
+        {
+            let mut state = self.state.write().await;
+            for request in &mut state.refinement_queue {
+                if request.id == request_id {
+                    request.status = new_status;
+                    break;
+                }
+            }
+        } // write lock dropped here
+
+        if let Some(ref repo) = self.refinement_repo {
+            if let Err(e) = repo.update_status(request_id, new_status).await {
+                tracing::warn!(
+                    "Failed to persist {} status for refinement {}: {}",
+                    if success { "Completed" } else { "Failed" },
+                    request_id,
+                    e
+                );
             }
         }
     }
@@ -533,6 +634,61 @@ impl EvolutionLoop {
             template_name.to_string(),
             (new_version, Utc::now()),
         );
+    }
+
+    /// Load pending refinement requests from the repository into in-memory state.
+    ///
+    /// Existing in-memory entries are preserved; only new IDs (from the DB) are added.
+    /// This is called on startup after `recover_in_progress_refinements()` to hydrate
+    /// the in-memory queue from persisted data.
+    pub async fn load_from_repo(&self) {
+        let Some(ref repo) = self.refinement_repo else {
+            return;
+        };
+
+        match repo.get_pending().await {
+            Ok(requests) => {
+                let mut state = self.state.write().await;
+                for request in requests {
+                    if !state.refinement_queue.iter().any(|r| r.id == request.id) {
+                        state.refinement_queue.push(request);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load refinement requests from repository: {}", e);
+            }
+        }
+    }
+
+    /// Recover InProgress refinements from a previous process run.
+    ///
+    /// During startup reconciliation, any refinement that was InProgress when the
+    /// process died is reset to Pending in the DB, then all pending requests are
+    /// loaded into the in-memory queue so the evolution loop can re-process them.
+    pub async fn recover_in_progress_refinements(&self) {
+        let Some(ref repo) = self.refinement_repo else {
+            return;
+        };
+
+        match repo.reset_in_progress_to_pending().await {
+            Ok(recovered) if !recovered.is_empty() => {
+                tracing::info!(
+                    "Startup recovery: reset {} InProgress refinement request(s) to Pending",
+                    recovered.len()
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to recover InProgress refinements on startup: {}",
+                    e
+                );
+            }
+        }
+
+        // Load all pending (including any just-recovered ones) into memory
+        self.load_from_repo().await;
     }
 
     /// Get evolution events for audit.
