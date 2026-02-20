@@ -4,6 +4,7 @@ pub mod adapter_loader;
 pub mod adapter_registry;
 pub mod agent_service;
 pub mod audit_log;
+pub mod budget_tracker;
 pub mod circuit_breaker;
 pub mod cold_start;
 pub mod command_bus;
@@ -52,7 +53,7 @@ pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerSe
 pub use command_bus::{CommandBus, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandResult, CommandSource, DomainCommand, GoalCommand, GoalCommandHandler, MemoryCommand, MemoryCommandHandler, TaskCommand, TaskCommandHandler};
 pub use cold_start::{ColdStartConfig, ColdStartReport, ColdStartService, Convention, ConventionCategory, Dependency, ProjectType};
 pub use convergence_engine::ConvergenceEngine;
-pub use config::{Config, ConfigError, A2AFederationConfig, TrustedSwarmConfig, TrustLevel, FederationAuthMethod, SwarmIdentityConfig};
+pub use config::{BudgetConfig, Config, ConfigError, A2AFederationConfig, TrustedSwarmConfig, TrustLevel, FederationAuthMethod, SwarmIdentityConfig};
 pub use context_truncation::{TruncationConfig, estimate_tokens, truncate_section, truncate_to_token_budget, truncate_context_sections};
 pub use context_window::{ContextWindowGuard, ContextWindowGuardConfig, ContextWindowCheck, model_context_window};
 pub use cost_tracker::{CostTracker, CostSummary, ModelPricing, get_model_pricing, estimate_cost, estimate_cost_cents};
@@ -78,7 +79,8 @@ pub use swarm_orchestrator::{ConvergenceLoopConfig, McpServerConfig, Orchestrato
 pub use task_schedule_service::TaskScheduleService;
 pub use task_service::{TaskService, SpawnLimitConfig, SpawnLimitResult, SpawnLimitType};
 pub use worktree_service::{WorktreeConfig, WorktreeService, WorktreeStats};
-pub use event_bus::{EventBus, EventBusConfig, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent};
+pub use event_bus::{BudgetPressureLevel, EventBus, EventBusConfig, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent};
+pub use budget_tracker::{BudgetOpportunity, BudgetState, BudgetTracker, BudgetTrackerConfig, BudgetWindow, BudgetWindowType};
 pub use event_reactor::{EventReactor, ReactorConfig, EventHandler, EventFilter, HandlerId, HandlerPriority, Reaction, HandlerContext, HandlerMetadata, ErrorStrategy};
 pub use event_scheduler::{EventScheduler, SchedulerConfig, ScheduledEvent, ScheduleType};
 pub use event_store::{EventQuery, EventStore, EventStoreError, EventStoreStats, InMemoryEventStore};

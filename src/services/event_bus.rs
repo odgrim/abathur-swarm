@@ -52,6 +52,68 @@ impl std::fmt::Display for SequenceNumber {
     }
 }
 
+/// Budget pressure level used by the budget-aware scheduling system.
+///
+/// Defined here (rather than in `budget_tracker`) so it can be embedded directly
+/// in `EventPayload` variants without creating an intra-crate circular dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BudgetPressureLevel {
+    /// Consumption is below the caution threshold — full scheduling allowed.
+    Normal,
+    /// Approaching the warning threshold — low-priority tasks may be deferred.
+    Caution,
+    /// Approaching the critical threshold — only high/critical tasks dispatch.
+    Warning,
+    /// Budget nearly exhausted — only critical tasks dispatch.
+    Critical,
+}
+
+impl BudgetPressureLevel {
+    /// Derive a pressure level from a consumed-percentage in `[0.0, 1.0]`.
+    ///
+    /// Uses canonical thresholds: Caution ≥ 60 %, Warning ≥ 80 %, Critical ≥ 95 %.
+    /// `BudgetTracker` applies its own *configurable* thresholds internally; this
+    /// method is provided for quick classification outside the tracker.
+    pub fn from_pct(consumed_pct: f64) -> Self {
+        if consumed_pct >= 0.95 {
+            Self::Critical
+        } else if consumed_pct >= 0.80 {
+            Self::Warning
+        } else if consumed_pct >= 0.60 {
+            Self::Caution
+        } else {
+            Self::Normal
+        }
+    }
+
+    /// Parse from a string, falling back to `Normal` for unrecognized input.
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "critical" => Self::Critical,
+            "warning" => Self::Warning,
+            "caution" => Self::Caution,
+            _ => Self::Normal,
+        }
+    }
+
+    /// Return a lowercase static string representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Caution => "caution",
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+impl std::fmt::Display for BudgetPressureLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Event severity level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -91,6 +153,7 @@ pub enum EventCategory {
     Convergence,
     Workflow,
     Adapter,
+    Budget,
 }
 
 impl std::fmt::Display for EventCategory {
@@ -108,6 +171,7 @@ impl std::fmt::Display for EventCategory {
             Self::Convergence => write!(f, "convergence"),
             Self::Workflow => write!(f, "workflow"),
             Self::Adapter => write!(f, "adapter"),
+            Self::Budget => write!(f, "budget"),
         }
     }
 }
@@ -813,6 +877,27 @@ pub enum EventPayload {
         task_id: Uuid,
         adapter_name: String,
     },
+
+    // Budget events
+
+    /// Emitted when the aggregate budget pressure level changes.
+    BudgetPressureChanged {
+        previous_level: BudgetPressureLevel,
+        new_level: BudgetPressureLevel,
+        /// Consumed percentage (0.0–1.0) that triggered the transition.
+        consumed_pct: f64,
+        /// ID of the window that caused the change (or "aggregate" for recompute).
+        window_id: String,
+    },
+
+    /// Emitted when a budget window has enough remaining tokens to schedule
+    /// additional work aggressively.
+    BudgetOpportunityDetected {
+        window_id: String,
+        remaining_tokens: u64,
+        time_to_reset_secs: u64,
+        opportunity_score: f64,
+    },
 }
 
 impl EventPayload {
@@ -935,6 +1020,8 @@ impl EventPayload {
             Self::AdapterEgressCompleted { .. } => "AdapterEgressCompleted",
             Self::AdapterEgressFailed { .. } => "AdapterEgressFailed",
             Self::AdapterTaskIngested { .. } => "AdapterTaskIngested",
+            Self::BudgetPressureChanged { .. } => "BudgetPressureChanged",
+            Self::BudgetOpportunityDetected { .. } => "BudgetOpportunityDetected",
         }
     }
 }
