@@ -105,14 +105,14 @@ impl GitHubClient {
         }
     }
 
-    /// Create a client by reading the `GITHUB_TOKEN` environment variable.
+    /// Create a client by reading the `ABATHUR_GITHUB_TOKEN` environment variable.
     ///
     /// Returns `Err` if the variable is not set or is empty.
     pub fn from_env() -> Result<Self, String> {
-        let token = std::env::var("GITHUB_TOKEN")
-            .map_err(|_| "GITHUB_TOKEN environment variable is not set".to_string())?;
+        let token = std::env::var("ABATHUR_GITHUB_TOKEN")
+            .map_err(|_| "ABATHUR_GITHUB_TOKEN environment variable is not set".to_string())?;
         if token.is_empty() {
-            return Err("GITHUB_TOKEN environment variable is empty".to_string());
+            return Err("ABATHUR_GITHUB_TOKEN environment variable is empty".to_string());
         }
         Ok(Self::new(token))
     }
@@ -392,9 +392,9 @@ impl GitHubClient {
     }
 }
 
-/// Process-wide lock to serialize tests that mutate the `GITHUB_TOKEN`
+/// Process-wide lock to serialize tests that mutate the `ABATHUR_GITHUB_TOKEN`
 /// environment variable. Tests that call `set_var` or `remove_var` on
-/// `GITHUB_TOKEN` must hold this lock for the duration of the operation.
+/// `ABATHUR_GITHUB_TOKEN` must hold this lock for the duration of the operation.
 #[cfg(test)]
 pub(crate) static GITHUB_TOKEN_ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
@@ -421,10 +421,10 @@ mod tests {
 
     #[test]
     fn test_client_from_env_missing() {
-        // Serialize access to GITHUB_TOKEN across tests to prevent races.
+        // Serialize access to ABATHUR_GITHUB_TOKEN across tests to prevent races.
         let _guard = super::GITHUB_TOKEN_ENV_LOCK.lock().unwrap();
         // SAFETY: test-only; serialized via GITHUB_TOKEN_ENV_LOCK.
-        unsafe { std::env::remove_var("GITHUB_TOKEN") };
+        unsafe { std::env::remove_var("ABATHUR_GITHUB_TOKEN") };
         let result = GitHubClient::from_env();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not set"));
@@ -432,15 +432,15 @@ mod tests {
 
     #[test]
     fn test_client_from_env_empty() {
-        // Serialize access to GITHUB_TOKEN across tests to prevent races.
+        // Serialize access to ABATHUR_GITHUB_TOKEN across tests to prevent races.
         let _guard = super::GITHUB_TOKEN_ENV_LOCK.lock().unwrap();
         // SAFETY: test-only; serialized via GITHUB_TOKEN_ENV_LOCK.
-        unsafe { std::env::set_var("GITHUB_TOKEN", "") };
+        unsafe { std::env::set_var("ABATHUR_GITHUB_TOKEN", "") };
         let result = GitHubClient::from_env();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("empty"));
         // Clean up
-        unsafe { std::env::remove_var("GITHUB_TOKEN") };
+        unsafe { std::env::remove_var("ABATHUR_GITHUB_TOKEN") };
     }
 
     #[test]

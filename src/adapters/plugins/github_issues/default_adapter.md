@@ -4,7 +4,7 @@ Bidirectional adapter for [GitHub](https://github.com) repository issues.
 
 ## Setup
 
-1. **Token**: Set the `GITHUB_TOKEN` environment variable to a GitHub personal
+1. **Token**: Set the `ABATHUR_GITHUB_TOKEN` environment variable to a GitHub personal
    access token (classic) or a fine-grained token with at least **Issues: Read & Write**
    permission for the target repository.
    You can create one at: Settings → Developer settings → Personal access tokens.

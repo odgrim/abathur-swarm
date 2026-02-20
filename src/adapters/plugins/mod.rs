@@ -79,7 +79,7 @@ pub static KNOWN_ADAPTERS: &[KnownAdapter] = &[
         ],
         default_config: include_str!("github_issues/default_adapter.toml"),
         default_adapter_md: include_str!("github_issues/default_adapter.md"),
-        required_env_vars: &["GITHUB_TOKEN"],
+        required_env_vars: &["ABATHUR_GITHUB_TOKEN"],
     },
 ];
 
@@ -209,10 +209,10 @@ mod tests {
 
     #[test]
     fn test_github_issues_missing_env_var() {
-        // Serialize access to GITHUB_TOKEN with the lock used by client.rs tests.
+        // Serialize access to ABATHUR_GITHUB_TOKEN with the lock used by client.rs tests.
         let _guard = self::github_issues::client::GITHUB_TOKEN_ENV_LOCK.lock().unwrap();
         // SAFETY: test-only; serialized via GITHUB_TOKEN_ENV_LOCK.
-        unsafe { std::env::remove_var("GITHUB_TOKEN") };
+        unsafe { std::env::remove_var("ABATHUR_GITHUB_TOKEN") };
 
         let manifest = AdapterManifest::new(
             "github-issues",
@@ -224,8 +224,8 @@ mod tests {
 
         let result = create_native_adapter(&manifest, "");
         match result {
-            Err(msg) => assert!(msg.contains("GITHUB_TOKEN"), "got: {msg}"),
-            Ok(_) => panic!("Expected error when GITHUB_TOKEN is not set"),
+            Err(msg) => assert!(msg.contains("ABATHUR_GITHUB_TOKEN"), "got: {msg}"),
+            Ok(_) => panic!("Expected error when ABATHUR_GITHUB_TOKEN is not set"),
         }
     }
 }
