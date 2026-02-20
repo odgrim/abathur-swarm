@@ -403,6 +403,29 @@ where
         }
     }
 
+    /// Start the guardrails hourly token counter reset task.
+    ///
+    /// Spawns a background task that resets `tokens_used_this_hour` to zero
+    /// every 60 minutes so the hourly token budget rolls over correctly.
+    /// Without this, the counter grows monotonically and permanently blocks
+    /// all token usage once `max_tokens_per_hour` is reached.
+    pub fn start_guardrails_hourly_reset(&self) {
+        let guardrails = self.guardrails.clone();
+        tokio::spawn(async move {
+            // Use a one-hour interval.  The first tick fires immediately;
+            // consume it without resetting so we only clear the counter after
+            // a full hour of accumulated usage has elapsed.
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(3600));
+            interval.tick().await; // consume immediate first tick
+            loop {
+                interval.tick().await;
+                guardrails.get_metrics().reset_hourly();
+                tracing::info!("Guardrails: hourly token counter reset");
+            }
+        });
+    }
+
     /// Create or reuse a worktree for task execution.
     ///
     /// On retries the worktree from the previous attempt still exists in the DB

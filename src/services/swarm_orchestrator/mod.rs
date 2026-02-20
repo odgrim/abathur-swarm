@@ -482,6 +482,14 @@ where
             }
         }
 
+        // Start guardrails hourly token counter reset
+        self.start_guardrails_hourly_reset();
+        self.audit_log.info(
+            AuditCategory::System,
+            AuditAction::SwarmStarted,
+            "Guardrails hourly token reset task started",
+        ).await;
+
         // Refresh active goals cache for agent context
         if let Err(e) = self.refresh_active_goals_cache().await {
             self.audit_log.log(

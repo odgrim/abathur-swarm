@@ -376,6 +376,31 @@ mod tests {
     }
 
     #[test]
+    fn test_reset_hourly() {
+        let config = GuardrailsConfig {
+            max_tokens_per_hour: 1000,
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        // Use some tokens to populate the hourly counter
+        guardrails.record_tokens(500);
+        assert_eq!(guardrails.get_metrics().get_tokens_this_hour(), 500);
+        // Total lifetime counter should reflect usage
+        assert_eq!(guardrails.get_metrics().get_total_tokens(), 500);
+
+        // After a reset the hourly counter must be zero …
+        guardrails.get_metrics().reset_hourly();
+        assert_eq!(guardrails.get_metrics().get_tokens_this_hour(), 0);
+
+        // … but the all-time total must be unchanged.
+        assert_eq!(guardrails.get_metrics().get_total_tokens(), 500);
+
+        // And tokens can be recorded again without being blocked.
+        assert!(guardrails.check_tokens(900).is_allowed());
+    }
+
+    #[test]
     fn test_token_limit() {
         let config = GuardrailsConfig {
             max_tokens_per_hour: 1000,
