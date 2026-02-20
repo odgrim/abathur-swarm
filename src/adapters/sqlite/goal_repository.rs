@@ -171,7 +171,8 @@ impl GoalRepository for SqliteGoalRepository {
         Ok(all_active
             .into_iter()
             .filter(|goal| {
-                goal.applicability_domains.iter().any(|d| domains.contains(d))
+                goal.applicability_domains.is_empty()  // universal goal: matches all domains
+                    || goal.applicability_domains.iter().any(|d| domains.contains(d))
             })
             .collect())
     }
