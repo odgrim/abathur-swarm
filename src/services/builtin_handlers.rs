@@ -1758,29 +1758,33 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static, M: MemoryReposito
 
         for goal in &goals {
             let goal_domains = &goal.applicability_domains;
-            if goal_domains.is_empty() {
-                continue;
-            }
+            // Universal goals (empty domains) match all tasks; otherwise filter by domain overlap.
 
             // Find tasks whose inferred domains overlap with this goal's domains
             let relevant_completed: Vec<&Task> = completed.iter()
                 .filter(|t| {
-                    let task_domains = GoalContextService::<G>::infer_task_domains(t);
-                    task_domains.iter().any(|d| goal_domains.contains(d))
+                    goal_domains.is_empty() || {
+                        let task_domains = GoalContextService::<G>::infer_task_domains(t);
+                        task_domains.iter().any(|d| goal_domains.contains(d))
+                    }
                 })
                 .collect();
 
             let relevant_failed: Vec<&Task> = failed.iter()
                 .filter(|t| {
-                    let task_domains = GoalContextService::<G>::infer_task_domains(t);
-                    task_domains.iter().any(|d| goal_domains.contains(d))
+                    goal_domains.is_empty() || {
+                        let task_domains = GoalContextService::<G>::infer_task_domains(t);
+                        task_domains.iter().any(|d| goal_domains.contains(d))
+                    }
                 })
                 .collect();
 
             let _relevant_running: Vec<&Task> = running.iter()
                 .filter(|t| {
-                    let task_domains = GoalContextService::<G>::infer_task_domains(t);
-                    task_domains.iter().any(|d| goal_domains.contains(d))
+                    goal_domains.is_empty() || {
+                        let task_domains = GoalContextService::<G>::infer_task_domains(t);
+                        task_domains.iter().any(|d| goal_domains.contains(d))
+                    }
                 })
                 .collect();
 
@@ -3320,9 +3324,11 @@ impl<G: GoalRepository + 'static> EventHandler for MemoryInformedDecompositionHa
         let mut cooldowns = self.cooldowns.write().await;
 
         for goal in &goals {
-            // Check if namespace overlaps with goal domains
-            let overlaps = goal.applicability_domains.iter()
-                .any(|d| d.eq_ignore_ascii_case(&namespace));
+            // Check if namespace overlaps with goal domains.
+            // Universal goals (empty domains) match all namespaces.
+            let overlaps = goal.applicability_domains.is_empty()
+                || goal.applicability_domains.iter()
+                    .any(|d| d.eq_ignore_ascii_case(&namespace));
             if !overlaps {
                 continue;
             }
