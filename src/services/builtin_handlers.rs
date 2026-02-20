@@ -7695,6 +7695,22 @@ impl<T: TaskRepository> AdapterLifecycleSyncHandler<T> {
         // Determine the status string from manifest config or default.
         let manifest = self.adapter_registry.get_manifest(&adapter_name);
         let new_status = get_status_string(manifest, config_key, default_status);
+
+        // Allow adapters to opt out of a specific lifecycle transition by
+        // setting the status value to "skip". This is useful when the external
+        // system manages state through its own mechanism (e.g. GitHub issues
+        // closed by PR merge) and the lifecycle sync should leave the item
+        // untouched for that event.
+        if new_status == "skip" {
+            tracing::debug!(
+                adapter = adapter_name,
+                task_id = %task_id,
+                config_key = config_key,
+                "Lifecycle sync skipped (status = \"skip\")"
+            );
+            return Ok(Reaction::None);
+        }
+
         let external_id = external_id.to_string();
         let action_name = format!("UpdateStatus({})", new_status);
 
@@ -7774,16 +7790,16 @@ impl<T: TaskRepository + 'static> EventHandler for AdapterLifecycleSyncHandler<T
     async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
         match &event.payload {
             EventPayload::TaskClaimed { task_id, .. } => {
-                self.handle_lifecycle(*task_id, "status_in_progress", "in progress").await
+                self.handle_lifecycle(*task_id, "status_in_progress", "skip").await
             }
             EventPayload::TaskCompleted { task_id, .. } => {
-                self.handle_lifecycle(*task_id, "status_done", "done").await
+                self.handle_lifecycle(*task_id, "status_done", "skip").await
             }
             EventPayload::TaskFailed { task_id, .. } => {
-                self.handle_lifecycle(*task_id, "status_failed", "failed").await
+                self.handle_lifecycle(*task_id, "status_failed", "skip").await
             }
             EventPayload::AdapterTaskIngested { task_id, .. } => {
-                self.handle_lifecycle(*task_id, "status_pending", "pending").await
+                self.handle_lifecycle(*task_id, "status_pending", "skip").await
             }
             _ => Ok(Reaction::None),
         }

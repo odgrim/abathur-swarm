@@ -1,7 +1,8 @@
 //! Baseline agent templates.
 //!
-//! The only pre-packaged agent is the Overmind. All other agents are
-//! created dynamically by the Overmind at runtime via MCP tools.
+//! A single `overmind` agent is seeded at startup. It receives all tasks regardless of
+//! source and selects the appropriate workflow spine at runtime based on task content.
+//! All other agents are created dynamically by the Overmind at runtime via MCP tools.
 
 use crate::domain::models::agent::{
     AgentConstraint, AgentTemplate, AgentTier, ToolCapability,
@@ -27,11 +28,18 @@ pub fn create_baseline_agents_with_workflow(
     vec![create_overmind_with_workflow(workflow)]
 }
 
+/// Create all baseline agents with awareness of all configured workflow spines.
+///
+/// The single Overmind is seeded with a routing-aware prompt that describes all
+/// provided workflows and teaches the Overmind to select the appropriate spine
+/// based on task content at runtime.
+pub fn create_baseline_agents_with_workflows(workflows: &[WorkflowTemplate]) -> Vec<AgentTemplate> {
+    vec![create_overmind_with_workflows(workflows)]
+}
+
 /// Overmind - The agentic orchestrator of the swarm.
 ///
-/// The Overmind is the sole pre-packaged agent. It analyzes tasks,
-/// creates whatever agents are needed dynamically via the `agent_create` MCP tool,
-/// delegates work via the `task_submit` MCP tool, and tracks completion.
+/// Receives all tasks and selects the appropriate workflow spine at runtime.
 pub fn create_overmind() -> AgentTemplate {
     create_overmind_with_workflow(None)
 }
@@ -41,13 +49,35 @@ pub fn create_overmind() -> AgentTemplate {
 /// If `workflow` is `Some`, generates the system prompt dynamically from the
 /// workflow template. If `None`, uses the static `OVERMIND_SYSTEM_PROMPT`.
 pub fn create_overmind_with_workflow(workflow: Option<&WorkflowTemplate>) -> AgentTemplate {
+    let has_triage = workflow
+        .map(|w| w.phases.iter().any(|p| p.name.to_lowercase() == "triage"))
+        .unwrap_or(false);
     let prompt = match workflow {
         Some(wf) => generate_overmind_prompt(wf),
         None => OVERMIND_SYSTEM_PROMPT.to_string(),
     };
+    build_overmind_template(prompt, has_triage)
+}
 
+/// Create the Overmind with awareness of all configured workflow spines.
+///
+/// Generates a routing-aware prompt that describes each workflow and teaches the
+/// Overmind to select the appropriate spine based on task content at runtime.
+pub fn create_overmind_with_workflows(workflows: &[WorkflowTemplate]) -> AgentTemplate {
+    let has_triage = workflows
+        .iter()
+        .any(|w| w.phases.iter().any(|p| p.name.to_lowercase() == "triage"));
+    let prompt = generate_overmind_prompt_multi(workflows);
+    build_overmind_template(prompt, has_triage)
+}
+
+/// Build the Overmind `AgentTemplate` from a pre-generated prompt.
+///
+/// Shared by `create_overmind_with_workflow` and `create_overmind_with_workflows`
+/// so the tool list, constraints, and capabilities are defined in one place.
+fn build_overmind_template(prompt: String, has_triage: bool) -> AgentTemplate {
     let mut template = AgentTemplate::new("overmind", AgentTier::Architect)
-        .with_description("Agentic orchestrator that analyzes tasks, dynamically creates agents, and delegates work through MCP tools")
+        .with_description("Agentic orchestrator that analyzes tasks, selects the appropriate workflow spine, dynamically creates agents, and delegates work through MCP tools")
         .with_prompt(prompt)
         .with_tool(ToolCapability::new("read", "Read source files for context").required())
         .with_tool(ToolCapability::new("shell", "Execute shell commands").required())
@@ -55,11 +85,20 @@ pub fn create_overmind_with_workflow(workflow: Option<&WorkflowTemplate>) -> Age
         .with_tool(ToolCapability::new("grep", "Search for patterns in codebase").required())
         .with_tool(ToolCapability::new("memory", "Query and store swarm memory"))
         .with_tool(ToolCapability::new("tasks", "Interact with task queue"))
-        .with_tool(ToolCapability::new("agents", "Create and manage agent templates"))
-        .with_constraint(AgentConstraint::new(
-            "decision-rationale",
-            "Every decision must include confidence level and rationale",
+        .with_tool(ToolCapability::new("agents", "Create and manage agent templates"));
+
+    if has_triage {
+        template = template.with_tool(ToolCapability::new(
+            "egress_publish",
+            "Execute egress actions against external adapters — close issues, post comments, \
+             create pull requests. Required for acting on triage rejections.",
         ));
+    }
+
+    let mut template = template.with_constraint(AgentConstraint::new(
+        "decision-rationale",
+        "Every decision must include confidence level and rationale",
+    ));
     template.version = 2;
     template
         .with_capability("agent-creation")
@@ -75,7 +114,7 @@ pub fn create_overmind_with_workflow(workflow: Option<&WorkflowTemplate>) -> Age
         .with_max_turns(50)
 }
 
-/// Generate a complete Overmind system prompt from a workflow template.
+/// Generate a complete Overmind system prompt from a single workflow template.
 ///
 /// Concatenates the prompt prefix (core identity + MCP tools), a dynamically
 /// generated workflow spine section, a concrete example, and the prompt suffix
@@ -87,6 +126,93 @@ pub fn generate_overmind_prompt(template: &WorkflowTemplate) -> String {
         "{}\n{}\n{}\n{}",
         OVERMIND_PROMPT_PREFIX, workflow_section, example_section, OVERMIND_PROMPT_SUFFIX
     )
+}
+
+/// Generate a routing-aware Overmind system prompt from all configured workflow templates.
+///
+/// Produces a prompt with a routing section (how to pick a spine) followed by the full
+/// phase details for each workflow. When `workflows` is empty, falls back to the static
+/// prompt. When only one workflow is provided, delegates to `generate_overmind_prompt`.
+pub fn generate_overmind_prompt_multi(workflows: &[WorkflowTemplate]) -> String {
+    if workflows.is_empty() {
+        return OVERMIND_SYSTEM_PROMPT.to_string();
+    }
+    if workflows.len() == 1 {
+        return generate_overmind_prompt(&workflows[0]);
+    }
+
+    let routing_section = generate_workflow_routing_section(workflows);
+
+    // Full phase details for every workflow, clearly separated
+    let workflow_sections: String = workflows
+        .iter()
+        .map(|wf| generate_workflow_prompt_section(wf))
+        .collect::<Vec<_>>()
+        .join("\n---\n\n");
+
+    // Use the most instructive workflow as the example:
+    // prefer one with a triage phase (shows the full flow), then "code", then the first.
+    let example_wf = workflows
+        .iter()
+        .find(|w| w.phases.iter().any(|p| p.name.to_lowercase() == "triage"))
+        .or_else(|| workflows.iter().find(|w| w.name == "code"))
+        .unwrap_or(&workflows[0]);
+    let example_section = generate_workflow_example(example_wf);
+
+    format!(
+        "{}\n{}\n{}\n{}\n{}",
+        OVERMIND_PROMPT_PREFIX, routing_section, workflow_sections, example_section, OVERMIND_PROMPT_SUFFIX
+    )
+}
+
+/// Generate the workflow selection / routing section of the Overmind prompt.
+///
+/// Produces a brief decision table and priority-ordered routing rules so the
+/// Overmind knows which spine to choose before starting any task.
+fn generate_workflow_routing_section(workflows: &[WorkflowTemplate]) -> String {
+    let has_triage = workflows
+        .iter()
+        .any(|w| w.phases.iter().any(|p| p.name.to_lowercase() == "triage"));
+
+    let mut section = String::from(
+        "## Workflow Selection\n\n\
+         Before starting any task, inspect the task description and select the \
+         appropriate workflow spine. Each spine defines a mandatory phase sequence — \
+         follow it completely from Phase 1 (Memory Search).\n\n\
+         ### Available Spines\n\n",
+    );
+
+    for wf in workflows {
+        let phases = std::iter::once("Memory Search".to_string())
+            .chain(wf.phases.iter().map(|p| capitalize(&p.name)))
+            .collect::<Vec<_>>()
+            .join(" → ");
+        let desc = if wf.description.is_empty() {
+            format!("{} phases", wf.phases.len())
+        } else {
+            wf.description.clone()
+        };
+        section.push_str(&format!("- **{}** — {} _({})\n", wf.name, desc, phases));
+    }
+
+    section.push_str("\n### Routing Rules (apply in order)\n\n");
+    if has_triage {
+        section.push_str(
+            "1. Task description begins with `[Ingested from ...]` → **external** \
+             (adapter-sourced; triage before code spine)\n",
+        );
+    }
+    section.push_str(
+        "2. Task is investigation or analysis only, no code deliverable → **analysis**\n\
+         3. Task is documentation only → **docs**\n\
+         4. Task is a code review request only → **review**\n\
+         5. Everything else → **code**\n\n\
+         After selecting a spine, scroll to its `## Workflow Spine: <Name>` section below \
+         and follow the phases in order. Do **not** mix phases from different spines.\n\n\
+         ---\n\n",
+    );
+
+    section
 }
 
 /// Generate the workflow spine section of the Overmind prompt.
@@ -113,6 +239,27 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
         .phases
         .iter()
         .any(|p| p.name.to_lowercase() == "review");
+
+    let has_triage = template
+        .phases
+        .iter()
+        .any(|p| p.name.to_lowercase() == "triage");
+
+    // Document egress_publish for triage workflows so the Overmind knows how
+    // to close rejected issues.
+    if has_triage {
+        section.push_str(
+            "\n### Egress Actions (Triage Workflows)\n\
+             You have access to **`egress_publish`** in this workflow. Use it during triage to \
+             act on rejected issues:\n\
+             - Post a comment explaining the rejection: \
+               `adapter: \"<adapter-name>\", action: {action: \"post_comment\", external_id: \"<id>\", body: \"<reason>\"}`\n\
+             - Close the issue as out-of-scope: \
+               `adapter: \"<adapter-name>\", action: {action: \"update_status\", external_id: \"<id>\", new_status: \"wontfix\"}`\n\
+             Parse the adapter name and external_id from the `[Ingested from <adapter> — <external_id>]` \
+             header in this task's description.\n",
+        );
+    }
 
     for (i, phase) in template.phases.iter().enumerate() {
         let phase_num = i + 2; // offset by 1 for memory search
@@ -149,8 +296,9 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
                 section.push_str(
                     "- This phase has no dependencies (it runs first).\n",
                 );
-                // Fan-out guidance for root phases (typically research)
-                if phase.read_only {
+                // Fan-out guidance for root phases (typically research).
+                // Triage is a single focused evaluation — no fan-out.
+                if phase.read_only && phase.name.to_lowercase() != "triage" {
                     section.push_str(
                         "- **Fan-out heuristic**: If the task touches 3+ distinct codebase areas, create one subtask per area running in parallel. Each stores findings via `memory_store` with a shared namespace and unique key. Use `task_wait` with `ids` array to wait for all.\n",
                     );
@@ -184,6 +332,38 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
                 phase.name,
                 phase_num + 1,
             ));
+        }
+
+        // Post-triage branching: read the verdict and either proceed or reject.
+        if phase.name.to_lowercase() == "triage" {
+            section.push_str(
+                "\n**Triage only applies to adapter-sourced tasks.** Check the task description \
+                 before doing anything else:\n\
+                 - If it does **not** begin with `[Ingested from ...]`, this task was created \
+                   internally. Skip triage entirely and proceed directly to the next phase.\n\
+                 - If it **does** begin with `[Ingested from ...]`, run triage as described \
+                   below.\n\
+                 \n\
+                 When running triage:\n\
+                 - Use `execution_mode: \"direct\"` — triage is a single-pass evaluation, not \
+                   iterative.\n\
+                 - The triage agent MUST store its verdict in memory: \
+                   `namespace: \"triage\", key: \"verdict\"`, content: `\"APPROVED\"` or \
+                   `\"REJECTED: <reason>\"`.\n\
+                 \n\
+                 **After `task_wait` returns for triage**, retrieve the verdict with \
+                 `memory_search` (query: `\"triage verdict\"`) and act on it:\n\
+                 - **APPROVED** → proceed to the next phase. Triage succeeded.\n\
+                 - **REJECTED** →\n\
+                   1. Parse adapter name and `external_id` from the \
+                      `[Ingested from <adapter> — <external_id>]` header.\n\
+                   2. Call `egress_publish` to post a comment explaining the rejection reason.\n\
+                   3. Call `egress_publish` with `action: update_status`, \
+                      `new_status: \"wontfix\"` to close the issue.\n\
+                   4. Call `task_update_status` to mark **this** task as `complete` — \
+                      triage succeeded; rejecting an invalid issue is the correct outcome.\n\
+                   5. **STOP** — do not proceed to the next phase.\n",
+            );
         }
     }
 
@@ -294,7 +474,7 @@ fn generate_workflow_example(template: &WorkflowTemplate) -> String {
 
         // agent_create example
         let tier_str = match phase.name.as_str() {
-            "plan" | "review" => "specialist",
+            "plan" | "review" | "triage" => "specialist",
             _ => "worker",
         };
 

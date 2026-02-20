@@ -70,8 +70,16 @@ pub struct SwarmConfig {
     /// When None, the classification heuristic decides.
     pub default_execution_mode: Option<crate::domain::models::ExecutionMode>,
 
-    /// Optional workflow template for configuring the Overmind's phase sequence.
+    /// Optional workflow template used for workspace provisioning (workspace kind,
+    /// output delivery). Falls back to the built-in code workflow when `None`.
     pub workflow_template: Option<WorkflowTemplate>,
+
+    /// All configured workflow spines made available to the Overmind.
+    ///
+    /// When non-empty, the Overmind is seeded with a routing-aware prompt that
+    /// describes each spine and teaches it to select the appropriate one based on
+    /// task content. When empty, the Overmind uses the static fallback prompt.
+    pub all_workflows: Vec<WorkflowTemplate>,
 
     /// When true, bypass permission checks for dangerous operations like
     /// auto-merging to main. Similar to `--dangerously-skip-permissions` in
@@ -341,6 +349,7 @@ impl Default for SwarmConfig {
             convergence_enabled: true,
             default_execution_mode: Some(crate::domain::models::ExecutionMode::Convergent { parallel_samples: None }),
             workflow_template: None,
+            all_workflows: vec![],
             dangerously_skip_permissions: false,
         }
     }

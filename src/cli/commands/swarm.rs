@@ -600,11 +600,19 @@ async fn run_swarm_foreground(
         None
     };
 
+    // Collect all workflow templates so the Overmind can route tasks to the right spine.
+    let all_workflows: Vec<_> = app_config
+        .available_workflows()
+        .into_iter()
+        .filter_map(|(name, _, _, _)| app_config.resolve_workflow(&name))
+        .collect();
+
     let config = SwarmConfig {
         max_agents,
         mcp_servers: mcp_server_config,
         default_execution_mode: execution_mode,
         workflow_template,
+        all_workflows,
         dangerously_skip_permissions,
         polling: app_config.polling,
         ..Default::default()

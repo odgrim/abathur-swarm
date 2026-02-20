@@ -621,6 +621,8 @@ impl Config {
     /// - `"analysis"` → 3-phase read-only analysis workflow (memory-only output)
     /// - `"docs"` → 3-phase documentation workflow (PR output)
     /// - `"review"` → single-phase code review workflow (memory-only output)
+    /// - `"external"` → 5-phase triage-first workflow for adapter-sourced tasks
+    ///   (triage, research, plan, implement, review)
     pub fn resolve_workflow(&self, name: &str) -> Option<WorkflowTemplate> {
         // Check user-defined workflows first.
         if let Some(wf) = self.workflows.iter().find(|wf| wf.name == name) {
@@ -633,6 +635,7 @@ impl Config {
             "analysis" => Some(WorkflowTemplate::analysis_workflow()),
             "docs" => Some(WorkflowTemplate::docs_workflow()),
             "review" => Some(WorkflowTemplate::review_only_workflow()),
+            "external" => Some(WorkflowTemplate::external_workflow()),
             _ => None,
         }
     }
@@ -652,11 +655,12 @@ impl Config {
         let mut workflows = Vec::new();
 
         // Add each built-in workflow unless shadowed by a user-defined one.
-        let builtins: [(&str, fn() -> WorkflowTemplate); 4] = [
+        let builtins: [(&str, fn() -> WorkflowTemplate); 5] = [
             ("code",     WorkflowTemplate::default_code_workflow),
             ("analysis", WorkflowTemplate::analysis_workflow),
             ("docs",     WorkflowTemplate::docs_workflow),
             ("review",   WorkflowTemplate::review_only_workflow),
+            ("external", WorkflowTemplate::external_workflow),
         ];
         for (name, constructor) in &builtins {
             if !self.workflows.iter().any(|wf| wf.name == *name) {

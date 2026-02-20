@@ -499,7 +499,14 @@ where
         {
             use crate::services::AgentService;
             let agent_service = AgentService::new(self.agent_repo.clone(), self.event_bus.clone());
-            match agent_service.seed_baseline_agents_with_workflow(self.config.workflow_template.as_ref()).await {
+            // Use routing-aware seeding when all_workflows is populated; otherwise fall
+            // back to single-workflow seeding (legacy / empty config path).
+            let seed_result = if !self.config.all_workflows.is_empty() {
+                agent_service.seed_baseline_agents_with_workflows(&self.config.all_workflows).await
+            } else {
+                agent_service.seed_baseline_agents_with_workflow(self.config.workflow_template.as_ref()).await
+            };
+            match seed_result {
                 Ok(seeded) if !seeded.is_empty() => {
                     self.audit_log.info(
                         AuditCategory::Agent,

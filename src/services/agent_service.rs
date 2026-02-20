@@ -463,6 +463,44 @@ impl<R: AgentRepository> AgentService<R> {
         Ok(seeded)
     }
 
+    /// Seed baseline agent templates with awareness of all configured workflow spines.
+    ///
+    /// Like [`seed_baseline_agents_with_workflow`], but generates a routing-aware Overmind
+    /// prompt that describes every provided workflow so the Overmind can select the
+    /// appropriate spine at runtime based on task content.
+    pub async fn seed_baseline_agents_with_workflows(
+        &self,
+        workflows: &[WorkflowTemplate],
+    ) -> DomainResult<Vec<String>> {
+        let baseline = specialist_templates::create_baseline_agents_with_workflows(workflows);
+        let mut seeded = Vec::new();
+
+        for template in baseline {
+            match self.repository.get_template_by_name(&template.name).await? {
+                None => {
+                    self.repository.create_template(&template).await?;
+                    seeded.push(template.name.clone());
+                    tracing::info!("Seeded baseline agent '{}'", template.name);
+                }
+                Some(existing) if template.version > existing.version => {
+                    let mut upgraded = template.clone();
+                    upgraded.id = existing.id;
+                    self.repository.update_template(&upgraded).await?;
+                    seeded.push(upgraded.name.clone());
+                    tracing::info!(
+                        "Upgraded baseline agent '{}' from v{} to v{}",
+                        upgraded.name, existing.version, upgraded.version
+                    );
+                }
+                Some(_) => {
+                    // DB version is current or newer, skip
+                }
+            }
+        }
+
+        Ok(seeded)
+    }
+
     /// Ensure a specific specialist template exists, creating if needed.
     ///
     /// With the overmind-only model, this will only find specialists that

@@ -28,15 +28,17 @@ state = "open"
 # Leave empty to ingest all issues.
 filter_labels = ""
 
-# Status name mappings for lifecycle sync.
-# The egress adapter maps new_status values: "closed"/"done"/"completed"/
-# "resolved"/"wontfix" close the issue; all other values reopen it.
+# Status name mappings for lifecycle sync (optional).
 #
-# status_done is intentionally set to "open" so that completing an abathur
-# task does NOT close the GitHub issue directly. Issues should be closed by
-# merging a pull request that contains "Closes #N" in its body, which GitHub
-# processes automatically on merge.
-status_open = "open"
-status_in_progress = "open"
-status_done = "open"
-status_closed = "closed"
+# The lifecycle sync handler defaults to "skip" for all events, so GitHub issue
+# state is never touched by lifecycle transitions. Issue state is managed by:
+#   - PR merge: "Closes #N" in the PR body closes the issue automatically on merge.
+#   - egress_publish: explicit wontfix close from the Overmind on triage rejection.
+#
+# To opt into lifecycle-driven state updates, set any of the following keys to a
+# GitHub issue state ("open" or "closed") or a named status that the egress adapter
+# maps to one. Leave unset (or set to "skip") to leave the issue state unchanged.
+#
+# status_in_progress = "open"
+# status_done = "closed"
+# status_failed = "open"
