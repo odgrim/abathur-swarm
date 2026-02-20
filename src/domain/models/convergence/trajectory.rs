@@ -334,6 +334,40 @@ impl Trajectory {
             .collect()
     }
 
+    /// Maximum number of observations retained in the trajectory.
+    ///
+    /// When this cap is reached, the oldest observations are evicted from the
+    /// front of the vector so that the most recent ones are always preserved.
+    pub const MAX_OBSERVATIONS: usize = 50;
+
+    /// Maximum number of strategy log entries retained in the trajectory.
+    pub const MAX_STRATEGY_LOG_ENTRIES: usize = 50;
+
+    /// Push an observation, enforcing the [`MAX_OBSERVATIONS`](Self::MAX_OBSERVATIONS) cap.
+    ///
+    /// If the observations vector would exceed `MAX_OBSERVATIONS` after the
+    /// push, the oldest entries are drained from the front.
+    pub fn push_observation_bounded(&mut self, obs: Observation) {
+        self.observations.push(obs);
+        if self.observations.len() > Self::MAX_OBSERVATIONS {
+            let excess = self.observations.len() - Self::MAX_OBSERVATIONS;
+            self.observations.drain(..excess);
+        }
+    }
+
+    /// Push a strategy log entry, enforcing the
+    /// [`MAX_STRATEGY_LOG_ENTRIES`](Self::MAX_STRATEGY_LOG_ENTRIES) cap.
+    ///
+    /// If the strategy_log vector would exceed `MAX_STRATEGY_LOG_ENTRIES`
+    /// after the push, the oldest entries are drained from the front.
+    pub fn push_strategy_log_bounded(&mut self, entry: StrategyEntry) {
+        self.strategy_log.push(entry);
+        if self.strategy_log.len() > Self::MAX_STRATEGY_LOG_ENTRIES {
+            let excess = self.strategy_log.len() - Self::MAX_STRATEGY_LOG_ENTRIES;
+            self.strategy_log.drain(..excess);
+        }
+    }
+
     /// Returns the observation with the highest convergence level.
     ///
     /// If no observations have metrics, returns the most recent observation.
@@ -1074,5 +1108,106 @@ mod tests {
             .push(test_observation(0, StrategyKind::RetryWithFeedback));
 
         assert!(trajectory.latest_overseer_signals().is_some());
+    }
+
+    #[test]
+    fn test_push_observation_bounded_caps_at_max() {
+        let task_id = Uuid::new_v4();
+        let mut trajectory =
+            Trajectory::new(task_id, None, test_spec(), test_budget(), test_policy());
+
+        let total = Trajectory::MAX_OBSERVATIONS + 5;
+        for i in 0..total {
+            trajectory.push_observation_bounded(test_observation(
+                i as u32,
+                StrategyKind::RetryWithFeedback,
+            ));
+        }
+
+        // Must not exceed the cap.
+        assert_eq!(trajectory.observations.len(), Trajectory::MAX_OBSERVATIONS);
+
+        // The most recent observations must be retained.
+        let first_retained = (total - Trajectory::MAX_OBSERVATIONS) as u32;
+        assert_eq!(trajectory.observations[0].sequence, first_retained);
+        assert_eq!(
+            trajectory.observations[Trajectory::MAX_OBSERVATIONS - 1].sequence,
+            (total - 1) as u32
+        );
+    }
+
+    #[test]
+    fn test_push_observation_bounded_under_cap() {
+        let task_id = Uuid::new_v4();
+        let mut trajectory =
+            Trajectory::new(task_id, None, test_spec(), test_budget(), test_policy());
+
+        for i in 0..5 {
+            trajectory.push_observation_bounded(test_observation(
+                i as u32,
+                StrategyKind::RetryWithFeedback,
+            ));
+        }
+
+        // Under the cap, all observations are retained.
+        assert_eq!(trajectory.observations.len(), 5);
+        assert_eq!(trajectory.observations[0].sequence, 0);
+        assert_eq!(trajectory.observations[4].sequence, 4);
+    }
+
+    #[test]
+    fn test_push_strategy_log_bounded_caps_at_max() {
+        let task_id = Uuid::new_v4();
+        let mut trajectory =
+            Trajectory::new(task_id, None, test_spec(), test_budget(), test_policy());
+
+        let total = Trajectory::MAX_STRATEGY_LOG_ENTRIES + 5;
+        for i in 0..total {
+            trajectory.push_strategy_log_bounded(StrategyEntry::new(
+                StrategyKind::RetryWithFeedback,
+                i as u32,
+                10_000,
+                false,
+            ));
+        }
+
+        // Must not exceed the cap.
+        assert_eq!(
+            trajectory.strategy_log.len(),
+            Trajectory::MAX_STRATEGY_LOG_ENTRIES
+        );
+
+        // The most recent entries must be retained.
+        let first_retained = (total - Trajectory::MAX_STRATEGY_LOG_ENTRIES) as u32;
+        assert_eq!(
+            trajectory.strategy_log[0].observation_sequence,
+            first_retained
+        );
+        assert_eq!(
+            trajectory.strategy_log[Trajectory::MAX_STRATEGY_LOG_ENTRIES - 1]
+                .observation_sequence,
+            (total - 1) as u32
+        );
+    }
+
+    #[test]
+    fn test_push_strategy_log_bounded_under_cap() {
+        let task_id = Uuid::new_v4();
+        let mut trajectory =
+            Trajectory::new(task_id, None, test_spec(), test_budget(), test_policy());
+
+        for i in 0..5 {
+            trajectory.push_strategy_log_bounded(StrategyEntry::new(
+                StrategyKind::RetryWithFeedback,
+                i as u32,
+                10_000,
+                false,
+            ));
+        }
+
+        // Under the cap, all entries are retained.
+        assert_eq!(trajectory.strategy_log.len(), 5);
+        assert_eq!(trajectory.strategy_log[0].observation_sequence, 0);
+        assert_eq!(trajectory.strategy_log[4].observation_sequence, 4);
     }
 }

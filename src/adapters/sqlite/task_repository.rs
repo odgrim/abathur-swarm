@@ -1,6 +1,11 @@
 //! SQLite implementation of the TaskRepository.
 
 use async_trait::async_trait;
+
+/// Emit a warning when a serialized context JSON blob exceeds this size.
+/// This is a signal that the hints cap may not be functioning or that
+/// `custom` data is growing unexpectedly large.
+const JSON_SIZE_WARN_BYTES: usize = 64 * 1024;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -28,6 +33,13 @@ impl TaskRepository for SqliteTaskRepository {
         let routing_json = serde_json::to_string(&task.routing_hints)?;
         let artifacts_json = serde_json::to_string(&task.artifacts)?;
         let context_json = serde_json::to_string(&task.context)?;
+        if context_json.len() > JSON_SIZE_WARN_BYTES {
+            tracing::warn!(
+                task_id = %task.id,
+                size_bytes = context_json.len(),
+                "context_json in create() exceeds size threshold; hints or custom data may be growing unboundedly"
+            );
+        }
         let (source_type, source_ref) = serialize_task_source(&task.source);
         let execution_mode_json = serde_json::to_string(&task.execution_mode)?;
 
@@ -96,6 +108,13 @@ impl TaskRepository for SqliteTaskRepository {
         let routing_json = serde_json::to_string(&task.routing_hints)?;
         let artifacts_json = serde_json::to_string(&task.artifacts)?;
         let context_json = serde_json::to_string(&task.context)?;
+        if context_json.len() > JSON_SIZE_WARN_BYTES {
+            tracing::warn!(
+                task_id = %task.id,
+                size_bytes = context_json.len(),
+                "context_json in update() exceeds size threshold; hints or custom data may be growing unboundedly"
+            );
+        }
         let (source_type, source_ref) = serialize_task_source(&task.source);
         let execution_mode_json = serde_json::to_string(&task.execution_mode)?;
 
