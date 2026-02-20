@@ -6,12 +6,32 @@ use std::sync::Arc;
 
 use crate::adapters::sqlite::{SqliteTaskRepository, initialize_default_database};
 use crate::cli::command_dispatcher::CliCommandDispatcher;
-use crate::cli::id_resolver::resolve_task_id;
+use crate::cli::id_resolver::{resolve_goal_id, resolve_task_id};
 use crate::cli::output::{output, truncate, CommandOutput};
 use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus, TaskType};
 use crate::domain::ports::TaskFilter;
 use crate::services::command_bus::{CommandResult, DomainCommand, TaskCommand};
 use crate::services::TaskService;
+
+/// CLI-local priority enum — maps to `TaskPriority` after clap parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CliPriority {
+    Low,
+    Normal,
+    High,
+    Critical,
+}
+
+impl From<CliPriority> for TaskPriority {
+    fn from(p: CliPriority) -> Self {
+        match p {
+            CliPriority::Low => TaskPriority::Low,
+            CliPriority::Normal => TaskPriority::Normal,
+            CliPriority::High => TaskPriority::High,
+            CliPriority::Critical => TaskPriority::Critical,
+        }
+    }
+}
 
 #[derive(Args, Debug)]
 pub struct TaskArgs {
@@ -22,15 +42,22 @@ pub struct TaskArgs {
 #[derive(Subcommand, Debug)]
 pub enum TaskCommands {
     /// Submit a new task
+    #[command(after_help = "\
+Examples:
+  abathur task submit \"Fix the login bug\"
+  abathur task submit \"Review PR #42\" --priority high
+  abathur task submit \"Implement feature X\" --goal abc123 --agent rust-impl
+  abathur task submit \"Subtask\" --parent def456 --depends-on ghi789
+")]
     Submit {
         /// The prompt to send to the agent
         prompt: String,
         /// Optional custom title (auto-generated from prompt if omitted)
         #[arg(short, long)]
         title: Option<String>,
-        /// Priority (low, normal, high, critical)
+        /// Priority level
         #[arg(short, long, default_value = "normal")]
-        priority: String,
+        priority: CliPriority,
         /// Parent task ID
         #[arg(long)]
         parent: Option<String>,
@@ -49,6 +76,9 @@ pub enum TaskCommands {
         /// Deadline for SLA enforcement (ISO 8601 datetime, e.g. "2025-12-31T23:59:59Z")
         #[arg(long)]
         deadline: Option<String>,
+        /// Associate with a goal (UUID or prefix)
+        #[arg(long)]
+        goal: Option<String>,
     },
     /// List tasks
     List {
@@ -317,9 +347,13 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
             input,
             idempotency_key,
             deadline,
+            goal,
         } => {
-            let priority = TaskPriority::from_str(&priority)
-                .ok_or_else(|| anyhow::anyhow!("Invalid priority: {}", priority))?;
+            if prompt.trim().is_empty() {
+                anyhow::bail!("task description cannot be empty");
+            }
+
+            let priority = TaskPriority::from(priority);
 
             let parent_id = match parent {
                 Some(p) => Some(resolve_task_id(&pool, &p).await?),
@@ -331,10 +365,27 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 deps.push(resolve_task_id(&pool, d).await?);
             }
 
-            let context = input.map(|i| TaskContext {
-                input: i,
+            let goal_id = match goal {
+                Some(ref g) => {
+                    if !g.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+                        anyhow::bail!("'{}' is not a valid UUID", g);
+                    }
+                    Some(resolve_goal_id(&pool, g).await?)
+                }
+                None => None,
+            };
+
+            let mut ctx = TaskContext {
+                input: input.unwrap_or_default(),
                 ..Default::default()
-            });
+            };
+            if let Some(gid) = goal_id {
+                ctx.custom.insert(
+                    "goal_id".to_string(),
+                    serde_json::Value::String(gid.to_string()),
+                );
+            }
+            let context = Box::new(Some(ctx));
 
             let deadline = deadline
                 .map(|d| chrono::DateTime::parse_from_rfc3339(&d))
@@ -349,7 +400,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 priority,
                 agent_type: agent,
                 depends_on: deps,
-                context: Box::new(context),
+                context,
                 idempotency_key,
                 source: TaskSource::Human,
                 deadline,
