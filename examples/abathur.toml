@@ -1,0 +1,156 @@
+# abathur.toml — Fully annotated example configuration
+# Copy to your project root and customize. All sections are optional.
+
+# ─── Task execution limits ────────────────────────────────────────────────────
+
+[limits]
+# Maximum nesting depth for subtasks
+max_depth = 5
+# Maximum direct subtasks spawned by a single task
+max_subtasks = 10
+# Maximum total descendants (recursive) per root task
+max_descendants = 100
+# Maximum tasks running concurrently across the swarm
+max_concurrent_tasks = 5
+# Maximum retries for a failed task before marking it permanently failed
+max_retries = 3
+# Seconds before a running task is considered timed out
+task_timeout_secs = 300
+
+# ─── Subtask spawning limits ──────────────────────────────────────────────────
+
+[spawn_limits]
+max_subtask_depth = 5
+max_subtasks_per_task = 10
+max_total_descendants = 100
+# Allow agents to request limit extensions
+allow_limit_extensions = true
+max_extensions = 2
+
+# ─── DAG restructuring ────────────────────────────────────────────────────────
+
+[restructure_limits]
+# How many times the meta-planner can restructure a failing DAG
+max_restructure_attempts = 3
+# Cooldown between restructure attempts (seconds)
+restructure_cooldown_secs = 300
+max_restructure_depth = 2
+auto_restructure_on_failure = true
+# Minimum success rate to consider DAG "stable" (0.0–1.0)
+min_success_rate_for_stability = 0.5
+
+# ─── Agent evolution ──────────────────────────────────────────────────────────
+
+[evolution]
+# Minimum completed tasks required before triggering refinement evaluation
+min_tasks_for_evaluation = 10
+# Success rate below which minor refinement is triggered (0.0–1.0)
+minor_refinement_threshold = 0.6
+# Success rate below which major refinement is triggered
+major_refinement_threshold = 0.4
+# Success rate below which immediate action is taken (revert/disable)
+immediate_action_threshold = 0.2
+# Historical template versions retained for revert safety
+max_template_versions = 5
+# Automatically revert a template when success rate regresses after update
+auto_revert_on_regression = true
+# Minimum improvement needed to keep a new template version (not revert)
+min_improvement_to_keep = 0.05
+# Sliding window size (recent tasks) for success rate calculation
+evaluation_window_size = 20
+# Minimum time between refinement cycles for the same agent (seconds)
+refinement_cooldown_secs = 3600
+
+# ─── Memory system ────────────────────────────────────────────────────────────
+
+[memory]
+# Base decay rate applied per maintenance cycle (0.0–1.0)
+decay_rate = 0.05
+# Relevance score below which a memory is pruned
+prune_threshold = 0.1
+# How often the decay daemon runs maintenance (seconds)
+maintenance_interval_secs = 3600
+# Maximum memories per namespace (prevents unbounded growth)
+max_per_namespace = 10000
+
+# ─── Git worktrees ────────────────────────────────────────────────────────────
+
+[worktrees]
+# Directory where task worktrees are created (relative to project root)
+base_path = ".abathur/worktrees"
+# Delete worktrees automatically when their task completes
+auto_cleanup = true
+# Prune worktrees older than this many hours (168 = 1 week)
+max_age_hours = 168
+enabled = true
+# Git branch prefix for task worktrees
+branch_prefix = "abathur/task"
+
+# ─── Agent-to-agent (A2A) federation ─────────────────────────────────────────
+
+[a2a]
+# Port for the A2A HTTP gateway
+gateway_port = 8080
+request_timeout_secs = 30
+# Maximum A2A message size (bytes); 1048576 = 1 MiB
+max_message_size = 1048576
+# Disabled by default — requires explicit opt-in
+enabled = false
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+
+[database]
+path = ".abathur/abathur.db"
+max_connections = 5
+connect_timeout_secs = 30
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+
+[logging]
+# trace | debug | info | warn | error
+level = "info"
+# pretty (human-readable) | json (structured, for log aggregators)
+format = "pretty"
+
+# ─── Convergence check polling ────────────────────────────────────────────────
+
+[polling]
+# How often the convergence engine checks each active goal (seconds)
+# 28800 = 8 hours
+goal_convergence_check_interval_secs = 28800
+
+# ─── External adapters ────────────────────────────────────────────────────────
+
+[adapters]
+enabled = true
+# Directory containing adapter config files (.abathur/adapters/<name>.toml)
+adapters_dir = ".abathur/adapters"
+# Default poll interval for ingestion adapters that don't set their own (seconds)
+default_poll_interval_secs = 300
+
+# ─── Token budget management ──────────────────────────────────────────────────
+
+[budget]
+caution_threshold_pct = 0.60
+warning_threshold_pct = 0.80
+critical_threshold_pct = 0.95
+opportunity_threshold_pct = 0.30
+min_opportunity_tokens = 10000
+max_agents_normal = 5
+max_agents_caution = 4
+max_agents_warning = 2
+max_agents_critical = 1
+
+# ─── Default workflow ─────────────────────────────────────────────────────────
+
+# Built-in workflows: "code", "analysis", "docs", "review"
+# Override with ABATHUR_DEFAULT_WORKFLOW env var
+default_workflow = "code"
+
+# ─── Custom workflow templates ────────────────────────────────────────────────
+# Uncomment and customize to define additional workflows.
+#
+# [[workflows]]
+# name = "my-workflow"
+# description = "Custom workflow for my project"
+# phases = ["plan", "implement", "review"]
