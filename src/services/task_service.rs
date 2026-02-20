@@ -13,6 +13,7 @@ use crate::services::event_bus::{
     EventCategory, EventPayload, EventSeverity, UnifiedEvent,
 };
 use crate::services::event_factory;
+use tracing::warn;
 
 /// Configuration for spawn limits.
 #[derive(Debug, Clone)]
@@ -528,13 +529,15 @@ impl<T: TaskRepository> TaskService<T> {
             return Err(DomainError::InvalidStateTransition {
                 from: task.status.as_str().to_string(),
                 to: "running".to_string(),
+                reason: "task must be in Ready state to be claimed".to_string(),
             });
         }
 
         task.agent_type = Some(agent_type.to_string());
-        task.transition_to(TaskStatus::Running).map_err(|_| DomainError::InvalidStateTransition {
+        task.transition_to(TaskStatus::Running).map_err(|e| DomainError::InvalidStateTransition {
             from: task.status.as_str().to_string(),
             to: "running".to_string(),
+            reason: e,
         })?;
 
         self.task_repo.update(&task).await?;
@@ -566,9 +569,10 @@ impl<T: TaskRepository> TaskService<T> {
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
-        task.transition_to(TaskStatus::Complete).map_err(|_| DomainError::InvalidStateTransition {
+        task.transition_to(TaskStatus::Complete).map_err(|e| DomainError::InvalidStateTransition {
             from: task.status.as_str().to_string(),
             to: "complete".to_string(),
+            reason: e,
         })?;
 
         self.task_repo.update(&task).await?;
@@ -620,14 +624,15 @@ impl<T: TaskRepository> TaskService<T> {
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
-        task.transition_to(TaskStatus::Failed).map_err(|_| DomainError::InvalidStateTransition {
+        task.transition_to(TaskStatus::Failed).map_err(|e| DomainError::InvalidStateTransition {
             from: task.status.as_str().to_string(),
             to: "failed".to_string(),
+            reason: e,
         })?;
 
         let error_str = error_message.clone().unwrap_or_default();
         if let Some(msg) = error_message {
-            task.context.hints.push(format!("Error: {}", msg));
+            task.context.push_hint_bounded(format!("Error: {}", msg));
         }
 
         self.task_repo.update(&task).await?;
@@ -704,7 +709,7 @@ impl<T: TaskRepository> TaskService<T> {
                 h.to_lowercase().contains("trapped")
             });
             if is_trapped {
-                task.context.hints.push("convergence:fresh_start".to_string());
+                task.context.push_hint_bounded("convergence:fresh_start".to_string());
             }
         }
 
@@ -737,9 +742,10 @@ impl<T: TaskRepository> TaskService<T> {
             ));
         }
 
-        task.transition_to(TaskStatus::Canceled).map_err(|_| DomainError::InvalidStateTransition {
+        task.transition_to(TaskStatus::Canceled).map_err(|e| DomainError::InvalidStateTransition {
             from: task.status.as_str().to_string(),
             to: "canceled".to_string(),
+            reason: e,
         })?;
 
         self.task_repo.update(&task).await?;
@@ -790,9 +796,23 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         if self.has_failed_dependency(task).await? {
-            task.transition_to(TaskStatus::Blocked).ok();
+            if let Err(e) = task.transition_to(TaskStatus::Blocked) {
+                warn!(task_id = %task.id, error = %e, "Failed to transition task to Blocked");
+                return Err(DomainError::InvalidStateTransition {
+                    from: task.status.as_str().to_string(),
+                    to: "blocked".to_string(),
+                    reason: e,
+                });
+            }
         } else if self.are_dependencies_complete(task).await? {
-            task.transition_to(TaskStatus::Ready).ok();
+            if let Err(e) = task.transition_to(TaskStatus::Ready) {
+                warn!(task_id = %task.id, error = %e, "Failed to transition task to Ready");
+                return Err(DomainError::InvalidStateTransition {
+                    from: task.status.as_str().to_string(),
+                    to: "ready".to_string(),
+                    reason: e,
+                });
+            }
         }
 
         Ok(())
@@ -869,10 +889,11 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                     .get(task_id)
                     .await?
                     .ok_or(DomainError::TaskNotFound(task_id))?;
-                task.transition_to(new_status).map_err(|_| {
+                task.transition_to(new_status).map_err(|e| {
                     DomainError::InvalidStateTransition {
                         from: task.status.as_str().to_string(),
                         to: new_status.as_str().to_string(),
+                        reason: e,
                     }
                 })?;
                 self.task_repo.update(&task).await?;

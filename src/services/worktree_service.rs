@@ -148,6 +148,7 @@ impl<W: WorktreeRepository> WorktreeService<W> {
             return Err(DomainError::InvalidStateTransition {
                 from: worktree.status.as_str().to_string(),
                 to: "completed".to_string(),
+                reason: "worktree must be in Active state to be completed".to_string(),
             });
         }
 
@@ -167,6 +168,7 @@ impl<W: WorktreeRepository> WorktreeService<W> {
             return Err(DomainError::InvalidStateTransition {
                 from: worktree.status.as_str().to_string(),
                 to: "merging".to_string(),
+                reason: "worktree must be in Completed state to merge".to_string(),
             });
         }
 
