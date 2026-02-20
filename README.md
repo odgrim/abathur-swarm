@@ -186,7 +186,7 @@ state         = "open"
 filter_labels = "swarm-ingestible"
 ```
 
-Requires `GITHUB_TOKEN` in the environment.
+Requires `ABATHUR_GITHUB_TOKEN` in the environment.
 
 ### ClickUp
 
@@ -202,7 +202,7 @@ status_in_progress = "IN PROGRESS"
 status_done        = "COMPLETED"
 ```
 
-Requires `CLICKUP_API_TOKEN` in the environment.
+Requires `CLICKUP_API_KEY` in the environment.
 
 ## Contributing
 
