@@ -207,9 +207,8 @@ impl BudgetTracker {
         time_to_reset_secs: u64,
     ) {
         let window_id = window_id.into();
-        let new_level = self.level_from_pct(consumed_pct);
 
-        let previous_level = {
+        let (previous_level, new_aggregate_level) = {
             let mut inner = self.inner.write().await;
 
             // Update or insert the window.
@@ -230,13 +229,24 @@ impl BudgetTracker {
             }
 
             let previous = inner.pressure_level;
-            inner.pressure_level = new_level;
-            previous
+
+            // Compute worst-case pressure across ALL known windows.
+            // A single low-consumption window must never drop the aggregate
+            // pressure that was set by a different high-consumption window.
+            let worst_level = inner
+                .windows
+                .iter()
+                .map(|w| self.level_from_pct(w.consumed_pct))
+                .max()
+                .unwrap_or(BudgetPressureLevel::Normal);
+
+            inner.pressure_level = worst_level;
+            (previous, worst_level)
         };
 
-        // Emit pressure change if the level actually changed.
-        if previous_level != new_level {
-            let severity = if new_level > previous_level {
+        // Emit pressure change if the aggregate level actually changed.
+        if previous_level != new_aggregate_level {
+            let severity = if new_aggregate_level > previous_level {
                 EventSeverity::Warning
             } else {
                 EventSeverity::Info
@@ -248,7 +258,7 @@ impl BudgetTracker {
                 None,
                 EventPayload::BudgetPressureChanged {
                     previous_level,
-                    new_level,
+                    new_level: new_aggregate_level,
                     consumed_pct,
                     window_id: window_id.clone(),
                 },
@@ -552,5 +562,67 @@ mod tests {
         tracker.record_tokens_used(id, 500).await;
         let state = tracker.current_state().await;
         assert_eq!(state.total_tokens_recorded, 1500);
+    }
+
+    /// Regression test for the aggregate pressure bug:
+    /// A low-consumption window reporting in must never drop the aggregate
+    /// pressure that was established by a high-consumption window.
+    #[tokio::test]
+    async fn test_aggregate_pressure_is_worst_case_across_windows() {
+        let tracker = make_tracker();
+
+        // Daily window at 97% → Critical
+        tracker
+            .report_budget_signal("daily", BudgetWindowType::Daily, 0.97, 300, 3600)
+            .await;
+        let state = tracker.current_state().await;
+        assert_eq!(state.pressure_level, BudgetPressureLevel::Critical);
+
+        // Weekly window at 10% → Normal, but aggregate must stay Critical.
+        tracker
+            .report_budget_signal("weekly", BudgetWindowType::Weekly, 0.10, 90_000, 86400)
+            .await;
+        let state = tracker.current_state().await;
+        assert_eq!(
+            state.pressure_level,
+            BudgetPressureLevel::Critical,
+            "aggregate pressure must remain at worst-case; a low-consumption window \
+             must not drag it below Critical"
+        );
+
+        // Now the daily window recovers to 50% → both windows are below caution → Normal.
+        tracker
+            .report_budget_signal("daily", BudgetWindowType::Daily, 0.50, 50_000, 3000)
+            .await;
+        let state = tracker.current_state().await;
+        assert_eq!(
+            state.pressure_level,
+            BudgetPressureLevel::Normal,
+            "once all windows are below all thresholds, aggregate must drop to Normal"
+        );
+    }
+
+    /// Verify that two windows at different pressure tiers correctly produce
+    /// the higher tier as the aggregate.
+    #[tokio::test]
+    async fn test_aggregate_pressure_selects_higher_tier() {
+        let tracker = make_tracker();
+
+        // Monthly at Caution (65%)
+        tracker
+            .report_budget_signal("monthly", BudgetWindowType::Monthly, 0.65, 35_000, 2_592_000)
+            .await;
+
+        // Daily at Warning (82%)
+        tracker
+            .report_budget_signal("daily", BudgetWindowType::Daily, 0.82, 18_000, 3600)
+            .await;
+
+        let state = tracker.current_state().await;
+        assert_eq!(
+            state.pressure_level,
+            BudgetPressureLevel::Warning,
+            "aggregate should be Warning, not Caution — daily is at Warning tier"
+        );
     }
 }
