@@ -6930,6 +6930,7 @@ pub struct GoalConvergenceCheckHandler<G: GoalRepository, T: TaskRepository> {
     goal_repo: Arc<G>,
     task_repo: Arc<T>,
     command_bus: Arc<crate::services::command_bus::CommandBus>,
+    budget_tracker: Option<Arc<crate::services::budget_tracker::BudgetTracker>>,
 }
 
 impl<G: GoalRepository, T: TaskRepository> GoalConvergenceCheckHandler<G, T> {
@@ -6938,7 +6939,13 @@ impl<G: GoalRepository, T: TaskRepository> GoalConvergenceCheckHandler<G, T> {
         task_repo: Arc<T>,
         command_bus: Arc<crate::services::command_bus::CommandBus>,
     ) -> Self {
-        Self { goal_repo, task_repo, command_bus }
+        Self { goal_repo, task_repo, command_bus, budget_tracker: None }
+    }
+
+    /// Attach a budget tracker to enable budget-pressure gating of convergence checks.
+    pub fn with_budget_tracker(mut self, tracker: Arc<crate::services::budget_tracker::BudgetTracker>) -> Self {
+        self.budget_tracker = Some(tracker);
+        self
     }
 
     /// Build the rich task description for the convergence check.
@@ -7026,7 +7033,9 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
                 custom_predicate: Some(Arc::new(|event| {
                     matches!(
                         &event.payload,
-                        EventPayload::ScheduledEventFired { name, .. } if name == "goal-convergence-check"
+                        EventPayload::ScheduledEventFired { name, .. }
+                            if name == "goal-convergence-check"
+                                || name == "goal-convergence-check:budget-trigger"
                     )
                 })),
                 ..Default::default()
@@ -7036,9 +7045,16 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
         }
     }
 
-    async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
         use crate::services::command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand};
         use crate::domain::models::TaskPriority;
+
+        // Determine if this was triggered by a budget opportunity signal
+        let is_budget_trigger = matches!(
+            &event.payload,
+            EventPayload::ScheduledEventFired { name, .. }
+                if name == "goal-convergence-check:budget-trigger"
+        );
 
         // Load all active goals
         let goals = self.goal_repo.get_active_with_constraints().await
@@ -7072,11 +7088,27 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
             return Ok(Reaction::None);
         }
 
-        // Build idempotency key based on 4-hour time bucket.
-        // This ensures at most one task per 4-hour window.
+        // Budget gate: if triggered by the scheduler (not a budget opportunity), and budget
+        // pressure is critical, skip creating new work.
+        if !is_budget_trigger {
+            if let Some(ref bt) = self.budget_tracker {
+                if bt.should_pause_new_work().await {
+                    tracing::debug!("GoalConvergenceCheckHandler: pausing convergence check — budget at critical pressure");
+                    return Ok(Reaction::None);
+                }
+            }
+        }
+
+        // Build idempotency key.
+        // Budget-triggered checks get a unique key per timestamp to bypass the 4-hour window.
         let now = chrono::Utc::now();
-        let bucket = now.timestamp() / 14400; // 4-hour buckets
-        let idem_key = format!("goal-convergence-check:{}", bucket);
+        let idem_key = if is_budget_trigger {
+            format!("goal-convergence-check:budget:{}", now.timestamp())
+        } else {
+            // Standard 4-hour bucket idempotency key
+            let bucket = now.timestamp() / 14400;
+            format!("goal-convergence-check:{}", bucket)
+        };
 
         // Build the rich description
         let description = Self::build_convergence_description(
@@ -7960,5 +7992,115 @@ impl EventHandler for EgressRoutingHandler {
                 Ok(Reaction::EmitEvents(vec![fail_event]))
             }
         }
+    }
+}
+
+// ============================================================================
+// BudgetTokenAccumulatorHandler
+// ============================================================================
+
+/// Accumulates token usage from `AgentInstanceCompleted` events into the
+/// `BudgetTracker` and recomputes aggregate budget pressure.
+///
+/// This allows the budget system to maintain a running tally of tokens
+/// consumed by the swarm without polling external APIs.
+pub struct BudgetTokenAccumulatorHandler {
+    budget_tracker: Arc<crate::services::budget_tracker::BudgetTracker>,
+}
+
+impl BudgetTokenAccumulatorHandler {
+    pub fn new(budget_tracker: Arc<crate::services::budget_tracker::BudgetTracker>) -> Self {
+        Self { budget_tracker }
+    }
+}
+
+#[async_trait]
+impl EventHandler for BudgetTokenAccumulatorHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "BudgetTokenAccumulatorHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Agent])
+                .payload_types(vec!["AgentInstanceCompleted".to_string()]),
+            priority: HandlerPriority::SYSTEM,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let (task_id, tokens_used) = match &event.payload {
+            EventPayload::AgentInstanceCompleted { task_id, tokens_used, .. } => {
+                (*task_id, *tokens_used)
+            }
+            _ => return Ok(Reaction::None),
+        };
+
+        self.budget_tracker.record_tokens_used(task_id, tokens_used).await;
+        self.budget_tracker.recompute_state().await;
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// BudgetOpportunityHandler
+// ============================================================================
+
+/// Converts `BudgetOpportunityDetected` events into synthetic
+/// `ScheduledEventFired { name: "goal-convergence-check:budget-trigger" }`
+/// events, allowing the `GoalConvergenceCheckHandler` to fire an out-of-band
+/// convergence check when budget headroom is available.
+pub struct BudgetOpportunityHandler;
+
+impl BudgetOpportunityHandler {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for BudgetOpportunityHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl EventHandler for BudgetOpportunityHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "BudgetOpportunityHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Budget])
+                .payload_types(vec!["BudgetOpportunityDetected".to_string()]),
+            priority: HandlerPriority::HIGH,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let opportunity_score = match &event.payload {
+            EventPayload::BudgetOpportunityDetected { opportunity_score, .. } => *opportunity_score,
+            _ => return Ok(Reaction::None),
+        };
+
+        tracing::info!(
+            opportunity_score,
+            "BudgetOpportunityHandler: budget opportunity detected, triggering out-of-band convergence check"
+        );
+
+        let trigger_event = crate::services::event_factory::make_event(
+            EventSeverity::Info,
+            EventCategory::Scheduler,
+            None,
+            None,
+            EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "goal-convergence-check:budget-trigger".to_string(),
+            },
+        );
+
+        Ok(Reaction::EmitEvents(vec![trigger_event]))
     }
 }

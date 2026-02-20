@@ -56,6 +56,7 @@ impl SqliteEventRepository {
             EventCategory::Convergence => "convergence",
             EventCategory::Workflow => "workflow",
             EventCategory::Adapter => "adapter",
+            EventCategory::Budget => "budget",
         }
     }
 
@@ -73,6 +74,7 @@ impl SqliteEventRepository {
             "convergence" => EventCategory::Convergence,
             "workflow" => EventCategory::Workflow,
             "adapter" => EventCategory::Adapter,
+            "budget" => EventCategory::Budget,
             _ => EventCategory::Task,
         }
     }

@@ -38,6 +38,9 @@ pub struct Config {
     pub polling: PollingConfig,
     /// External adapter subsystem configuration.
     pub adapters: AdapterConfig,
+    /// Budget-aware scheduling configuration.
+    #[serde(default)]
+    pub budget: BudgetConfig,
     /// Name of the default workflow to use.
     #[serde(default = "default_workflow_name")]
     pub default_workflow: String,
@@ -60,6 +63,7 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             polling: PollingConfig::default(),
             adapters: AdapterConfig::default(),
+            budget: BudgetConfig::default(),
             default_workflow: default_workflow_name(),
             workflows: Vec::new(),
         }
@@ -450,6 +454,46 @@ impl Default for LoggingConfig {
         Self {
             level: "info".to_string(),
             format: "pretty".to_string(),
+        }
+    }
+}
+
+/// Configuration for the budget-aware scheduling subsystem.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BudgetConfig {
+    /// Consumed-% threshold that promotes pressure to Caution (default 0.60).
+    pub caution_threshold_pct: f64,
+    /// Consumed-% threshold that promotes pressure to Warning (default 0.80).
+    pub warning_threshold_pct: f64,
+    /// Consumed-% threshold that promotes pressure to Critical (default 0.95).
+    pub critical_threshold_pct: f64,
+    /// Consumed-% below which an opportunity window is signalled (default 0.30).
+    pub opportunity_threshold_pct: f64,
+    /// Minimum remaining tokens required to declare an opportunity window.
+    pub min_opportunity_tokens: u64,
+    /// Maximum concurrent agents when pressure is Normal.
+    pub max_agents_normal: u32,
+    /// Maximum concurrent agents when pressure is Caution.
+    pub max_agents_caution: u32,
+    /// Maximum concurrent agents when pressure is Warning.
+    pub max_agents_warning: u32,
+    /// Maximum concurrent agents when pressure is Critical.
+    pub max_agents_critical: u32,
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            caution_threshold_pct: 0.60,
+            warning_threshold_pct: 0.80,
+            critical_threshold_pct: 0.95,
+            opportunity_threshold_pct: 0.30,
+            min_opportunity_tokens: 10_000,
+            max_agents_normal: 5,
+            max_agents_caution: 4,
+            max_agents_warning: 2,
+            max_agents_critical: 1,
         }
     }
 }

@@ -537,13 +537,15 @@ where
 
         // GoalConvergenceCheckHandler (NORMAL) — periodic deep goal convergence evaluation
         if p.goal_convergence_check_enabled {
-            reactor
-                .register(Arc::new(GoalConvergenceCheckHandler::new(
-                    self.goal_repo.clone(),
-                    self.task_repo.clone(),
-                    command_bus.clone(),
-                )))
-                .await;
+            let mut convergence_handler = GoalConvergenceCheckHandler::new(
+                self.goal_repo.clone(),
+                self.task_repo.clone(),
+                command_bus.clone(),
+            );
+            if let Some(ref bt) = self.budget_tracker {
+                convergence_handler = convergence_handler.with_budget_tracker(bt.clone());
+            }
+            reactor.register(Arc::new(convergence_handler)).await;
 
             // GoalStagnationDetectorHandler (LOW) — alert when a goal hasn't been evaluated recently
             {
@@ -590,6 +592,18 @@ where
                     tracing::warn!("Failed to register active task schedules: {}", e);
                 }
             }
+        }
+
+        // Budget handlers — only when budget tracker is configured
+        if let Some(ref budget_tracker) = self.budget_tracker {
+            reactor.register(Arc::new(
+                crate::services::builtin_handlers::BudgetTokenAccumulatorHandler::new(
+                    budget_tracker.clone(),
+                )
+            )).await;
+            reactor.register(Arc::new(
+                crate::services::builtin_handlers::BudgetOpportunityHandler::new()
+            )).await;
         }
 
         // Adapter handlers — register only when an adapter registry is present

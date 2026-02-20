@@ -117,6 +117,9 @@ where
 
     /// Optional adapter registry for external system integration.
     pub(super) adapter_registry: Option<Arc<crate::services::adapter_registry::AdapterRegistry>>,
+
+    /// Optional budget tracker for budget-aware scheduling.
+    pub(super) budget_tracker: Option<Arc<crate::services::budget_tracker::BudgetTracker>>,
 }
 
 // ============================================================================
@@ -184,6 +187,7 @@ where
             convergence_engine_config: None,
             phase_orchestrator: None,
             adapter_registry: None,
+            budget_tracker: None,
         }
     }
 
@@ -330,6 +334,19 @@ where
         registry: Arc<crate::services::adapter_registry::AdapterRegistry>,
     ) -> Self {
         self.adapter_registry = Some(registry);
+        self
+    }
+
+    /// Attach a budget tracker for budget-aware scheduling.
+    ///
+    /// When present, the orchestrator will gate task dispatching based on
+    /// the current budget pressure level and emit budget events through the
+    /// event bus.
+    pub fn with_budget_tracker(
+        mut self,
+        tracker: Arc<crate::services::budget_tracker::BudgetTracker>,
+    ) -> Self {
+        self.budget_tracker = Some(tracker);
         self
     }
 

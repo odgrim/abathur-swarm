@@ -674,6 +674,15 @@ async fn run_swarm_foreground(
     .with_pool(pool.clone())
     .with_adapter_registry(adapter_registry);
 
+    // Wire up budget-aware scheduling using thresholds from abathur.toml [budget] section
+    let orchestrator = {
+        let tracker_config = crate::services::budget_tracker::BudgetTrackerConfig::from_budget_config(&app_config.budget);
+        let tracker = std::sync::Arc::new(
+            crate::services::budget_tracker::BudgetTracker::new(tracker_config, event_bus.clone())
+        );
+        orchestrator.with_budget_tracker(tracker)
+    };
+
     if !json_mode {
         println!("Starting Abathur Swarm Orchestrator");
         println!("   Max agents: {}", max_agents);
