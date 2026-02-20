@@ -6914,13 +6914,14 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
         let pending = self.task_repo.list_by_status(TaskStatus::Pending).await
             .map_err(|e| format!("GoalConvergenceCheckHandler: failed to list pending tasks: {}", e))?;
 
-        // Overlap check: skip if a previous convergence check task is still running/ready
-        let overlap_exists = running.iter()
+        // Overlap check: skip if a previous convergence check task is still enqueued/active
+        let overlap_exists = pending.iter()
             .chain(ready.iter())
+            .chain(running.iter())
             .any(|t| t.title.starts_with("Goal Convergence Check"));
 
         if overlap_exists {
-            tracing::debug!("GoalConvergenceCheckHandler: previous convergence check task still active, skipping");
+            tracing::debug!("GoalConvergenceCheckHandler: previous convergence check task already enqueued or active, skipping");
             return Ok(Reaction::None);
         }
 
