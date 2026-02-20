@@ -783,6 +783,9 @@ where
             }
         }
 
+        // Recover InProgress refinement requests from previous process run
+        self.evolution_loop.recover_in_progress_refinements().await;
+
         Ok(corrections)
     }
 }
