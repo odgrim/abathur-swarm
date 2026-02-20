@@ -7437,10 +7437,28 @@ impl<T: TaskRepository + 'static> EventHandler for IngestionPollHandler<T> {
                 // Map priority
                 let priority = item.priority.unwrap_or(crate::domain::models::TaskPriority::Normal);
 
-                let description = format!(
-                    "[Ingested from {} — {}]\n\n{}",
-                    adapter_name, item.external_id, item.description
+                // Build a structured header for the task description.
+                let mut header = format!(
+                    "[Ingested from {} — {}]",
+                    adapter_name, item.external_id
                 );
+
+                // When the ingested item carries a GitHub URL, surface it and
+                // instruct the agent to pass `issue_number` to `create_pr` so
+                // the PR body gets a "Closes #N" link. GitHub then closes the
+                // issue automatically when the PR is merged into the default branch.
+                if let Some(url) = item.metadata.get("github_url").and_then(|v| v.as_str()) {
+                    header.push_str(&format!("\nGitHub Issue: {url}"));
+                    header.push_str(&format!(
+                        "\n\nWhen creating a pull request to resolve this issue, \
+                         include `\"issue_number\": {}` in the create_pr params. \
+                         This appends \"Closes #{}\" to the PR body so GitHub \
+                         closes the issue automatically when the PR is merged.",
+                        item.external_id, item.external_id
+                    ));
+                }
+
+                let description = format!("{}\n\n{}", header, item.description);
 
                 let envelope = crate::services::command_bus::CommandEnvelope::new(
                     crate::services::command_bus::CommandSource::Adapter(adapter_name.to_string()),
