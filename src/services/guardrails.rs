@@ -94,6 +94,27 @@ impl RuntimeMetrics {
         self.total_tokens_used.fetch_add(tokens, Ordering::Relaxed);
     }
 
+    /// Atomically check if `requested` tokens fit within `max`, and record them if so.
+    ///
+    /// Uses `fetch_update` (CAS loop) to avoid TOCTOU races between callers.
+    /// Returns `Ok(new_total)` on success (tokens have been recorded),
+    /// or `Err(current)` if adding `requested` would exceed `max`.
+    pub fn check_and_record_tokens(&self, requested: u64, max: u64) -> Result<u64, u64> {
+        self.tokens_used_this_hour
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                if current + requested <= max {
+                    Some(current + requested)
+                } else {
+                    None
+                }
+            })
+            .map(|prev| {
+                // Also bump the all-time counter (no limit semantics, Relaxed is fine)
+                self.total_tokens_used.fetch_add(requested, Ordering::Relaxed);
+                prev + requested
+            })
+    }
+
     pub fn record_task_started(&self) {
         self.tasks_started.fetch_add(1, Ordering::Relaxed);
     }
@@ -297,6 +318,36 @@ impl Guardrails {
         self.metrics.record_tokens(tokens);
     }
 
+    /// Atomically check token budget and record usage if within limits.
+    ///
+    /// This is the race-free alternative to calling `check_tokens` then `record_tokens`
+    /// separately. The token increment is guaranteed to only happen if the limit is
+    /// not exceeded.
+    ///
+    /// Returns:
+    /// - `Allowed`          — tokens recorded, usage below 80% of max
+    /// - `Warning(message)` — tokens recorded, usage at or above 80% of max
+    /// - `Blocked(message)` — tokens NOT recorded, limit would be exceeded
+    pub fn check_and_record_tokens(&self, requested: u64) -> GuardrailResult {
+        let max = self.config.max_tokens_per_hour;
+        match self.metrics.check_and_record_tokens(requested, max) {
+            Ok(new_total) => {
+                if new_total > (max * 80) / 100 {
+                    GuardrailResult::Warning(format!(
+                        "Approaching token limit: {}/{} used",
+                        new_total, max
+                    ))
+                } else {
+                    GuardrailResult::Allowed
+                }
+            }
+            Err(_current) => GuardrailResult::Blocked(format!(
+                "Token limit ({}/hour) would be exceeded",
+                max
+            )),
+        }
+    }
+
     /// Record cost.
     pub fn record_cost(&self, cents: f64) {
         self.metrics.record_cost(cents);
@@ -394,5 +445,103 @@ mod tests {
 
         // Should block when exceeding
         assert!(guardrails.check_tokens(300).is_blocked());
+    }
+
+    #[test]
+    fn test_check_and_record_tokens_atomic() {
+        let config = GuardrailsConfig {
+            max_tokens_per_hour: 1000,
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        // Step 1: Fresh state — 500 tokens fits in 1000, should be Allowed
+        match guardrails.check_and_record_tokens(500) {
+            GuardrailResult::Allowed => {}
+            other => panic!("Expected Allowed, got {:?}", other),
+        }
+        assert_eq!(guardrails.get_metrics().get_tokens_this_hour(), 500);
+        assert_eq!(guardrails.get_metrics().get_total_tokens(), 500);
+
+        // Step 2: Add 300 more via record_tokens to reach 800 (exactly 80%, not > 80%)
+        guardrails.record_tokens(300);
+        assert_eq!(guardrails.get_metrics().get_tokens_this_hour(), 800);
+
+        // Step 3: At 85%: 800 + 50 = 850 > (1000 * 80 / 100 = 800) → Warning
+        //         Tokens ARE recorded atomically.
+        match guardrails.check_and_record_tokens(50) {
+            GuardrailResult::Warning(msg) => {
+                assert!(msg.contains("850"), "Warning message should contain new total: {}", msg);
+            }
+            other => panic!("Expected Warning, got {:?}", other),
+        }
+        assert_eq!(guardrails.get_metrics().get_tokens_this_hour(), 850);
+
+        // Step 4: Would exceed — 850 + 200 = 1050 > 1000 → Blocked
+        //         Counter must NOT change (atomicity guarantee).
+        match guardrails.check_and_record_tokens(200) {
+            GuardrailResult::Blocked(msg) => {
+                assert!(msg.contains("1000"), "Blocked message should contain limit: {}", msg);
+            }
+            other => panic!("Expected Blocked, got {:?}", other),
+        }
+        assert_eq!(
+            guardrails.get_metrics().get_tokens_this_hour(),
+            850,
+            "Counter must not change when request is blocked"
+        );
+
+        // Step 5: Exactly at boundary — 850 + 150 = 1000 == max → Warning (not Blocked)
+        //         (1000 > 800 → Warning, 1000 <= 1000 → not Blocked)
+        match guardrails.check_and_record_tokens(150) {
+            GuardrailResult::Warning(_) => {}
+            other => panic!("Expected Warning at exactly max, got {:?}", other),
+        }
+        assert_eq!(guardrails.get_metrics().get_tokens_this_hour(), 1000);
+    }
+
+    #[tokio::test]
+    async fn test_check_and_record_tokens_concurrent() {
+        let config = GuardrailsConfig {
+            max_tokens_per_hour: 1000,
+            ..Default::default()
+        };
+        let guardrails = Arc::new(Guardrails::new(config));
+
+        // Spawn 20 tasks each requesting 100 tokens.
+        // Only 10 can succeed (10 * 100 = 1000 == max).
+        // The other 10 must be blocked. Total recorded must never exceed 1000.
+        let handles: Vec<_> = (0..20)
+            .map(|_| {
+                let g = Arc::clone(&guardrails);
+                tokio::spawn(async move { g.check_and_record_tokens(100) })
+            })
+            .collect();
+
+        let mut allowed_count = 0u32;
+        let mut blocked_count = 0u32;
+        for handle in handles {
+            match handle.await.expect("task panicked") {
+                GuardrailResult::Allowed | GuardrailResult::Warning(_) => allowed_count += 1,
+                GuardrailResult::Blocked(_) => blocked_count += 1,
+            }
+        }
+
+        let total_recorded = guardrails.get_metrics().get_tokens_this_hour();
+
+        // Hard invariant: never exceed the limit
+        assert!(
+            total_recorded <= 1000,
+            "Total tokens recorded ({}) exceeded max (1000) — atomicity failure!",
+            total_recorded
+        );
+
+        // Exactly 10 allowed (each 100 tokens; max=1000, boundary inclusive)
+        assert_eq!(allowed_count, 10, "Expected exactly 10 allowed tasks");
+        assert_eq!(blocked_count, 10, "Expected exactly 10 blocked tasks");
+        assert_eq!(total_recorded, 1000, "Expected exactly 1000 tokens recorded");
+
+        // total_tokens_used must also match (both counters updated together)
+        assert_eq!(guardrails.get_metrics().get_total_tokens(), 1000);
     }
 }
