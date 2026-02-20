@@ -163,6 +163,11 @@ impl TaskType {
     pub fn is_verification(&self) -> bool {
         matches!(self, Self::Verification)
     }
+
+    /// Whether this task type is a review task.
+    pub fn is_review(&self) -> bool {
+        matches!(self, Self::Review)
+    }
 }
 
 /// Priority level for tasks.

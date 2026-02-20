@@ -1055,6 +1055,78 @@ where
             return Ok(None);
         }
 
+        // Guard: for review tasks, verify the implementation(s) being reviewed,
+        // not the review task itself. The reviewer is a QA proxy — the question
+        // is "did the implementation satisfy its intent?", not "was the review thorough?"
+        if task.task_type.is_review() {
+            if task.depends_on.is_empty() {
+                tracing::debug!(
+                    task_id = %task.id,
+                    "Skipping intent verification for review task with no dependencies"
+                );
+                return Ok(None);
+            }
+
+            // Collect the implementation tasks this review covers.
+            let mut impl_tasks = Vec::new();
+            for dep_id in &task.depends_on {
+                if let Ok(Some(dep)) = self.task_repo.get(*dep_id).await {
+                    // Skip nested review/verification tasks to avoid recursion.
+                    if !dep.task_type.is_review() && !dep.task_type.is_verification() {
+                        impl_tasks.push(dep);
+                    }
+                }
+            }
+
+            if impl_tasks.is_empty() {
+                tracing::debug!(
+                    task_id = %task.id,
+                    "Review task depends only on review/verification tasks; skipping intent verification"
+                );
+                return Ok(None);
+            }
+
+            // Extract intent from the goal (richer context) or the first implementation task.
+            let mut intent = if let Some(gid) = goal_id {
+                match self.extract_guiding_intent(gid).await {
+                    Ok(i) => i,
+                    Err(_) => OriginalIntent::from_task(impl_tasks[0].id, &impl_tasks[0].description),
+                }
+            } else {
+                OriginalIntent::from_task(impl_tasks[0].id, &impl_tasks[0].description)
+            };
+
+            if intent.original_text.trim().is_empty() {
+                return Ok(None);
+            }
+
+            if let Some(signals) = overseer_signals {
+                append_overseer_evidence(&mut intent.original_text, signals);
+            }
+
+            let verification_task_id = self
+                .create_verification_task(task, goal_id, iteration)
+                .await
+                .ok();
+
+            return match self.verify_intent(&intent, &impl_tasks, iteration).await {
+                Ok(result) => {
+                    if let Some(vtid) = verification_task_id {
+                        let _ = self.finalize_verification_task(vtid, &result).await;
+                    }
+                    Ok(Some(result))
+                }
+                Err(e) => {
+                    if let Some(vtid) = verification_task_id {
+                        let _ = self
+                            .fail_verification_task(vtid, &format!("Verification infrastructure error: {}", e))
+                            .await;
+                    }
+                    Err(e)
+                }
+            };
+        }
+
         // Try to extract intent from the goal first (richer context),
         // then fall back to the task description.
         let mut intent = if let Some(gid) = goal_id {
@@ -1084,98 +1156,7 @@ where
         // preconditions — the verifier decides whether failures are relevant
         // to the task's intent or are pre-existing/unrelated.
         if let Some(signals) = overseer_signals {
-            let mut evidence = String::from(
-                "\n\n## Overseer Evidence\n\n\
-                 The following static check results are provided as context for your \
-                 judgment. A failing build or test is important evidence but does NOT \
-                 automatically mean the intent is unsatisfied — use your judgment about \
-                 whether failures are related to the task's intent or are pre-existing/unrelated. \
-                 If new security vulnerabilities were introduced by the work, this is a strong \
-                 signal against satisfaction unless the task explicitly involves security \
-                 trade-offs. Your assessment of intent satisfaction is the authoritative \
-                 finality decision.\n\n",
-            );
-
-            if let Some(ref build) = signals.build_result {
-                evidence.push_str(&format!(
-                    "- **Build**: {} ({})\n",
-                    if build.success { "PASS" } else { "FAIL" },
-                    if build.error_count > 0 {
-                        format!("{} error(s)", build.error_count)
-                    } else {
-                        "clean".to_string()
-                    },
-                ));
-                if !build.errors.is_empty() {
-                    for err in build.errors.iter().take(5) {
-                        evidence.push_str(&format!("  - {}\n", err));
-                    }
-                }
-            }
-
-            if let Some(ref tc) = signals.type_check {
-                evidence.push_str(&format!(
-                    "- **Type Check**: {} ({})\n",
-                    if tc.clean { "CLEAN" } else { "FAIL" },
-                    if tc.error_count > 0 {
-                        format!("{} error(s)", tc.error_count)
-                    } else {
-                        "clean".to_string()
-                    },
-                ));
-                if !tc.errors.is_empty() {
-                    for err in tc.errors.iter().take(5) {
-                        evidence.push_str(&format!("  - {}\n", err));
-                    }
-                }
-            }
-
-            if let Some(ref tests) = signals.test_results {
-                evidence.push_str(&format!(
-                    "- **Tests**: {}/{} passing ({} failed, {} regressions)\n",
-                    tests.passed, tests.total, tests.failed, tests.regression_count,
-                ));
-                if !tests.failing_test_names.is_empty() {
-                    evidence.push_str("  Failing tests:\n");
-                    for name in tests.failing_test_names.iter().take(10) {
-                        evidence.push_str(&format!("  - {}\n", name));
-                    }
-                }
-            }
-
-            if let Some(ref lint) = signals.lint_results {
-                evidence.push_str(&format!(
-                    "- **Lint**: {} error(s), {} warning(s)\n",
-                    lint.error_count, lint.warning_count,
-                ));
-            }
-
-            if let Some(ref sec) = signals.security_scan {
-                evidence.push_str(&format!(
-                    "- **Security**: {} critical, {} high, {} medium finding(s)\n",
-                    sec.critical_count, sec.high_count, sec.medium_count,
-                ));
-                if !sec.findings.is_empty() {
-                    for finding in sec.findings.iter().take(5) {
-                        evidence.push_str(&format!("  - {}\n", finding));
-                    }
-                }
-            }
-
-            for check in &signals.custom_checks {
-                evidence.push_str(&format!(
-                    "- **Custom '{}' **: {} — {}\n",
-                    check.name,
-                    if check.passed { "PASS" } else { "FAIL" },
-                    check.details,
-                ));
-            }
-
-            if !signals.has_any_signal() {
-                evidence.push_str("- No overseer signals available for this iteration.\n");
-            }
-
-            intent.original_text.push_str(&evidence);
+            append_overseer_evidence(&mut intent.original_text, signals);
         }
 
         // Create a verification task to make this run visible in the task tree.
@@ -1208,6 +1189,105 @@ where
             }
         }
     }
+}
+
+/// Append structured overseer evidence to an intent text string.
+///
+/// This consolidates static-check signals (build, type-check, tests, lint,
+/// security, custom) into a markdown section that the verifier can reason over.
+fn append_overseer_evidence(text: &mut String, signals: &OverseerSignals) {
+    let mut evidence = String::from(
+        "\n\n## Overseer Evidence\n\n\
+         The following static check results are provided as context for your \
+         judgment. A failing build or test is important evidence but does NOT \
+         automatically mean the intent is unsatisfied — use your judgment about \
+         whether failures are related to the task's intent or are pre-existing/unrelated. \
+         If new security vulnerabilities were introduced by the work, this is a strong \
+         signal against satisfaction unless the task explicitly involves security \
+         trade-offs. Your assessment of intent satisfaction is the authoritative \
+         finality decision.\n\n",
+    );
+
+    if let Some(ref build) = signals.build_result {
+        evidence.push_str(&format!(
+            "- **Build**: {} ({})\n",
+            if build.success { "PASS" } else { "FAIL" },
+            if build.error_count > 0 {
+                format!("{} error(s)", build.error_count)
+            } else {
+                "clean".to_string()
+            },
+        ));
+        if !build.errors.is_empty() {
+            for err in build.errors.iter().take(5) {
+                evidence.push_str(&format!("  - {}\n", err));
+            }
+        }
+    }
+
+    if let Some(ref tc) = signals.type_check {
+        evidence.push_str(&format!(
+            "- **Type Check**: {} ({})\n",
+            if tc.clean { "CLEAN" } else { "FAIL" },
+            if tc.error_count > 0 {
+                format!("{} error(s)", tc.error_count)
+            } else {
+                "clean".to_string()
+            },
+        ));
+        if !tc.errors.is_empty() {
+            for err in tc.errors.iter().take(5) {
+                evidence.push_str(&format!("  - {}\n", err));
+            }
+        }
+    }
+
+    if let Some(ref tests) = signals.test_results {
+        evidence.push_str(&format!(
+            "- **Tests**: {}/{} passing ({} failed, {} regressions)\n",
+            tests.passed, tests.total, tests.failed, tests.regression_count,
+        ));
+        if !tests.failing_test_names.is_empty() {
+            evidence.push_str("  Failing tests:\n");
+            for name in tests.failing_test_names.iter().take(10) {
+                evidence.push_str(&format!("  - {}\n", name));
+            }
+        }
+    }
+
+    if let Some(ref lint) = signals.lint_results {
+        evidence.push_str(&format!(
+            "- **Lint**: {} error(s), {} warning(s)\n",
+            lint.error_count, lint.warning_count,
+        ));
+    }
+
+    if let Some(ref sec) = signals.security_scan {
+        evidence.push_str(&format!(
+            "- **Security**: {} critical, {} high, {} medium finding(s)\n",
+            sec.critical_count, sec.high_count, sec.medium_count,
+        ));
+        if !sec.findings.is_empty() {
+            for finding in sec.findings.iter().take(5) {
+                evidence.push_str(&format!("  - {}\n", finding));
+            }
+        }
+    }
+
+    for check in &signals.custom_checks {
+        evidence.push_str(&format!(
+            "- **Custom '{}' **: {} — {}\n",
+            check.name,
+            if check.passed { "PASS" } else { "FAIL" },
+            check.details,
+        ));
+    }
+
+    if !signals.has_any_signal() {
+        evidence.push_str("- No overseer signals available for this iteration.\n");
+    }
+
+    text.push_str(&evidence);
 }
 
 /// System prompt for the intent verifier agent.
