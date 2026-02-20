@@ -249,8 +249,16 @@ where
         self
     }
 
-    /// Provide a DB pool for services that need persistence (absence timers, command dedup).
+    /// Provide a DB pool for services that need persistence (absence timers, command dedup,
+    /// and evolution loop refinement requests).
     pub fn with_pool(mut self, pool: sqlx::SqlitePool) -> Self {
+        use crate::adapters::sqlite::SqliteRefinementRepository;
+        use crate::services::evolution_loop::EvolutionConfig;
+
+        let refinement_repo = Arc::new(SqliteRefinementRepository::new(pool.clone()));
+        self.evolution_loop = Arc::new(
+            EvolutionLoop::new(EvolutionConfig::default()).with_repo(refinement_repo),
+        );
         self.pool = Some(pool);
         self
     }

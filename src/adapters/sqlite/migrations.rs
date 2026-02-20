@@ -114,5 +114,10 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
             description: "Per-goal convergence check tracking".to_string(),
             sql: include_str!("../../../migrations/006_goal_convergence_check_at.sql").to_string(),
         },
+        Migration {
+            version: 7,
+            description: "Refinement requests persistence for evolution loop".to_string(),
+            sql: include_str!("../../../migrations/007_refinement_requests.sql").to_string(),
+        },
     ]
 }
