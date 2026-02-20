@@ -17,6 +17,7 @@ Abathur coordinates multiple AI agents to work on complex tasks. It handles task
 - **Rust 1.85+** — install via [rustup](https://rustup.rs)
 - **ANTHROPIC_API_KEY** — set in your environment; agents run on Claude
 - **Git 2.5+** — worktree isolation requires Git worktree support
+- No system SQLite required — SQLite is bundled in the binary
 
 ## Installation
 
@@ -89,7 +90,7 @@ abathur workflow       Manage workflow templates
 abathur adapter        Manage adapter plugins
 ```
 
-All commands support `--json` for machine-readable output and `-v` / `-vv` / `-vvv` for increased verbosity.
+All commands support `--json` for machine-readable output and `--config <path>` to override the default `abathur.toml`.
 
 ## Configuration
 
