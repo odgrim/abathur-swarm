@@ -379,6 +379,27 @@ pub struct TaskContext {
     pub custom: std::collections::HashMap<String, serde_json::Value>,
 }
 
+impl TaskContext {
+    /// Maximum number of hints retained in the context.
+    ///
+    /// When this cap is reached, the oldest hints are evicted from the front
+    /// of the vector so that the most recent hints are always preserved.
+    pub const MAX_HINTS: usize = 20;
+
+    /// Push a hint, enforcing the [`MAX_HINTS`](Self::MAX_HINTS) cap.
+    ///
+    /// If the hints vector would exceed `MAX_HINTS` after the push, the
+    /// oldest entries are drained from the front until the length is within
+    /// the cap. This retains the most recently added hints.
+    pub fn push_hint_bounded(&mut self, hint: String) {
+        self.hints.push(hint);
+        if self.hints.len() > Self::MAX_HINTS {
+            let excess = self.hints.len() - Self::MAX_HINTS;
+            self.hints.drain(..excess);
+        }
+    }
+}
+
 /// A discrete unit of work that can be executed by an agent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
@@ -757,5 +778,40 @@ mod tests {
         // Valid task
         let task = Task::new("Valid prompt");
         assert!(task.validate().is_ok());
+    }
+
+    #[test]
+    fn test_push_hint_bounded_caps_at_max() {
+        let mut ctx = TaskContext::default();
+        let total = TaskContext::MAX_HINTS + 5;
+
+        for i in 0..total {
+            ctx.push_hint_bounded(format!("hint-{}", i));
+        }
+
+        // The vec must not exceed MAX_HINTS.
+        assert_eq!(ctx.hints.len(), TaskContext::MAX_HINTS);
+
+        // The most recent hints must be retained (oldest were evicted).
+        let first_retained = total - TaskContext::MAX_HINTS;
+        assert_eq!(ctx.hints[0], format!("hint-{}", first_retained));
+        assert_eq!(
+            ctx.hints[TaskContext::MAX_HINTS - 1],
+            format!("hint-{}", total - 1)
+        );
+    }
+
+    #[test]
+    fn test_push_hint_bounded_under_cap() {
+        let mut ctx = TaskContext::default();
+
+        for i in 0..5 {
+            ctx.push_hint_bounded(format!("hint-{}", i));
+        }
+
+        // Under the cap, all hints are retained.
+        assert_eq!(ctx.hints.len(), 5);
+        assert_eq!(ctx.hints[0], "hint-0");
+        assert_eq!(ctx.hints[4], "hint-4");
     }
 }

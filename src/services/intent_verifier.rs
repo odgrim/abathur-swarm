@@ -1020,7 +1020,7 @@ where
         error: &str,
     ) -> DomainResult<()> {
         if let Ok(Some(mut task)) = self.task_repo.get(verification_task_id).await {
-            task.context.hints.push(format!("Error: {}", error));
+            task.context.push_hint_bounded(format!("Error: {}", error));
             let _ = task.transition_to(TaskStatus::Failed);
             let _ = self.task_repo.update(&task).await;
         }

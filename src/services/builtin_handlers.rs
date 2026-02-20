@@ -550,7 +550,7 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
                 "consecutive_budget_failures".to_string(),
                 serde_json::json!(consecutive),
             );
-            updated.context.hints.push("retry:max_turns_exceeded".to_string());
+            updated.context.push_hint_bounded("retry:max_turns_exceeded".to_string());
             updated.context.custom.insert(
                 "last_failure_reason".to_string(),
                 serde_json::Value::String(error.to_string()),
@@ -4295,9 +4295,9 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceSLAPressureHandler
         // When escalating to critical, also ensure warning hint is present
         let mut updated = task.clone();
         if hint == "sla:critical" && !updated.context.hints.iter().any(|h| h == "sla:warning") {
-            updated.context.hints.push("sla:warning".to_string());
+            updated.context.push_hint_bounded("sla:warning".to_string());
         }
-        updated.context.hints.push(hint.to_string());
+        updated.context.push_hint_bounded(hint.to_string());
         updated.updated_at = chrono::Utc::now();
 
         self.task_repo.update(&updated).await

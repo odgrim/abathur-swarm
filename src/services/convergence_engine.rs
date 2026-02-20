@@ -595,9 +595,9 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             obs_with_metrics = obs_with_metrics.with_verification(verification);
         }
 
-        // Push observation
-        trajectory.observations.push(obs_with_metrics);
-        trajectory.strategy_log.push(entry);
+        // Push observation (bounded to prevent unbounded JSON growth)
+        trajectory.push_observation_bounded(obs_with_metrics);
+        trajectory.push_strategy_log_bounded(entry);
 
         // Emit ObservationRecorded
         if let Some(obs) = trajectory.observations.last() {

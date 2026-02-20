@@ -2,6 +2,11 @@
 
 use std::collections::HashMap;
 
+/// Emit a warning when a serialized JSON blob for a trajectory column
+/// exceeds this size. This is a signal that the capping logic may not be
+/// working as expected or that individual entries are unusually large.
+const JSON_SIZE_WARN_BYTES: usize = 64 * 1024;
+
 use async_trait::async_trait;
 use sqlx::SqlitePool;
 
@@ -46,10 +51,24 @@ impl TrajectoryRepository for SqliteTrajectoryRepository {
 
         let specification_json = serde_json::to_string(&trajectory.specification)?;
         let observations_json = serde_json::to_string(&trajectory.observations)?;
+        if observations_json.len() > JSON_SIZE_WARN_BYTES {
+            tracing::warn!(
+                trajectory_id = %id,
+                size_bytes = observations_json.len(),
+                "observations_json exceeds size threshold; JSON growth may be unbounded"
+            );
+        }
         let attractor_state_json = serde_json::to_string(&trajectory.attractor_state)?;
         let budget_json = serde_json::to_string(&trajectory.budget)?;
         let policy_json = serde_json::to_string(&trajectory.policy)?;
         let strategy_log_json = serde_json::to_string(&trajectory.strategy_log)?;
+        if strategy_log_json.len() > JSON_SIZE_WARN_BYTES {
+            tracing::warn!(
+                trajectory_id = %id,
+                size_bytes = strategy_log_json.len(),
+                "strategy_log_json exceeds size threshold; JSON growth may be unbounded"
+            );
+        }
         let context_health_json = serde_json::to_string(&trajectory.context_health)?;
         let hints_json = serde_json::to_string(&trajectory.hints)?;
         let forced_strategy_json = trajectory

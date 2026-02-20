@@ -632,7 +632,7 @@ impl<T: TaskRepository> TaskService<T> {
 
         let error_str = error_message.clone().unwrap_or_default();
         if let Some(msg) = error_message {
-            task.context.hints.push(format!("Error: {}", msg));
+            task.context.push_hint_bounded(format!("Error: {}", msg));
         }
 
         self.task_repo.update(&task).await?;
@@ -709,7 +709,7 @@ impl<T: TaskRepository> TaskService<T> {
                 h.to_lowercase().contains("trapped")
             });
             if is_trapped {
-                task.context.hints.push("convergence:fresh_start".to_string());
+                task.context.push_hint_bounded("convergence:fresh_start".to_string());
             }
         }
 
