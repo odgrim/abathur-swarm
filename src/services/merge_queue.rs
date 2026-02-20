@@ -235,6 +235,9 @@ where
         agent_branch: &str,
         task_branch: &str,
     ) -> DomainResult<Uuid> {
+        validate_branch_name(agent_branch)?;
+        validate_branch_name(task_branch)?;
+
         // Get worktree for this task
         let worktree = self.worktree_repo.get_by_task(task_id).await?
             .ok_or_else(|| DomainError::ValidationFailed(
@@ -261,6 +264,9 @@ where
         target_branch: &str,
         target_workdir: &str,
     ) -> DomainResult<Uuid> {
+        validate_branch_name(source_branch)?;
+        validate_branch_name(target_branch)?;
+
         let request = MergeRequest::new_stage1(
             task_id,
             source_branch.to_string(),
@@ -279,6 +285,9 @@ where
             .ok_or_else(|| DomainError::ValidationFailed(
                 format!("No worktree found for task {}", task_id)
             ))?;
+
+        validate_branch_name(&worktree.branch)?;
+        validate_branch_name(&self.config.main_branch)?;
 
         let request = MergeRequest::new_stage2(
             task_id,
@@ -540,7 +549,7 @@ where
         // Merge source into target
         let merge_msg = format!("Merge {} into {}", source, target);
         let merge = Command::new("git")
-            .args(["merge", "--no-ff", source, "-m", &merge_msg])
+            .args(["merge", "--no-ff", "-m", &merge_msg, "--", source])
             .current_dir(workdir)
             .output()
             .await
@@ -790,6 +799,47 @@ where
     }
 }
 
+/// Validates a git branch name to prevent command injection.
+///
+/// Rejects names that could be interpreted as git flags or otherwise subvert
+/// git command execution. Follows `git check-ref-format` rules.
+fn validate_branch_name(name: &str) -> DomainResult<()> {
+    if name.is_empty() {
+        return Err(DomainError::ValidationFailed(
+            "Branch name cannot be empty".to_string(),
+        ));
+    }
+    if name.starts_with('-') {
+        return Err(DomainError::ValidationFailed(format!(
+            "Invalid branch name '{}': must not start with '-'",
+            name
+        )));
+    }
+    if name.contains("..") {
+        return Err(DomainError::ValidationFailed(format!(
+            "Invalid branch name '{}': must not contain '..'",
+            name
+        )));
+    }
+    for ch in name.chars() {
+        if ch.is_ascii_control()
+            || matches!(ch, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+        {
+            return Err(DomainError::ValidationFailed(format!(
+                "Invalid branch name '{}': contains disallowed character '{}'",
+                name, ch
+            )));
+        }
+    }
+    if name.ends_with(".lock") {
+        return Err(DomainError::ValidationFailed(format!(
+            "Invalid branch name '{}': must not end with '.lock'",
+            name
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,5 +896,61 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"success\":true"));
         assert!(json.contains("\"commit_sha\":\"abc123\""));
+    }
+
+    // --- validate_branch_name tests ---
+
+    #[test]
+    fn test_validate_branch_name_rejects_empty() {
+        let err = validate_branch_name("").unwrap_err();
+        assert!(
+            err.to_string().contains("empty"),
+            "Expected 'empty' in error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_branch_name_rejects_leading_dash() {
+        assert!(validate_branch_name("-Xours").is_err());
+        assert!(validate_branch_name("--strategy=recursive").is_err());
+        assert!(validate_branch_name("-").is_err());
+        assert!(validate_branch_name("--allow-unrelated-histories").is_err());
+    }
+
+    #[test]
+    fn test_validate_branch_name_rejects_double_dot() {
+        assert!(validate_branch_name("main..evil").is_err());
+        assert!(validate_branch_name("feature..main").is_err());
+        assert!(validate_branch_name("a..b").is_err());
+    }
+
+    #[test]
+    fn test_validate_branch_name_rejects_invalid_chars() {
+        assert!(validate_branch_name("branch~1").is_err());
+        assert!(validate_branch_name("branch^evil").is_err());
+        assert!(validate_branch_name("branch:evil").is_err());
+        assert!(validate_branch_name("branch?evil").is_err());
+        assert!(validate_branch_name("branch*evil").is_err());
+        assert!(validate_branch_name("branch[evil").is_err());
+        assert!(validate_branch_name("branch\\evil").is_err());
+        assert!(validate_branch_name("branch name").is_err());
+    }
+
+    #[test]
+    fn test_validate_branch_name_rejects_lock_suffix() {
+        assert!(validate_branch_name("feature.lock").is_err());
+        assert!(validate_branch_name("main.lock").is_err());
+    }
+
+    #[test]
+    fn test_validate_branch_name_accepts_valid_names() {
+        assert!(validate_branch_name("main").is_ok());
+        assert!(validate_branch_name("feature/my-feature").is_ok());
+        assert!(validate_branch_name("abathur/task-12345678").is_ok());
+        assert!(validate_branch_name("task/abc123").is_ok());
+        assert!(validate_branch_name("fix/issue-38").is_ok());
+        assert!(validate_branch_name("release/1.0.0").is_ok());
+        assert!(validate_branch_name("v2.0.0").is_ok());
     }
 }
