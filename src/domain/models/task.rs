@@ -814,4 +814,21 @@ mod tests {
         assert_eq!(ctx.hints[0], "hint-0");
         assert_eq!(ctx.hints[4], "hint-4");
     }
+
+    #[test]
+    fn test_push_hint_bounded_at_exact_cap() {
+        let mut ctx = TaskContext::default();
+
+        // Push exactly MAX_HINTS items — no eviction should occur.
+        for i in 0..TaskContext::MAX_HINTS {
+            ctx.push_hint_bounded(format!("hint-{}", i));
+        }
+
+        assert_eq!(ctx.hints.len(), TaskContext::MAX_HINTS);
+        assert_eq!(ctx.hints[0], "hint-0");
+        assert_eq!(
+            ctx.hints[TaskContext::MAX_HINTS - 1],
+            format!("hint-{}", TaskContext::MAX_HINTS - 1)
+        );
+    }
 }
