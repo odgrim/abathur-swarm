@@ -264,6 +264,9 @@ pub enum EventPayload {
         iteration: u32,
         max_iterations: u32,
         new_plan_task_id: Uuid,
+        /// The new review task ID, stored as successor on the failed review task
+        /// so the parent orchestrating agent can follow the chain.
+        new_review_task_id: Uuid,
     },
 
     // Agent events
