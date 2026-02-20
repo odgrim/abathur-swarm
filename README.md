@@ -8,9 +8,16 @@ Abathur coordinates multiple AI agents to work on complex tasks. It handles task
 
 - **Task orchestration**: Break down work into a DAG of subtasks, route them to specialized agents, run them in parallel waves
 - **Git worktree isolation**: Each task runs in its own worktree so agents can work on different parts of the codebase simultaneously without stepping on each other
-- **Three-tier memory**: Semantic, episodic, and procedural memory with configurable decay. Agents can query past context and learnings
+- **Three-tier memory**: Working, episodic, and semantic memory with configurable decay. Agents can query past context and learnings
 - **Agent evolution**: Track success rates per agent template version. Underperforming agents get refined, regressions get reverted
 - **Meta-planning**: A meta-planner agent analyzes incoming tasks, detects capability gaps, and can spawn new specialist agents when needed
+
+## Prerequisites
+
+- **Rust 1.85+** — install via [rustup](https://rustup.rs)
+- **ANTHROPIC_API_KEY** — set in your environment; agents run on Claude
+- **Git 2.5+** — worktree isolation requires Git worktree support
+- No system SQLite required — SQLite is bundled in the binary
 
 ## Installation
 
@@ -70,47 +77,81 @@ abathur swarm start
 ```
 abathur init           Initialize project structure
 abathur goal           Manage convergent goals
-abathur task           Submit and track tasks  
+abathur task           Submit and track tasks
 abathur memory         Query the three-tier memory system
 abathur agent          List and inspect agent templates
 abathur worktree       Manage git worktrees for task isolation
 abathur swarm          Start/stop the orchestrator
 abathur mcp            Run MCP servers for agent access to infrastructure
+abathur trigger        Manage trigger rules for event-driven automation
+abathur schedule       Manage periodic task schedules
+abathur event          Query and inspect the event store
+abathur workflow       Manage workflow templates
+abathur adapter        Manage adapter plugins
 ```
 
-All commands support `--json` for machine-readable output.
+All commands support `--json` for machine-readable output and `--config <path>` to override the default `abathur.toml`.
 
 ## Configuration
 
-Create an `abathur.toml` in your project root:
+Create an `abathur.toml` in your project root (see `examples/abathur.toml` for a fully annotated reference):
 
 ```toml
 [limits]
 max_depth = 5
 max_subtasks = 10
-max_descendants = 50
+max_descendants = 100
+max_concurrent_tasks = 5
 
 [memory]
-semantic_decay_rate = 0.01
-episodic_decay_rate = 0.05
-procedural_decay_rate = 0.02
+decay_rate = 0.05
+prune_threshold = 0.1
+maintenance_interval_secs = 3600
 
-[worktree]
+[worktrees]
 base_path = ".abathur/worktrees"
+auto_cleanup = true
+
+[polling]
+goal_convergence_check_interval_secs = 28800
 ```
 
-Environment variables with the `ABATHUR_` prefix override config file values.
+Environment variables with the `ABATHUR_` prefix override config file values (e.g. `ABATHUR_LIMITS_MAX_DEPTH`, `ABATHUR_DATABASE_PATH`, `ABATHUR_LOG_LEVEL`).
 
 ## Architecture
 
-The codebase follows hexagonal architecture:
+Abathur follows hexagonal architecture — domain logic is isolated from infrastructure through port interfaces:
 
-- `domain/models/` - Core types: tasks, goals, memory, agents, worktrees
-- `domain/ports/` - Repository traits (interfaces)
-- `adapters/sqlite/` - SQLite implementations
-- `adapters/substrates/` - LLM backend integrations (Claude Code, Anthropic API)
-- `services/` - Business logic: orchestrator, meta-planner, memory decay, merge queue
-- `cli/` - Command handlers
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        CLI / MCP                            │
+│              (clap commands, HTTP JSON handlers)            │
+└───────────────────────┬─────────────────────────────────────┘
+                        │
+┌───────────────────────▼─────────────────────────────────────┐
+│                      Services                               │
+│  orchestrator · meta-planner · memory-decay · merge-queue   │
+│  convergence-engine · evolution-loop · adapter-manager      │
+└───────┬──────────────────────────────────────┬──────────────┘
+        │  domain/ports (traits)               │
+┌───────▼──────────┐               ┌───────────▼──────────────┐
+│   Domain Models  │               │       Adapters           │
+│  tasks · goals   │               │  SQLite repositories     │
+│  memory · agents │               │  Claude / Anthropic API  │
+│  worktrees       │               │  External plugins        │
+│  events          │               │  (GitHub, ClickUp, …)    │
+└──────────────────┘               └──────────────────────────┘
+```
+
+Source layout:
+
+- `src/domain/models/` — Core types: tasks, goals, memory, agents, worktrees, events
+- `src/domain/ports/` — Repository and service traits (interfaces)
+- `src/adapters/sqlite/` — SQLite implementations of all repository ports
+- `src/adapters/substrates/` — LLM backend integrations (Claude Code, Anthropic API)
+- `src/adapters/plugins/` — External adapter plugins (GitHub Issues, ClickUp)
+- `src/services/` — Business logic: orchestrator, meta-planner, memory decay, merge queue
+- `src/cli/` — Command handlers
 
 ## How agents work
 
@@ -128,6 +169,45 @@ When agents complete work:
 2. Task branches merge into main after integration verification passes
 
 Conflicts trigger retry-with-rebase. Persistent conflicts escalate to a merge conflict specialist agent.
+
+## External adapters
+
+Adapters connect Abathur to external project management tools, feeding work items in as tasks and syncing status back out. Adapter definitions live in `.abathur/adapters/<name>/adapter.toml`.
+
+### GitHub Issues
+
+Polls GitHub repository issues and creates Abathur tasks. Lifecycle events (task completed, failed) close or reopen the corresponding issue.
+
+```toml
+# .abathur/adapters/github-issues/adapter.toml
+[config]
+owner         = "your-org"
+repo          = "your-repo"
+state         = "open"
+filter_labels = "swarm-ingestible"
+```
+
+Requires `ABATHUR_GITHUB_TOKEN` in the environment.
+
+### ClickUp
+
+Polls a ClickUp list for tasks and syncs status updates back. Tag-based filtering controls which tasks are ingested.
+
+```toml
+# .abathur/adapters/clickup/adapter.toml
+[config]
+list_id            = "901711146339"
+filter_tag         = ""
+status_pending     = "PENDING"
+status_in_progress = "IN PROGRESS"
+status_done        = "COMPLETED"
+```
+
+Requires `CLICKUP_API_KEY` in the environment.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding conventions, and the PR process.
 
 ## License
 
