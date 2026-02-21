@@ -44,6 +44,9 @@ pub enum DomainError {
 
     #[error("Task schedule not found: {0}")]
     TaskScheduleNotFound(Uuid),
+
+    #[error("Invalid branch name: {0}")]
+    InvalidBranchName(String),
 }
 
 pub type DomainResult<T> = Result<T, DomainError>;
