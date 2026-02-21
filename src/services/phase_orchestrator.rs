@@ -438,7 +438,13 @@ where
         for (task, _) in &tasks {
             if task.depends_on.is_empty() {
                 let mut t = task.clone();
-                t.status = TaskStatus::Ready;
+                t.transition_to(TaskStatus::Ready).map_err(|e| {
+                    DomainError::InvalidStateTransition {
+                        from: t.status.as_str().to_string(),
+                        to: "ready".to_string(),
+                        reason: e,
+                    }
+                })?;
                 self.task_repo.update(&t).await?;
             }
         }

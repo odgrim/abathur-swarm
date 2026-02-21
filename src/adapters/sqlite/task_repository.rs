@@ -596,10 +596,10 @@ mod tests {
         let repo = setup_test_repo().await;
 
         let mut task1 = Task::with_title("Ready High", "Desc").with_priority(TaskPriority::High);
-        task1.status = TaskStatus::Ready;
+        task1.force_status(TaskStatus::Ready, "test setup");
 
         let mut task2 = Task::with_title("Ready Low", "Desc").with_priority(TaskPriority::Low);
-        task2.status = TaskStatus::Ready;
+        task2.force_status(TaskStatus::Ready, "test setup");
 
         repo.create(&task1).await.unwrap();
         repo.create(&task2).await.unwrap();
@@ -614,7 +614,7 @@ mod tests {
         let repo = setup_test_repo().await;
 
         let mut task = Task::with_title("Claimable", "Desc");
-        task.status = TaskStatus::Ready;
+        task.force_status(TaskStatus::Ready, "test setup");
         repo.create(&task).await.unwrap();
 
         let claimed = repo.claim_task_atomic(task.id, "overmind").await.unwrap();
@@ -631,7 +631,7 @@ mod tests {
         let repo = setup_test_repo().await;
 
         let mut task = Task::with_title("Race me", "Desc");
-        task.status = TaskStatus::Ready;
+        task.force_status(TaskStatus::Ready, "test setup");
         repo.create(&task).await.unwrap();
 
         let first = repo.claim_task_atomic(task.id, "overmind").await.unwrap();
@@ -659,7 +659,7 @@ mod tests {
         let repo = setup_test_repo().await;
 
         let mut task = Task::with_title("Version check", "Desc");
-        task.status = TaskStatus::Ready;
+        task.force_status(TaskStatus::Ready, "test setup");
         let original_version = task.version;
         repo.create(&task).await.unwrap();
 

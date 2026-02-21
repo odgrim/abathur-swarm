@@ -75,16 +75,16 @@ impl TaskStatus {
     }
 
     /// Valid transitions from this status.
-    pub fn valid_transitions(&self) -> Vec<TaskStatus> {
+    pub fn valid_transitions(&self) -> &'static [TaskStatus] {
         match self {
-            Self::Pending => vec![Self::Ready, Self::Blocked, Self::Canceled],
-            Self::Ready => vec![Self::Running, Self::Blocked, Self::Canceled],
-            Self::Blocked => vec![Self::Ready, Self::Canceled],
-            Self::Running => vec![Self::Validating, Self::Complete, Self::Failed, Self::Canceled],
-            Self::Validating => vec![Self::Complete, Self::Failed],
-            Self::Complete => vec![],
-            Self::Failed => vec![Self::Ready], // Can retry
-            Self::Canceled => vec![],
+            Self::Pending => &[Self::Ready, Self::Blocked, Self::Canceled],
+            Self::Ready => &[Self::Running, Self::Blocked, Self::Canceled, Self::Pending],
+            Self::Blocked => &[Self::Ready, Self::Canceled],
+            Self::Running => &[Self::Validating, Self::Complete, Self::Failed, Self::Canceled],
+            Self::Validating => &[Self::Complete, Self::Failed, Self::Canceled],
+            Self::Complete => &[],
+            Self::Failed => &[Self::Ready], // Can retry
+            Self::Canceled => &[],
         }
     }
 
@@ -583,6 +583,25 @@ impl Task {
         self
     }
 
+    /// Set the initial status of a newly created task (builder method).
+    ///
+    /// This is intended for tasks that need to start in a non-default status
+    /// (e.g., `Running` for verification tasks). Only call on freshly created
+    /// tasks before persistence.
+    pub fn with_initial_status(mut self, status: TaskStatus) -> Self {
+        self.status = status;
+        self.updated_at = Utc::now();
+        // Update timestamps for the initial status
+        match status {
+            TaskStatus::Running => self.started_at = Some(Utc::now()),
+            TaskStatus::Complete | TaskStatus::Failed | TaskStatus::Canceled => {
+                self.completed_at = Some(Utc::now());
+            }
+            _ => {}
+        }
+        self
+    }
+
     /// Check if can transition to given status.
     pub fn can_transition_to(&self, new_status: TaskStatus) -> bool {
         self.status.can_transition_to(new_status)
@@ -614,6 +633,38 @@ impl Task {
         Ok(())
     }
 
+    /// Force a status transition, bypassing the state machine.
+    ///
+    /// This should only be used in exceptional circumstances such as crash
+    /// recovery, startup reconciliation, or test setup. A tracing warning is
+    /// emitted every time this is called so that bypass sites are visible in
+    /// logs.
+    ///
+    /// Timestamps (`updated_at`, `started_at`, `completed_at`) and `version`
+    /// are updated consistently with [`transition_to`].
+    pub fn force_status(&mut self, new_status: TaskStatus, reason: &str) {
+        tracing::warn!(
+            task_id = %self.id,
+            from = %self.status.as_str(),
+            to = %new_status.as_str(),
+            reason = reason,
+            "Forcing task status transition (bypassing state machine)"
+        );
+
+        self.status = new_status;
+        self.updated_at = Utc::now();
+        self.version += 1;
+
+        // Update timestamps consistently with transition_to
+        match new_status {
+            TaskStatus::Running => self.started_at = Some(Utc::now()),
+            TaskStatus::Complete | TaskStatus::Failed | TaskStatus::Canceled => {
+                self.completed_at = Some(Utc::now());
+            }
+            _ => {}
+        }
+    }
+
     /// Check if task is terminal.
     pub fn is_terminal(&self) -> bool {
         self.status.is_terminal()
@@ -630,10 +681,7 @@ impl Task {
             return Err("Cannot retry: either not failed or max retries reached".to_string());
         }
         self.retry_count += 1;
-        self.status = TaskStatus::Ready;
-        self.updated_at = Utc::now();
-        self.version += 1;
-        Ok(())
+        self.transition_to(TaskStatus::Ready)
     }
 
     /// Validate task.
@@ -725,7 +773,7 @@ mod tests {
     #[test]
     fn test_task_retry() {
         let mut task = Task::new("Test task description");
-        task.status = TaskStatus::Failed;
+        task.force_status(TaskStatus::Failed, "test setup");
 
         assert!(task.can_retry());
         task.retry().unwrap();
@@ -835,5 +883,305 @@ mod tests {
             ctx.hints[TaskContext::MAX_HINTS - 1],
             format!("hint-{}", TaskContext::MAX_HINTS - 1)
         );
+    }
+
+    // =========================================================================
+    // State machine enforcement tests (GitHub #54)
+    // =========================================================================
+
+    #[test]
+    fn test_all_valid_transitions_succeed() {
+        // Pending → Ready
+        let mut t = Task::new("p");
+        assert!(t.transition_to(TaskStatus::Ready).is_ok());
+
+        // Pending → Blocked
+        let mut t = Task::new("p");
+        assert!(t.transition_to(TaskStatus::Blocked).is_ok());
+
+        // Pending → Canceled
+        let mut t = Task::new("p");
+        assert!(t.transition_to(TaskStatus::Canceled).is_ok());
+
+        // Ready → Running
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        assert!(t.transition_to(TaskStatus::Running).is_ok());
+
+        // Ready → Blocked
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        assert!(t.transition_to(TaskStatus::Blocked).is_ok());
+
+        // Ready → Canceled
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        assert!(t.transition_to(TaskStatus::Canceled).is_ok());
+
+        // Ready → Pending (new transition)
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        assert!(t.transition_to(TaskStatus::Pending).is_ok());
+
+        // Blocked → Ready
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Blocked).unwrap();
+        assert!(t.transition_to(TaskStatus::Ready).is_ok());
+
+        // Blocked → Canceled
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Blocked).unwrap();
+        assert!(t.transition_to(TaskStatus::Canceled).is_ok());
+
+        // Running → Validating
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        t.transition_to(TaskStatus::Running).unwrap();
+        assert!(t.transition_to(TaskStatus::Validating).is_ok());
+
+        // Running → Complete
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        t.transition_to(TaskStatus::Running).unwrap();
+        assert!(t.transition_to(TaskStatus::Complete).is_ok());
+
+        // Running → Failed
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        t.transition_to(TaskStatus::Running).unwrap();
+        assert!(t.transition_to(TaskStatus::Failed).is_ok());
+
+        // Running → Canceled
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        t.transition_to(TaskStatus::Running).unwrap();
+        assert!(t.transition_to(TaskStatus::Canceled).is_ok());
+
+        // Validating → Complete
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        t.transition_to(TaskStatus::Running).unwrap();
+        t.transition_to(TaskStatus::Validating).unwrap();
+        assert!(t.transition_to(TaskStatus::Complete).is_ok());
+
+        // Validating → Failed
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        t.transition_to(TaskStatus::Running).unwrap();
+        t.transition_to(TaskStatus::Validating).unwrap();
+        assert!(t.transition_to(TaskStatus::Failed).is_ok());
+
+        // Validating → Canceled (new transition)
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        t.transition_to(TaskStatus::Running).unwrap();
+        t.transition_to(TaskStatus::Validating).unwrap();
+        assert!(t.transition_to(TaskStatus::Canceled).is_ok());
+
+        // Failed → Ready (retry)
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        t.transition_to(TaskStatus::Running).unwrap();
+        t.transition_to(TaskStatus::Failed).unwrap();
+        assert!(t.transition_to(TaskStatus::Ready).is_ok());
+    }
+
+    #[test]
+    fn test_invalid_transitions_return_err() {
+        // Pending → Running (must go through Ready)
+        let mut t = Task::new("p");
+        assert!(t.transition_to(TaskStatus::Running).is_err());
+
+        // Pending → Complete
+        let mut t = Task::new("p");
+        assert!(t.transition_to(TaskStatus::Complete).is_err());
+
+        // Pending → Failed
+        let mut t = Task::new("p");
+        assert!(t.transition_to(TaskStatus::Failed).is_err());
+
+        // Ready → Complete (must go through Running)
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        assert!(t.transition_to(TaskStatus::Complete).is_err());
+
+        // Blocked → Running (must go through Ready)
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Blocked).unwrap();
+        assert!(t.transition_to(TaskStatus::Running).is_err());
+
+        // Validating → Running (cannot go back)
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        t.transition_to(TaskStatus::Running).unwrap();
+        t.transition_to(TaskStatus::Validating).unwrap();
+        assert!(t.transition_to(TaskStatus::Running).is_err());
+    }
+
+    #[test]
+    fn test_terminal_state_enforcement() {
+        // Complete → anything
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        t.transition_to(TaskStatus::Running).unwrap();
+        t.transition_to(TaskStatus::Complete).unwrap();
+
+        assert!(t.transition_to(TaskStatus::Running).is_err());
+        assert!(t.transition_to(TaskStatus::Failed).is_err());
+        assert!(t.transition_to(TaskStatus::Pending).is_err());
+        assert!(t.transition_to(TaskStatus::Ready).is_err());
+
+        // Canceled → anything
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Canceled).unwrap();
+
+        assert!(t.transition_to(TaskStatus::Running).is_err());
+        assert!(t.transition_to(TaskStatus::Pending).is_err());
+        assert!(t.transition_to(TaskStatus::Ready).is_err());
+    }
+
+    #[test]
+    fn test_self_transition_rejected() {
+        let mut t = Task::new("p");
+        // Pending → Pending
+        assert!(t.transition_to(TaskStatus::Pending).is_err());
+
+        // Ready → Ready
+        t.transition_to(TaskStatus::Ready).unwrap();
+        assert!(t.transition_to(TaskStatus::Ready).is_err());
+
+        // Running → Running
+        t.transition_to(TaskStatus::Running).unwrap();
+        assert!(t.transition_to(TaskStatus::Running).is_err());
+    }
+
+    #[test]
+    fn test_force_status_works_for_any_transition() {
+        let mut t = Task::new("p");
+        assert_eq!(t.status, TaskStatus::Pending);
+
+        // Force an invalid transition: Pending → Complete
+        t.force_status(TaskStatus::Complete, "test: force bypass");
+        assert_eq!(t.status, TaskStatus::Complete);
+        assert!(t.completed_at.is_some());
+
+        // Force from terminal back to Running (impossible via transition_to)
+        t.force_status(TaskStatus::Running, "test: force from terminal");
+        assert_eq!(t.status, TaskStatus::Running);
+        assert!(t.started_at.is_some());
+    }
+
+    #[test]
+    fn test_force_status_updates_version() {
+        let mut t = Task::new("p");
+        let v_before = t.version;
+        t.force_status(TaskStatus::Running, "test");
+        assert_eq!(t.version, v_before + 1);
+    }
+
+    #[test]
+    fn test_retry_uses_transition_to() {
+        // retry() should go through transition_to, which means
+        // it should work from Failed state (Failed→Ready is valid)
+        let mut t = Task::new("p");
+        t.force_status(TaskStatus::Failed, "test setup");
+
+        let v_before = t.version;
+        t.retry().unwrap();
+        assert_eq!(t.status, TaskStatus::Ready);
+        assert_eq!(t.retry_count, 1);
+        // transition_to increments version
+        assert_eq!(t.version, v_before + 1);
+
+        // retry() should fail from non-Failed state
+        let mut t2 = Task::new("p");
+        assert!(t2.retry().is_err());
+    }
+
+    #[test]
+    fn test_timestamp_side_effects() {
+        // Running sets started_at
+        let mut t = Task::new("p");
+        assert!(t.started_at.is_none());
+        t.transition_to(TaskStatus::Ready).unwrap();
+        t.transition_to(TaskStatus::Running).unwrap();
+        assert!(t.started_at.is_some());
+
+        // Complete sets completed_at
+        let mut t = Task::new("p");
+        assert!(t.completed_at.is_none());
+        t.transition_to(TaskStatus::Ready).unwrap();
+        t.transition_to(TaskStatus::Running).unwrap();
+        t.transition_to(TaskStatus::Complete).unwrap();
+        assert!(t.completed_at.is_some());
+
+        // Failed sets completed_at
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        t.transition_to(TaskStatus::Running).unwrap();
+        t.transition_to(TaskStatus::Failed).unwrap();
+        assert!(t.completed_at.is_some());
+
+        // Canceled sets completed_at
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Canceled).unwrap();
+        assert!(t.completed_at.is_some());
+    }
+
+    #[test]
+    fn test_transition_error_message_content() {
+        let mut t = Task::new("p");
+        let err = t.transition_to(TaskStatus::Running).unwrap_err();
+        assert!(err.contains("pending"), "Error should mention source status: {}", err);
+        assert!(err.contains("running"), "Error should mention target status: {}", err);
+    }
+
+    #[test]
+    fn test_with_initial_status_builder() {
+        let t = Task::new("p").with_initial_status(TaskStatus::Running);
+        assert_eq!(t.status, TaskStatus::Running);
+        assert!(t.started_at.is_some());
+
+        let t = Task::new("p").with_initial_status(TaskStatus::Complete);
+        assert_eq!(t.status, TaskStatus::Complete);
+        assert!(t.completed_at.is_some());
+
+        // Default Pending should not set started_at or completed_at
+        let t = Task::new("p").with_initial_status(TaskStatus::Pending);
+        assert_eq!(t.status, TaskStatus::Pending);
+        assert!(t.started_at.is_none());
+        assert!(t.completed_at.is_none());
+    }
+
+    #[test]
+    fn test_new_transitions_validating_to_canceled() {
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        t.transition_to(TaskStatus::Running).unwrap();
+        t.transition_to(TaskStatus::Validating).unwrap();
+        // Validating → Canceled is a newly added valid transition
+        assert!(t.can_transition_to(TaskStatus::Canceled));
+        assert!(t.transition_to(TaskStatus::Canceled).is_ok());
+        assert_eq!(t.status, TaskStatus::Canceled);
+        assert!(t.completed_at.is_some());
+    }
+
+    #[test]
+    fn test_new_transitions_ready_to_pending() {
+        let mut t = Task::new("p");
+        t.transition_to(TaskStatus::Ready).unwrap();
+        // Ready → Pending is a newly added valid transition
+        assert!(t.can_transition_to(TaskStatus::Pending));
+        assert!(t.transition_to(TaskStatus::Pending).is_ok());
+        assert_eq!(t.status, TaskStatus::Pending);
+    }
+
+    #[test]
+    fn test_valid_transitions_returns_static_slice() {
+        // Ensure the return type is a static slice (no allocation per call)
+        let transitions = TaskStatus::Pending.valid_transitions();
+        assert!(transitions.contains(&TaskStatus::Ready));
+        assert!(transitions.contains(&TaskStatus::Blocked));
+        assert!(transitions.contains(&TaskStatus::Canceled));
     }
 }

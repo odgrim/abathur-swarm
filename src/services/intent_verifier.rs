@@ -957,8 +957,7 @@ where
         );
 
         // Mark as running immediately (verification is about to execute)
-        task.status = TaskStatus::Running;
-        task.started_at = Some(chrono::Utc::now());
+        let task = task.with_initial_status(TaskStatus::Running);
 
         self.task_repo.create(&task).await?;
         Ok(task.id)
