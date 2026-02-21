@@ -1277,8 +1277,8 @@ mod tests {
         let mut task_updated = service.get_task(task.id).await.unwrap().unwrap();
         task_updated.execution_mode = ExecutionMode::Convergent { parallel_samples: None };
         task_updated.trajectory_id = Some(Uuid::new_v4());
-        // Transition to Ready -> Running -> Failed so we can retry
-        task_updated.status = TaskStatus::Ready;
+        // Force to Ready for test setup (task is already Ready from submit, but be explicit)
+        task_updated.force_status(TaskStatus::Ready, "test setup: convergent retry test");
         service.task_repo.update(&task_updated).await.unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
@@ -1315,7 +1315,7 @@ mod tests {
         let mut task_updated = service.get_task(task.id).await.unwrap().unwrap();
         task_updated.execution_mode = ExecutionMode::Convergent { parallel_samples: None };
         task_updated.trajectory_id = Some(Uuid::new_v4());
-        task_updated.status = TaskStatus::Ready;
+        task_updated.force_status(TaskStatus::Ready, "test setup: trapped convergent retry test");
         service.task_repo.update(&task_updated).await.unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
