@@ -79,6 +79,7 @@ where
     pub(super) audit_log: Arc<AuditLogService>,
     pub(super) circuit_breaker: Arc<CircuitBreakerService>,
     pub(super) decay_daemon_handle: Arc<RwLock<Option<DaemonHandle>>>,
+    pub(super) hourly_reset_handle: Arc<RwLock<Option<crate::services::guardrails::HourlyResetHandle>>>,
     pub(super) evolution_loop: Arc<EvolutionLoop>,
     pub(super) active_goals_cache: Arc<RwLock<Vec<Goal>>>,
     pub(super) restructure_service: Arc<tokio::sync::Mutex<DagRestructureService>>,
@@ -163,6 +164,7 @@ where
             audit_log: Arc::new(AuditLogService::with_defaults()),
             circuit_breaker: Arc::new(CircuitBreakerService::with_defaults()),
             decay_daemon_handle: Arc::new(RwLock::new(None)),
+            hourly_reset_handle: Arc::new(RwLock::new(None)),
             evolution_loop: Arc::new(EvolutionLoop::with_default_config()),
             active_goals_cache: Arc::new(RwLock::new(Vec::new())),
             restructure_service: Arc::new(tokio::sync::Mutex::new(DagRestructureService::with_defaults())),
@@ -482,6 +484,9 @@ where
             }
         }
 
+        // Start hourly token reset daemon (always runs — no memory repo dependency)
+        self.start_hourly_reset_daemon().await;
+
         // Refresh active goals cache for agent context
         if let Err(e) = self.refresh_active_goals_cache().await {
             self.audit_log.log(
@@ -714,6 +719,9 @@ where
 
         // Stop decay daemon if running
         self.stop_decay_daemon().await;
+
+        // Stop hourly token reset daemon if running
+        self.stop_hourly_reset_daemon().await;
 
         // Stop embedded MCP servers if running
         self.stop_embedded_mcp_servers().await;
