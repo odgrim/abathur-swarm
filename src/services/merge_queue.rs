@@ -548,8 +548,9 @@ where
         validate_branch_name(target)?;
 
         // Use git merge-tree to check for conflicts without modifying worktree
+        // Branch names are validated above; `--` prevents interpretation as flags
         let output = Command::new("git")
-            .args(["merge-tree", target, source])
+            .args(["merge-tree", "--", target, source])
             .current_dir(workdir)
             .output()
             .await
@@ -592,7 +593,7 @@ where
         validate_branch_name(source)?;
         validate_branch_name(target)?;
 
-        // Checkout target branch
+        // Checkout target branch (validated above to prevent flag injection)
         let checkout = Command::new("git")
             .args(["checkout", target])
             .current_dir(workdir)
@@ -605,10 +606,10 @@ where
             return Err(DomainError::ValidationFailed(format!("Git checkout failed: {}", stderr)));
         }
 
-        // Merge source into target
+        // Merge source into target — `--` separates options from branch name
         let merge_msg = format!("Merge {} into {}", source, target);
         let merge = Command::new("git")
-            .args(["merge", "--no-ff", source, "-m", &merge_msg])
+            .args(["merge", "--no-ff", "-m", &merge_msg, "--", source])
             .current_dir(workdir)
             .output()
             .await

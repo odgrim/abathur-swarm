@@ -70,7 +70,7 @@ pub use intent_verifier::{IntentVerifierConfig, IntentVerifierService};
 pub use llm_planner::{LlmPlanner, LlmPlannerConfig, LlmDecomposition, LlmTaskSpec, PlanningContext, AgentRefinementSuggestion};
 pub use memory_decay_daemon::{DaemonHandle, DaemonStatus, DecayDaemonConfig, DecayDaemonEvent, MemoryDecayDaemon, StopReason};
 pub use memory_service::{DecayConfig, MaintenanceReport, MemoryService, MemoryStats};
-pub use merge_queue::{MergeQueue, MergeQueueConfig, MergeQueueStats, MergeRequest, MergeResult, MergeStage, MergeStatus};
+pub use merge_queue::{MergeQueue, MergeQueueConfig, MergeQueueStats, MergeRequest, MergeResult, MergeStage, MergeStatus, validate_branch_name};
 pub use meta_planner::{AgentMetrics, AgentSpec, Complexity, DecompositionPlan, MetaPlanner, MetaPlannerConfig, TaskSpec};
 pub use overmind::{OvermindConfig, OvermindService};
 pub use phase_orchestrator::{PhaseOrchestrator, PhaseOrchestratorConfig};
