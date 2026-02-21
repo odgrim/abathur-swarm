@@ -99,7 +99,7 @@ fn build_overmind_template(prompt: String, has_triage: bool) -> AgentTemplate {
         "decision-rationale",
         "Every decision must include confidence level and rationale",
     ));
-    template.version = 2;
+    template.version = 3;
     template
         .with_capability("agent-creation")
         .with_capability("task-delegation")

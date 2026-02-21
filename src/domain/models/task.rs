@@ -342,6 +342,11 @@ pub struct RoutingHints {
     pub complexity: Complexity,
     /// Prompt tier for context assembly
     pub prompt_tier: PromptTier,
+    /// Workflow template name for phase-orchestrated execution.
+    /// When set, the task is routed to the PhaseOrchestrator instead of
+    /// the Overmind fallback. Use "external" for adapter-sourced tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_name: Option<String>,
 }
 
 /// Type of artifact produced.

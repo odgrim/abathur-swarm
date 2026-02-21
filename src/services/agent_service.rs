@@ -650,12 +650,12 @@ mod tests {
         old.version = 1;
         service.repository.create_template(&old).await.unwrap();
 
-        // Seed should upgrade to v2
+        // Seed should upgrade to v3
         let seeded = service.seed_baseline_agents().await.unwrap();
         assert!(seeded.contains(&"overmind".to_string()));
 
         let template = service.get_template("overmind").await.unwrap().unwrap();
-        assert_eq!(template.version, 2);
+        assert_eq!(template.version, 3);
     }
 
     #[tokio::test]

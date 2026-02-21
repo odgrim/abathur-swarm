@@ -663,6 +663,12 @@ async fn run_swarm_foreground(
         ),
     );
 
+    // Pre-clone repos for PhaseOrchestrator before they are moved into SwarmOrchestrator.
+    let phase_orch_task_repo = task_repo.clone();
+    let phase_orch_agent_repo = agent_repo.clone();
+    let phase_orch_goal_repo = goal_repo.clone();
+    let phase_orch_substrate = substrate.clone();
+
     let orchestrator = SwarmOrchestrator::new(
         goal_repo,
         task_repo,
@@ -689,6 +695,27 @@ async fn run_swarm_foreground(
             crate::services::budget_tracker::BudgetTracker::new(tracker_config, event_bus.clone())
         );
         orchestrator.with_budget_tracker(tracker)
+    };
+
+    // Wire PhaseOrchestrator as the primary execution driver for workflow-based tasks.
+    // Top-level adapter-sourced tasks (and tasks with a workflow_name routing hint) are
+    // routed to the deterministic state machine instead of the Overmind fallback.
+    let orchestrator = {
+        use crate::adapters::sqlite::SqliteWorkflowRepository;
+        use crate::domain::ports::WorkflowRepository;
+        use crate::services::phase_orchestrator::{PhaseOrchestrator, PhaseOrchestratorConfig};
+
+        let workflow_repo = Arc::new(SqliteWorkflowRepository::new(pool.clone()));
+        let phase_orch = PhaseOrchestrator::new(
+            phase_orch_task_repo,
+            phase_orch_agent_repo,
+            phase_orch_goal_repo,
+            phase_orch_substrate,
+            workflow_repo as Arc<dyn WorkflowRepository>,
+            event_bus.clone(),
+            PhaseOrchestratorConfig::default(),
+        );
+        orchestrator.with_phase_orchestrator(Arc::new(phase_orch))
     };
 
     if !json_mode {

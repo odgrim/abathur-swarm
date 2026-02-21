@@ -14,8 +14,10 @@ use crate::domain::errors::DomainResult;
 use crate::domain::models::{
     RelevanceWeights, ScoredMemory,
     SessionStatus, SubstrateConfig, SubstrateRequest,
-    Task, TaskStatus,
+    Task, TaskSource, TaskStatus,
 };
+use crate::domain::models::workflow::WorkflowConfig;
+use crate::services::workflow_builder::build_workflow_from_template;
 use crate::services::memory_service::MemoryService;
 use crate::domain::ports::{AgentFilter, AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
@@ -274,6 +276,74 @@ where
             if let Ok(Some(mut updated)) = self.task_repo.get(task.id).await {
                 updated.agent_type = Some(agent_type.clone());
                 let _ = self.task_repo.update(&updated).await;
+            }
+        }
+
+        // Phase-orchestrated path: top-level adapter-sourced tasks (and tasks with a
+        // workflow_name routing hint) are driven by the deterministic PhaseOrchestrator
+        // state machine instead of the Overmind fallback.
+        //
+        // This check runs BEFORE the budget gate and permit acquisition — the
+        // PhaseOrchestrator manages its own concurrency and does not need a permit.
+        if let Some(ref phase_orch) = self.phase_orchestrator {
+            let is_external_root =
+                matches!(&task.source, TaskSource::Adapter(_)) && task.parent_id.is_none();
+
+            let workflow_name = task
+                .routing_hints
+                .workflow_name
+                .as_deref()
+                .or_else(|| if is_external_root { Some("external") } else { None });
+
+            if let Some(wn) = workflow_name {
+                let template = self
+                    .config
+                    .all_workflows
+                    .iter()
+                    .find(|wf| wf.name == wn)
+                    .cloned()
+                    .unwrap_or_else(WorkflowTemplate::external_workflow);
+
+                let definition = build_workflow_from_template(
+                    task.id,
+                    &task.title,
+                    &template,
+                    WorkflowConfig::default(),
+                );
+
+                // Atomically claim the task before handing off to the phase orchestrator.
+                match self.task_repo.claim_task_atomic(task.id, "phase-orchestrator").await {
+                    Ok(None) => {
+                        tracing::debug!(
+                            task_id = %task.id,
+                            "Task already claimed; skipping phase-orchestrator handoff"
+                        );
+                        return Ok(());
+                    }
+                    Ok(Some(_)) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task.id,
+                            "Failed to claim task for phase-orchestrator: {}",
+                            e
+                        );
+                        return Ok(());
+                    }
+                }
+
+                if let Err(e) = phase_orch.execute_workflow(definition).await {
+                    tracing::error!(
+                        task_id = %task.id,
+                        "Phase orchestrator failed to start workflow: {}",
+                        e
+                    );
+                    if let Ok(Some(mut t)) = self.task_repo.get(task.id).await {
+                        let _ = t.transition_to(TaskStatus::Failed);
+                        let _ = self.task_repo.update(&t).await;
+                    }
+                }
+
+                return Ok(());
             }
         }
 

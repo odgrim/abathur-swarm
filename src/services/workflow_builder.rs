@@ -21,6 +21,7 @@ use crate::domain::models::workflow::{
     PhaseDefinition, PhaseTaskDefinition, PhaseType, PhaseVerification, WorkflowConfig,
     WorkflowDefinition,
 };
+use crate::domain::models::workflow_template::{OutputDelivery, PhaseDependency, WorkflowTemplate};
 
 /// Build a `WorkflowDefinition` from a goal decomposition decision.
 pub fn build_workflow_from_decomposition(
@@ -50,6 +51,98 @@ pub fn build_workflow_from_decomposition(
         }
         DecompositionStrategy::Incremental => {
             build_incremental(&mut workflow, &decision.tasks, &decision.verification_points);
+        }
+    }
+
+    workflow
+}
+
+/// Build a `WorkflowDefinition` from a `WorkflowTemplate`.
+///
+/// Maps each `WorkflowPhase` → `PhaseDefinition` with `PhaseType::Execute`,
+/// wiring edges according to each phase's `PhaseDependency`.
+///
+/// - `Root` phases get no predecessor edges (they start immediately).
+/// - `Sequential` phases get a single edge from the immediately preceding phase.
+/// - `AllPrevious` phases get edges from every preceding phase.
+///
+/// When `template.output_delivery == OutputDelivery::PullRequest`, a final
+/// `PhaseType::Verify` gate is appended after the last phase to signal PR
+/// readiness. This is a pure mapping — no LLM is invoked.
+pub fn build_workflow_from_template(
+    goal_id: Uuid,
+    goal_title: &str,
+    template: &WorkflowTemplate,
+    config: WorkflowConfig,
+) -> WorkflowDefinition {
+    use crate::domain::models::TaskPriority;
+
+    let mut workflow = WorkflowDefinition::new(
+        format!("Workflow for: {}", goal_title),
+        goal_id,
+    );
+    workflow.config = config;
+
+    let mut phase_ids: Vec<Uuid> = Vec::new();
+
+    for phase in &template.phases {
+        let task_def = TaskDefinition {
+            title: phase.name.clone(),
+            description: format!("{}\n\nRole: {}", phase.description, phase.role),
+            agent_type: None,
+            priority: TaskPriority::Normal,
+            depends_on: Vec::new(),
+            needs_worktree: !phase.read_only,
+            estimated_complexity: 3,
+            acceptance_criteria: Vec::new(),
+        };
+
+        let phase_def = PhaseDefinition {
+            id: Uuid::new_v4(),
+            name: phase.name.clone(),
+            phase_type: PhaseType::Execute,
+            task_definitions: vec![PhaseTaskDefinition { task_def }],
+            verification: None,
+            sub_workflow: None,
+        };
+
+        let phase_id = phase_def.id;
+        workflow.add_phase(phase_def);
+
+        match phase.dependency {
+            PhaseDependency::Root => {}
+            PhaseDependency::Sequential => {
+                if let Some(&prev_id) = phase_ids.last() {
+                    workflow.add_edge(prev_id, phase_id);
+                }
+            }
+            PhaseDependency::AllPrevious => {
+                for &prev_id in &phase_ids {
+                    workflow.add_edge(prev_id, phase_id);
+                }
+            }
+        }
+
+        phase_ids.push(phase_id);
+    }
+
+    // Append a PR-gate Verify phase for pull-request delivery workflows.
+    if template.output_delivery == OutputDelivery::PullRequest && !phase_ids.is_empty() {
+        let verify_phase = PhaseDefinition {
+            id: Uuid::new_v4(),
+            name: "pr-gate".to_string(),
+            phase_type: PhaseType::Verify,
+            task_definitions: Vec::new(),
+            verification: Some(PhaseVerification {
+                description: "All phases complete; ready for pull request creation.".to_string(),
+                is_blocking: true,
+            }),
+            sub_workflow: None,
+        };
+        let verify_id = verify_phase.id;
+        workflow.add_phase(verify_phase);
+        if let Some(&last_id) = phase_ids.last() {
+            workflow.add_edge(last_id, verify_id);
         }
     }
 
