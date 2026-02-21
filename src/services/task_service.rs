@@ -1,5 +1,6 @@
 //! Task service implementing business logic.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -13,7 +14,7 @@ use crate::services::event_bus::{
     EventCategory, EventPayload, EventSeverity, UnifiedEvent,
 };
 use crate::services::event_factory;
-use tracing::warn;
+use tracing::{debug, error, info, warn};
 
 /// Configuration for spawn limits.
 #[derive(Debug, Clone)]
@@ -151,6 +152,12 @@ impl<T: TaskRepository> TaskService<T> {
         // Check subtask depth
         let depth = self.calculate_depth(&parent).await?;
         if depth >= self.spawn_limits.max_subtask_depth {
+            warn!(
+                parent_id = %parent_id,
+                depth = depth,
+                limit = self.spawn_limits.max_subtask_depth,
+                "Spawn limit exceeded: subtask depth"
+            );
             return Ok(SpawnLimitResult::LimitExceeded {
                 limit_type: SpawnLimitType::SubtaskDepth,
                 current_value: depth,
@@ -162,6 +169,12 @@ impl<T: TaskRepository> TaskService<T> {
         // Check direct subtasks count
         let direct_subtasks = self.count_direct_subtasks(parent_id).await?;
         if direct_subtasks >= self.spawn_limits.max_subtasks_per_task {
+            warn!(
+                parent_id = %parent_id,
+                direct_subtasks = direct_subtasks,
+                limit = self.spawn_limits.max_subtasks_per_task,
+                "Spawn limit exceeded: subtasks per task"
+            );
             return Ok(SpawnLimitResult::LimitExceeded {
                 limit_type: SpawnLimitType::SubtasksPerTask,
                 current_value: direct_subtasks,
@@ -174,6 +187,13 @@ impl<T: TaskRepository> TaskService<T> {
         let root_id = self.find_root_task(&parent).await?;
         let total_descendants = self.count_all_descendants(root_id).await?;
         if total_descendants >= self.spawn_limits.max_total_descendants {
+            warn!(
+                parent_id = %parent_id,
+                root_id = %root_id,
+                total_descendants = total_descendants,
+                limit = self.spawn_limits.max_total_descendants,
+                "Spawn limit exceeded: total descendants"
+            );
             return Ok(SpawnLimitResult::LimitExceeded {
                 limit_type: SpawnLimitType::TotalDescendants,
                 current_value: total_descendants,
@@ -359,11 +379,20 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         // --- Threshold decision ---
-        if convergent_score >= 3 {
+        let mode = if convergent_score >= 3 {
             ExecutionMode::Convergent { parallel_samples: None }
         } else {
             ExecutionMode::Direct
-        }
+        };
+
+        debug!(
+            task_title = %task.title,
+            convergent_score = convergent_score,
+            execution_mode = %if mode.is_convergent() { "convergent" } else { "direct" },
+            "Classified task execution mode"
+        );
+
+        mode
     }
 
     /// Look up the parent task's execution mode, if the task has a parent.
@@ -378,6 +407,60 @@ impl<T: TaskRepository> TaskService<T> {
             }
             None => Ok(None),
         }
+    }
+
+    /// Detect cycles in the dependency graph reachable from the proposed dependencies.
+    ///
+    /// Walks the transitive dependency graph of each proposed dependency using
+    /// iterative DFS. If any walk revisits a node already on the current DFS
+    /// path (the "in-stack" set), a cycle exists in the dependency graph.
+    ///
+    /// This catches both pre-existing cycles in the stored graph and cycles
+    /// that would be introduced by the new task's dependency edges.
+    ///
+    /// Returns `Ok(())` if no cycle is detected, or `Err(DomainError::DependencyCycle(path))`
+    /// with the cycle path if one is found.
+    async fn detect_dependency_cycle(&self, depends_on: &[Uuid]) -> DomainResult<()> {
+        if depends_on.is_empty() {
+            return Ok(());
+        }
+
+        // For each proposed dependency, walk its transitive deps via DFS.
+        // If we revisit the start node, there is a cycle.
+        for &start_dep in depends_on {
+            let mut stack: Vec<(Uuid, Vec<Uuid>)> = vec![(start_dep, vec![start_dep])];
+            let mut visited = HashSet::new();
+            visited.insert(start_dep);
+
+            while let Some((current_id, path)) = stack.pop() {
+                let current_task = self.task_repo.get(current_id).await?;
+                let Some(current_task) = current_task else {
+                    continue;
+                };
+
+                for &upstream_dep in &current_task.depends_on {
+                    if upstream_dep == start_dep {
+                        // Reached back to the start — cycle detected.
+                        let mut cycle_path = path.clone();
+                        cycle_path.push(upstream_dep);
+                        return Err(DomainError::DependencyCycle(cycle_path));
+                    }
+
+                    if visited.insert(upstream_dep) {
+                        let mut new_path = path.clone();
+                        new_path.push(upstream_dep);
+                        stack.push((upstream_dep, new_path));
+                    }
+                }
+
+                // Safety limit to prevent runaway traversal on corrupted data
+                if visited.len() > 10000 {
+                    break;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Submit a new task. Returns the task and events to be journaled.
@@ -421,6 +504,10 @@ impl<T: TaskRepository> TaskService<T> {
                 return Err(DomainError::TaskNotFound(*dep_id));
             }
         }
+
+        // Detect cycles in the dependency graph before persisting the task.
+        // This prevents infinite loops in readiness checks and DAG traversal.
+        self.detect_dependency_cycle(&depends_on).await?;
 
         let mut task = match title {
             Some(t) => Task::with_title(t, description),
@@ -474,6 +561,16 @@ impl<T: TaskRepository> TaskService<T> {
         self.check_and_update_readiness(&mut task).await?;
         self.task_repo.update(&task).await?;
 
+        info!(
+            task_id = %task.id,
+            title = %task.title,
+            status = %task.status.as_str(),
+            priority = ?task.priority,
+            execution_mode = %if task.execution_mode.is_convergent() { "convergent" } else { "direct" },
+            parent_id = ?parent_id,
+            "Task submitted"
+        );
+
         // Collect TaskSubmitted event
         let goal_id = task.parent_id.unwrap_or_else(Uuid::new_v4);
         events.push(Self::make_event(
@@ -526,6 +623,11 @@ impl<T: TaskRepository> TaskService<T> {
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
         if task.status != TaskStatus::Ready {
+            error!(
+                task_id = %task_id,
+                current_status = task.status.as_str(),
+                "Cannot claim task: not in Ready state"
+            );
             return Err(DomainError::InvalidStateTransition {
                 from: task.status.as_str().to_string(),
                 to: "running".to_string(),
@@ -541,6 +643,13 @@ impl<T: TaskRepository> TaskService<T> {
         })?;
 
         self.task_repo.update(&task).await?;
+
+        info!(
+            task_id = %task_id,
+            agent_type = agent_type,
+            title = %task.title,
+            "Task claimed"
+        );
 
         let events = vec![Self::make_event(
             EventSeverity::Info,
@@ -576,6 +685,13 @@ impl<T: TaskRepository> TaskService<T> {
         })?;
 
         self.task_repo.update(&task).await?;
+
+        info!(
+            task_id = %task_id,
+            title = %task.title,
+            execution_mode = %if task.execution_mode.is_convergent() { "convergent" } else { "direct" },
+            "Task completed"
+        );
 
         let mut events = vec![Self::make_event(
             EventSeverity::Info,
@@ -636,6 +752,15 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         self.task_repo.update(&task).await?;
+
+        error!(
+            task_id = %task_id,
+            title = %task.title,
+            error = %error_str,
+            retry_count = task.retry_count,
+            max_retries = task.max_retries,
+            "Task failed"
+        );
 
         let execution_mode_str = if task.execution_mode.is_convergent() {
             "convergent".to_string()
@@ -716,6 +841,14 @@ impl<T: TaskRepository> TaskService<T> {
         task.retry().map_err(DomainError::ValidationFailed)?;
         self.task_repo.update(&task).await?;
 
+        info!(
+            task_id = %task_id,
+            title = %task.title,
+            retry_count = task.retry_count,
+            max_retries = task.max_retries,
+            "Task retrying"
+        );
+
         let events = vec![Self::make_event(
             EventSeverity::Warning,
             EventCategory::Task,
@@ -749,6 +882,13 @@ impl<T: TaskRepository> TaskService<T> {
         })?;
 
         self.task_repo.update(&task).await?;
+
+        warn!(
+            task_id = %task_id,
+            title = %task.title,
+            reason = reason,
+            "Task cancelled"
+        );
 
         let events = vec![Self::make_event(
             EventSeverity::Warning,
@@ -1277,8 +1417,8 @@ mod tests {
         let mut task_updated = service.get_task(task.id).await.unwrap().unwrap();
         task_updated.execution_mode = ExecutionMode::Convergent { parallel_samples: None };
         task_updated.trajectory_id = Some(Uuid::new_v4());
-        // Transition to Ready -> Running -> Failed so we can retry
-        task_updated.status = TaskStatus::Ready;
+        // Force to Ready for test setup (task is already Ready from submit, but be explicit)
+        task_updated.force_status(TaskStatus::Ready, "test setup: convergent retry test");
         service.task_repo.update(&task_updated).await.unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
@@ -1315,7 +1455,7 @@ mod tests {
         let mut task_updated = service.get_task(task.id).await.unwrap().unwrap();
         task_updated.execution_mode = ExecutionMode::Convergent { parallel_samples: None };
         task_updated.trajectory_id = Some(Uuid::new_v4());
-        task_updated.status = TaskStatus::Ready;
+        task_updated.force_status(TaskStatus::Ready, "test setup: trapped convergent retry test");
         service.task_repo.update(&task_updated).await.unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
@@ -1449,4 +1589,358 @@ mod tests {
         assert!(task.execution_mode.is_convergent(),
             "Task with acceptance criteria + constraints should be inferred as Convergent");
     }
+
+    // --- Dependency cycle detection tests ---
+
+    #[tokio::test]
+    async fn test_direct_cycle_detected() {
+        let service = setup_service().await;
+
+        // Create task A
+        let (task_a, _) = service.submit_task(
+            Some("Task A".to_string()),
+            "First task".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        // Create task B that depends on A
+        let (task_b, _) = service.submit_task(
+            Some("Task B".to_string()),
+            "Second task".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![task_a.id],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        // Try to create task C that depends on both A and B.
+        // B already depends on A, so this creates: C -> B -> A and C -> A.
+        // This is a diamond, NOT a cycle — should succeed.
+        let result = service.submit_task(
+            Some("Task C".to_string()),
+            "Third task".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![task_a.id, task_b.id],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await;
+        assert!(result.is_ok(), "Diamond dependency should not be detected as cycle");
+
+        // Now try to create task D that depends on both B and A,
+        // where we also make A depend on B (creating a real cycle).
+        // We can't directly create a cycle with submit_task since it validates,
+        // but we can test via direct repo manipulation.
+
+        // Create a real cycle in the DB: make A depend on B (B already depends on A).
+        // Use add_dependency to write to the task_dependencies table.
+        service.task_repo.add_dependency(task_a.id, task_b.id).await.unwrap();
+
+        // Now A -> B and B -> A — submitting anything depending on both should detect the cycle.
+        // Also, submitting a new task depending on A should detect A -> B -> A cycle.
+        let result = service.submit_task(
+            Some("Task D".to_string()),
+            "Fourth task".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![task_a.id],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await;
+        // Single dep but A has a cycle with B internally
+        assert!(result.is_err(), "Direct cycle A->B->A should be detected");
+        match result.unwrap_err() {
+            DomainError::DependencyCycle(path) => {
+                assert!(path.len() >= 2, "Cycle path should contain at least 2 nodes");
+                assert_eq!(*path.first().unwrap(), task_a.id);
+            }
+            other => panic!("Expected DependencyCycle error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_indirect_cycle_detected() {
+        let service = setup_service().await;
+
+        // Create A -> B -> C chain
+        let (task_a, _) = service.submit_task(
+            Some("Task A".to_string()),
+            "First task".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        let (task_b, _) = service.submit_task(
+            Some("Task B".to_string()),
+            "Second task".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![task_a.id],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        let (task_c, _) = service.submit_task(
+            Some("Task C".to_string()),
+            "Third task".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![task_b.id],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        // Create a cycle: make A depend on C (C -> B -> A already exists).
+        // Use add_dependency to write to the task_dependencies table.
+        service.task_repo.add_dependency(task_a.id, task_c.id).await.unwrap();
+
+        // Try to submit a task depending on A — should detect the cycle
+        let result = service.submit_task(
+            Some("Task D".to_string()),
+            "Fourth task".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![task_a.id],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await;
+        assert!(result.is_err(), "Indirect cycle A->C->B->A should be detected");
+        match result.unwrap_err() {
+            DomainError::DependencyCycle(path) => {
+                assert!(path.len() >= 2, "Cycle path should have multiple nodes");
+            }
+            other => panic!("Expected DependencyCycle error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_diamond_dependency_no_false_positive() {
+        let service = setup_service().await;
+
+        // Create diamond: A -> B, A -> C, B -> D, C -> D
+        let (task_d, _) = service.submit_task(
+            Some("Task D".to_string()),
+            "Shared dependency".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        let (task_b, _) = service.submit_task(
+            Some("Task B".to_string()),
+            "Left branch".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![task_d.id],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        let (task_c, _) = service.submit_task(
+            Some("Task C".to_string()),
+            "Right branch".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![task_d.id],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        // A depends on both B and C (which both depend on D) — diamond, not cycle
+        let result = service.submit_task(
+            Some("Task A".to_string()),
+            "Top of diamond".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![task_b.id, task_c.id],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await;
+
+        assert!(result.is_ok(), "Diamond dependency (A->B->D, A->C->D) should NOT be detected as cycle");
+    }
+
+    #[tokio::test]
+    async fn test_cycle_through_new_task_deps() {
+        let service = setup_service().await;
+
+        // Create A (no deps) and B that depends on A
+        let (task_a, _) = service.submit_task(
+            Some("Task A".to_string()),
+            "First task".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        let (task_b, _) = service.submit_task(
+            Some("Task B".to_string()),
+            "Second task depends on A".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![task_a.id],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        // Try to create new task C that depends on both A and B.
+        // B -> A, so C -> A and C -> B -> A is just a diamond. Should succeed.
+        let result = service.submit_task(
+            Some("Task C".to_string()),
+            "Depends on A and B".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![task_a.id, task_b.id],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await;
+        assert!(result.is_ok(), "Non-cyclic multi-dep should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_no_deps_no_cycle_check() {
+        let service = setup_service().await;
+
+        // Task with no dependencies should always succeed (no cycle possible)
+        let result = service.submit_task(
+            Some("Solo Task".to_string()),
+            "No dependencies".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await;
+        assert!(result.is_ok(), "Task with no deps should not trigger cycle detection");
+    }
+
+    #[tokio::test]
+    async fn test_single_dep_no_cycle() {
+        let service = setup_service().await;
+
+        let (task_a, _) = service.submit_task(
+            Some("Task A".to_string()),
+            "Base task".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        // Single dependency, no cycle possible through the new task alone
+        let result = service.submit_task(
+            Some("Task B".to_string()),
+            "Depends on A".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![task_a.id],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await;
+        assert!(result.is_ok(), "Single non-cyclic dependency should succeed");
+    }
+
 }

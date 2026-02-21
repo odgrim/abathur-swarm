@@ -17,6 +17,7 @@ use crate::domain::models::{TaskStatus, WorktreeStatus};
 use crate::domain::ports::{TaskRepository, WorktreeRepository};
 use crate::services::integration_verifier::{IntegrationVerifierService, VerificationResult};
 use crate::domain::ports::GoalRepository;
+use tracing::{debug, error, info, warn};
 
 /// Stage of the merge process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,6 +250,14 @@ where
         );
 
         let id = request.id;
+        info!(
+            task_id = %task_id,
+            merge_id = %id,
+            source = agent_branch,
+            target = task_branch,
+            stage = "agent_to_task",
+            "Queued stage 1 merge"
+        );
         self.queue.write().await.push_back(request);
         Ok(id)
     }
@@ -268,6 +277,14 @@ where
             target_workdir.to_string(),
         );
         let id = request.id;
+        info!(
+            task_id = %task_id,
+            merge_id = %id,
+            source = source_branch,
+            target = target_branch,
+            stage = "merge_back",
+            "Queued merge-back"
+        );
         self.queue.write().await.push_back(request);
         Ok(id)
     }
@@ -288,6 +305,14 @@ where
         );
 
         let id = request.id;
+        info!(
+            task_id = %task_id,
+            merge_id = %id,
+            source = %worktree.branch,
+            target = %self.config.main_branch,
+            stage = "task_to_main",
+            "Queued stage 2 merge"
+        );
         self.queue.write().await.push_back(request);
         Ok(id)
     }
@@ -308,6 +333,15 @@ where
                 None => return Ok(None),
             }
         };
+
+        debug!(
+            merge_id = %request.id,
+            task_id = %request.task_id,
+            stage = ?request.stage,
+            source = %request.source_branch,
+            target = %request.target_branch,
+            "Processing merge request"
+        );
 
         // Process based on stage
         let result = match request.stage {
@@ -345,6 +379,12 @@ where
         ).await?;
 
         if !conflict_check.0.is_empty() {
+            warn!(
+                merge_id = %request.id,
+                task_id = %request.task_id,
+                conflict_files = ?conflict_check.0,
+                "Stage 1 merge has conflicts"
+            );
             request.status = MergeStatus::Conflict;
             request.error = Some(format!("Merge conflicts in: {}", conflict_check.0.join(", ")));
             request.updated_at = Utc::now();
@@ -362,6 +402,12 @@ where
         // Perform the merge
         match self.git_merge(&request.workdir, &request.source_branch, &request.target_branch).await {
             Ok(commit_sha) => {
+                info!(
+                    merge_id = %request.id,
+                    task_id = %request.task_id,
+                    commit_sha = %commit_sha,
+                    "Stage 1 merge completed successfully"
+                );
                 request.status = MergeStatus::Completed;
                 request.commit_sha = Some(commit_sha.clone());
                 request.updated_at = Utc::now();
@@ -376,6 +422,12 @@ where
                 })
             }
             Err(e) => {
+                error!(
+                    merge_id = %request.id,
+                    task_id = %request.task_id,
+                    error = %e,
+                    "Stage 1 merge failed"
+                );
                 request.status = MergeStatus::Failed;
                 request.error = Some(e.to_string());
                 request.updated_at = Utc::now();
@@ -396,10 +448,21 @@ where
     async fn process_stage2(&self, request: &mut MergeRequest) -> DomainResult<MergeResult> {
         // Run verification first if required
         if self.config.require_verification {
+            debug!(
+                merge_id = %request.id,
+                task_id = %request.task_id,
+                "Running pre-merge verification"
+            );
             let verification = self.verifier.verify_task(request.task_id).await?;
             request.verification = Some(verification.clone());
 
             if !verification.passed {
+                warn!(
+                    merge_id = %request.id,
+                    task_id = %request.task_id,
+                    failures = ?verification.failures_summary,
+                    "Stage 2 verification failed"
+                );
                 request.status = MergeStatus::VerificationFailed;
                 request.error = verification.failures_summary.clone();
                 request.updated_at = Utc::now();
@@ -413,6 +476,11 @@ where
                     conflict_files: vec![],
                 });
             }
+            debug!(
+                merge_id = %request.id,
+                task_id = %request.task_id,
+                "Pre-merge verification passed"
+            );
         }
 
         // Check for conflicts
@@ -423,6 +491,12 @@ where
         ).await?;
 
         if !conflict_check.0.is_empty() {
+            warn!(
+                merge_id = %request.id,
+                task_id = %request.task_id,
+                conflict_files = ?conflict_check.0,
+                "Stage 2 merge has conflicts"
+            );
             request.status = MergeStatus::Conflict;
             request.error = Some(format!("Merge conflicts in: {}", conflict_check.0.join(", ")));
             request.updated_at = Utc::now();
@@ -440,6 +514,13 @@ where
         // Perform the merge to main
         match self.git_merge(&self.config.repo_path, &request.source_branch, &request.target_branch).await {
             Ok(commit_sha) => {
+                info!(
+                    merge_id = %request.id,
+                    task_id = %request.task_id,
+                    commit_sha = %commit_sha,
+                    target = %request.target_branch,
+                    "Stage 2 merge to main completed successfully"
+                );
                 request.status = MergeStatus::Completed;
                 request.commit_sha = Some(commit_sha.clone());
                 request.updated_at = Utc::now();
@@ -460,6 +541,12 @@ where
                 })
             }
             Err(e) => {
+                error!(
+                    merge_id = %request.id,
+                    task_id = %request.task_id,
+                    error = %e,
+                    "Stage 2 merge to main failed"
+                );
                 request.status = MergeStatus::Failed;
                 request.error = Some(e.to_string());
                 request.updated_at = Utc::now();
@@ -483,13 +570,29 @@ where
         source: &str,
         target: &str,
     ) -> DomainResult<(Vec<String>, bool)> {
+        debug!(
+            workdir = workdir,
+            source = source,
+            target = target,
+            command = "git merge-tree",
+            "Checking for merge conflicts"
+        );
         // Use git merge-tree to check for conflicts without modifying worktree
         let output = Command::new("git")
             .args(["merge-tree", target, source])
             .current_dir(workdir)
             .output()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+            .map_err(|e| {
+                error!(
+                    workdir = workdir,
+                    source = source,
+                    target = target,
+                    error = %e,
+                    "Failed to execute git merge-tree"
+                );
+                DomainError::ValidationFailed(format!("Failed to run git: {}", e))
+            })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -525,28 +628,61 @@ where
         target: &str,
     ) -> DomainResult<String> {
         // Checkout target branch
+        debug!(
+            workdir = workdir,
+            target = target,
+            command = "git checkout",
+            "Checking out target branch"
+        );
         let checkout = Command::new("git")
             .args(["checkout", target])
             .current_dir(workdir)
             .output()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+            .map_err(|e| {
+                error!(workdir = workdir, target = target, error = %e, "Failed to execute git checkout");
+                DomainError::ValidationFailed(format!("Failed to run git: {}", e))
+            })?;
 
         if !checkout.status.success() {
             let stderr = String::from_utf8_lossy(&checkout.stderr);
+            error!(
+                workdir = workdir,
+                target = target,
+                stderr = %stderr,
+                "Git checkout failed"
+            );
             return Err(DomainError::ValidationFailed(format!("Git checkout failed: {}", stderr)));
         }
 
         // Merge source into target
         let merge_msg = format!("Merge {} into {}", source, target);
+        debug!(
+            workdir = workdir,
+            source = source,
+            target = target,
+            command = "git merge --no-ff",
+            "Performing merge"
+        );
         let merge = Command::new("git")
             .args(["merge", "--no-ff", source, "-m", &merge_msg])
             .current_dir(workdir)
             .output()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+            .map_err(|e| {
+                error!(workdir = workdir, source = source, target = target, error = %e, "Failed to execute git merge");
+                DomainError::ValidationFailed(format!("Failed to run git: {}", e))
+            })?;
 
         if !merge.status.success() {
+            let stderr = String::from_utf8_lossy(&merge.stderr);
+            error!(
+                workdir = workdir,
+                source = source,
+                target = target,
+                stderr = %stderr,
+                "Git merge failed, aborting"
+            );
             // Abort the merge if it failed
             let _ = Command::new("git")
                 .args(["merge", "--abort"])
@@ -554,7 +690,6 @@ where
                 .output()
                 .await;
 
-            let stderr = String::from_utf8_lossy(&merge.stderr);
             return Err(DomainError::ValidationFailed(format!("Git merge failed: {}", stderr)));
         }
 
@@ -564,9 +699,13 @@ where
             .current_dir(workdir)
             .output()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+            .map_err(|e| {
+                error!(workdir = workdir, error = %e, "Failed to execute git rev-parse HEAD");
+                DomainError::ValidationFailed(format!("Failed to run git: {}", e))
+            })?;
 
         let commit_sha = String::from_utf8_lossy(&rev_parse.stdout).trim().to_string();
+        debug!(workdir = workdir, commit_sha = %commit_sha, "Merge commit created");
         Ok(commit_sha)
     }
 
@@ -632,8 +771,10 @@ where
         let mut queue = self.queue.write().await;
         if let Some(idx) = queue.iter().position(|r| r.id == id && r.status == MergeStatus::Queued) {
             queue.remove(idx);
+            info!(merge_id = %id, "Merge request cancelled");
             return Ok(true);
         }
+        debug!(merge_id = %id, "Merge request not found or not in queued state for cancellation");
         Ok(false)
     }
 
@@ -653,6 +794,7 @@ where
 
         // Check if task is complete
         if task.status != TaskStatus::Complete {
+            debug!(task_id = %task_id, status = ?task.status, "Task not complete, skipping stage 2");
             return Ok(None);
         }
 
@@ -661,6 +803,7 @@ where
         let all_deps_complete = deps.iter().all(|t| t.status == TaskStatus::Complete);
 
         if !all_deps_complete {
+            debug!(task_id = %task_id, "Not all dependencies complete, skipping stage 2");
             return Ok(None);
         }
 
@@ -761,6 +904,11 @@ where
             let mut queue = self.queue.write().await;
             if let Some(req) = queue.iter_mut().find(|r| r.id == merge_request_id) {
                 if req.status == MergeStatus::Conflict {
+                    info!(
+                        merge_id = %merge_request_id,
+                        task_id = %req.task_id,
+                        "Re-queuing merge after conflict resolution"
+                    );
                     req.status = MergeStatus::Queued;
                     req.error = None;
                     req.updated_at = Utc::now();
@@ -774,6 +922,11 @@ where
             let history = self.history.read().await;
             if let Some(req) = history.iter().find(|r| r.id == merge_request_id) {
                 if req.status == MergeStatus::Conflict {
+                    info!(
+                        merge_id = %merge_request_id,
+                        task_id = %req.task_id,
+                        "Re-queuing merge from history after conflict resolution"
+                    );
                     let mut new_req = req.clone();
                     new_req.status = MergeStatus::Queued;
                     new_req.error = None;
@@ -786,6 +939,7 @@ where
             }
         }
 
+        debug!(merge_id = %merge_request_id, "No conflicted merge request found for retry");
         Ok(false)
     }
 }

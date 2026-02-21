@@ -648,7 +648,7 @@ where
                     Err(e) => {
                         tracing::warn!("CommandBus failed to reconcile task {}, falling back to direct write: {}", task.id, e);
                         let mut task = task.clone();
-                        task.status = TaskStatus::Failed;
+                        task.force_status(TaskStatus::Failed, "startup reconciliation: stale running task (CommandBus fallback)");
                         if let Err(e) = self.task_repo.update(&task).await {
                             tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                         } else {
@@ -658,7 +658,7 @@ where
                 }
             } else {
                 let mut task = task.clone();
-                task.status = TaskStatus::Failed;
+                task.force_status(TaskStatus::Failed, "startup reconciliation: stale running task (no CommandBus)");
                 if let Err(e) = self.task_repo.update(&task).await {
                     tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                 } else {
@@ -702,7 +702,7 @@ where
                             Err(e) => {
                                 tracing::warn!("CommandBus failed to reconcile task {}, falling back to direct write: {}", task.id, e);
                                 let mut task = task.clone();
-                                task.status = TaskStatus::Pending;
+                                task.force_status(TaskStatus::Pending, "startup reconciliation: ready task with incomplete deps (CommandBus fallback)");
                                 if let Err(e) = self.task_repo.update(&task).await {
                                     tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                                 } else {
@@ -712,7 +712,7 @@ where
                         }
                     } else {
                         let mut task = task.clone();
-                        task.status = TaskStatus::Pending;
+                        task.force_status(TaskStatus::Pending, "startup reconciliation: ready task with incomplete deps (no CommandBus)");
                         if let Err(e) = self.task_repo.update(&task).await {
                             tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                         } else {
@@ -763,7 +763,7 @@ where
                         Err(e) => {
                             tracing::warn!("CommandBus failed to reconcile task {}, falling back to direct write: {}", task.id, e);
                             let mut task = task.clone();
-                            task.status = TaskStatus::Ready;
+                            task.force_status(TaskStatus::Ready, "startup reconciliation: pending task with all deps complete (CommandBus fallback)");
                             if let Err(e) = self.task_repo.update(&task).await {
                                 tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                             } else {
@@ -773,7 +773,7 @@ where
                     }
                 } else {
                     let mut task = task.clone();
-                    task.status = TaskStatus::Ready;
+                    task.force_status(TaskStatus::Ready, "startup reconciliation: pending task with all deps complete (no CommandBus)");
                     if let Err(e) = self.task_repo.update(&task).await {
                         tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
                     } else {

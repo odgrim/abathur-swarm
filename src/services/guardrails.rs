@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::{debug, warn};
 
 /// Configuration for guardrails.
 #[derive(Debug, Clone)]
@@ -160,6 +161,12 @@ impl Guardrails {
         let tasks = self.current_tasks.read().await;
 
         if tasks.len() >= self.config.max_concurrent_tasks {
+            warn!(
+                task_id = %task_id,
+                current = tasks.len(),
+                limit = self.config.max_concurrent_tasks,
+                "Task start blocked: concurrent task limit reached"
+            );
             return GuardrailResult::Blocked(format!(
                 "Maximum concurrent tasks ({}) reached",
                 self.config.max_concurrent_tasks
@@ -167,6 +174,7 @@ impl Guardrails {
         }
 
         if tasks.contains(&task_id) {
+            warn!(task_id = %task_id, "Task start blocked: task already running");
             return GuardrailResult::Blocked("Task already running".to_string());
         }
 
@@ -178,6 +186,7 @@ impl Guardrails {
         let mut tasks = self.current_tasks.write().await;
         tasks.insert(task_id);
         self.metrics.record_task_started();
+        debug!(task_id = %task_id, concurrent_tasks = tasks.len(), "Task registered as started");
     }
 
     /// Register a task as finished.
@@ -190,6 +199,7 @@ impl Guardrails {
         } else {
             self.metrics.record_task_failed();
         }
+        debug!(task_id = %task_id, success = success, concurrent_tasks = tasks.len(), "Task registered as finished");
     }
 
     /// Check if we can spawn a new agent.
@@ -197,6 +207,12 @@ impl Guardrails {
         let agents = self.current_agents.read().await;
 
         if agents.len() >= self.config.max_concurrent_agents {
+            warn!(
+                agent_id = _agent_id,
+                current = agents.len(),
+                limit = self.config.max_concurrent_agents,
+                "Agent spawn blocked: concurrent agent limit reached"
+            );
             return GuardrailResult::Blocked(format!(
                 "Maximum concurrent agents ({}) reached",
                 self.config.max_concurrent_agents
@@ -211,6 +227,7 @@ impl Guardrails {
         let mut agents = self.current_agents.write().await;
         agents.insert(agent_id.to_string());
         self.metrics.record_agent_spawned();
+        debug!(agent_id = agent_id, concurrent_agents = agents.len(), "Agent registered as spawned");
     }
 
     /// Register an agent as finished.
@@ -223,6 +240,7 @@ impl Guardrails {
     pub fn check_tool(&self, tool_name: &str) -> GuardrailResult {
         for blocked in &self.config.blocked_tools {
             if tool_name.eq_ignore_ascii_case(blocked) {
+                warn!(tool = tool_name, "Tool usage blocked by guardrail");
                 return GuardrailResult::Blocked(format!("Tool '{}' is blocked", tool_name));
             }
         }
@@ -233,6 +251,7 @@ impl Guardrails {
     pub fn check_file_path(&self, path: &str) -> GuardrailResult {
         for pattern in &self.config.blocked_files {
             if Self::matches_pattern(path, pattern) {
+                warn!(path = path, pattern = pattern.as_str(), "File access blocked by guardrail");
                 return GuardrailResult::Blocked(format!(
                     "Access to '{}' is blocked by pattern '{}'",
                     path, pattern
@@ -246,6 +265,12 @@ impl Guardrails {
     pub fn check_tokens(&self, requested: u64) -> GuardrailResult {
         let current = self.metrics.get_tokens_this_hour();
         if current + requested > self.config.max_tokens_per_hour {
+            warn!(
+                current_tokens = current,
+                requested_tokens = requested,
+                limit = self.config.max_tokens_per_hour,
+                "Token usage blocked: hourly limit would be exceeded"
+            );
             return GuardrailResult::Blocked(format!(
                 "Token limit ({}/hour) would be exceeded",
                 self.config.max_tokens_per_hour
@@ -254,6 +279,12 @@ impl Guardrails {
 
         // Warn at 80%
         if current + requested > (self.config.max_tokens_per_hour * 80) / 100 {
+            warn!(
+                current_tokens = current,
+                requested_tokens = requested,
+                limit = self.config.max_tokens_per_hour,
+                "Approaching token limit (>80%)"
+            );
             return GuardrailResult::Warning(format!(
                 "Approaching token limit: {}/{} used",
                 current + requested,
@@ -272,6 +303,12 @@ impl Guardrails {
 
         let current = self.metrics.get_cost_cents();
         if current + additional_cents > self.config.budget_limit_cents {
+            warn!(
+                current_cost_cents = current,
+                additional_cents = additional_cents,
+                budget_limit_cents = self.config.budget_limit_cents,
+                "Budget limit would be exceeded"
+            );
             return GuardrailResult::Blocked(format!(
                 "Budget limit (${:.2}) would be exceeded",
                 self.config.budget_limit_cents / 100.0
@@ -284,6 +321,11 @@ impl Guardrails {
     /// Check decomposition depth.
     pub fn check_decomposition_depth(&self, current_depth: usize) -> GuardrailResult {
         if current_depth >= self.config.max_decomposition_depth {
+            warn!(
+                current_depth = current_depth,
+                limit = self.config.max_decomposition_depth,
+                "Decomposition depth limit reached"
+            );
             return GuardrailResult::Blocked(format!(
                 "Maximum decomposition depth ({}) reached",
                 self.config.max_decomposition_depth

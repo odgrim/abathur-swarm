@@ -3,6 +3,14 @@
 use thiserror::Error;
 use uuid::Uuid;
 
+/// Format a cycle path as a human-readable string: `A -> B -> C -> A`.
+fn format_cycle_path(path: &[Uuid]) -> String {
+    path.iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
 /// Domain-level errors that can occur in the Abathur system.
 #[derive(Debug, Error)]
 pub enum DomainError {
@@ -15,8 +23,8 @@ pub enum DomainError {
     #[error("Invalid state transition from {from} to {to}: {reason}")]
     InvalidStateTransition { from: String, to: String, reason: String },
 
-    #[error("Task dependency cycle detected involving task: {0}")]
-    DependencyCycle(Uuid),
+    #[error("Task dependency cycle detected: {}", format_cycle_path(.0))]
+    DependencyCycle(Vec<Uuid>),
 
     #[error("Agent not found: {0}")]
     AgentNotFound(String),

@@ -583,7 +583,7 @@ mod tests {
     fn create_test_task() -> Task {
         let mut task = Task::with_title("Test Task", "Test description")
             .with_priority(TaskPriority::Normal);
-        task.status = TaskStatus::Failed;
+        task.force_status(TaskStatus::Failed, "test setup");
         task
     }
 
@@ -711,12 +711,12 @@ mod tests {
     fn test_is_eligible() {
         let service = DagRestructureService::with_defaults();
 
-        let mut failed_task = create_test_task();
-        failed_task.status = TaskStatus::Failed;
+        let failed_task = create_test_task();
+        // create_test_task() already sets Failed status
         assert!(service.is_eligible(&failed_task));
 
         let mut pending_task = create_test_task();
-        pending_task.status = TaskStatus::Pending;
+        pending_task.force_status(TaskStatus::Pending, "test setup: testing is_eligible");
         assert!(!service.is_eligible(&pending_task));
     }
 
