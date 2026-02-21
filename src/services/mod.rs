@@ -64,7 +64,7 @@ pub use embedding_service::{EmbeddingService, EmbeddingServiceConfig, BatchEmbed
 pub use evolution_loop::{EvolutionAction, EvolutionConfig, EvolutionEvent, EvolutionLoop, EvolutionTrigger, RefinementRepository, RefinementRequest, RefinementSeverity, RefinementStatus, TaskExecution, TaskOutcome, TemplateStats};
 pub use goal_context_service::GoalContextService;
 pub use goal_service::GoalService;
-pub use guardrails::{GuardrailResult, Guardrails, GuardrailsConfig, RuntimeMetrics};
+pub use guardrails::{GuardrailResult, Guardrails, GuardrailsConfig, HourlyResetConfig, HourlyResetDaemon, HourlyResetHandle, RuntimeMetrics};
 pub use integration_verifier::{IntegrationVerifierService, VerificationCheck, VerificationResult, VerifierConfig, TestResult};
 pub use intent_verifier::{IntentVerifierConfig, IntentVerifierService};
 pub use llm_planner::{LlmPlanner, LlmPlannerConfig, LlmDecomposition, LlmTaskSpec, PlanningContext, AgentRefinementSuggestion};
