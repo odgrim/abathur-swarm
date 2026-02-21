@@ -198,6 +198,7 @@ impl Guardrails {
     ///
     /// **Deprecated**: Use [`check_and_register_task`] instead to avoid a
     /// TOCTOU race between checking and registering.
+    #[deprecated(note = "Use check_and_register_task instead to avoid TOCTOU race")]
     pub async fn check_task_start(&self, task_id: uuid::Uuid) -> GuardrailResult {
         let tasks = self.current_tasks.read().await;
 
@@ -219,6 +220,7 @@ impl Guardrails {
     ///
     /// **Deprecated**: Use [`check_and_register_task`] instead to avoid a
     /// TOCTOU race between checking and registering.
+    #[deprecated(note = "Use check_and_register_task instead to avoid TOCTOU race")]
     pub async fn register_task_start(&self, task_id: uuid::Uuid) {
         let mut tasks = self.current_tasks.write().await;
         tasks.insert(task_id);
@@ -264,6 +266,7 @@ impl Guardrails {
     ///
     /// **Deprecated**: Use [`check_and_register_agent`] instead to avoid a
     /// TOCTOU race between checking and registering.
+    #[deprecated(note = "Use check_and_register_agent instead to avoid TOCTOU race")]
     pub async fn check_agent_spawn(&self, _agent_id: &str) -> GuardrailResult {
         let agents = self.current_agents.read().await;
 
@@ -281,6 +284,7 @@ impl Guardrails {
     ///
     /// **Deprecated**: Use [`check_and_register_agent`] instead to avoid a
     /// TOCTOU race between checking and registering.
+    #[deprecated(note = "Use check_and_register_agent instead to avoid TOCTOU race")]
     pub async fn register_agent_spawn(&self, agent_id: &str) {
         let mut agents = self.current_agents.write().await;
         agents.insert(agent_id.to_string());
@@ -343,6 +347,7 @@ impl Guardrails {
     ///
     /// **Deprecated**: Use [`check_and_record_tokens`] instead to avoid a
     /// TOCTOU race between checking and recording.
+    #[deprecated(note = "Use check_and_record_tokens instead to avoid TOCTOU race")]
     pub fn check_tokens(&self, requested: u64) -> GuardrailResult {
         let current = self.metrics.get_tokens_this_hour();
         if current + requested > self.config.max_tokens_per_hour {
@@ -424,6 +429,7 @@ impl Guardrails {
     ///
     /// **Deprecated**: Use [`check_and_record_tokens`] instead for atomic
     /// check+record.
+    #[deprecated(note = "Use check_and_record_tokens instead for atomic check+record")]
     pub fn record_tokens(&self, tokens: u64) {
         self.metrics.record_tokens(tokens);
     }
@@ -568,6 +574,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_task_limit() {
         let config = GuardrailsConfig {
             max_concurrent_tasks: 2,
@@ -617,6 +624,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_token_limit() {
         let config = GuardrailsConfig {
             max_tokens_per_hour: 1000,
@@ -674,6 +682,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_atomic_check_and_record_tokens_blocked() {
         let config = GuardrailsConfig {
             max_tokens_per_hour: 1000,

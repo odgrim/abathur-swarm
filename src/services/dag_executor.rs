@@ -1032,9 +1032,27 @@ where
                     );
                 }
 
-                // Record tokens with guardrails
+                // Record tokens with guardrails (atomic check+record)
                 if let Some(ref g) = guardrails {
-                    g.record_tokens(tokens_used);
+                    match g.check_and_record_tokens(tokens_used) {
+                        crate::services::guardrails::GuardrailResult::Blocked(reason) => {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                tokens_used,
+                                "Token recording blocked by guardrails: {}",
+                                reason
+                            );
+                        }
+                        crate::services::guardrails::GuardrailResult::Warning(reason) => {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                tokens_used,
+                                "Token usage warning: {}",
+                                reason
+                            );
+                        }
+                        crate::services::guardrails::GuardrailResult::Allowed => {}
+                    }
                     if let Some(cost_cents) = estimated_cost_cents {
                         g.record_cost(cost_cents);
                     }
