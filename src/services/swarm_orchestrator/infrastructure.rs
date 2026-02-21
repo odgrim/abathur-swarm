@@ -18,6 +18,7 @@ use crate::services::{
     DecayDaemonConfig, IntegrationVerifierService, MemoryDecayDaemon, MemoryService,
     VerificationResult, VerifierConfig, WorktreeConfig, WorktreeService,
     command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand},
+    guardrails::{HourlyResetConfig, HourlyResetDaemon},
 };
 
 use super::types::{OrchestratorStatus, SwarmEvent, SwarmStats};
@@ -393,6 +394,36 @@ where
         });
 
         Ok(())
+    }
+
+    /// Start the hourly token reset daemon.
+    ///
+    /// Spawns a background task that resets the hourly token counter at the
+    /// configured interval (default: 1 hour). Follows the same lifecycle
+    /// pattern as [`start_decay_daemon`].
+    pub async fn start_hourly_reset_daemon(&self) {
+        let metrics = self.guardrails.metrics_arc();
+        let daemon = HourlyResetDaemon::new(metrics, HourlyResetConfig::default());
+        let handle = daemon.spawn();
+
+        {
+            let mut h = self.hourly_reset_handle.write().await;
+            *h = Some(handle);
+        }
+
+        self.audit_log.info(
+            AuditCategory::System,
+            AuditAction::SwarmStarted,
+            "Hourly token reset daemon started",
+        ).await;
+    }
+
+    /// Stop the hourly token reset daemon.
+    pub async fn stop_hourly_reset_daemon(&self) {
+        let h = self.hourly_reset_handle.read().await;
+        if let Some(ref handle) = *h {
+            handle.stop();
+        }
     }
 
     /// Stop the memory decay daemon.
