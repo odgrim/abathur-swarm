@@ -64,13 +64,13 @@ pub use embedding_service::{EmbeddingService, EmbeddingServiceConfig, BatchEmbed
 pub use evolution_loop::{EvolutionAction, EvolutionConfig, EvolutionEvent, EvolutionLoop, EvolutionTrigger, RefinementRepository, RefinementRequest, RefinementSeverity, RefinementStatus, TaskExecution, TaskOutcome, TemplateStats};
 pub use goal_context_service::GoalContextService;
 pub use goal_service::GoalService;
-pub use guardrails::{GuardrailResult, Guardrails, GuardrailsConfig, RuntimeMetrics};
+pub use guardrails::{GuardrailResult, Guardrails, GuardrailsConfig, HourlyResetConfig, HourlyResetDaemon, HourlyResetHandle, RuntimeMetrics};
 pub use integration_verifier::{IntegrationVerifierService, VerificationCheck, VerificationResult, VerifierConfig, TestResult};
 pub use intent_verifier::{IntentVerifierConfig, IntentVerifierService};
 pub use llm_planner::{LlmPlanner, LlmPlannerConfig, LlmDecomposition, LlmTaskSpec, PlanningContext, AgentRefinementSuggestion};
 pub use memory_decay_daemon::{DaemonHandle, DaemonStatus, DecayDaemonConfig, DecayDaemonEvent, MemoryDecayDaemon, StopReason};
 pub use memory_service::{DecayConfig, MaintenanceReport, MemoryService, MemoryStats};
-pub use merge_queue::{MergeQueue, MergeQueueConfig, MergeQueueStats, MergeRequest, MergeResult, MergeStage, MergeStatus};
+pub use merge_queue::{MergeQueue, MergeQueueConfig, MergeQueueStats, MergeRequest, MergeResult, MergeStage, MergeStatus, validate_branch_name};
 pub use meta_planner::{AgentMetrics, AgentSpec, Complexity, DecompositionPlan, MetaPlanner, MetaPlannerConfig, TaskSpec};
 pub use overmind::{OvermindConfig, OvermindService};
 pub use phase_orchestrator::{PhaseOrchestrator, PhaseOrchestratorConfig};
