@@ -5,9 +5,10 @@
 //! - Stage 2: Task feature branch → Main branch (with verification)
 
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::process::Command;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -17,6 +18,59 @@ use crate::domain::models::{TaskStatus, WorktreeStatus};
 use crate::domain::ports::{TaskRepository, WorktreeRepository};
 use crate::services::integration_verifier::{IntegrationVerifierService, VerificationResult};
 use crate::domain::ports::GoalRepository;
+
+/// Regex pattern for valid git branch names.
+///
+/// Allows alphanumeric characters, hyphens, underscores, dots, and forward slashes
+/// (for hierarchical branch names like `feature/my-branch`). Rejects anything that
+/// could be interpreted as a git flag (leading `-`), shell metacharacter, or other
+/// potentially dangerous input.
+static VALID_BRANCH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._/\-]*$").expect("Invalid branch name regex")
+});
+
+/// Validate that a branch name is safe for use in git commands.
+///
+/// Rejects branch names that:
+/// - Are empty
+/// - Start with a hyphen (could be interpreted as a git flag)
+/// - Contain shell metacharacters or whitespace
+/// - Contain `..` (git traversal)
+/// - End with `.lock` (reserved by git)
+/// - Contain control characters or other unsafe characters
+pub fn validate_branch_name(name: &str) -> DomainResult<()> {
+    if name.is_empty() {
+        return Err(DomainError::InvalidBranchName(
+            "branch name must not be empty".to_string(),
+        ));
+    }
+
+    if name.contains("..") {
+        return Err(DomainError::InvalidBranchName(format!(
+            "branch name must not contain '..': {name}"
+        )));
+    }
+
+    if name.ends_with(".lock") {
+        return Err(DomainError::InvalidBranchName(format!(
+            "branch name must not end with '.lock': {name}"
+        )));
+    }
+
+    if name.ends_with('/') || name.contains("//") {
+        return Err(DomainError::InvalidBranchName(format!(
+            "branch name has invalid slash usage: {name}"
+        )));
+    }
+
+    if !VALID_BRANCH_RE.is_match(name) {
+        return Err(DomainError::InvalidBranchName(format!(
+            "branch name contains invalid characters: {name}"
+        )));
+    }
+
+    Ok(())
+}
 
 /// Stage of the merge process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +289,9 @@ where
         agent_branch: &str,
         task_branch: &str,
     ) -> DomainResult<Uuid> {
+        validate_branch_name(agent_branch)?;
+        validate_branch_name(task_branch)?;
+
         // Get worktree for this task
         let worktree = self.worktree_repo.get_by_task(task_id).await?
             .ok_or_else(|| DomainError::ValidationFailed(
@@ -261,6 +318,9 @@ where
         target_branch: &str,
         target_workdir: &str,
     ) -> DomainResult<Uuid> {
+        validate_branch_name(source_branch)?;
+        validate_branch_name(target_branch)?;
+
         let request = MergeRequest::new_stage1(
             task_id,
             source_branch.to_string(),
@@ -483,9 +543,14 @@ where
         source: &str,
         target: &str,
     ) -> DomainResult<(Vec<String>, bool)> {
+        // Defense-in-depth: validate branch names before passing to git
+        validate_branch_name(source)?;
+        validate_branch_name(target)?;
+
         // Use git merge-tree to check for conflicts without modifying worktree
+        // Branch names are validated above; `--` prevents interpretation as flags
         let output = Command::new("git")
-            .args(["merge-tree", target, source])
+            .args(["merge-tree", "--", target, source])
             .current_dir(workdir)
             .output()
             .await
@@ -524,7 +589,11 @@ where
         source: &str,
         target: &str,
     ) -> DomainResult<String> {
-        // Checkout target branch
+        // Defense-in-depth: validate branch names before passing to git
+        validate_branch_name(source)?;
+        validate_branch_name(target)?;
+
+        // Checkout target branch (validated above to prevent flag injection)
         let checkout = Command::new("git")
             .args(["checkout", target])
             .current_dir(workdir)
@@ -537,10 +606,10 @@ where
             return Err(DomainError::ValidationFailed(format!("Git checkout failed: {}", stderr)));
         }
 
-        // Merge source into target
+        // Merge source into target — `--` separates options from branch name
         let merge_msg = format!("Merge {} into {}", source, target);
         let merge = Command::new("git")
-            .args(["merge", "--no-ff", source, "-m", &merge_msg])
+            .args(["merge", "--no-ff", "-m", &merge_msg, "--", source])
             .current_dir(workdir)
             .output()
             .await
@@ -846,5 +915,104 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"success\":true"));
         assert!(json.contains("\"commit_sha\":\"abc123\""));
+    }
+
+    // --- Branch name validation tests ---
+
+    #[test]
+    fn test_validate_valid_branch_names() {
+        // Simple names
+        assert!(validate_branch_name("main").is_ok());
+        assert!(validate_branch_name("develop").is_ok());
+        assert!(validate_branch_name("my-feature").is_ok());
+        assert!(validate_branch_name("my_feature").is_ok());
+
+        // Hierarchical names
+        assert!(validate_branch_name("feature/my-branch").is_ok());
+        assert!(validate_branch_name("release/v1.0.0").is_ok());
+        assert!(validate_branch_name("hotfix/fix-123").is_ok());
+        assert!(validate_branch_name("user/john/feature").is_ok());
+
+        // Names with dots
+        assert!(validate_branch_name("v1.2.3").is_ok());
+        assert!(validate_branch_name("release-1.0").is_ok());
+
+        // Names starting with digits
+        assert!(validate_branch_name("123-fix").is_ok());
+
+        // Abathur-style branch names
+        assert!(validate_branch_name("abathur/task-abc123").is_ok());
+        assert!(validate_branch_name("task-5ff9ae8d").is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_branch_name() {
+        let result = validate_branch_name("");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DomainError::InvalidBranchName(_)));
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn test_validate_branch_name_starting_with_hyphen() {
+        // Could be interpreted as a git flag
+        let result = validate_branch_name("-flag");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DomainError::InvalidBranchName(_)));
+
+        let result = validate_branch_name("--help");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DomainError::InvalidBranchName(_)));
+
+        let result = validate_branch_name("--exec=malicious");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_branch_name_with_shell_metacharacters() {
+        assert!(validate_branch_name("branch;rm -rf /").is_err());
+        assert!(validate_branch_name("branch|cat /etc/passwd").is_err());
+        assert!(validate_branch_name("branch&background").is_err());
+        assert!(validate_branch_name("branch$(cmd)").is_err());
+        assert!(validate_branch_name("branch`cmd`").is_err());
+        assert!(validate_branch_name("branch name").is_err()); // spaces
+        assert!(validate_branch_name("branch\ttab").is_err()); // tabs
+        assert!(validate_branch_name("branch\nnewline").is_err()); // newlines
+    }
+
+    #[test]
+    fn test_validate_branch_name_with_double_dots() {
+        // Git traversal
+        assert!(validate_branch_name("a..b").is_err());
+        assert!(validate_branch_name("main..feature").is_err());
+        let err = validate_branch_name("a..b").unwrap_err();
+        assert!(err.to_string().contains(".."));
+    }
+
+    #[test]
+    fn test_validate_branch_name_ending_with_lock() {
+        assert!(validate_branch_name("branch.lock").is_err());
+        assert!(validate_branch_name("HEAD.lock").is_err());
+        let err = validate_branch_name("branch.lock").unwrap_err();
+        assert!(err.to_string().contains(".lock"));
+    }
+
+    #[test]
+    fn test_validate_branch_name_with_invalid_slashes() {
+        assert!(validate_branch_name("feature/").is_err());
+        assert!(validate_branch_name("feature//branch").is_err());
+    }
+
+    #[test]
+    fn test_validate_branch_name_with_special_chars() {
+        assert!(validate_branch_name("branch~1").is_err());
+        assert!(validate_branch_name("branch^2").is_err());
+        assert!(validate_branch_name("branch:ref").is_err());
+        assert!(validate_branch_name("branch[0]").is_err());
+        assert!(validate_branch_name("branch?glob").is_err());
+        assert!(validate_branch_name("branch*star").is_err());
+        assert!(validate_branch_name("branch\\backslash").is_err());
+        assert!(validate_branch_name("branch@{upstream}").is_err());
     }
 }
