@@ -13,7 +13,7 @@ use crate::services::event_bus::{
     EventCategory, EventPayload, EventSeverity, UnifiedEvent,
 };
 use crate::services::event_factory;
-use tracing::warn;
+use tracing::{debug, error, info, warn};
 
 /// Configuration for spawn limits.
 #[derive(Debug, Clone)]
@@ -151,6 +151,12 @@ impl<T: TaskRepository> TaskService<T> {
         // Check subtask depth
         let depth = self.calculate_depth(&parent).await?;
         if depth >= self.spawn_limits.max_subtask_depth {
+            warn!(
+                parent_id = %parent_id,
+                depth = depth,
+                limit = self.spawn_limits.max_subtask_depth,
+                "Spawn limit exceeded: subtask depth"
+            );
             return Ok(SpawnLimitResult::LimitExceeded {
                 limit_type: SpawnLimitType::SubtaskDepth,
                 current_value: depth,
@@ -162,6 +168,12 @@ impl<T: TaskRepository> TaskService<T> {
         // Check direct subtasks count
         let direct_subtasks = self.count_direct_subtasks(parent_id).await?;
         if direct_subtasks >= self.spawn_limits.max_subtasks_per_task {
+            warn!(
+                parent_id = %parent_id,
+                direct_subtasks = direct_subtasks,
+                limit = self.spawn_limits.max_subtasks_per_task,
+                "Spawn limit exceeded: subtasks per task"
+            );
             return Ok(SpawnLimitResult::LimitExceeded {
                 limit_type: SpawnLimitType::SubtasksPerTask,
                 current_value: direct_subtasks,
@@ -174,6 +186,13 @@ impl<T: TaskRepository> TaskService<T> {
         let root_id = self.find_root_task(&parent).await?;
         let total_descendants = self.count_all_descendants(root_id).await?;
         if total_descendants >= self.spawn_limits.max_total_descendants {
+            warn!(
+                parent_id = %parent_id,
+                root_id = %root_id,
+                total_descendants = total_descendants,
+                limit = self.spawn_limits.max_total_descendants,
+                "Spawn limit exceeded: total descendants"
+            );
             return Ok(SpawnLimitResult::LimitExceeded {
                 limit_type: SpawnLimitType::TotalDescendants,
                 current_value: total_descendants,
@@ -359,11 +378,20 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         // --- Threshold decision ---
-        if convergent_score >= 3 {
+        let mode = if convergent_score >= 3 {
             ExecutionMode::Convergent { parallel_samples: None }
         } else {
             ExecutionMode::Direct
-        }
+        };
+
+        debug!(
+            task_title = %task.title,
+            convergent_score = convergent_score,
+            execution_mode = %if mode.is_convergent() { "convergent" } else { "direct" },
+            "Classified task execution mode"
+        );
+
+        mode
     }
 
     /// Look up the parent task's execution mode, if the task has a parent.
@@ -474,6 +502,16 @@ impl<T: TaskRepository> TaskService<T> {
         self.check_and_update_readiness(&mut task).await?;
         self.task_repo.update(&task).await?;
 
+        info!(
+            task_id = %task.id,
+            title = %task.title,
+            status = %task.status.as_str(),
+            priority = ?task.priority,
+            execution_mode = %if task.execution_mode.is_convergent() { "convergent" } else { "direct" },
+            parent_id = ?parent_id,
+            "Task submitted"
+        );
+
         // Collect TaskSubmitted event
         let goal_id = task.parent_id.unwrap_or_else(Uuid::new_v4);
         events.push(Self::make_event(
@@ -526,6 +564,11 @@ impl<T: TaskRepository> TaskService<T> {
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
         if task.status != TaskStatus::Ready {
+            error!(
+                task_id = %task_id,
+                current_status = task.status.as_str(),
+                "Cannot claim task: not in Ready state"
+            );
             return Err(DomainError::InvalidStateTransition {
                 from: task.status.as_str().to_string(),
                 to: "running".to_string(),
@@ -541,6 +584,13 @@ impl<T: TaskRepository> TaskService<T> {
         })?;
 
         self.task_repo.update(&task).await?;
+
+        info!(
+            task_id = %task_id,
+            agent_type = agent_type,
+            title = %task.title,
+            "Task claimed"
+        );
 
         let events = vec![Self::make_event(
             EventSeverity::Info,
@@ -576,6 +626,13 @@ impl<T: TaskRepository> TaskService<T> {
         })?;
 
         self.task_repo.update(&task).await?;
+
+        info!(
+            task_id = %task_id,
+            title = %task.title,
+            execution_mode = %if task.execution_mode.is_convergent() { "convergent" } else { "direct" },
+            "Task completed"
+        );
 
         let mut events = vec![Self::make_event(
             EventSeverity::Info,
@@ -636,6 +693,15 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         self.task_repo.update(&task).await?;
+
+        error!(
+            task_id = %task_id,
+            title = %task.title,
+            error = %error_str,
+            retry_count = task.retry_count,
+            max_retries = task.max_retries,
+            "Task failed"
+        );
 
         let execution_mode_str = if task.execution_mode.is_convergent() {
             "convergent".to_string()
@@ -716,6 +782,14 @@ impl<T: TaskRepository> TaskService<T> {
         task.retry().map_err(DomainError::ValidationFailed)?;
         self.task_repo.update(&task).await?;
 
+        info!(
+            task_id = %task_id,
+            title = %task.title,
+            retry_count = task.retry_count,
+            max_retries = task.max_retries,
+            "Task retrying"
+        );
+
         let events = vec![Self::make_event(
             EventSeverity::Warning,
             EventCategory::Task,
@@ -749,6 +823,13 @@ impl<T: TaskRepository> TaskService<T> {
         })?;
 
         self.task_repo.update(&task).await?;
+
+        warn!(
+            task_id = %task_id,
+            title = %task.title,
+            reason = reason,
+            "Task cancelled"
+        );
 
         let events = vec![Self::make_event(
             EventSeverity::Warning,
