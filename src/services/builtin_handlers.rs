@@ -3007,6 +3007,90 @@ impl EventHandler for EventPruningHandler {
 }
 
 // ============================================================================
+// CommandPruningHandler
+// ============================================================================
+
+/// Triggered by the "command-pruning" scheduled event.
+/// Deletes old rows from the `processed_commands` table to prevent unbounded
+/// growth. The idempotency guarantee only needs to cover a reasonable window
+/// (default: 7 days) — after that, cleanup is safe.
+pub struct CommandPruningHandler {
+    pool: sqlx::SqlitePool,
+    /// TTL for processed command records in days.
+    ttl_days: u64,
+}
+
+impl CommandPruningHandler {
+    pub fn new(pool: sqlx::SqlitePool, ttl_days: u64) -> Self {
+        Self { pool, ttl_days }
+    }
+}
+
+#[async_trait]
+impl EventHandler for CommandPruningHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "CommandPruningHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "command-pruning"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::LOW,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let ttl = std::time::Duration::from_secs(self.ttl_days * 24 * 3600);
+        let cutoff = (chrono::Utc::now()
+            - chrono::Duration::from_std(ttl).unwrap_or_default())
+        .to_rfc3339();
+
+        let pruned = sqlx::query("DELETE FROM processed_commands WHERE processed_at < ?")
+            .bind(&cutoff)
+            .execute(&self.pool)
+            .await
+            .map(|r| r.rows_affected())
+            .map_err(|e| format!("CommandPruning: failed to prune commands: {}", e))?;
+
+        if pruned > 0 {
+            tracing::info!(
+                "CommandPruning: pruned {} processed commands older than {} days",
+                pruned,
+                self.ttl_days
+            );
+
+            let summary = UnifiedEvent {
+                id: EventId::new(),
+                sequence: SequenceNumber(0),
+                timestamp: chrono::Utc::now(),
+                severity: EventSeverity::Info,
+                category: EventCategory::Orchestrator,
+                goal_id: None,
+                task_id: None,
+                correlation_id: event.correlation_id,
+                source_process_id: None,
+                payload: EventPayload::ReconciliationCompleted {
+                    corrections_made: pruned as u32,
+                },
+            };
+
+            Ok(Reaction::EmitEvents(vec![summary]))
+        } else {
+            Ok(Reaction::None)
+        }
+    }
+}
+
+// ============================================================================
 // TaskSLAEnforcementHandler (Phase 2a)
 // ============================================================================
 
@@ -6649,6 +6733,158 @@ mod tests {
         // Second call immediately: last_activity was just reset, idle < 1s
         let reaction_b = handler2.handle(&make_stall_check_event(), &ctx).await.unwrap();
         assert!(matches!(reaction_b, Reaction::None));
+    }
+
+    // ---- CommandPruningHandler tests ----
+
+    #[tokio::test]
+    async fn test_command_pruning_handler_metadata() {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let handler = CommandPruningHandler::new(pool, 7);
+        let meta = handler.metadata();
+
+        assert_eq!(meta.name, "CommandPruningHandler");
+        assert_eq!(meta.priority, HandlerPriority::LOW);
+        assert!(matches!(meta.error_strategy, ErrorStrategy::LogAndContinue));
+        assert_eq!(meta.filter.categories, vec![EventCategory::Scheduler]);
+        assert_eq!(meta.filter.payload_types, vec!["ScheduledEventFired".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_command_pruning_handler_filter_matches_correct_schedule() {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let handler = CommandPruningHandler::new(pool, 7);
+        let meta = handler.metadata();
+
+        let predicate = meta.filter.custom_predicate.as_ref().expect("filter should have custom predicate");
+
+        // Should match "command-pruning"
+        let matching_event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Debug,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "command-pruning".to_string(),
+            },
+        };
+        assert!(predicate(&matching_event));
+
+        // Should NOT match other schedule names
+        let non_matching_event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Debug,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "event-pruning".to_string(),
+            },
+        };
+        assert!(!predicate(&non_matching_event));
+    }
+
+    #[tokio::test]
+    async fn test_command_pruning_handler_prunes_old_commands() {
+        let pool = create_migrated_test_pool().await.unwrap();
+
+        // Insert an old command record (30 days ago)
+        let old_time = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        sqlx::query("INSERT INTO processed_commands (command_id, processed_at) VALUES (?, ?)")
+            .bind("old-cmd-1")
+            .bind(&old_time)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Insert a recent command record (1 day ago)
+        let recent_time = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+        sqlx::query("INSERT INTO processed_commands (command_id, processed_at) VALUES (?, ?)")
+            .bind("recent-cmd-1")
+            .bind(&recent_time)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let handler = CommandPruningHandler::new(pool.clone(), 7);
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Debug,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "command-pruning".to_string(),
+            },
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should have pruned the old command and emitted a summary event
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                assert_eq!(events.len(), 1);
+                assert!(matches!(
+                    events[0].payload,
+                    EventPayload::ReconciliationCompleted { corrections_made: 1 }
+                ));
+            }
+            Reaction::None => panic!("Expected EmitEvents reaction for pruned commands"),
+        }
+
+        // Verify: old command deleted, recent command still present
+        let remaining: Vec<(String,)> =
+            sqlx::query_as("SELECT command_id FROM processed_commands")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].0, "recent-cmd-1");
+    }
+
+    #[tokio::test]
+    async fn test_command_pruning_handler_returns_none_when_nothing_to_prune() {
+        let pool = create_migrated_test_pool().await.unwrap();
+
+        let handler = CommandPruningHandler::new(pool, 7);
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Debug,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "command-pruning".to_string(),
+            },
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::None));
     }
 }
 

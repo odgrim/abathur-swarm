@@ -10,7 +10,8 @@ use crate::domain::ports::{
     AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository,
 };
 use crate::services::builtin_handlers::{
-    A2APollHandler, AdapterLifecycleSyncHandler, ConvergenceCancellationHandler,
+    A2APollHandler, AdapterLifecycleSyncHandler, CommandPruningHandler,
+    ConvergenceCancellationHandler,
     ConvergenceCoordinationHandler,
     ConvergenceEscalationFeedbackHandler,
     ConvergenceEvolutionHandler, ConvergenceMemoryHandler, ConvergenceSLAPressureHandler,
@@ -475,6 +476,16 @@ where
             }
         }
 
+        // CommandPruningHandler (LOW) — prune old processed commands
+        if let Some(ref pool) = self.pool {
+            reactor
+                .register(Arc::new(CommandPruningHandler::new(
+                    pool.clone(),
+                    p.command_ttl_days,
+                )))
+                .await;
+        }
+
         // TaskSLAEnforcementHandler (NORMAL) — periodic SLA deadline checks
         reactor
             .register(Arc::new(TaskSLAEnforcementHandler::new(
@@ -871,6 +882,18 @@ where
                 .register(interval_schedule(
                     "event-pruning",
                     Duration::from_secs(p.event_pruning_interval_secs),
+                    EventCategory::Scheduler,
+                    EventSeverity::Debug,
+                ))
+                .await;
+        }
+
+        // Command pruning — remove old processed command dedup records
+        if self.pool.is_some() {
+            scheduler
+                .register(interval_schedule(
+                    "command-pruning",
+                    Duration::from_secs(p.command_pruning_interval_secs),
                     EventCategory::Scheduler,
                     EventSeverity::Debug,
                 ))
