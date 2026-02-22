@@ -388,6 +388,24 @@ impl TaskRepository for SqliteTaskRepository {
 
         self.get(task_id).await
     }
+
+    async fn get_parent_id(&self, task_id: Uuid) -> DomainResult<Option<Uuid>> {
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT parent_id FROM tasks WHERE id = ?"
+        )
+        .bind(task_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some((Some(parent_str),)) => {
+                let uuid = Uuid::parse_str(&parent_str)
+                    .map_err(|e| DomainError::SerializationError(e.to_string()))?;
+                Ok(Some(uuid))
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 impl SqliteTaskRepository {
