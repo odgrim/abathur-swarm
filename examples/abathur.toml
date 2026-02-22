@@ -112,6 +112,14 @@ level = "info"
 # pretty (human-readable) | json (structured, for log aggregators)
 format = "pretty"
 
+# ─── Command deduplication ───────────────────────────────────────────────────
+
+[command_dedup]
+# How often to prune old processed command records (seconds)
+pruning_interval_secs = 21600
+# Retention period for processed command records (days)
+ttl_days = 7
+
 # ─── Convergence check polling ────────────────────────────────────────────────
 
 [polling]

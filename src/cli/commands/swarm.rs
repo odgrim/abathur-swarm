@@ -806,7 +806,10 @@ async fn run_swarm_foreground(
                 }
                 SwarmEvent::TaskSubmitted { task_id, task_title, goal_id } => {
                     if !json_mode {
-                        println!("  Task submitted: {} ({}) for goal {}", task_title, task_id, goal_id);
+                        match goal_id {
+                            Some(gid) => println!("  Task submitted: {} ({}) for goal {}", task_title, task_id, gid),
+                            None => println!("  Task submitted: {} ({})", task_title, task_id),
+                        }
                     }
                 }
                 SwarmEvent::TaskReady { task_id, task_title } => {

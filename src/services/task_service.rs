@@ -396,6 +396,7 @@ impl<T: TaskRepository> TaskService<T> {
         deadline: Option<chrono::DateTime<chrono::Utc>>,
         task_type: Option<TaskType>,
         execution_mode: Option<ExecutionMode>,
+        goal_id: Option<Uuid>,
     ) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         let mut events = Vec::new();
 
@@ -474,12 +475,12 @@ impl<T: TaskRepository> TaskService<T> {
         self.check_and_update_readiness(&mut task).await?;
         self.task_repo.update(&task).await?;
 
-        // Collect TaskSubmitted event
-        let goal_id = task.parent_id.unwrap_or_else(Uuid::new_v4);
+        // Collect TaskSubmitted event — use the actual goal_id passed by the
+        // caller (or None for non-goal tasks) instead of fabricating one.
         events.push(Self::make_event(
             EventSeverity::Info,
             EventCategory::Task,
-            Some(goal_id),
+            goal_id,
             Some(task.id),
             EventPayload::TaskSubmitted {
                 task_id: task.id,
@@ -493,7 +494,7 @@ impl<T: TaskRepository> TaskService<T> {
             events.push(Self::make_event(
                 EventSeverity::Debug,
                 EventCategory::Task,
-                Some(goal_id),
+                goal_id,
                 Some(task.id),
                 EventPayload::TaskReady {
                     task_id: task.id,
@@ -837,6 +838,7 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                 deadline,
                 task_type,
                 execution_mode,
+                goal_id,
             } => {
                 let (task, events) = self
                     .submit_task(
@@ -852,6 +854,7 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                         deadline,
                         task_type,
                         execution_mode,
+                        goal_id,
                     )
                     .await?;
                 Ok(CommandOutcome { result: CommandResult::Task(task), events })
@@ -964,6 +967,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         ).await.unwrap();
 
         assert_eq!(task.title, "Test Task");
@@ -989,6 +993,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         ).await.unwrap();
 
         // Create main task that depends on it
@@ -1005,6 +1010,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         ).await.unwrap();
 
         // Main should be pending (dependency not complete)
@@ -1039,6 +1045,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         ).await.unwrap();
 
         let (task2, _) = service.submit_task(
@@ -1054,6 +1061,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         ).await.unwrap();
 
         // Should return same task
@@ -1078,6 +1086,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         ).await.unwrap();
 
         let (claimed, _) = service.claim_task(task.id, "test-agent").await.unwrap();
@@ -1106,6 +1115,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         ).await.unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
@@ -1271,6 +1281,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         ).await.unwrap();
 
         // Manually set convergent mode and trajectory_id (normally done by orchestrator)
@@ -1309,6 +1320,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         ).await.unwrap();
 
         // Set up as convergent with trajectory
@@ -1349,6 +1361,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         ).await.unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
@@ -1379,6 +1392,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         ).await.unwrap();
 
         service.claim_task(task.id, "test-agent").await.unwrap();
@@ -1417,6 +1431,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         ).await.unwrap();
 
         assert!(task.execution_mode.is_direct(),
@@ -1443,6 +1458,7 @@ mod tests {
             None,
             None,
             None,
+        None,
         ).await.unwrap();
 
         // Default complexity is Moderate. "ensure that" keyword = +2, constraint hint = +2 => 4 >= 3

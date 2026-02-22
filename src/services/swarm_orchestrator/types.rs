@@ -173,6 +173,13 @@ pub struct PollingConfig {
     pub startup_max_replay_events: u64,
     /// Stale task threshold in seconds for startup orphan detection (default: 300).
     pub startup_stale_task_threshold_secs: u64,
+
+    // --- Command deduplication cleanup ---
+    /// Interval for pruning old processed commands (default: 21600s = 6 hours).
+    pub command_pruning_interval_secs: u64,
+    /// TTL for processed command records in days (default: 7).
+    /// Commands older than this are deleted during pruning.
+    pub command_ttl_days: u64,
 }
 
 impl Default for PollingConfig {
@@ -233,6 +240,10 @@ impl Default for PollingConfig {
             startup_catchup_enabled: true,
             startup_max_replay_events: 10000,
             startup_stale_task_threshold_secs: 300,
+
+            // Command deduplication cleanup
+            command_pruning_interval_secs: 21600, // 6 hours
+            command_ttl_days: 7,
         }
     }
 }
@@ -380,7 +391,7 @@ pub enum SwarmEvent {
     /// Goal decomposed into tasks.
     GoalDecomposed { goal_id: Uuid, task_count: usize },
     /// Task submitted (created and added to the system).
-    TaskSubmitted { task_id: Uuid, task_title: String, goal_id: Uuid },
+    TaskSubmitted { task_id: Uuid, task_title: String, goal_id: Option<Uuid> },
     /// Task readiness updated.
     TaskReady { task_id: Uuid, task_title: String },
     /// Task spawned.

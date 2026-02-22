@@ -115,6 +115,7 @@ async fn test_task_mutation_emits_and_persists_event() {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("submit task");
@@ -206,7 +207,7 @@ async fn test_reactor_dispatches_to_handler() {
         payload: EventPayload::TaskSubmitted {
             task_id: Uuid::new_v4(),
             task_title: "test task".to_string(),
-            goal_id: Uuid::nil(),
+            goal_id: None,
         },
     };
     event_bus.publish(event).await;
@@ -349,7 +350,7 @@ async fn test_replay_missed_events_catches_up() {
             payload: EventPayload::TaskSubmitted {
                 task_id,
                 task_title: format!("task-{}", i),
-                goal_id: Uuid::nil(),
+                goal_id: None,
             },
         };
         store.append(&event).await.expect("append event");
@@ -417,6 +418,7 @@ async fn test_command_bus_routes_and_emits() {
             deadline: None,
             task_type: None,
             execution_mode: None,
+            goal_id: None,
         }),
     );
 
@@ -495,6 +497,7 @@ async fn test_e2e_mutation_persist_react() {
             deadline: None,
             task_type: None,
             execution_mode: None,
+            goal_id: None,
         }),
     );
     command_bus.dispatch(envelope).await.expect("dispatch");

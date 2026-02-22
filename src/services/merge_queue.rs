@@ -3,13 +3,18 @@
 //! Implements a two-stage merge process:
 //! - Stage 1: Agent worktree branches → Task feature branch
 //! - Stage 2: Task feature branch → Main branch (with verification)
+//!
+//! All git operations are offloaded to the Tokio blocking thread pool via
+//! `spawn_blocking` to prevent long-running git commands from starving
+//! the async runtime.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::process::Command;
 use std::sync::Arc;
-use tokio::process::Command;
 use tokio::sync::RwLock;
+use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
@@ -229,6 +234,7 @@ where
     }
 
     /// Queue a Stage 1 merge (agent → task branch).
+    #[instrument(skip(self), fields(task_id = %task_id))]
     pub async fn queue_stage1(
         &self,
         task_id: Uuid,
@@ -249,11 +255,13 @@ where
         );
 
         let id = request.id;
+        info!(merge_id = %id, source = agent_branch, target = task_branch, "queued stage 1 merge");
         self.queue.write().await.push_back(request);
         Ok(id)
     }
 
     /// Queue a merge-back: subtask branch → feature branch, in the feature branch's worktree.
+    #[instrument(skip(self), fields(task_id = %task_id))]
     pub async fn queue_merge_back(
         &self,
         task_id: Uuid,
@@ -268,11 +276,13 @@ where
             target_workdir.to_string(),
         );
         let id = request.id;
+        info!(merge_id = %id, source = source_branch, target = target_branch, "queued merge-back");
         self.queue.write().await.push_back(request);
         Ok(id)
     }
 
     /// Queue a Stage 2 merge (task → main).
+    #[instrument(skip(self), fields(task_id = %task_id))]
     pub async fn queue_stage2(&self, task_id: Uuid) -> DomainResult<Uuid> {
         // Get worktree for this task
         let worktree = self.worktree_repo.get_by_task(task_id).await?
@@ -288,11 +298,13 @@ where
         );
 
         let id = request.id;
+        info!(merge_id = %id, source = %worktree.branch, target = %self.config.main_branch, "queued stage 2 merge");
         self.queue.write().await.push_back(request);
         Ok(id)
     }
 
     /// Process the next merge in the queue.
+    #[instrument(skip(self))]
     pub async fn process_next(&self) -> DomainResult<Option<MergeResult>> {
         // Get next queued request
         let mut request = {
@@ -308,6 +320,14 @@ where
                 None => return Ok(None),
             }
         };
+
+        info!(
+            merge_id = %request.id,
+            stage = ?request.stage,
+            source = %request.source_branch,
+            target = %request.target_branch,
+            "processing merge request"
+        );
 
         // Process based on stage
         let result = match request.stage {
@@ -336,6 +356,7 @@ where
     }
 
     /// Process a Stage 1 merge (agent → task branch).
+    #[instrument(skip(self, request), fields(merge_id = %request.id, task_id = %request.task_id))]
     async fn process_stage1(&self, request: &mut MergeRequest) -> DomainResult<MergeResult> {
         // Check for conflicts first
         let conflict_check = self.check_merge_conflicts(
@@ -345,6 +366,11 @@ where
         ).await?;
 
         if !conflict_check.0.is_empty() {
+            warn!(
+                merge_id = %request.id,
+                conflicts = ?conflict_check.0,
+                "merge conflicts detected in stage 1"
+            );
             request.status = MergeStatus::Conflict;
             request.error = Some(format!("Merge conflicts in: {}", conflict_check.0.join(", ")));
             request.updated_at = Utc::now();
@@ -362,6 +388,7 @@ where
         // Perform the merge
         match self.git_merge(&request.workdir, &request.source_branch, &request.target_branch).await {
             Ok(commit_sha) => {
+                info!(merge_id = %request.id, commit = %commit_sha, "stage 1 merge completed");
                 request.status = MergeStatus::Completed;
                 request.commit_sha = Some(commit_sha.clone());
                 request.updated_at = Utc::now();
@@ -376,6 +403,7 @@ where
                 })
             }
             Err(e) => {
+                warn!(merge_id = %request.id, error = %e, "stage 1 merge failed");
                 request.status = MergeStatus::Failed;
                 request.error = Some(e.to_string());
                 request.updated_at = Utc::now();
@@ -393,13 +421,20 @@ where
     }
 
     /// Process a Stage 2 merge (task → main with verification).
+    #[instrument(skip(self, request), fields(merge_id = %request.id, task_id = %request.task_id))]
     async fn process_stage2(&self, request: &mut MergeRequest) -> DomainResult<MergeResult> {
         // Run verification first if required
         if self.config.require_verification {
+            info!(merge_id = %request.id, "running integration verification before stage 2 merge");
             let verification = self.verifier.verify_task(request.task_id).await?;
             request.verification = Some(verification.clone());
 
             if !verification.passed {
+                warn!(
+                    merge_id = %request.id,
+                    failures = ?verification.failures_summary,
+                    "verification failed, blocking stage 2 merge"
+                );
                 request.status = MergeStatus::VerificationFailed;
                 request.error = verification.failures_summary.clone();
                 request.updated_at = Utc::now();
@@ -423,6 +458,11 @@ where
         ).await?;
 
         if !conflict_check.0.is_empty() {
+            warn!(
+                merge_id = %request.id,
+                conflicts = ?conflict_check.0,
+                "merge conflicts detected in stage 2"
+            );
             request.status = MergeStatus::Conflict;
             request.error = Some(format!("Merge conflicts in: {}", conflict_check.0.join(", ")));
             request.updated_at = Utc::now();
@@ -440,6 +480,7 @@ where
         // Perform the merge to main
         match self.git_merge(&self.config.repo_path, &request.source_branch, &request.target_branch).await {
             Ok(commit_sha) => {
+                info!(merge_id = %request.id, commit = %commit_sha, "stage 2 merge completed");
                 request.status = MergeStatus::Completed;
                 request.commit_sha = Some(commit_sha.clone());
                 request.updated_at = Utc::now();
@@ -460,6 +501,7 @@ where
                 })
             }
             Err(e) => {
+                warn!(merge_id = %request.id, error = %e, "stage 2 merge failed");
                 request.status = MergeStatus::Failed;
                 request.error = Some(e.to_string());
                 request.updated_at = Utc::now();
@@ -477,97 +519,134 @@ where
     }
 
     /// Check for merge conflicts without actually merging.
+    ///
+    /// Runs `git merge-tree` in a blocking thread to avoid holding an async
+    /// runtime worker thread during the potentially slow git operation.
+    #[instrument(skip(self))]
     async fn check_merge_conflicts(
         &self,
         workdir: &str,
         source: &str,
         target: &str,
     ) -> DomainResult<(Vec<String>, bool)> {
-        // Use git merge-tree to check for conflicts without modifying worktree
-        let output = Command::new("git")
-            .args(["merge-tree", target, source])
-            .current_dir(workdir)
-            .output()
-            .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+        let workdir = workdir.to_string();
+        let source = source.to_string();
+        let target = target.to_string();
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        debug!(
+            workdir = %workdir,
+            source = %source,
+            target = %target,
+            "checking for merge conflicts via spawn_blocking"
+        );
 
-        // Look for conflict markers
-        let has_conflicts = stdout.contains("<<<<<<<") || stdout.contains(">>>>>>>");
+        let result = tokio::task::spawn_blocking(move || {
+            let output = Command::new("git")
+                .args(["merge-tree", &target, &source])
+                .current_dir(&workdir)
+                .output()
+                .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
 
-        if has_conflicts {
-            // Extract conflicting file names
-            let mut conflicts = Vec::new();
-            for line in stdout.lines() {
-                // merge-tree output format includes file paths
-                if line.starts_with("+++") || line.starts_with("---") {
-                    if let Some(path) = line.split_whitespace().nth(1) {
-                        if !path.starts_with("a/") && !path.starts_with("b/") {
-                            if !conflicts.contains(&path.to_string()) {
-                                conflicts.push(path.to_string());
+            let stdout = String::from_utf8_lossy(&output.stdout);
+
+            // Look for conflict markers
+            let has_conflicts = stdout.contains("<<<<<<<") || stdout.contains(">>>>>>>");
+
+            if has_conflicts {
+                // Extract conflicting file names
+                let mut conflicts = Vec::new();
+                for line in stdout.lines() {
+                    // merge-tree output format includes file paths
+                    if line.starts_with("+++") || line.starts_with("---") {
+                        if let Some(path) = line.split_whitespace().nth(1) {
+                            if !path.starts_with("a/") && !path.starts_with("b/") {
+                                if !conflicts.contains(&path.to_string()) {
+                                    conflicts.push(path.to_string());
+                                }
                             }
                         }
                     }
                 }
+                Ok((conflicts, true))
+            } else {
+                Ok((vec![], false))
             }
-            Ok((conflicts, true))
-        } else {
-            Ok((vec![], false))
-        }
+        })
+        .await
+        .map_err(|e| DomainError::ValidationFailed(format!("Git conflict check task panicked: {}", e)))?;
+
+        result
     }
 
     /// Perform a git merge.
+    ///
+    /// Runs the full checkout → merge → rev-parse sequence in a blocking
+    /// thread to avoid holding an async runtime worker thread during the
+    /// potentially slow git operations.
+    #[instrument(skip(self))]
     async fn git_merge(
         &self,
         workdir: &str,
         source: &str,
         target: &str,
     ) -> DomainResult<String> {
-        // Checkout target branch
-        let checkout = Command::new("git")
-            .args(["checkout", target])
-            .current_dir(workdir)
-            .output()
-            .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+        let workdir = workdir.to_string();
+        let source = source.to_string();
+        let target = target.to_string();
 
-        if !checkout.status.success() {
-            let stderr = String::from_utf8_lossy(&checkout.stderr);
-            return Err(DomainError::ValidationFailed(format!("Git checkout failed: {}", stderr)));
-        }
+        info!(
+            workdir = %workdir,
+            source = %source,
+            target = %target,
+            "performing git merge via spawn_blocking"
+        );
 
-        // Merge source into target
-        let merge_msg = format!("Merge {} into {}", source, target);
-        let merge = Command::new("git")
-            .args(["merge", "--no-ff", source, "-m", &merge_msg])
-            .current_dir(workdir)
-            .output()
-            .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
-
-        if !merge.status.success() {
-            // Abort the merge if it failed
-            let _ = Command::new("git")
-                .args(["merge", "--abort"])
-                .current_dir(workdir)
+        let result = tokio::task::spawn_blocking(move || {
+            // Checkout target branch
+            let checkout = Command::new("git")
+                .args(["checkout", &target])
+                .current_dir(&workdir)
                 .output()
-                .await;
+                .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
 
-            let stderr = String::from_utf8_lossy(&merge.stderr);
-            return Err(DomainError::ValidationFailed(format!("Git merge failed: {}", stderr)));
-        }
+            if !checkout.status.success() {
+                let stderr = String::from_utf8_lossy(&checkout.stderr);
+                return Err(DomainError::ValidationFailed(format!("Git checkout failed: {}", stderr)));
+            }
 
-        // Get the merge commit SHA
-        let rev_parse = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(workdir)
-            .output()
-            .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+            // Merge source into target
+            let merge_msg = format!("Merge {} into {}", source, target);
+            let merge = Command::new("git")
+                .args(["merge", "--no-ff", &source, "-m", &merge_msg])
+                .current_dir(&workdir)
+                .output()
+                .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
 
-        let commit_sha = String::from_utf8_lossy(&rev_parse.stdout).trim().to_string();
-        Ok(commit_sha)
+            if !merge.status.success() {
+                // Abort the merge if it failed
+                let _ = Command::new("git")
+                    .args(["merge", "--abort"])
+                    .current_dir(&workdir)
+                    .output();
+
+                let stderr = String::from_utf8_lossy(&merge.stderr);
+                return Err(DomainError::ValidationFailed(format!("Git merge failed: {}", stderr)));
+            }
+
+            // Get the merge commit SHA
+            let rev_parse = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&workdir)
+                .output()
+                .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+
+            let commit_sha = String::from_utf8_lossy(&rev_parse.stdout).trim().to_string();
+            Ok(commit_sha)
+        })
+        .await
+        .map_err(|e| DomainError::ValidationFailed(format!("Git merge task panicked: {}", e)))?;
+
+        result
     }
 
     /// Get the current queue status.
@@ -647,6 +726,7 @@ where
     }
 
     /// Queue Stage 2 merge for a task if all its subtasks are complete.
+    #[instrument(skip(self), fields(task_id = %task_id))]
     pub async fn queue_stage2_if_ready(&self, task_id: Uuid) -> DomainResult<Option<Uuid>> {
         let task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
