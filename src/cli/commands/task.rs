@@ -406,6 +406,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 deadline,
                 task_type: None,
                 execution_mode: None,
+                goal_id,
             });
 
             let result = dispatcher.dispatch(cmd).await

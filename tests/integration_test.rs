@@ -95,6 +95,7 @@ async fn test_task_lifecycle_with_dependencies() {
         None,
         None,
         None,
+    None,
     ).await.expect("Failed to submit parent task");
 
     // Create a dependent task
@@ -111,6 +112,7 @@ async fn test_task_lifecycle_with_dependencies() {
         None,
         None,
         None,
+    None,
     ).await.expect("Failed to submit child task");
 
     // Parent should be ready (no deps)
@@ -344,6 +346,7 @@ async fn test_task_idempotency() {
         None,
         None,
         None,
+    None,
     ).await.expect("First submit failed");
 
     // Second submission with same key should return the same task
@@ -360,6 +363,7 @@ async fn test_task_idempotency() {
         None,
         None,
         None,
+    None,
     ).await.expect("Second submit failed");
 
     // Should be the same task
@@ -393,6 +397,7 @@ async fn test_task_retry_on_failure() {
         None,
         None,
         None,
+    None,
     ).await.expect("Failed to submit");
 
     // Claim the task

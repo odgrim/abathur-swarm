@@ -133,6 +133,9 @@ pub enum TaskCommand {
         deadline: Option<chrono::DateTime<chrono::Utc>>,
         task_type: Option<TaskType>,
         execution_mode: Option<ExecutionMode>,
+        /// The goal this task serves, if any. Used as event metadata for
+        /// goal-to-work traceability — not stored on the Task struct.
+        goal_id: Option<Uuid>,
     },
     Claim {
         task_id: Uuid,
