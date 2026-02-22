@@ -94,14 +94,27 @@ All commands support `--json` for machine-readable output and `--config <path>` 
 
 ## Configuration
 
-Create an `abathur.toml` in your project root (see `examples/abathur.toml` for a fully annotated reference):
+Create an `abathur.toml` in your project root. See [`examples/abathur.toml`](examples/abathur.toml) for a **fully annotated** reference covering every option.
+
+Minimal quickstart config:
 
 ```toml
 [limits]
-max_depth = 5
-max_subtasks = 10
-max_descendants = 100
-max_concurrent_tasks = 5
+max_depth = 5              # Maximum subtask nesting depth
+max_subtasks = 10          # Maximum direct subtasks per task
+max_descendants = 100      # Maximum total descendants per root task
+max_concurrent_tasks = 5   # Maximum tasks running concurrently
+max_retries = 3            # Retries before permanent failure
+task_timeout_secs = 300    # Seconds before a task is timed out
+
+# Spawn limits are checked independently of [limits] and control
+# subtask tree growth boundaries. See examples/abathur.toml for details.
+[spawn_limits]
+max_subtask_depth = 5
+max_subtasks_per_task = 10
+max_total_descendants = 100
+allow_limit_extensions = true
+max_extensions = 2
 
 [memory]
 decay_rate = 0.05
@@ -112,11 +125,23 @@ maintenance_interval_secs = 3600
 base_path = ".abathur/worktrees"
 auto_cleanup = true
 
+[database]
+path = ".abathur/abathur.db"
+
+[logging]
+level = "info"
+format = "pretty"
+
 [polling]
 goal_convergence_check_interval_secs = 28800
 ```
 
+> **Note:** The `[limits]` and `[spawn_limits]` sections serve different purposes.
+> `[limits]` controls runtime execution boundaries (concurrency, timeouts, retries).
+> `[spawn_limits]` controls task tree shape (depth, fan-out, total descendants).
+
 Environment variables with the `ABATHUR_` prefix override config file values (e.g. `ABATHUR_LIMITS_MAX_DEPTH`, `ABATHUR_DATABASE_PATH`, `ABATHUR_LOG_LEVEL`).
+
 
 ## Architecture
 
