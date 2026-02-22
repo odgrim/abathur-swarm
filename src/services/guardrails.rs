@@ -2,6 +2,12 @@
 //!
 //! Enforces resource limits, safety constraints, and monitors
 //! for dangerous operations.
+//!
+//! ## Cost tracking
+//!
+//! Costs are stored internally as **hundredths of a cent** (i.e. cents × 100)
+//! using an `AtomicU64`.  Public API surfaces continue to accept and return
+//! values denominated in *cents* (`f64`), so callers are unaffected.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -85,7 +91,8 @@ pub struct RuntimeMetrics {
     tasks_completed: AtomicU64,
     tasks_failed: AtomicU64,
     agents_spawned: AtomicU64,
-    cost_cents: AtomicU64, // Store as integer cents * 100
+    /// Accumulated cost stored as hundredths-of-a-cent (i.e. `cents * 100`).
+    cost_hundredths: AtomicU64,
 }
 
 impl RuntimeMetrics {
@@ -111,8 +118,46 @@ impl RuntimeMetrics {
     }
 
     pub fn record_cost(&self, cents: f64) {
-        let int_cents = (cents * 100.0) as u64;
-        self.cost_cents.fetch_add(int_cents, Ordering::Relaxed);
+        debug_assert!(cents >= 0.0, "cost must be non-negative, got {cents}");
+        if cents < 0.0 || cents.is_nan() {
+            // In release builds, silently ignore bad values rather than
+            // corrupting the accumulator.
+            return;
+        }
+
+        let hundredths = (cents * 100.0).round() as u64;
+
+        // Use a CAS loop to detect overflow instead of wrapping silently.
+        loop {
+            let current = self.cost_hundredths.load(Ordering::Relaxed);
+            match current.checked_add(hundredths) {
+                Some(new_val) => {
+                    if self
+                        .cost_hundredths
+                        .compare_exchange_weak(
+                            current,
+                            new_val,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        return;
+                    }
+                    // CAS failed — another thread updated concurrently; retry.
+                }
+                None => {
+                    // Overflow would occur — saturate at u64::MAX and warn.
+                    tracing::warn!(
+                        current_hundredths = current,
+                        additional_hundredths = hundredths,
+                        "cost accumulator overflow detected — saturating at u64::MAX"
+                    );
+                    self.cost_hundredths.store(u64::MAX, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
     }
 
     pub fn get_tokens_this_hour(&self) -> u64 {
@@ -124,7 +169,7 @@ impl RuntimeMetrics {
     }
 
     pub fn get_cost_cents(&self) -> f64 {
-        self.cost_cents.load(Ordering::Relaxed) as f64 / 100.0
+        self.cost_hundredths.load(Ordering::Relaxed) as f64 / 100.0
     }
 
     pub fn reset_hourly(&self) {
