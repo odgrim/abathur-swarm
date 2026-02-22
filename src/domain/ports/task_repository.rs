@@ -75,4 +75,11 @@ pub trait TaskRepository: Send + Sync {
     /// Uses `UPDATE ... WHERE status = 'ready'` to prevent TOCTOU races.
     /// Returns `Ok(None)` if the task was already claimed or not in Ready state.
     async fn claim_task_atomic(&self, task_id: Uuid, agent_type: &str) -> DomainResult<Option<Task>>;
+
+    /// Get only the parent_id for a task, without loading the full struct.
+    ///
+    /// Returns `Ok(None)` if the task does not exist or has no parent.
+    /// This is used for lightweight ancestry traversal (depth calculation,
+    /// root-finding) to avoid cloning entire `Task` structs at each level.
+    async fn get_parent_id(&self, task_id: Uuid) -> DomainResult<Option<Uuid>>;
 }
