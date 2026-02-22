@@ -745,6 +745,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReviewFailureLoopHandler<T> {
                 deadline: None,
                 task_type: None,
                 execution_mode: None,
+                goal_id: None,
             }),
         );
 
@@ -784,6 +785,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReviewFailureLoopHandler<T> {
                 deadline: None,
                 task_type: None,
                 execution_mode: None,
+                goal_id: None,
             }),
         );
 
@@ -823,6 +825,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReviewFailureLoopHandler<T> {
                 deadline: None,
                 task_type: None,
                 execution_mode: None,
+                goal_id: None,
             }),
         );
 
@@ -1672,6 +1675,7 @@ impl EventHandler for A2APollHandler {
                     deadline: None,
                     task_type: None,
                     execution_mode: None,
+                    goal_id: None,
                 }),
             );
 
@@ -3720,6 +3724,7 @@ impl EventHandler for GoalEvaluationTaskCreationHandler {
                             deadline: None,
                             task_type: None,
                             execution_mode: None,
+                            goal_id: Some(*goal_id),
                         }),
                     );
 
@@ -3751,6 +3756,7 @@ impl EventHandler for GoalEvaluationTaskCreationHandler {
                         deadline: None,
                         task_type: None,
                         execution_mode: None,
+                        goal_id: Some(*goal_id),
                     }),
                 );
 
@@ -3851,6 +3857,7 @@ impl EventHandler for EvolutionTriggeredTemplateUpdateHandler {
                 deadline: None,
                 task_type: None,
                 execution_mode: None,
+                goal_id: None,
             }),
         );
 
@@ -7113,6 +7120,7 @@ impl<S: TaskScheduleRepository + 'static, T: TaskRepository + 'static> EventHand
             deadline: None,
             task_type: None,
             execution_mode: None,
+            goal_id: None,
         });
 
         let envelope = CommandEnvelope::new(
@@ -7376,6 +7384,7 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
                 deadline: None,
                 task_type: None,
                 execution_mode: None,
+                goal_id: None,
             }),
         );
 
@@ -7712,6 +7721,7 @@ impl<T: TaskRepository + 'static> EventHandler for IngestionPollHandler<T> {
                             deadline: None,
                             task_type: None,
                             execution_mode: None,
+                            goal_id: None,
                         },
                     ),
                 );

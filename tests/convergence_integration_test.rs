@@ -257,6 +257,7 @@ async fn test_classify_execution_mode_complex_gets_convergent() {
             None,
             None,
             None,
+        None,
         )
         .await
         .expect("Failed to submit task");
@@ -297,6 +298,7 @@ async fn test_classify_execution_mode_trivial_stays_direct() {
             None,
             None,
             None,
+        None,
         )
         .await
         .expect("Failed to submit task");
@@ -491,6 +493,7 @@ async fn test_convergent_outcome_mapping() {
             None,
             None,
             None,
+        None,
         )
         .await
         .expect("Failed to submit task");
@@ -551,6 +554,7 @@ async fn test_convergent_outcome_mapping() {
             None,
             None,
             None,
+        None,
         )
         .await
         .expect("Failed to submit task");
@@ -614,6 +618,7 @@ async fn test_task_retry_preserves_trajectory_id() {
             None,
             None,
             None,
+        None,
         )
         .await
         .expect("Failed to submit task");
@@ -960,6 +965,7 @@ async fn test_apply_sla_pressure_warning() {
             None,
             None,
             None,
+        None,
         )
         .await
         .expect("Failed to submit task");
@@ -1503,6 +1509,7 @@ async fn test_execution_mode_persistence_roundtrip() {
             None,
             None,
             None,
+        None,
         )
         .await
         .expect("Failed to submit task");

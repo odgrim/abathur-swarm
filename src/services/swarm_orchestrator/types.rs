@@ -391,7 +391,7 @@ pub enum SwarmEvent {
     /// Goal decomposed into tasks.
     GoalDecomposed { goal_id: Uuid, task_count: usize },
     /// Task submitted (created and added to the system).
-    TaskSubmitted { task_id: Uuid, task_title: String, goal_id: Uuid },
+    TaskSubmitted { task_id: Uuid, task_title: String, goal_id: Option<Uuid> },
     /// Task readiness updated.
     TaskReady { task_id: Uuid, task_title: String },
     /// Task spawned.

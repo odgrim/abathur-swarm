@@ -513,6 +513,7 @@ where
             deadline: None,
             task_type,
             execution_mode,
+            goal_id: None,
         });
         let envelope = CommandEnvelope::new(CommandSource::Mcp("stdio".into()), cmd);
 

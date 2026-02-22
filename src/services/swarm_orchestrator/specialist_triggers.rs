@@ -337,6 +337,7 @@ where
                         deadline: None,
                         task_type: None,
                         execution_mode: None,
+                        goal_id: None,
                     }),
                 );
                 match cb.dispatch(envelope).await {
@@ -418,6 +419,7 @@ where
                     deadline: None,
                     task_type: None,
                     execution_mode: None,
+                    goal_id: None,
                 }),
             );
             match cb.dispatch(envelope).await {
@@ -603,6 +605,7 @@ where
                     deadline: None,
                     task_type: None,
                     execution_mode: None,
+                    goal_id: None,
                 }),
             );
             match cb.dispatch(envelope).await {
@@ -792,6 +795,7 @@ where
                             deadline: None,
                             task_type: None,
                             execution_mode: None,
+                            goal_id: None,
                         }),
                     );
                     match cb.dispatch(envelope).await {
