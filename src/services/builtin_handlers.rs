@@ -501,6 +501,13 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
             return Ok(Reaction::None);
         }
 
+        // Skip workflow phase subtasks — the workflow engine manages rework via
+        // verification retries and gate escalation. Generic retry would race with
+        // WorkflowSubtaskCompletionHandler and cause double-advance.
+        if task.context.custom.contains_key("workflow_phase") {
+            return Ok(Reaction::None);
+        }
+
         let is_max_turns = error.starts_with("error_max_turns");
 
         // Circuit-break: tasks that repeatedly exhaust their turn budget should not retry
@@ -670,6 +677,12 @@ impl<T: TaskRepository + 'static> EventHandler for ReviewFailureLoopHandler<T> {
 
         // Only handle review tasks
         if !Self::is_review_task(&task) {
+            return Ok(Reaction::None);
+        }
+
+        // Skip workflow phase subtasks — the workflow engine handles rework via
+        // verification retries and gate escalation, not the review loop handler.
+        if task.context.custom.contains_key("workflow_phase") {
             return Ok(Reaction::None);
         }
 
@@ -4053,6 +4066,13 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceCoordinationHandle
             None => return Ok(Reaction::None),
         };
 
+        // Skip parents that have workflow_state — the workflow engine owns their
+        // lifecycle and transitions. Convergence coordination would race with
+        // WorkflowSubtaskCompletionHandler and bypass the workflow state machine.
+        if parent.context.custom.contains_key("workflow_state") {
+            return Ok(Reaction::None);
+        }
+
         // Only act on parents that are Running with a trajectory (convergent decomposition)
         if parent.status != TaskStatus::Running || parent.trajectory_id.is_none() {
             return Ok(Reaction::None);
@@ -5070,6 +5090,325 @@ impl<T: TaskRepository + 'static, Tr: TrajectoryRepository + 'static> EventHandl
         Ok(Reaction::None)
     }
 }
+
+// ============================================================================
+// WorkflowSubtaskCompletionHandler
+// ============================================================================
+
+/// When a task completes or fails, check if its parent has workflow state.
+/// If so, call `workflow_engine.handle_phase_complete()` to drive the
+/// workflow state machine forward.
+pub struct WorkflowSubtaskCompletionHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+    event_bus: Arc<EventBus>,
+    verification_enabled: bool,
+}
+
+impl<T: TaskRepository> WorkflowSubtaskCompletionHandler<T> {
+    pub fn new(task_repo: Arc<T>, event_bus: Arc<EventBus>, verification_enabled: bool) -> Self {
+        Self { task_repo, event_bus, verification_enabled }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for WorkflowSubtaskCompletionHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "WorkflowSubtaskCompletionHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Task])
+                .payload_types(vec![
+                    "TaskCompleted".to_string(),
+                    "TaskCompletedWithResult".to_string(),
+                    "TaskFailed".to_string(),
+                ]),
+            priority: HandlerPriority::HIGH,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let subtask_id = match &event.payload {
+            EventPayload::TaskCompleted { task_id, .. } => *task_id,
+            EventPayload::TaskCompletedWithResult { task_id, .. } => *task_id,
+            EventPayload::TaskFailed { task_id, .. } => *task_id,
+            _ => return Ok(Reaction::None),
+        };
+
+        // Look up the subtask to find its parent
+        let subtask = match self.task_repo.get(subtask_id).await {
+            Ok(Some(t)) => t,
+            _ => return Ok(Reaction::None),
+        };
+
+        // Guard: don't let verification tasks re-trigger the workflow handler
+        if subtask.task_type.is_verification() {
+            return Ok(Reaction::None);
+        }
+
+        let parent_id = match subtask.parent_id {
+            Some(id) => id,
+            None => return Ok(Reaction::None),
+        };
+
+        // Check if parent has workflow_state
+        let parent = match self.task_repo.get(parent_id).await {
+            Ok(Some(t)) => t,
+            _ => return Ok(Reaction::None),
+        };
+
+        if !parent.context.custom.contains_key("workflow_state") {
+            return Ok(Reaction::None);
+        }
+
+        // Delegate to workflow engine
+        let engine = crate::services::workflow_engine::WorkflowEngine::new(
+            self.task_repo.clone(),
+            self.event_bus.clone(),
+            self.verification_enabled,
+        );
+        if let Err(e) = engine.handle_phase_complete(parent_id, subtask_id).await {
+            tracing::warn!(
+                parent_id = %parent_id,
+                subtask_id = %subtask_id,
+                "WorkflowSubtaskCompletionHandler: handle_phase_complete failed: {}",
+                e
+            );
+        }
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// WorkflowVerificationHandler
+// ============================================================================
+
+/// Listens for `WorkflowVerificationRequested` events and runs LLM-based
+/// intent verification on the completed phase subtasks. Maps the result
+/// back through `WorkflowEngine::handle_verification_result()`.
+pub struct WorkflowVerificationHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+    event_bus: Arc<EventBus>,
+    intent_verifier: Arc<dyn crate::services::swarm_orchestrator::convergent_execution::ConvergentIntentVerifier>,
+    verification_enabled: bool,
+}
+
+impl<T: TaskRepository> WorkflowVerificationHandler<T> {
+    pub fn new(
+        task_repo: Arc<T>,
+        event_bus: Arc<EventBus>,
+        intent_verifier: Arc<dyn crate::services::swarm_orchestrator::convergent_execution::ConvergentIntentVerifier>,
+        verification_enabled: bool,
+    ) -> Self {
+        Self {
+            task_repo,
+            event_bus,
+            intent_verifier,
+            verification_enabled,
+        }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for WorkflowVerificationHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "WorkflowVerificationHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Workflow])
+                .payload_types(vec![
+                    "WorkflowVerificationRequested".to_string(),
+                ]),
+            priority: HandlerPriority::HIGH,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let (task_id, phase_name, retry_count) = match &event.payload {
+            EventPayload::WorkflowVerificationRequested {
+                task_id,
+                phase_name,
+                retry_count,
+                ..
+            } => (*task_id, phase_name.clone(), *retry_count),
+            _ => return Ok(Reaction::None),
+        };
+
+        // Load parent task
+        let mut parent_task = match self.task_repo.get(task_id).await {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                tracing::warn!(task_id = %task_id, "WorkflowVerificationHandler: parent task not found");
+                return Ok(Reaction::None);
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "WorkflowVerificationHandler: failed to load parent task");
+                return Ok(Reaction::None);
+            }
+        };
+
+        // Step 4.4: Enrich parent task with phase context before verification.
+        // This gives the verifier knowledge of which workflow phase just completed.
+        {
+            let workflow_state = parent_task.context.custom.get("workflow_state")
+                .and_then(|v| serde_json::from_value::<crate::domain::models::workflow_state::WorkflowState>(v.clone()).ok());
+
+            if let Some(ref ws) = workflow_state {
+                let phase_index = ws.phase_index().unwrap_or(0);
+                // Count total phases from workflow template name
+                let total_phases_hint = parent_task.context.custom.get("workflow_total_phases")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                let phase_context = if total_phases_hint > 0 {
+                    format!("workflow_phase: {} (phase {}/{})", phase_name, phase_index + 1, total_phases_hint)
+                } else {
+                    format!("workflow_phase: {} (phase {})", phase_name, phase_index + 1)
+                };
+                parent_task.context.custom.insert(
+                    "verification_phase_context".to_string(),
+                    serde_json::Value::String(phase_context),
+                );
+            }
+
+            // Include aggregation summary if fan-out was used
+            if let Some(agg_summary) = parent_task.context.custom.get("aggregation_summary").cloned() {
+                parent_task.context.custom.insert(
+                    "verification_aggregation_summary".to_string(),
+                    agg_summary,
+                );
+            }
+        }
+
+        // Step 4.3: Create a Verification subtask for audit trail
+        {
+            use crate::domain::models::task::{Task, TaskStatus, TaskPriority};
+
+            let mut verification_task = Task::new(
+                format!("Verify phase '{}' for task {}", phase_name, task_id),
+            );
+            verification_task.task_type = crate::domain::models::task::TaskType::Verification;
+            verification_task.parent_id = Some(task_id);
+            verification_task.priority = TaskPriority::High;
+            verification_task.context.custom.insert(
+                "workflow_verification".to_string(),
+                serde_json::json!({
+                    "phase_name": phase_name,
+                    "retry_count": retry_count,
+                    "parent_task_id": task_id.to_string(),
+                }),
+            );
+            // Start it as running immediately since we're executing inline
+            verification_task.status = TaskStatus::Running;
+            let verification_task_id = verification_task.id;
+
+            if let Err(e) = self.task_repo.create(&verification_task).await {
+                tracing::warn!(
+                    task_id = %task_id,
+                    "WorkflowVerificationHandler: failed to create verification subtask: {}",
+                    e
+                );
+            }
+
+            // Extract goal_id from parent task context
+            let goal_id = parent_task.context.custom.get("goal_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok());
+
+            // Run intent verification on the parent task
+            let (satisfied, summary) = match self.intent_verifier.verify_convergent_intent(
+                &parent_task,
+                goal_id,
+                retry_count,
+                None, // no overseer signals
+            ).await {
+                Ok(Some(result)) => {
+                    use crate::domain::models::intent_verification::IntentSatisfaction;
+                    let satisfied = result.satisfaction == IntentSatisfaction::Satisfied;
+                    let summary = format!(
+                        "Phase '{}' verification: {} (confidence: {:.2}, gaps: {})",
+                        phase_name,
+                        result.satisfaction.as_str(),
+                        result.confidence,
+                        result.gaps.len(),
+                    );
+                    (satisfied, summary)
+                }
+                Ok(None) => {
+                    tracing::info!(
+                        task_id = %task_id,
+                        "WorkflowVerificationHandler: no intent to verify, treating as satisfied"
+                    );
+                    (true, "No intent to verify — auto-passing".to_string())
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        error = %e,
+                        "WorkflowVerificationHandler: verification failed, treating as satisfied"
+                    );
+                    (true, format!("Verification infrastructure error: {}", e))
+                }
+            };
+
+            // Mark verification subtask as complete/failed and store results
+            let mut ver_task = verification_task;
+            ver_task.context.custom.insert(
+                "verification_result".to_string(),
+                serde_json::json!({
+                    "satisfied": satisfied,
+                    "summary": summary,
+                }),
+            );
+            if satisfied {
+                ver_task.status = TaskStatus::Complete;
+            } else {
+                ver_task.status = TaskStatus::Failed;
+                ver_task.context.custom.insert(
+                    "verification_error".to_string(),
+                    serde_json::Value::String(summary.clone()),
+                );
+            }
+            if let Err(e) = self.task_repo.update(&ver_task).await {
+                tracing::warn!(
+                    verification_task_id = %verification_task_id,
+                    "WorkflowVerificationHandler: failed to update verification subtask: {}",
+                    e
+                );
+            }
+
+            // Feed result back to workflow engine
+            let engine = crate::services::workflow_engine::WorkflowEngine::new(
+                self.task_repo.clone(),
+                self.event_bus.clone(),
+                self.verification_enabled,
+            );
+            if let Err(e) = engine.handle_verification_result(task_id, satisfied, &summary).await {
+                tracing::warn!(
+                    task_id = %task_id,
+                    "WorkflowVerificationHandler: handle_verification_result failed: {}",
+                    e
+                );
+            }
+        }
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// WorkflowAutoAdvanceHandler — REMOVED
+// ============================================================================
+// Removed: `WorkflowAutoAdvanceHandler` reacted to `WorkflowEnrolled` and raced
+// with `spawn_task_agent()` (which also advances from Pending at claim time)
+// and the `workflow_advance` MCP tool. Since `spawn_task_agent()` already
+// auto-advances, this handler was redundant and caused orphaned subtasks.
+// The advance guard in `WorkflowEngine::advance()` now prevents double-advance
+// from active states as an additional safety net.
 
 #[cfg(test)]
 mod tests {
@@ -6649,66 +6988,6 @@ mod tests {
         // Second call immediately: last_activity was just reset, idle < 1s
         let reaction_b = handler2.handle(&make_stall_check_event(), &ctx).await.unwrap();
         assert!(matches!(reaction_b, Reaction::None));
-    }
-}
-
-// ============================================================================
-// WorkflowPhaseCompletionHandler
-// ============================================================================
-
-/// Handler that forwards workflow phase completion/failure events
-/// through a channel for the phase orchestrator to process.
-///
-/// Listens for `PhaseCompleted` and `PhaseFailed` events from the
-/// workflow event category and sends (workflow_instance_id, phase_id)
-/// to a channel that the phase orchestrator drains.
-pub struct WorkflowPhaseCompletionHandler {
-    tx: tokio::sync::mpsc::Sender<(uuid::Uuid, uuid::Uuid)>,
-}
-
-impl WorkflowPhaseCompletionHandler {
-    pub fn new(tx: tokio::sync::mpsc::Sender<(uuid::Uuid, uuid::Uuid)>) -> Self {
-        Self { tx }
-    }
-}
-
-#[async_trait]
-impl EventHandler for WorkflowPhaseCompletionHandler {
-    fn metadata(&self) -> HandlerMetadata {
-        HandlerMetadata {
-            id: HandlerId::new(),
-            name: "WorkflowPhaseCompletionHandler".to_string(),
-            filter: EventFilter::new()
-                .categories(vec![EventCategory::Workflow])
-                .payload_types(vec![
-                    "PhaseCompleted".to_string(),
-                    "PhaseFailed".to_string(),
-                ]),
-            priority: HandlerPriority::HIGH,
-            error_strategy: ErrorStrategy::LogAndContinue,
-        }
-    }
-
-    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
-        let ids = match &event.payload {
-            EventPayload::PhaseCompleted {
-                workflow_instance_id,
-                phase_id,
-                ..
-            } => Some((*workflow_instance_id, *phase_id)),
-            EventPayload::PhaseFailed {
-                workflow_instance_id,
-                phase_id,
-                ..
-            } => Some((*workflow_instance_id, *phase_id)),
-            _ => None,
-        };
-
-        if let Some((wf_id, phase_id)) = ids {
-            let _ = self.tx.send((wf_id, phase_id)).await;
-        }
-
-        Ok(Reaction::None)
     }
 }
 

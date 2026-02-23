@@ -14,10 +14,8 @@ use crate::domain::errors::DomainResult;
 use crate::domain::models::{
     RelevanceWeights, ScoredMemory,
     SessionStatus, SubstrateConfig, SubstrateRequest,
-    Task, TaskSource, TaskStatus,
+    Task, TaskStatus,
 };
-use crate::domain::models::workflow::WorkflowConfig;
-use crate::services::workflow_builder::build_workflow_from_template;
 use crate::services::memory_service::MemoryService;
 use crate::domain::ports::{AgentFilter, AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
@@ -279,74 +277,6 @@ where
             }
         }
 
-        // Phase-orchestrated path: top-level adapter-sourced tasks (and tasks with a
-        // workflow_name routing hint) are driven by the deterministic PhaseOrchestrator
-        // state machine instead of the Overmind fallback.
-        //
-        // This check runs BEFORE the budget gate and permit acquisition — the
-        // PhaseOrchestrator manages its own concurrency and does not need a permit.
-        if let Some(ref phase_orch) = self.phase_orchestrator {
-            let is_external_root =
-                matches!(&task.source, TaskSource::Adapter(_)) && task.parent_id.is_none();
-
-            let workflow_name = task
-                .routing_hints
-                .workflow_name
-                .as_deref()
-                .or_else(|| if is_external_root { Some("external") } else { None });
-
-            if let Some(wn) = workflow_name {
-                let template = self
-                    .config
-                    .all_workflows
-                    .iter()
-                    .find(|wf| wf.name == wn)
-                    .cloned()
-                    .unwrap_or_else(WorkflowTemplate::external_workflow);
-
-                let definition = build_workflow_from_template(
-                    task.id,
-                    &task.title,
-                    &template,
-                    WorkflowConfig::default(),
-                );
-
-                // Atomically claim the task before handing off to the phase orchestrator.
-                match self.task_repo.claim_task_atomic(task.id, "phase-orchestrator").await {
-                    Ok(None) => {
-                        tracing::debug!(
-                            task_id = %task.id,
-                            "Task already claimed; skipping phase-orchestrator handoff"
-                        );
-                        return Ok(());
-                    }
-                    Ok(Some(_)) => {}
-                    Err(e) => {
-                        tracing::warn!(
-                            task_id = %task.id,
-                            "Failed to claim task for phase-orchestrator: {}",
-                            e
-                        );
-                        return Ok(());
-                    }
-                }
-
-                if let Err(e) = phase_orch.execute_workflow(definition).await {
-                    tracing::error!(
-                        task_id = %task.id,
-                        "Phase orchestrator failed to start workflow: {}",
-                        e
-                    );
-                    if let Ok(Some(mut t)) = self.task_repo.get(task.id).await {
-                        let _ = t.transition_to(TaskStatus::Failed);
-                        let _ = self.task_repo.update(&t).await;
-                    }
-                }
-
-                return Ok(());
-            }
-        }
-
         // Check circuit breaker
         let scope = CircuitScope::agent(&agent_type);
         let check_result = self.circuit_breaker.check(scope.clone()).await;
@@ -416,6 +346,57 @@ where
                             agent_type: agent_type.clone(),
                         },
                     )).await;
+
+                    // Auto-advance from Pending workflow state (Step 1.3).
+                    // If this task is enrolled in a workflow and in Pending state,
+                    // create the WorkflowEngine and advance to the first phase.
+                    // Return early — the phase subtask will be picked up in the
+                    // next scheduling cycle.
+                    if let Ok(Some(claimed_task)) = self.task_repo.get(task.id).await {
+                        if let Some(ws_val) = claimed_task.context.custom.get("workflow_state") {
+                            if let Ok(ws) = serde_json::from_value::<crate::domain::models::workflow_state::WorkflowState>(ws_val.clone()) {
+                                if matches!(ws, crate::domain::models::workflow_state::WorkflowState::Pending { .. }) {
+                                    let verification_enabled = self.intent_verifier.is_some();
+                                    let engine = crate::services::workflow_engine::WorkflowEngine::new(
+                                        self.task_repo.clone(),
+                                        self.event_bus.clone(),
+                                        verification_enabled,
+                                    );
+                                    match engine.advance(task.id).await {
+                                        Ok(crate::services::workflow_engine::AdvanceResult::PhaseStarted { phase_name, .. }) => {
+                                            tracing::info!(
+                                                task_id = %task.id,
+                                                phase = %phase_name,
+                                                "Auto-advanced workflow from Pending to first phase"
+                                            );
+                                            // Return early — the phase subtask will be spawned next cycle
+                                            drop(permit);
+                                            return Ok(());
+                                        }
+                                        Ok(crate::services::workflow_engine::AdvanceResult::Completed) => {
+                                            tracing::info!(
+                                                task_id = %task.id,
+                                                "Workflow completed immediately on advance (no phases)"
+                                            );
+                                            drop(permit);
+                                            return Ok(());
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                task_id = %task.id,
+                                                error = %e,
+                                                "Failed to auto-advance workflow from Pending"
+                                            );
+                                            // Don't fall through to normal spawn — the task is enrolled
+                                            // in a workflow and should not be processed directly.
+                                            drop(permit);
+                                            return Ok(());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to atomically claim task {}: {}", task.id, e);
@@ -607,10 +588,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
             // Runtime upgrade: if the stored mode is Direct but the agent is
             // write-capable and non-read-only, upgrade to Convergent when
-            // convergence is enabled. This ensures implementation agents always
-            // go through the convergent execution path regardless of what mode
-            // was assigned at submit time.
-            let effective_mode = if task.execution_mode.is_direct()
+            // convergence is enabled. Skip for workflow subtasks — the workflow
+            // engine already chose the right mode (Step 2.2).
+            let is_workflow_subtask = task.context.custom.contains_key("workflow_phase");
+            let effective_mode = if !is_workflow_subtask
+                && task.execution_mode.is_direct()
                 && self.config.convergence_enabled
                 && !is_read_only_role
                 && agent_can_write
@@ -863,6 +845,26 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                         // Auto-commit safety net after convergence terminates
                         if let Some(ref wt_path) = convergent_worktree_path {
                             let _ = auto_commit_worktree(wt_path, task_id).await;
+                        }
+
+                        // Store convergent outcome in task context (Step 5.1)
+                        // so workflow verification can skip redundant checks.
+                        {
+                            let outcome_str = match &outcome {
+                                Ok(super::convergent_execution::ConvergentOutcome::Converged) => "converged",
+                                Ok(super::convergent_execution::ConvergentOutcome::PartialAccepted) => "partial_accepted",
+                                Ok(super::convergent_execution::ConvergentOutcome::Decomposed(_)) => "decomposed",
+                                Ok(super::convergent_execution::ConvergentOutcome::Failed(_)) => "failed",
+                                Ok(super::convergent_execution::ConvergentOutcome::Cancelled) => "cancelled",
+                                Err(_) => "error",
+                            };
+                            if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                t.context.custom.insert(
+                                    "convergence_outcome".to_string(),
+                                    serde_json::json!(outcome_str),
+                                );
+                                let _ = task_repo.update(&t).await;
+                            }
                         }
 
                         // Map ConvergentOutcome to task status transitions

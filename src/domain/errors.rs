@@ -39,9 +39,6 @@ pub enum DomainError {
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
 
-    #[error("Workflow not found: {0}")]
-    WorkflowNotFound(Uuid),
-
     #[error("Task schedule not found: {0}")]
     TaskScheduleNotFound(Uuid),
 }

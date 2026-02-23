@@ -180,6 +180,71 @@ where
                     }
                 },
                 {
+                    "name": "workflow_advance",
+                    "description": "Advance a workflow to its next phase. Creates a subtask for the phase and returns its details so you can create an agent for it. Call after enrollment to start the first phase, and after each non-gate phase completes.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": { "type": "string", "description": "UUID of the parent task enrolled in the workflow" }
+                        },
+                        "required": ["task_id"]
+                    }
+                },
+                {
+                    "name": "workflow_status",
+                    "description": "Get the current workflow state for a task — which phase is running, what subtasks are active, and overall progress.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": { "type": "string", "description": "UUID of the task to check workflow status for" }
+                        },
+                        "required": ["task_id"]
+                    }
+                },
+                {
+                    "name": "workflow_gate",
+                    "description": "Provide a verdict at a gate phase (triage or review). Returns status: 'approved_and_advanced' (with subtask details) if approve advances to the next phase, 'approved_and_completed' if approve finishes the workflow, or 'verdict_applied' for reject/rework.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": { "type": "string", "description": "UUID of the parent task at the gate phase" },
+                            "verdict": { "type": "string", "enum": ["approve", "reject", "rework"], "description": "Gate verdict: approve (advance), reject (terminate), or rework (re-run phase)" },
+                            "reason": { "type": "string", "description": "Reason for the verdict — especially important for reject and rework decisions" }
+                        },
+                        "required": ["task_id", "verdict"]
+                    }
+                },
+                {
+                    "name": "workflow_fan_out",
+                    "description": "Split the current workflow phase into parallel subtasks. Each slice gets its own subtask. Use when a phase can be parallelized. Create an agent for each returned subtask.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": { "type": "string", "description": "UUID of the parent task to fan out" },
+                            "slices": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "description": { "type": "string", "description": "Description of this slice's work" }
+                                    },
+                                    "required": ["description"]
+                                },
+                                "description": "Array of work slices — one subtask is created per slice"
+                            }
+                        },
+                        "required": ["task_id", "slices"]
+                    }
+                },
+                {
+                    "name": "workflow_list",
+                    "description": "List all tasks that are currently enrolled in workflows, showing their workflow name, current phase, and state.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    }
+                },
+                {
                     "name": "task_list",
                     "description": "List tasks in the Abathur swarm. Use this to monitor the progress of subtasks you've created. Filter by status to find running, completed, or failed tasks. Without a status filter, returns tasks that are ready to execute.",
                     "inputSchema": {
@@ -396,6 +461,11 @@ where
             "task_wait" => self.tool_task_wait(&arguments).await,
             "adapter_list" => self.tool_adapter_list(&arguments).await,
             "egress_publish" => self.tool_egress_publish(&arguments).await,
+            "workflow_advance" => self.tool_workflow_advance(&arguments).await,
+            "workflow_status" => self.tool_workflow_status(&arguments).await,
+            "workflow_gate" => self.tool_workflow_gate(&arguments).await,
+            "workflow_fan_out" => self.tool_workflow_fan_out(&arguments).await,
+            "workflow_list" => self.tool_workflow_list(&arguments).await,
             _ => Err(format!("Unknown tool: {}", tool_name)),
         };
 
@@ -1132,6 +1202,199 @@ where
             }
             Err(e) => Err(format!("Egress action failed: {}", e)),
         }
+    }
+
+    // ========================================================================
+    // Workflow tools
+    // ========================================================================
+
+    async fn tool_workflow_advance(&self, args: &serde_json::Value) -> Result<String, String> {
+        let task_id_str = args
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing required field: task_id")?;
+        let task_id = uuid::Uuid::parse_str(task_id_str)
+            .map_err(|e| format!("Invalid task_id: {}", e))?;
+
+        let engine = crate::services::workflow_engine::WorkflowEngine::new(
+            self.task_service.repo().clone(),
+            self.event_bus.clone().unwrap_or_else(|| {
+                Arc::new(crate::services::event_bus::EventBus::new(
+                    crate::services::event_bus::EventBusConfig::default(),
+                ))
+            }),
+            false, // MCP tools don't drive verification; the handler does
+        );
+        let result = engine.advance(task_id).await.map_err(|e| format!("{}", e))?;
+
+        let response = match result {
+            crate::services::workflow_engine::AdvanceResult::PhaseStarted {
+                subtask_id,
+                phase_index,
+                phase_name,
+                subtask_title,
+                subtask_description,
+            } => serde_json::json!({
+                "status": "phase_started",
+                "subtask_id": subtask_id.to_string(),
+                "phase_index": phase_index,
+                "phase_name": phase_name,
+                "subtask_title": subtask_title,
+                "subtask_description": subtask_description,
+            }),
+            crate::services::workflow_engine::AdvanceResult::Completed => serde_json::json!({
+                "status": "completed",
+                "message": "All workflow phases have been completed",
+            }),
+        };
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    async fn tool_workflow_status(&self, args: &serde_json::Value) -> Result<String, String> {
+        let task_id_str = args
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing required field: task_id")?;
+        let task_id = uuid::Uuid::parse_str(task_id_str)
+            .map_err(|e| format!("Invalid task_id: {}", e))?;
+
+        let engine = crate::services::workflow_engine::WorkflowEngine::new(
+            self.task_service.repo().clone(),
+            self.event_bus.clone().unwrap_or_else(|| {
+                Arc::new(crate::services::event_bus::EventBus::new(
+                    crate::services::event_bus::EventBusConfig::default(),
+                ))
+            }),
+            false, // MCP tools don't drive verification; the handler does
+        );
+        let status = engine.get_state(task_id).await.map_err(|e| format!("{}", e))?;
+
+        serde_json::to_string_pretty(&status).map_err(|e| e.to_string())
+    }
+
+    async fn tool_workflow_gate(&self, args: &serde_json::Value) -> Result<String, String> {
+        let task_id_str = args
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing required field: task_id")?;
+        let task_id = uuid::Uuid::parse_str(task_id_str)
+            .map_err(|e| format!("Invalid task_id: {}", e))?;
+        let verdict_str = args
+            .get("verdict")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing required field: verdict")?;
+        let verdict: crate::domain::models::workflow_state::GateVerdict =
+            serde_json::from_value(serde_json::Value::String(verdict_str.to_string()))
+                .map_err(|e| format!("Invalid verdict '{}': {}", verdict_str, e))?;
+        let reason = args
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let engine = crate::services::workflow_engine::WorkflowEngine::new(
+            self.task_service.repo().clone(),
+            self.event_bus.clone().unwrap_or_else(|| {
+                Arc::new(crate::services::event_bus::EventBus::new(
+                    crate::services::event_bus::EventBusConfig::default(),
+                ))
+            }),
+            false, // MCP tools don't drive verification; the handler does
+        );
+        let result = engine.provide_verdict(task_id, verdict, reason).await
+            .map_err(|e| format!("{}", e))?;
+
+        let response = match result {
+            Some(crate::services::workflow_engine::AdvanceResult::PhaseStarted {
+                subtask_id, phase_index, phase_name, subtask_title, subtask_description,
+            }) => serde_json::json!({
+                "status": "approved_and_advanced",
+                "task_id": task_id.to_string(),
+                "verdict": verdict_str,
+                "subtask_id": subtask_id.to_string(),
+                "phase_index": phase_index,
+                "phase_name": phase_name,
+                "subtask_title": subtask_title,
+                "subtask_description": subtask_description,
+            }),
+            Some(crate::services::workflow_engine::AdvanceResult::Completed) => serde_json::json!({
+                "status": "approved_and_completed",
+                "task_id": task_id.to_string(),
+                "verdict": verdict_str,
+                "message": "All workflow phases have been completed",
+            }),
+            None => serde_json::json!({
+                "status": "verdict_applied",
+                "task_id": task_id.to_string(),
+                "verdict": verdict_str,
+            }),
+        };
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    async fn tool_workflow_fan_out(&self, args: &serde_json::Value) -> Result<String, String> {
+        let task_id_str = args
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing required field: task_id")?;
+        let task_id = uuid::Uuid::parse_str(task_id_str)
+            .map_err(|e| format!("Invalid task_id: {}", e))?;
+
+        let slices_value = args
+            .get("slices")
+            .ok_or("Missing required field: slices")?;
+        let slices: Vec<crate::domain::models::workflow_state::FanOutSlice> =
+            serde_json::from_value(slices_value.clone())
+                .map_err(|e| format!("Invalid slices: {}", e))?;
+
+        let engine = crate::services::workflow_engine::WorkflowEngine::new(
+            self.task_service.repo().clone(),
+            self.event_bus.clone().unwrap_or_else(|| {
+                Arc::new(crate::services::event_bus::EventBus::new(
+                    crate::services::event_bus::EventBusConfig::default(),
+                ))
+            }),
+            false, // MCP tools don't drive verification; the handler does
+        );
+        let result = engine.fan_out(task_id, slices).await.map_err(|e| format!("{}", e))?;
+
+        let response = serde_json::json!({
+            "subtask_ids": result.subtask_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+            "phase_index": result.phase_index,
+            "phase_name": result.phase_name,
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    async fn tool_workflow_list(&self, _args: &serde_json::Value) -> Result<String, String> {
+        // List all tasks that have workflow_state in their context
+        use crate::domain::models::TaskStatus;
+
+        let mut workflows = Vec::new();
+        // Check active tasks (non-terminal)
+        for status in &[TaskStatus::Pending, TaskStatus::Ready, TaskStatus::Running, TaskStatus::Blocked] {
+            let tasks = self.task_service.repo().list_by_status(*status).await
+                .map_err(|e| format!("Failed to list tasks: {}", e))?;
+            for task in tasks {
+                if let Some(ws_value) = task.context.custom.get("workflow_state") {
+                    if let Ok(ws) = serde_json::from_value::<crate::domain::models::workflow_state::WorkflowState>(ws_value.clone()) {
+                        workflows.push(serde_json::json!({
+                            "task_id": task.id.to_string(),
+                            "task_title": task.title,
+                            "workflow_name": ws.workflow_name(),
+                            "phase_index": ws.phase_index(),
+                            "is_terminal": ws.is_terminal(),
+                            "state": serde_json::to_value(&ws).unwrap_or_default(),
+                        }));
+                    }
+                }
+            }
+        }
+
+        let response = serde_json::json!({
+            "workflows": workflows,
+            "count": workflows.len(),
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
     }
 
     // ========================================================================

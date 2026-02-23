@@ -290,79 +290,57 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
             section.push_str("- Set `read_only: true` when creating this agent.\n");
         }
 
-        // Dependency instructions
-        match phase.dependency {
-            PhaseDependency::Root => {
-                section.push_str(
-                    "- This phase has no dependencies (it runs first).\n",
-                );
-                // Fan-out guidance for root phases (typically research).
-                // Triage is a single focused evaluation — no fan-out.
-                if phase.read_only && phase.name.to_lowercase() != "triage" {
-                    section.push_str(
-                        "- **Fan-out heuristic**: If the task touches 3+ distinct codebase areas, create one subtask per area running in parallel. Each stores findings via `memory_store` with a shared namespace and unique key. Use `task_wait` with `ids` array to wait for all.\n",
-                    );
-                }
-            }
-            PhaseDependency::Sequential => {
-                if i == 0 {
-                    section.push_str(
-                        "- This phase has no task dependencies (memory search is done by the Overmind directly).\n",
-                    );
-                } else {
-                    let prev_phase = &template.phases[i - 1];
-                    section.push_str(&format!(
-                        "- The {} task MUST `depends_on` the {} task UUID.\n",
-                        phase.name,
-                        prev_phase.name,
-                    ));
-                }
-            }
-            PhaseDependency::AllPrevious => {
-                section.push_str(
-                    "- This phase MUST `depends_on` ALL previous phase task UUIDs.\n",
-                );
-            }
+        // Auto-lifecycle phase instructions
+        let is_gate = phase.name.to_lowercase() == "triage" || phase.name.to_lowercase() == "review";
+        let is_triage = phase.name.to_lowercase() == "triage";
+
+        if is_gate {
+            section.push_str(
+                "- **Gate phase**: The system auto-creates a subtask. When it completes, you'll receive a gate notification. Use `workflow_gate` to approve, reject, or rework.\n",
+            );
+        } else if phase.verify {
+            section.push_str(
+                "- **Verified phase**: The system auto-creates a subtask and runs verification on completion. If verification passes, auto-advances. If it fails repeatedly, you'll receive a gate notification.\n",
+            );
+        } else {
+            section.push_str(
+                "- **Auto-advance phase**: The system auto-creates a subtask and auto-advances on completion. Create an appropriate agent when you see the phase subtask appear.\n",
+            );
         }
 
-        // task_wait instructions
-        if i < template.phases.len() - 1 {
-            section.push_str(&format!(
-                "- After submitting the {} task, call `task_wait` with the task UUID before proceeding to Phase {}.\n",
-                phase.name,
-                phase_num + 1,
-            ));
+        // Fan-out guidance for root phases (typically research).
+        // Triage is a single focused evaluation — no fan-out.
+        if phase.dependency == PhaseDependency::Root && phase.read_only && !is_triage {
+            section.push_str(
+                "- **Fan-out heuristic**: If the task touches 3+ distinct codebase areas, call `workflow_fan_out` with one slice per area *before* the engine creates a single subtask.\n",
+            );
         }
 
         // Post-triage branching: read the verdict and either proceed or reject.
-        if phase.name.to_lowercase() == "triage" {
+        if is_triage {
             section.push_str(
                 "\n**Triage only applies to adapter-sourced tasks.** Check the task description \
                  before doing anything else:\n\
                  - If it does **not** begin with `[Ingested from ...]`, this task was created \
-                   internally. Skip triage entirely and proceed directly to the next phase.\n\
+                   internally. Skip triage entirely — call `workflow_gate` with `approve`.\n\
                  - If it **does** begin with `[Ingested from ...]`, run triage as described \
                    below.\n\
                  \n\
                  When running triage:\n\
-                 - Use `execution_mode: \"direct\"` — triage is a single-pass evaluation, not \
-                   iterative.\n\
                  - The triage agent MUST store its verdict in memory: \
                    `namespace: \"triage\", key: \"verdict\"`, content: `\"APPROVED\"` or \
                    `\"REJECTED: <reason>\"`.\n\
                  \n\
-                 **After `task_wait` returns for triage**, retrieve the verdict with \
+                 **After the triage subtask completes** (gate notification), retrieve the verdict with \
                  `memory_search` (query: `\"triage verdict\"`) and act on it:\n\
-                 - **APPROVED** → proceed to the next phase. Triage succeeded.\n\
+                 - **APPROVED** → call `workflow_gate` with `approve` to advance.\n\
                  - **REJECTED** →\n\
                    1. Parse adapter name and `external_id` from the \
                       `[Ingested from <adapter> — <external_id>]` header.\n\
                    2. Call `egress_publish` to post a comment explaining the rejection reason.\n\
                    3. Call `egress_publish` with `action: update_status`, \
                       `new_status: \"wontfix\"` to close the issue.\n\
-                   4. Call `task_update_status` to mark **this** task as `complete` — \
-                      triage succeeded; rejecting an invalid issue is the correct outcome.\n\
-                   5. **STOP** — do not proceed to the next phase.\n",
+                   4. Call `workflow_gate` with `reject` to terminate the workflow.\n",
             );
         }
     }
@@ -450,11 +428,11 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
 
 /// Generate a concrete workflow example for the Overmind prompt.
 fn generate_workflow_example(template: &WorkflowTemplate) -> String {
-    let mut example = String::from("## Example: Full Workflow Spine\n\n```\n");
+    let mut example = String::from("## Example: Auto-Lifecycle Workflow\n\n```\n");
 
-    // Phase 1: Memory Search
+    // Phase 1: Memory Search (Overmind does directly)
     example.push_str(
-        "# Phase 1: Memory Search\n\
+        "# Phase 1: Memory Search (you do directly)\n\
          tool: memory_search\n\
          arguments:\n\
          \x20 query: \"<relevant search terms>\"\n\n\
@@ -465,21 +443,31 @@ fn generate_workflow_example(template: &WorkflowTemplate) -> String {
     for (i, phase) in template.phases.iter().enumerate() {
         let phase_num = i + 2;
         let phase_name_cap = capitalize(&phase.name);
-        let var_name = format!("{}_task_id", phase.name.replace('-', "_"));
+        let is_gate = phase.name.to_lowercase() == "triage" || phase.name.to_lowercase() == "review";
 
         example.push_str(&format!(
-            "\n# Phase {}: {}\n",
+            "\n# Phase {}: {} — ",
             phase_num, phase_name_cap,
         ));
 
-        // agent_create example
+        // Describe how this phase starts
+        if is_gate {
+            example.push_str("system creates subtask, gate notification on completion\n");
+        } else if phase.verify {
+            example.push_str("system creates subtask, verification runs on completion\n");
+        } else {
+            example.push_str("system auto-creates subtask, auto-advances on completion\n");
+        }
+
+        // Agent creation example
         let tier_str = match phase.name.as_str() {
             "plan" | "review" | "triage" => "specialist",
             _ => "worker",
         };
 
         example.push_str(&format!(
-            "tool: agent_create\narguments:\n\
+            "# Create agent for this phase's subtask\n\
+             tool: agent_create\narguments:\n\
              \x20 name: \"{}-agent\"\n\
              \x20 description: \"{}\"\n\
              \x20 tier: \"{}\"\n\
@@ -503,65 +491,47 @@ fn generate_workflow_example(template: &WorkflowTemplate) -> String {
             example.push_str("  read_only: true\n");
         }
 
-        example.push_str(&format!(
-            "\ntool: task_submit\narguments:\n\
-             \x20 title: \"{}: <specific task title>\"\n\
-             \x20 description: \"<specific task instructions>\"\n\
-             \x20 agent_type: \"{}-agent\"\n",
-            phase_name_cap, phase.name,
-        ));
-
-        // depends_on
-        if i > 0 {
-            let prev_var = format!(
-                "{}_task_id",
-                template.phases[i - 1].name.replace('-', "_")
-            );
-            match phase.dependency {
-                PhaseDependency::Root => {}
-                PhaseDependency::Sequential => {
-                    example.push_str(&format!(
-                        "  depends_on: [\"<{}>\"]",
-                        prev_var,
-                    ));
-                }
-                PhaseDependency::AllPrevious => {
-                    let all_prev: Vec<String> = template.phases[..i]
-                        .iter()
-                        .map(|p| format!("\"<{}_task_id>\"", p.name.replace('-', "_")))
-                        .collect();
-                    example.push_str(&format!(
-                        "  depends_on: [{}]",
-                        all_prev.join(", "),
-                    ));
-                }
-            }
-            example.push('\n');
+        // Gate phases need a workflow_gate call
+        if is_gate {
+            example.push_str(&format!(
+                "\n# {} completes → gate notification. Evaluate and call workflow_gate.\n\
+                 tool: workflow_gate\narguments:\n\
+                 \x20 task_id: \"<parent_task_id>\"\n\
+                 \x20 verdict: \"approve\"\n\
+                 \x20 reason: \"{} passed\"\n",
+                phase_name_cap, phase_name_cap,
+            ));
+        } else if phase.verify {
+            example.push_str(&format!(
+                "\n# {} completes → verification runs automatically.\n\
+                 # If verification passes → auto-advances to next phase.\n\
+                 # If verification fails repeatedly → gate notification for your verdict.\n",
+                phase_name_cap,
+            ));
+        } else {
+            example.push_str(&format!(
+                "\n# {} completes → system auto-advances to next phase.\n",
+                phase_name_cap,
+            ));
         }
 
-        example.push_str(&format!("# Returns {}\n", var_name));
-
-        // task_wait
-        if i < template.phases.len() - 1 {
-            // Root phases may fan-out; show ids array pattern
-            if phase.dependency == PhaseDependency::Root && phase.read_only {
-                example.push_str(&format!(
-                    "\n# Wait for all {} tasks to complete\n\
-                     tool: task_wait\narguments:\n\
-                     \x20 ids: [\"<{}_1>\", \"<{}_2>\"]\n",
-                    phase.name, var_name, var_name,
-                ));
-            } else {
-                example.push_str(&format!(
-                    "\n# Wait for {} to complete\n\
-                     tool: task_wait\narguments:\n\
-                     \x20 id: \"<{}>\"\n",
-                    phase.name, var_name,
-                ));
-            }
+        // Fan-out example for root read-only phases
+        if phase.dependency == PhaseDependency::Root && phase.read_only
+            && phase.name.to_lowercase() != "triage"
+        {
+            example.push_str(&format!(
+                "\n# Optional: fan-out {} into parallel slices\n\
+                 tool: workflow_fan_out\narguments:\n\
+                 \x20 task_id: \"<parent_task_id>\"\n\
+                 \x20 slices:\n\
+                 \x20   - {{description: \"Explore area A\"}}\n\
+                 \x20   - {{description: \"Explore area B\"}}\n",
+                phase.name,
+            ));
         }
     }
 
+    example.push_str("\n# All phases done → workflow completes automatically.\n");
     example.push_str("```\n");
     example
 }
@@ -629,57 +599,71 @@ You have native MCP tools for interacting with the Abathur swarm. Use these dire
 ### Goals
 - **goals_list**: View active goals for context on overall project direction.
 
-## Default Workflow Spine
+## Default Workflow Spine (Auto-Lifecycle)
 
-Every task MUST follow this 5-phase spine. Do NOT skip phases or jump straight to implementation.
+Tasks are **auto-enrolled** in workflows at submission time. The system auto-advances through phases — you do NOT need to manually submit and wait for each phase.
 
-### Phase 1: Memory Search
+### How Workflows Work
+1. Task is submitted → system auto-enrolls in the appropriate workflow (default: "code")
+2. Task is spawned → system auto-advances to the first phase, creating a subtask
+3. You create an agent for the phase subtask using `agent_create`
+4. When the phase subtask completes:
+   - **Non-gate phase without verification**: System auto-advances to the next phase. A new subtask appears — create an agent for it.
+   - **Non-gate phase with verification**: System runs intent verification automatically. If it passes, auto-advances. If it fails with retries remaining, auto-reworks. If retries exhausted, escalates to a gate for your verdict.
+   - **Gate phase** (triage, review): You review the result and call `workflow_gate` with approve/reject/rework.
+5. When all phases complete, the workflow and parent task are marked complete.
+
+### Default Phases: research → plan → implement → review
+
+**Phase 1: Memory Search** (you do directly)
 Query swarm memory for similar past tasks, known patterns, and prior decisions via `memory_search`.
 
-### Phase 2: Research
-Create **read-only research agents** to explore the codebase. Decompose the research into parallel, domain-scoped subtasks.
-- Tools: `read`, `glob`, `grep`, `memory` — read-only. Include `task_status` so agents can mark completion.
-- Research tasks have no dependencies (they run first).
-- **Fan-out heuristic**: If the task touches 3+ distinct codebase areas (e.g., config system, CLI, domain models), create one research subtask per area. Each subtask should store its findings via `memory_store` with a shared namespace and a unique key. If the task is narrow (1-2 areas), a single research task is fine.
-- Include `memory` in the researcher's tools so findings survive even if the agent hits its turn limit.
-- After submitting all research tasks, call `task_wait` with ALL research task UUIDs (using the `ids` array parameter) before proceeding to Phase 3.
-- You MUST always create research tasks first. NEVER create an implementation agent without preceding research.
+**Phase 2: Research** — system auto-creates subtask
+Create a read-only research agent when the research subtask appears.
+- Tools: `read`, `glob`, `grep`, `memory` — read-only. Include `task_status`.
+- **Fan-out heuristic**: If the task touches 3+ distinct codebase areas, call `workflow_fan_out` with one slice per area *before* the engine creates a single subtask.
 
-### Phase 3: Plan
-Create a **domain-specific planning agent** to draft a concrete implementation plan based on the research findings.
-- Pick the planner's domain based on what the research revealed (e.g., "database-schema-architect" for DB changes, "api-designer" for new endpoints, "systems-architect" for infrastructure changes, "rust-module-planner" for Rust refactoring).
+**Phase 3: Plan** — system auto-creates subtask
+Create a domain-specific planning agent when the plan subtask appears.
 - Tools: `read`, `glob`, `grep`, `memory` — read-only plus memory to store the plan.
-- The planning task MUST `depends_on` the research task UUID.
-- Do NOT use a generic "planner" agent. The planner must be a domain specialist.
-- After submitting the plan task, call `task_wait` with the plan task UUID before proceeding to Phase 4.
 
-### Phase 4: Implement
-Create **implementation agents** with specific instructions derived from the planning phase.
-- Implementation tasks MUST `depends_on` the planning task UUID.
-- Split large implementations into parallel tasks where possible.
-- After submitting implementation tasks, call `task_wait` with all implementation task UUIDs before proceeding to Phase 5.
+**Phase 4: Implement** — system auto-creates subtask (with verification)
+Create an implementation agent when the implement subtask appears.
+- Uses convergent execution automatically. Verification runs on completion.
+- If verification fails, the system auto-reworks. If retries exhausted, escalated to a gate for your verdict.
 
-### Phase 5: Review
-Create a **code review agent** that reviews for correctness, edge cases, test coverage, and adherence to the plan.
-- The review task MUST `depends_on` all implementation task UUIDs.
+**Phase 5: Review** — gate phase
+Create a code review agent when the review subtask appears.
+- After completion, you receive a gate notification. Call `workflow_gate` with approve/reject/rework.
+- Ensure review tasks use `agent_type: "code-reviewer"`.
 
-After review completion, the orchestrator's post-completion workflow automatically handles integration (PR creation or merge to main).
+### Fan-Out Decision Patterns
+Use `workflow_fan_out` when a phase can benefit from parallel execution. Call it while the workflow is in `Pending` or at a `PhaseGate` — before the engine auto-creates a single subtask.
 
-When a review task fails because the implementation has issues, the system automatically loops back to create a new plan + implement + review cycle incorporating the review feedback. This loop is bounded by `max_review_iterations`. Ensure review tasks use `agent_type: "code-reviewer"` so the system can identify them.
+**When to fan-out:**
+- Research phases touching 3+ distinct codebase areas → one researcher per area
+- Implementation phases with independent features → one implementer per feature
 
-IMPORTANT — Do NOT spawn your own fix when a review task fails. After `task_wait` returns with a failed review task, call `task_get(review_task_id)` and inspect context.custom:
-- If `review_loop_successor` is present, the system has already created the next review cycle. Call `task_wait(review_loop_successor)` to wait for it. Follow the chain if that also fails.
-- If `review_loop_active` is present without a successor, the system is handling it — wait briefly then re-check before taking action.
-Never independently spawn a new plan→implement→review cycle when the review loop is active; doing so creates conflicting parallel work tracks.
+**When NOT to fan-out:**
+- Triage phases (single focused evaluation)
+- Planning phases (need unified strategy)
+- Phases where work is inherently sequential
+
+### Intent Verification
+Some phases (e.g., `implement`) have automated intent verification. This is fully automatic:
+- **Verification passes**: System auto-advances to the next phase.
+- **Verification fails (retries remaining)**: System automatically re-runs the phase with feedback. No action needed.
+- **Verification fails (retries exhausted)**: Escalated to a gate. Review the feedback and decide: `approve`, `reject`, or `rework`.
+- **Convergent execution phases**: If a phase converged successfully, workflow verification is skipped.
 
 ### Agent Reuse Policy
 
-ALWAYS call `agent_list` before `agent_create`. Reuse an existing agent if one is suitable for the needed role. Only create a new agent when no existing agent covers the needed role. For example, if a "database-schema-architect" already exists from a previous task, reuse it for subsequent database planning tasks rather than creating a duplicate.
+ALWAYS call `agent_list` before `agent_create`. Reuse an existing agent if one is suitable for the needed role. Only create a new agent when no existing agent covers the needed role.
 
-## Example: Full Workflow Spine
+## Example: Auto-Lifecycle Workflow
 
 ```
-# Phase 1: Memory Search
+# Phase 1: Memory Search (you do directly)
 tool: memory_search
 arguments:
   query: "rate limiting middleware tower"
@@ -687,13 +671,15 @@ arguments:
 # Check existing agents before creating any
 tool: agent_list
 
-# Phase 2: Research - create read-only researcher (if none exists)
+# The workflow auto-advances to Phase 2: Research, creating a subtask.
+# You see the subtask appear — create an agent for it.
+
 tool: agent_create
 arguments:
   name: "codebase-researcher"
   description: "Read-only agent that explores codebases and reports findings via memory"
   tier: "worker"
-  system_prompt: "You are a codebase research specialist. Explore the code, identify patterns, relevant files, and dependencies. Store your findings via memory_store with the namespace given in your task description. You are read-only — do NOT attempt to modify any files."
+  system_prompt: "You are a codebase research specialist..."
   tools:
     - {name: "read", description: "Read source files", required: true}
     - {name: "glob", description: "Find files by pattern", required: true}
@@ -703,118 +689,71 @@ arguments:
   max_turns: 15
   read_only: true
 
-# Fan-out: one task per research domain
-tool: task_submit
-arguments:
-  title: "Research: middleware stack and tower service usage"
-  description: "Explore the codebase to find existing middleware patterns and tower service usage. Store findings via memory_store with namespace 'rate-limiting-research' and key 'middleware-stack'."
-  agent_type: "codebase-researcher"
-  priority: "normal"
-# Returns research_task_id_1
+# Research completes → system auto-advances to Phase 3: Plan.
+# Plan subtask appears — create an agent for it.
 
-tool: task_submit
-arguments:
-  title: "Research: configuration and test patterns"
-  description: "Explore configuration patterns and test patterns for middleware. Store findings via memory_store with namespace 'rate-limiting-research' and key 'config-and-tests'."
-  agent_type: "codebase-researcher"
-  priority: "normal"
-# Returns research_task_id_2
-
-# Wait for ALL research to complete before planning
-tool: task_wait
-arguments:
-  ids: ["<research_task_id_1>", "<research_task_id_2>"]
-# → Returns when all research completes, then proceed to Phase 3
-
-# Phase 3: Plan - create domain-specific planner
 tool: agent_create
 arguments:
   name: "api-middleware-architect"
   description: "Plans API middleware implementations"
   tier: "specialist"
-  system_prompt: "You are an API middleware architect. Based on research findings, draft concrete implementation plans with specific file changes, function signatures, and test strategies. Store your plan via memory_store."
+  system_prompt: "You are an API middleware architect..."
   tools:
-    - {name: "read", description: "Read source files", required: true}
-    - {name: "glob", description: "Find files", required: true}
-    - {name: "grep", description: "Search code", required: true}
-    - {name: "memory", description: "Store implementation plan", required: true}
-    - {name: "task_status", description: "Mark task complete or failed", required: true}
+    - {name: "read", required: true}
+    - {name: "glob", required: true}
+    - {name: "grep", required: true}
+    - {name: "memory", required: true}
+    - {name: "task_status", required: true}
   max_turns: 15
   read_only: true
 
-tool: task_submit
-arguments:
-  title: "Plan: rate limiting middleware design"
-  description: "Based on research findings, design the rate limiting middleware. Specify: files to create/modify, data structures, configuration, error handling, and test plan. Store the plan in memory."
-  agent_type: "api-middleware-architect"
-  depends_on: ["<research_task_id>"]
-  priority: "normal"
-# Returns plan_task_id
+# Plan completes → system auto-advances to Phase 4: Implement.
+# Implement subtask appears (convergent mode) — create an agent for it.
 
-# Wait for planning to complete before implementation
-tool: task_wait
-arguments:
-  id: "<plan_task_id>"
-# → Returns when planning completes, then proceed to Phase 4
-
-# Phase 4: Implement
 tool: agent_create
 arguments:
   name: "rust-implementer"
   description: "Writes and modifies Rust code"
   tier: "worker"
-  system_prompt: "You are a Rust implementation specialist. Follow the implementation plan exactly. Write clean, idiomatic Rust code following existing patterns. Run cargo check after changes."
+  system_prompt: "You are a Rust implementation specialist..."
   tools:
-    - {name: "read", description: "Read source files", required: true}
-    - {name: "write", description: "Write new files", required: true}
-    - {name: "edit", description: "Edit existing files", required: true}
-    - {name: "shell", description: "Run cargo commands", required: true}
-    - {name: "glob", description: "Find files", required: false}
-    - {name: "grep", description: "Search code", required: false}
-    - {name: "memory", description: "Read implementation plan", required: false}
-    - {name: "task_status", description: "Mark task complete or failed", required: true}
-  constraints:
-    - {name: "test-after-change", description: "Run cargo check after significant changes"}
+    - {name: "read", required: true}
+    - {name: "write", required: true}
+    - {name: "edit", required: true}
+    - {name: "shell", required: true}
+    - {name: "glob", required: false}
+    - {name: "grep", required: false}
+    - {name: "memory", required: false}
+    - {name: "task_status", required: true}
   max_turns: 30
 
-tool: task_submit
-arguments:
-  title: "Implement rate limiting middleware"
-  description: "Follow the stored implementation plan. Add rate limiting to all API endpoints using tower middleware. Limit to 100 req/min per IP. Include tests."
-  agent_type: "rust-implementer"
-  depends_on: ["<plan_task_id>"]
-  priority: "normal"
-  execution_mode: "convergent"
-# Returns impl_task_id
+# Implement completes → verification runs automatically.
+# Verification passes → system auto-advances to Phase 5: Review.
+# Review subtask appears — create an agent for it.
 
-# Wait for implementation to complete before review (convergent tasks need longer timeout)
-tool: task_wait
-arguments:
-  id: "<impl_task_id>"
-# → Returns when implementation completes, then proceed to Phase 5
-
-# Phase 5: Review
 tool: agent_create
 arguments:
   name: "code-reviewer"
   description: "Reviews code for correctness and quality"
   tier: "specialist"
-  system_prompt: "You are a code review specialist. Review changes for correctness, edge cases, error handling, test coverage, and adherence to the implementation plan. Report issues clearly."
+  system_prompt: "You are a code review specialist..."
   tools:
-    - {name: "read", description: "Read source files", required: true}
-    - {name: "glob", description: "Find files", required: true}
-    - {name: "grep", description: "Search code", required: true}
-    - {name: "shell", description: "Run tests", required: true}
-    - {name: "memory", description: "Read implementation plan", required: false}
-    - {name: "task_status", description: "Mark task complete or failed", required: true}
+    - {name: "read", required: true}
+    - {name: "glob", required: true}
+    - {name: "grep", required: true}
+    - {name: "shell", required: true}
+    - {name: "memory", required: false}
+    - {name: "task_status", required: true}
   max_turns: 15
 
-tool: task_submit
+# Review completes → gate phase. Evaluate and call workflow_gate.
+tool: workflow_gate
 arguments:
-  title: "Review rate limiting implementation"
-  description: "Review the rate limiting middleware for correctness, edge cases, performance, and test coverage. Verify it matches the implementation plan."
-  agent_type: "code-reviewer"
-  depends_on: ["<impl_task_id>"]
+  task_id: "<parent_task_id>"
+  verdict: "approve"
+  reason: "Review passed all checks"
+
+# After approval → system advances and completes the workflow.
 ```
 
 ### Agent Design Principles
@@ -866,11 +805,54 @@ You have native MCP tools for interacting with the Abathur swarm. Use these dire
   - Use `agents` only for agents that need to create other agent templates (almost never — only the Overmind needs this).
 
 ### Task Management
-- **task_submit**: Create a subtask and delegate it to an agent. Required field: `description`. Optional: `title`, `agent_type` (name of agent template to execute this task), `depends_on` (array of task UUIDs that must complete first), `priority` (low|normal|high|critical, default: normal), `execution_mode` ("direct" or "convergent" — convergent uses iterative refinement with intent verification; recommended for implementation tasks; if omitted the system selects automatically). The parent_id is set automatically from your current task context.
 - **task_list**: List tasks, optionally filtered by `status` (pending|ready|running|complete|failed|blocked). Use this to track subtask progress.
 - **task_get**: Get full task details by `id` (UUID). Use to check subtask results and failure reasons.
 - **task_update_status**: Mark a task as `complete` or `failed`. Provide `error` message when failing a task.
 - **task_wait**: Block until a task reaches a terminal state (complete, failed, or canceled). Pass `id` for a single task or `ids` for multiple tasks. Optional `timeout_seconds` (default: 600). Returns the final status. ALWAYS use this instead of polling with task_list + sleep loops — polling wastes your turn budget. For implementation tasks that use convergent execution, set `timeout_seconds` to at least 1800 (30 minutes) since convergent tasks may run multiple iterations.
+
+### Workflow Management
+Tasks are **auto-enrolled** in workflows at submission time — you do NOT need to enroll them manually. The system selects the appropriate workflow based on task source and type. Phases auto-advance between non-gate phases. Your role is limited to:
+1. **Gate verdicts**: At gate phases (triage, review), evaluate results and call `workflow_gate`
+2. **Fan-out decisions**: When a phase should be parallelized, call `workflow_fan_out` with slices
+3. **Status monitoring**: Use `workflow_status` and `workflow_list` for observability
+4. **Manual override**: Use `workflow_advance` only for edge cases (e.g., stuck workflows)
+
+- **workflow_advance(task_id)**: Manually advance a workflow to the next phase. Normally not needed — phases auto-advance. Use only for stuck workflows or manual recovery.
+- **workflow_status(task_id)**: Get the current workflow state — which phase is running, what subtasks are active, and overall progress.
+- **workflow_gate(task_id, verdict, reason)**: Provide a verdict at a gate phase (triage or review). Verdicts: `approve` (advance to next phase), `reject` (terminate the workflow), `rework` (re-run the current phase).
+- **workflow_fan_out(task_id, slices)**: Split the current phase into parallel subtasks. Each slice gets its own subtask. Create an agent for each slice. The system handles aggregation and auto-advances after all slices complete.
+- **workflow_list**: List all active workflows with their current phase and status.
+
+### How Workflows Work (Auto-Lifecycle)
+1. Task is submitted → system auto-enrolls in the appropriate workflow
+2. Task is spawned → system auto-advances to the first phase, creating a subtask
+3. You create an agent for the phase subtask using `agent_create`
+4. When the phase subtask completes:
+   - **Non-gate phase without verification**: System auto-advances to the next phase. A new subtask appears — create an agent for it.
+   - **Non-gate phase with verification**: System runs intent verification automatically. If it passes, auto-advances. If it fails with retries remaining, auto-reworks. If retries exhausted, escalates to a gate for your verdict.
+   - **Gate phase** (triage, review): You review the result and call `workflow_gate` with approve/reject/rework.
+5. When all phases complete, the workflow and parent task are marked complete.
+
+### Fan-Out Decision Patterns
+Use `workflow_fan_out` when a phase can benefit from parallel execution. The system handles aggregation — after all slices complete, an aggregation subtask synthesizes results before the workflow advances.
+
+**When to fan-out:**
+- Research phases touching 3+ distinct codebase areas → one researcher per area
+- Implementation phases with independent features → one implementer per feature
+- Review phases for large changesets → one reviewer per module/subsystem
+- Single-focus phases → keep as single subtask (default `advance()` behavior)
+
+**When NOT to fan-out:**
+- Triage phases (single focused evaluation)
+- Planning phases (need unified strategy)
+- Phases where work is inherently sequential
+
+### Intent Verification
+Some phases (e.g., `implement`) have automated intent verification. This is fully automatic:
+- **Verification passes**: System auto-advances to the next phase.
+- **Verification fails (retries remaining)**: System automatically re-runs the phase with feedback. No action needed from you.
+- **Verification fails (retries exhausted)**: Escalated to a gate. Review the feedback and decide: `approve` to accept as-is, `reject` to fail the task, or `rework` to try again.
+- **Convergent execution phases**: If a phase used convergent execution and converged successfully, workflow verification is skipped (convergence already verified intent).
 
 ### Memory
 - **memory_search**: Search swarm memory by `query` string. Use before planning to find similar past tasks and known patterns.
@@ -1015,9 +997,8 @@ mod tests {
 
         // Dynamic path should contain fan-out heuristic for read-only root phases
         assert!(prompt.contains("Fan-out heuristic"));
-        assert!(prompt.contains("memory_store"));
-        // Example should use ids array for root read-only phases
-        assert!(prompt.contains("ids: ["));
+        // Example should show workflow_fan_out for root read-only phases
+        assert!(prompt.contains("workflow_fan_out"));
     }
 
     #[test]
@@ -1033,6 +1014,7 @@ mod tests {
                     tools: vec!["read".to_string(), "glob".to_string(), "grep".to_string()],
                     read_only: true,
                     dependency: PhaseDependency::Root,
+                    verify: false,
                 },
                 WorkflowPhase {
                     name: "write-docs".to_string(),
@@ -1045,6 +1027,7 @@ mod tests {
                     ],
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
+                    verify: false,
                 },
             ],
             ..WorkflowTemplate::default()
@@ -1062,40 +1045,48 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_workflow_with_all_previous_dependency() {
+    fn test_generate_workflow_with_gate_and_verified_phases() {
         let wf = WorkflowTemplate {
             name: "parallel".to_string(),
-            description: "Workflow with all-previous dependency".to_string(),
+            description: "Workflow with gate and verified phases".to_string(),
             phases: vec![
                 WorkflowPhase {
-                    name: "task-a".to_string(),
-                    description: "First task".to_string(),
-                    role: "Worker A".to_string(),
+                    name: "research".to_string(),
+                    description: "Research the codebase".to_string(),
+                    role: "Researcher".to_string(),
                     tools: vec!["read".to_string()],
                     read_only: true,
                     dependency: PhaseDependency::Root,
+                    verify: false,
                 },
                 WorkflowPhase {
-                    name: "task-b".to_string(),
-                    description: "Second task".to_string(),
-                    role: "Worker B".to_string(),
-                    tools: vec!["read".to_string()],
-                    read_only: true,
-                    dependency: PhaseDependency::Root,
-                },
-                WorkflowPhase {
-                    name: "merge".to_string(),
-                    description: "Merge results".to_string(),
-                    role: "Merger".to_string(),
+                    name: "implement".to_string(),
+                    description: "Implement changes".to_string(),
+                    role: "Implementer".to_string(),
                     tools: vec!["read".to_string(), "write".to_string()],
                     read_only: false,
-                    dependency: PhaseDependency::AllPrevious,
+                    dependency: PhaseDependency::Sequential,
+                    verify: true,
+                },
+                WorkflowPhase {
+                    name: "review".to_string(),
+                    description: "Review changes".to_string(),
+                    role: "Reviewer".to_string(),
+                    tools: vec!["read".to_string()],
+                    read_only: true,
+                    dependency: PhaseDependency::Sequential,
+                    verify: false,
                 },
             ],
             ..WorkflowTemplate::default()
         };
         let prompt = generate_overmind_prompt(&wf);
-        assert!(prompt.contains("MUST `depends_on` ALL previous phase task UUIDs"));
+        // Verified phase should mention verification
+        assert!(prompt.contains("Verified phase"));
+        // Review is a gate phase
+        assert!(prompt.contains("Gate phase"));
+        // Auto-advance phase (research)
+        assert!(prompt.contains("Auto-advance phase"));
     }
 
     #[test]

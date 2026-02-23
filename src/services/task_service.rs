@@ -7,6 +7,7 @@ use async_trait::async_trait;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{Complexity, ExecutionMode, Task, TaskContext, TaskPriority, TaskSource, TaskStatus, TaskType};
+use crate::domain::models::workflow_state::WorkflowState;
 use crate::domain::ports::{TaskFilter, TaskRepository};
 use crate::services::command_bus::{CommandError, CommandOutcome, CommandResult, TaskCommand, TaskCommandHandler};
 use crate::services::event_bus::{
@@ -122,6 +123,45 @@ impl<T: TaskRepository> TaskService<T> {
     pub fn with_default_execution_mode(mut self, mode: Option<ExecutionMode>) -> Self {
         self.default_execution_mode = mode;
         self
+    }
+
+    /// Access the underlying task repository.
+    pub fn repo(&self) -> &Arc<T> {
+        &self.task_repo
+    }
+
+    /// Determine the workflow name for a task based on its characteristics.
+    ///
+    /// Returns `None` for tasks that should NOT be enrolled (verification tasks,
+    /// review tasks, tasks already part of a workflow phase, non-root subtasks).
+    fn infer_workflow_name(task: &Task) -> Option<String> {
+        // Adapter-sourced tasks -> "external" (triage-first)
+        if let TaskSource::Adapter(_) = &task.source {
+            return Some("external".to_string());
+        }
+
+        // Verification and Review tasks are never enrolled
+        if matches!(task.task_type, TaskType::Verification | TaskType::Review) {
+            return None;
+        }
+
+        // Tasks that are already a workflow phase subtask are never enrolled
+        if task.context.custom.contains_key("workflow_phase") {
+            return None;
+        }
+
+        // Explicit workflow_name hint takes priority
+        if let Some(ref name) = task.routing_hints.workflow_name {
+            return Some(name.clone());
+        }
+
+        // Root tasks (no parent) default to "code"
+        if task.parent_id.is_none() {
+            return Some("code".to_string());
+        }
+
+        // Other subtasks are not enrolled
+        None
     }
 
     /// Helper to build a UnifiedEvent with standard fields.
@@ -467,6 +507,29 @@ impl<T: TaskRepository> TaskService<T> {
             task.execution_mode = inferred_mode;
         }
 
+        // --- Auto-enroll in workflow ---
+        if let Some(wf_name) = Self::infer_workflow_name(&task) {
+            // Validate that the inferred workflow name corresponds to a real template.
+            // If not, skip enrollment and log a warning rather than creating a task
+            // that will fail later when advance() calls get_template().
+            let templates = crate::domain::models::workflow_template::WorkflowTemplate::builtin_templates();
+            if templates.contains_key(&wf_name) {
+                task.routing_hints.workflow_name = Some(wf_name.clone());
+                let wf_state = WorkflowState::Pending {
+                    workflow_name: wf_name.clone(),
+                };
+                if let Ok(val) = serde_json::to_value(&wf_state) {
+                    task.context.custom.insert("workflow_state".to_string(), val);
+                }
+            } else {
+                warn!(
+                    task_id = %task.id,
+                    workflow_name = %wf_name,
+                    "Skipping workflow auto-enrollment: unknown template"
+                );
+            }
+        }
+
         task.validate().map_err(DomainError::ValidationFailed)?;
         self.task_repo.create(&task).await?;
 
@@ -487,6 +550,22 @@ impl<T: TaskRepository> TaskService<T> {
                 goal_id,
             },
         ));
+
+        // Emit WorkflowEnrolled if auto-enrolled
+        if task.context.custom.contains_key("workflow_state") {
+            if let Some(ref wf_name) = task.routing_hints.workflow_name {
+                events.push(Self::make_event(
+                    EventSeverity::Info,
+                    EventCategory::Workflow,
+                    Some(goal_id),
+                    Some(task.id),
+                    EventPayload::WorkflowEnrolled {
+                        task_id: task.id,
+                        workflow_name: wf_name.clone(),
+                    },
+                ));
+            }
+        }
 
         // If the task is immediately ready (no deps), collect TaskReady event
         if task.status == TaskStatus::Ready {

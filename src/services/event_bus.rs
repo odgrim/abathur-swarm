@@ -787,61 +787,6 @@ pub enum EventPayload {
         feature_branch: String,
     },
 
-    // Workflow lifecycle events
-
-    /// Workflow execution started.
-    WorkflowStarted {
-        workflow_instance_id: Uuid,
-        workflow_name: String,
-        goal_id: Uuid,
-        phase_count: usize,
-    },
-
-    /// Workflow execution completed.
-    WorkflowCompleted {
-        workflow_instance_id: Uuid,
-        goal_id: Uuid,
-        status: String,
-        tokens_consumed: u64,
-    },
-
-    /// A workflow phase started executing.
-    PhaseStarted {
-        workflow_instance_id: Uuid,
-        phase_id: Uuid,
-        phase_name: String,
-        task_count: usize,
-    },
-
-    /// A workflow phase completed successfully.
-    PhaseCompleted {
-        workflow_instance_id: Uuid,
-        phase_id: Uuid,
-        phase_name: String,
-    },
-
-    /// A workflow phase failed.
-    PhaseFailed {
-        workflow_instance_id: Uuid,
-        phase_id: Uuid,
-        phase_name: String,
-        error: String,
-    },
-
-    /// Phase verification gate completed.
-    PhaseVerificationCompleted {
-        workflow_instance_id: Uuid,
-        phase_id: Uuid,
-        passed: bool,
-    },
-
-    /// Phase recovery started (overmind invoked).
-    PhaseRecoveryStarted {
-        workflow_instance_id: Uuid,
-        phase_id: Uuid,
-        retry_count: u32,
-    },
-
     // Adapter events
 
     /// Adapter ingestion poll completed successfully.
@@ -897,6 +842,66 @@ pub enum EventPayload {
         remaining_tokens: u64,
         time_to_reset_secs: u64,
         opportunity_score: f64,
+    },
+
+    // Workflow state machine events
+
+    /// Task enrolled in a workflow.
+    WorkflowEnrolled {
+        task_id: Uuid,
+        workflow_name: String,
+    },
+
+    /// Workflow phase started with subtask(s).
+    WorkflowPhaseStarted {
+        task_id: Uuid,
+        phase_index: usize,
+        phase_name: String,
+        subtask_ids: Vec<Uuid>,
+    },
+
+    /// Gate phase reached — awaiting overmind verdict.
+    WorkflowGateReached {
+        task_id: Uuid,
+        phase_index: usize,
+        phase_name: String,
+    },
+
+    /// Gate verdict provided by overmind.
+    WorkflowGateVerdict {
+        task_id: Uuid,
+        phase_index: usize,
+        verdict: String,
+    },
+
+    /// Workflow advanced from one phase to another.
+    WorkflowAdvanced {
+        task_id: Uuid,
+        from_phase: usize,
+        to_phase: usize,
+    },
+
+    /// All workflow phases completed.
+    WorkflowCompleted {
+        task_id: Uuid,
+    },
+
+    /// Workflow phase verification requested — engine is in Verifying state.
+    WorkflowVerificationRequested {
+        task_id: Uuid,
+        phase_index: usize,
+        phase_name: String,
+        retry_count: u32,
+    },
+
+    /// Workflow phase verification completed — satisfied or failed.
+    WorkflowVerificationCompleted {
+        task_id: Uuid,
+        phase_index: usize,
+        phase_name: String,
+        satisfied: bool,
+        retry_count: u32,
+        summary: String,
     },
 }
 
@@ -1008,13 +1013,6 @@ impl EventPayload {
             Self::ConvergenceTerminated { .. } => "ConvergenceTerminated",
             Self::TaskExecutionRecorded { .. } => "TaskExecutionRecorded",
             Self::SubtaskMergedToFeature { .. } => "SubtaskMergedToFeature",
-            Self::WorkflowStarted { .. } => "WorkflowStarted",
-            Self::WorkflowCompleted { .. } => "WorkflowCompleted",
-            Self::PhaseStarted { .. } => "PhaseStarted",
-            Self::PhaseCompleted { .. } => "PhaseCompleted",
-            Self::PhaseFailed { .. } => "PhaseFailed",
-            Self::PhaseVerificationCompleted { .. } => "PhaseVerificationCompleted",
-            Self::PhaseRecoveryStarted { .. } => "PhaseRecoveryStarted",
             Self::AdapterIngestionCompleted { .. } => "AdapterIngestionCompleted",
             Self::AdapterIngestionFailed { .. } => "AdapterIngestionFailed",
             Self::AdapterEgressCompleted { .. } => "AdapterEgressCompleted",
@@ -1022,6 +1020,14 @@ impl EventPayload {
             Self::AdapterTaskIngested { .. } => "AdapterTaskIngested",
             Self::BudgetPressureChanged { .. } => "BudgetPressureChanged",
             Self::BudgetOpportunityDetected { .. } => "BudgetOpportunityDetected",
+            Self::WorkflowEnrolled { .. } => "WorkflowEnrolled",
+            Self::WorkflowPhaseStarted { .. } => "WorkflowPhaseStarted",
+            Self::WorkflowGateReached { .. } => "WorkflowGateReached",
+            Self::WorkflowGateVerdict { .. } => "WorkflowGateVerdict",
+            Self::WorkflowAdvanced { .. } => "WorkflowAdvanced",
+            Self::WorkflowCompleted { .. } => "WorkflowCompleted",
+            Self::WorkflowVerificationRequested { .. } => "WorkflowVerificationRequested",
+            Self::WorkflowVerificationCompleted { .. } => "WorkflowVerificationCompleted",
         }
     }
 }

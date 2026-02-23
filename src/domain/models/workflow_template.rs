@@ -88,6 +88,13 @@ pub struct WorkflowPhase {
     /// How this phase depends on previous phases.
     #[serde(default)]
     pub dependency: PhaseDependency,
+    /// Whether to run intent verification after this phase completes.
+    ///
+    /// When `true`, the workflow engine parks at `Verifying` after phase
+    /// subtasks finish, runs LLM-based intent verification, and auto-reworks
+    /// if verification fails (up to `max_verification_retries`).
+    #[serde(default)]
+    pub verify: bool,
 }
 
 /// A workflow template defining the phase sequence for task execution.
@@ -109,6 +116,17 @@ pub struct WorkflowTemplate {
     /// How completed work is delivered at the end of a successful workflow.
     #[serde(default)]
     pub output_delivery: OutputDelivery,
+    /// Maximum number of verification retries before escalating to a gate.
+    ///
+    /// Applies to phases with `verify: true`. When verification fails and
+    /// retries are below this limit, the phase auto-reworks. When retries
+    /// are exhausted, the engine escalates to a `PhaseGate`.
+    #[serde(default = "default_max_verification_retries")]
+    pub max_verification_retries: u32,
+}
+
+fn default_max_verification_retries() -> u32 {
+    2
 }
 
 impl WorkflowTemplate {
@@ -126,6 +144,7 @@ impl WorkflowTemplate {
                     tools: vec!["read".to_string(), "glob".to_string(), "grep".to_string()],
                     read_only: true,
                     dependency: PhaseDependency::Root,
+                    verify: false,
                 },
                 WorkflowPhase {
                     name: "plan".to_string(),
@@ -134,6 +153,7 @@ impl WorkflowTemplate {
                     tools: vec!["read".to_string(), "glob".to_string(), "grep".to_string(), "memory".to_string()],
                     read_only: true,
                     dependency: PhaseDependency::Sequential,
+                    verify: false,
                 },
                 WorkflowPhase {
                     name: "implement".to_string(),
@@ -142,6 +162,7 @@ impl WorkflowTemplate {
                     tools: vec!["read".to_string(), "write".to_string(), "edit".to_string(), "shell".to_string(), "glob".to_string(), "grep".to_string(), "memory".to_string()],
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
+                    verify: true,
                 },
                 WorkflowPhase {
                     name: "review".to_string(),
@@ -150,11 +171,13 @@ impl WorkflowTemplate {
                     tools: vec!["read".to_string(), "glob".to_string(), "grep".to_string(), "shell".to_string(), "memory".to_string()],
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
+                    verify: false,
                 },
             ],
             workspace_kind: WorkspaceKind::Worktree,
             tool_grants: Vec::new(),
             output_delivery: OutputDelivery::PullRequest,
+            max_verification_retries: default_max_verification_retries(),
         }
     }
 
@@ -176,6 +199,7 @@ impl WorkflowTemplate {
                     tools: vec!["read".to_string(), "glob".to_string(), "grep".to_string(), "memory".to_string()],
                     read_only: true,
                     dependency: PhaseDependency::Root,
+                    verify: false,
                 },
                 WorkflowPhase {
                     name: "analyze".to_string(),
@@ -184,6 +208,7 @@ impl WorkflowTemplate {
                     tools: vec!["read".to_string(), "glob".to_string(), "grep".to_string(), "memory".to_string()],
                     read_only: true,
                     dependency: PhaseDependency::Sequential,
+                    verify: false,
                 },
                 WorkflowPhase {
                     name: "synthesize".to_string(),
@@ -192,11 +217,13 @@ impl WorkflowTemplate {
                     tools: vec!["read".to_string(), "memory".to_string()],
                     read_only: true,
                     dependency: PhaseDependency::Sequential,
+                    verify: false,
                 },
             ],
             workspace_kind: WorkspaceKind::None,
             tool_grants: vec!["memory".to_string()],
             output_delivery: OutputDelivery::MemoryOnly,
+            max_verification_retries: default_max_verification_retries(),
         }
     }
 
@@ -217,6 +244,7 @@ impl WorkflowTemplate {
                     tools: vec!["read".to_string(), "glob".to_string(), "grep".to_string(), "memory".to_string()],
                     read_only: true,
                     dependency: PhaseDependency::Root,
+                    verify: false,
                 },
                 WorkflowPhase {
                     name: "write".to_string(),
@@ -225,6 +253,7 @@ impl WorkflowTemplate {
                     tools: vec!["read".to_string(), "write".to_string(), "edit".to_string(), "glob".to_string(), "grep".to_string(), "memory".to_string()],
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
+                    verify: true,
                 },
                 WorkflowPhase {
                     name: "review".to_string(),
@@ -233,11 +262,13 @@ impl WorkflowTemplate {
                     tools: vec!["read".to_string(), "glob".to_string(), "grep".to_string(), "memory".to_string()],
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
+                    verify: false,
                 },
             ],
             workspace_kind: WorkspaceKind::Worktree,
             tool_grants: Vec::new(),
             output_delivery: OutputDelivery::PullRequest,
+            max_verification_retries: default_max_verification_retries(),
         }
     }
 
@@ -259,11 +290,13 @@ impl WorkflowTemplate {
                     tools: vec!["read".to_string(), "glob".to_string(), "grep".to_string(), "shell".to_string(), "memory".to_string()],
                     read_only: true,
                     dependency: PhaseDependency::Root,
+                    verify: false,
                 },
             ],
             workspace_kind: WorkspaceKind::None,
             tool_grants: vec!["memory".to_string()],
             output_delivery: OutputDelivery::MemoryOnly,
+            max_verification_retries: default_max_verification_retries(),
         }
     }
 
@@ -301,6 +334,7 @@ impl WorkflowTemplate {
                     ],
                     read_only: true,
                     dependency: PhaseDependency::Root,
+                    verify: false,
                 },
                 WorkflowPhase {
                     name: "research".to_string(),
@@ -316,6 +350,7 @@ impl WorkflowTemplate {
                     ],
                     read_only: true,
                     dependency: PhaseDependency::Sequential,
+                    verify: false,
                 },
                 WorkflowPhase {
                     name: "plan".to_string(),
@@ -331,6 +366,7 @@ impl WorkflowTemplate {
                     ],
                     read_only: true,
                     dependency: PhaseDependency::Sequential,
+                    verify: false,
                 },
                 WorkflowPhase {
                     name: "implement".to_string(),
@@ -348,6 +384,7 @@ impl WorkflowTemplate {
                     ],
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
+                    verify: true,
                 },
                 WorkflowPhase {
                     name: "review".to_string(),
@@ -365,11 +402,13 @@ impl WorkflowTemplate {
                     ],
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
+                    verify: false,
                 },
             ],
             workspace_kind: WorkspaceKind::Worktree,
             tool_grants: Vec::new(),
             output_delivery: OutputDelivery::PullRequest,
+            max_verification_retries: default_max_verification_retries(),
         }
     }
 
@@ -421,6 +460,18 @@ impl WorkflowTemplate {
 
         Ok(())
     }
+
+    /// Returns all built-in workflow templates keyed by name.
+    pub fn builtin_templates() -> std::collections::HashMap<String, Self> {
+        let templates = vec![
+            Self::default_code_workflow(),
+            Self::analysis_workflow(),
+            Self::docs_workflow(),
+            Self::review_only_workflow(),
+            Self::external_workflow(),
+        ];
+        templates.into_iter().map(|t| (t.name.clone(), t)).collect()
+    }
 }
 
 #[cfg(test)]
@@ -469,6 +520,7 @@ mod tests {
                 tools: vec!["read".to_string()],
                 read_only: false,
                 dependency: PhaseDependency::Root,
+                verify: false,
             }],
             ..Default::default()
         };
@@ -498,6 +550,7 @@ mod tests {
                 tools: vec!["invalid_tool".to_string()],
                 read_only: false,
                 dependency: PhaseDependency::Root,
+                verify: false,
             }],
             ..Default::default()
         };
@@ -518,6 +571,7 @@ mod tests {
                 tools: vec!["read".to_string()],
                 read_only: false,
                 dependency: PhaseDependency::Root,
+                verify: false,
             }],
             ..Default::default()
         };
@@ -560,6 +614,7 @@ mod tests {
                     tools: vec!["read".to_string(), "glob".to_string(), "grep".to_string()],
                     read_only: true,
                     dependency: PhaseDependency::Root,
+                    verify: false,
                 },
                 WorkflowPhase {
                     name: "write-docs".to_string(),
@@ -568,6 +623,7 @@ mod tests {
                     tools: vec!["read".to_string(), "write".to_string(), "edit".to_string()],
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
+                    verify: false,
                 },
             ],
             ..Default::default()
@@ -624,6 +680,7 @@ mod tests {
                 role: "doer".to_string(),
                 tools: vec!["read".to_string()],
                 read_only: false,
+                verify: false,
                 dependency: PhaseDependency::Root,
             }],
             tool_grants: vec!["not_a_real_tool".to_string()],

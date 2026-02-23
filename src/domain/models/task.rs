@@ -81,7 +81,7 @@ impl TaskStatus {
             Self::Ready => vec![Self::Running, Self::Blocked, Self::Canceled],
             Self::Blocked => vec![Self::Ready, Self::Canceled],
             Self::Running => vec![Self::Validating, Self::Complete, Self::Failed, Self::Canceled],
-            Self::Validating => vec![Self::Complete, Self::Failed],
+            Self::Validating => vec![Self::Running, Self::Complete, Self::Failed],
             Self::Complete => vec![],
             Self::Failed => vec![Self::Ready], // Can retry
             Self::Canceled => vec![],
@@ -342,9 +342,8 @@ pub struct RoutingHints {
     pub complexity: Complexity,
     /// Prompt tier for context assembly
     pub prompt_tier: PromptTier,
-    /// Workflow template name for phase-orchestrated execution.
-    /// When set, the task is routed to the PhaseOrchestrator instead of
-    /// the Overmind fallback. Use "external" for adapter-sourced tasks.
+    /// Workflow name hint (e.g., "code", "analysis", "docs", "review").
+    /// When set, the overmind uses this to enroll the task in the named workflow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_name: Option<String>,
 }

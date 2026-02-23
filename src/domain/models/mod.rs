@@ -13,7 +13,7 @@ pub mod specialist_templates;
 pub mod substrate;
 pub mod task;
 pub mod task_schedule;
-pub mod workflow;
+pub mod workflow_state;
 pub mod workflow_template;
 pub mod worktree;
 
@@ -30,6 +30,6 @@ pub use specialist_templates::*;
 pub use substrate::*;
 pub use task::*;
 pub use task_schedule::*;
-pub use workflow::*;
+pub use workflow_state::*;
 pub use workflow_template::*;
 pub use worktree::*;

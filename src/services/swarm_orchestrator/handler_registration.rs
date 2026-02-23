@@ -31,7 +31,7 @@ use crate::services::builtin_handlers::{
     TaskOutcomeMemoryHandler,
     TaskReadySpawnHandler, TaskScheduleHandler, TaskSLAEnforcementHandler,
     TriggerCatchupHandler, WatermarkAuditHandler,
-    WorkflowPhaseCompletionHandler,
+    WorkflowSubtaskCompletionHandler, WorkflowVerificationHandler,
     WorktreeReconciliationHandler,
 };
 use crate::services::command_bus::CommandBus;
@@ -67,6 +67,30 @@ where
                 self.task_repo.clone(),
             )))
             .await;
+
+        // WorkflowSubtaskCompletionHandler (HIGH) — drive workflow state machine on subtask completion
+        let verification_enabled = self.intent_verifier.is_some();
+        reactor
+            .register(Arc::new(WorkflowSubtaskCompletionHandler::new(
+                self.task_repo.clone(),
+                self.event_bus.clone(),
+                verification_enabled,
+            )))
+            .await;
+
+        // WorkflowVerificationHandler (HIGH) — run intent verification on completed phases
+        if let Some(ref verifier) = self.intent_verifier {
+            reactor
+                .register(Arc::new(WorkflowVerificationHandler::new(
+                    self.task_repo.clone(),
+                    self.event_bus.clone(),
+                    Arc::clone(verifier) as Arc<dyn crate::services::swarm_orchestrator::convergent_execution::ConvergentIntentVerifier>,
+                    true,
+                )))
+                .await;
+        }
+
+        // WorkflowAutoAdvanceHandler — REMOVED (race condition with spawn_task_agent auto-advance)
 
         // TaskFailedBlockHandler (SYSTEM) — block dependents on failure/cancel
         reactor
@@ -299,32 +323,6 @@ where
 
             bus
         };
-
-        // WorkflowPhaseCompletionHandler (HIGH) — forward phase events to phase orchestrator
-        if self.phase_orchestrator.is_some() {
-            let (wf_tx, mut wf_rx) = tokio::sync::mpsc::channel::<(uuid::Uuid, uuid::Uuid)>(64);
-            reactor
-                .register(Arc::new(WorkflowPhaseCompletionHandler::new(wf_tx)))
-                .await;
-
-            // Spawn a background task that drains the channel and calls into the phase orchestrator
-            let phase_orch = self.phase_orchestrator.clone().unwrap();
-            tokio::spawn(async move {
-                while let Some((workflow_instance_id, phase_id)) = wf_rx.recv().await {
-                    if let Err(e) = phase_orch
-                        .on_phase_tasks_completed(workflow_instance_id, phase_id)
-                        .await
-                    {
-                        tracing::error!(
-                            workflow_id = %workflow_instance_id,
-                            phase_id = %phase_id,
-                            error = %e,
-                            "Failed to handle phase completion"
-                        );
-                    }
-                }
-            });
-        }
 
         // ReviewFailureLoopHandler (HIGH) — loop review failures back to plan+implement
         reactor

@@ -35,15 +35,14 @@ pub mod merge_queue;
 pub mod meta_planner; // Rust service module for decomposition planning
 pub mod overmind;
 pub mod prompt_adapter;
-pub mod phase_orchestrator;
 pub mod swarm_orchestrator;
 pub mod task_schedule_service;
 pub mod task_service;
 pub mod trigger_rules;
-pub mod workflow_builder;
 pub mod convergence_bridge;
 pub mod convergence_engine;
 pub mod overseers;
+pub mod workflow_engine;
 pub mod worktree_service;
 
 pub use adapter_registry::AdapterRegistry;
@@ -73,11 +72,10 @@ pub use memory_service::{DecayConfig, MaintenanceReport, MemoryService, MemorySt
 pub use merge_queue::{MergeQueue, MergeQueueConfig, MergeQueueStats, MergeRequest, MergeResult, MergeStage, MergeStatus};
 pub use meta_planner::{AgentMetrics, AgentSpec, Complexity, DecompositionPlan, MetaPlanner, MetaPlannerConfig, TaskSpec};
 pub use overmind::{OvermindConfig, OvermindService};
-pub use phase_orchestrator::{PhaseOrchestrator, PhaseOrchestratorConfig};
-pub use workflow_builder::build_workflow_from_decomposition;
 pub use swarm_orchestrator::{ConvergenceLoopConfig, McpServerConfig, OrchestratorStatus, SwarmConfig, SwarmEvent, SwarmOrchestrator, SwarmStats, VerificationLevel};
 pub use task_schedule_service::TaskScheduleService;
 pub use task_service::{TaskService, SpawnLimitConfig, SpawnLimitResult, SpawnLimitType};
+pub use workflow_engine::WorkflowEngine;
 pub use worktree_service::{WorktreeConfig, WorktreeService, WorktreeStats};
 pub use event_bus::{BudgetPressureLevel, EventBus, EventBusConfig, EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent};
 pub use budget_tracker::{BudgetOpportunity, BudgetState, BudgetTracker, BudgetTrackerConfig, BudgetWindow, BudgetWindowType};
