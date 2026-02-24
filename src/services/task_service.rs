@@ -958,6 +958,29 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                 let (task, events) = self.cancel_task(task_id, &reason).await?;
                 Ok(CommandOutcome { result: CommandResult::Task(task), events })
             }
+            TaskCommand::Assign {
+                task_id,
+                agent_type,
+            } => {
+                // Set agent_type on a Ready task without claiming it.
+                // The scheduler will pick it up on the next cycle.
+                let mut task = self
+                    .task_repo
+                    .get(task_id)
+                    .await?
+                    .ok_or(DomainError::TaskNotFound(task_id))?;
+                if task.status != TaskStatus::Ready {
+                    return Err(DomainError::InvalidStateTransition {
+                        from: task.status.as_str().to_string(),
+                        to: "ready (assign)".to_string(),
+                        reason: "task must be in Ready state to assign an agent_type".to_string(),
+                    }.into());
+                }
+                task.agent_type = Some(agent_type);
+                task.updated_at = chrono::Utc::now();
+                self.task_repo.update(&task).await?;
+                Ok(CommandOutcome { result: CommandResult::Task(task), events: vec![] })
+            }
             TaskCommand::Transition {
                 task_id,
                 new_status,

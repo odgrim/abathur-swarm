@@ -66,6 +66,7 @@ fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
                 cli_tools.push("mcp__abathur__task_list".to_string());
                 cli_tools.push("mcp__abathur__task_get".to_string());
                 cli_tools.push("mcp__abathur__task_update_status".to_string());
+                cli_tools.push("mcp__abathur__task_assign".to_string());
                 cli_tools.push("mcp__abathur__task_wait".to_string());
                 cli_tools.push("mcp__abathur__goals_list".to_string());
             }
@@ -247,6 +248,13 @@ where
         task: &Task,
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
+        // Skip workflow phase subtasks awaiting agent assignment from overmind.
+        // The overmind's long-running session creates specialists and assigns them
+        // via task_assign. Until agent_type is set, leave the task in Ready.
+        if task.agent_type.is_none() && task.context.custom.contains_key("workflow_phase") {
+            return Ok(());
+        }
+
         // Runtime safety net: don't spawn agents if MCP servers are down.
         // The task stays Ready and will be retried on the next poll cycle.
         if !self.check_mcp_readiness().await {
@@ -367,11 +375,10 @@ where
                                             tracing::info!(
                                                 task_id = %task.id,
                                                 phase = %phase_name,
-                                                "Auto-advanced workflow from Pending to first phase"
+                                                "Auto-advanced workflow from Pending to first phase — overmind session will orchestrate"
                                             );
-                                            // Return early — the phase subtask will be spawned next cycle
-                                            drop(permit);
-                                            return Ok(());
+                                            // Fall through — the overmind gets a long-running
+                                            // substrate session to orchestrate all phases.
                                         }
                                         Ok(crate::services::workflow_engine::AdvanceResult::Completed) => {
                                             tracing::info!(

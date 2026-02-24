@@ -157,6 +157,12 @@ pub enum TaskCommand {
         task_id: Uuid,
         new_status: TaskStatus,
     },
+    /// Assign an agent_type to a Ready task without claiming it.
+    /// Used by the overmind to assign specialists to workflow phase subtasks.
+    Assign {
+        task_id: Uuid,
+        agent_type: String,
+    },
 }
 
 /// Goal mutation commands.

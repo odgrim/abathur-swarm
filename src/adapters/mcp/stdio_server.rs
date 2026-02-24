@@ -388,6 +388,18 @@ where
                     }
                 },
                 {
+                    "name": "task_assign",
+                    "description": "Assign an agent_type to a Ready task without claiming it. Use this to assign a specialist agent to a workflow phase subtask so the scheduler picks it up. The task must be in Ready state. Does not change the task's status.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "task_id": { "type": "string", "description": "UUID of the task to assign" },
+                            "agent_type": { "type": "string", "description": "Name of the agent template to assign (must match an existing agent template)" }
+                        },
+                        "required": ["task_id", "agent_type"]
+                    }
+                },
+                {
                     "name": "task_wait",
                     "description": "Block until one or more tasks reach a terminal state (complete, failed, or canceled). Use this instead of polling with task_list + sleep. Returns the final status of each task. This is the recommended way to wait for subtask completion.",
                     "inputSchema": {
@@ -451,6 +463,7 @@ where
             "task_list" => self.tool_task_list(&arguments).await,
             "task_get" => self.tool_task_get(&arguments).await,
             "task_update_status" => self.tool_task_update_status(&arguments).await,
+            "task_assign" => self.tool_task_assign(&arguments).await,
             "agent_create" => self.tool_agent_create(&arguments).await,
             "agent_list" => self.tool_agent_list(&arguments).await,
             "agent_get" => self.tool_agent_get(&arguments).await,
@@ -733,6 +746,39 @@ where
 
         let response = serde_json::json!({
             "id": task.id.to_string(),
+            "status": task.status.as_str(),
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    async fn tool_task_assign(&self, args: &serde_json::Value) -> Result<String, String> {
+        let task_id_str = args
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing required field: task_id")?;
+        let task_id = Uuid::parse_str(task_id_str)
+            .map_err(|e| format!("Invalid UUID: {}", e))?;
+        let agent_type = args
+            .get("agent_type")
+            .and_then(|a| a.as_str())
+            .ok_or("Missing required field: agent_type")?
+            .to_string();
+
+        let cmd = DomainCommand::Task(TaskCommand::Assign {
+            task_id,
+            agent_type: agent_type.clone(),
+        });
+        let envelope = CommandEnvelope::new(CommandSource::Mcp("stdio".into()), cmd);
+
+        let task = match self.command_bus.dispatch(envelope).await {
+            Ok(CommandResult::Task(task)) => task,
+            Ok(_) => return Err("Unexpected command result type".to_string()),
+            Err(e) => return Err(format!("Failed to assign task: {}", e)),
+        };
+
+        let response = serde_json::json!({
+            "id": task.id.to_string(),
+            "agent_type": task.agent_type,
             "status": task.status.as_str(),
         });
         serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
