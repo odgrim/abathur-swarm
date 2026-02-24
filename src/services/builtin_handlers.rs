@@ -1367,9 +1367,41 @@ impl<T: TaskRepository + 'static> EventHandler for RetryProcessingHandler<T> {
         let mut new_events = Vec::new();
 
         for task in failed {
+            // Skip workflow phase subtasks — the workflow engine manages their
+            // lifecycle. Generic retry would race with
+            // WorkflowSubtaskCompletionHandler and cause double-advance.
+            if task.context.custom.contains_key("workflow_phase") {
+                continue;
+            }
+
+            // Skip review-loop-managed tasks — ReviewFailureLoopHandler owns
+            // their full retry lifecycle.
+            if task.context.custom.contains_key("review_loop_active")
+                || task.context.custom.contains_key("review_iteration")
+            {
+                continue;
+            }
+
+            // Circuit-break consecutive budget failures: tasks that repeatedly
+            // exhaust their turn budget should not retry indefinitely.
+            if task.context.custom.get("last_failure_reason")
+                .and_then(|v| v.as_str())
+                .map_or(false, |e| e.starts_with("error_max_turns"))
+            {
+                let consecutive = task.context.custom
+                    .get("consecutive_budget_failures")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if consecutive >= 3 {
+                    continue;
+                }
+            }
+
             if task.retry_count < self.max_retries {
                 let mut updated = task.clone();
-                if updated.transition_to(TaskStatus::Ready).is_ok() {
+                // Use retry() instead of transition_to(Ready) so that
+                // retry_count is properly incremented.
+                if updated.retry().is_ok() {
                     self.task_repo.update(&updated).await
                         .map_err(|e| format!("Failed to update: {}", e))?;
 
@@ -5714,6 +5746,143 @@ mod tests {
         let updated = repo.get(task.id).await.unwrap().unwrap();
         assert_eq!(updated.status, TaskStatus::Ready);
         assert_eq!(updated.retry_count, 2);
+    }
+
+    // ========================================================================
+    // RetryProcessingHandler tests
+    // ========================================================================
+
+    /// Helper: create a ScheduledEventFired event for "retry-check".
+    fn make_retry_check_event() -> UnifiedEvent {
+        UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Debug,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: Uuid::new_v4(),
+                name: "retry-check".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_processing_skips_workflow_subtasks() {
+        let repo = setup_task_repo().await;
+        let handler = RetryProcessingHandler::new(repo.clone(), 3);
+
+        // Create a failed workflow subtask
+        let mut task = Task::new("Research phase subtask");
+        task.max_retries = 3;
+        task.context.custom.insert(
+            "workflow_phase".to_string(),
+            serde_json::Value::String("research".to_string()),
+        );
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task.transition_to(TaskStatus::Failed).unwrap();
+        repo.create(&task).await.unwrap();
+
+        let event = make_retry_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should NOT retry — workflow engine owns this task's lifecycle
+        assert!(matches!(reaction, Reaction::None));
+
+        let updated = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Failed);
+        assert_eq!(updated.retry_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_retry_processing_skips_review_loop_tasks() {
+        let repo = setup_task_repo().await;
+        let handler = RetryProcessingHandler::new(repo.clone(), 3);
+
+        // Create a failed review-loop task
+        let mut task = Task::new("Review iteration task");
+        task.max_retries = 3;
+        task.context.custom.insert(
+            "review_loop_active".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task.transition_to(TaskStatus::Failed).unwrap();
+        repo.create(&task).await.unwrap();
+
+        let event = make_retry_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        assert!(matches!(reaction, Reaction::None));
+        let updated = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_retry_processing_uses_retry_increments_count() {
+        let repo = setup_task_repo().await;
+        let handler = RetryProcessingHandler::new(repo.clone(), 3);
+
+        // Create a normal failed task (no workflow/review context)
+        let mut task = Task::new("Normal task");
+        task.max_retries = 3;
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task.transition_to(TaskStatus::Failed).unwrap();
+        repo.create(&task).await.unwrap();
+
+        let event = make_retry_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should retry and increment retry_count
+        assert!(matches!(reaction, Reaction::EmitEvents(_)));
+        let updated = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Ready);
+        assert_eq!(updated.retry_count, 1, "retry() should increment retry_count");
+    }
+
+    #[tokio::test]
+    async fn test_retry_processing_circuit_breaks_budget_failures() {
+        let repo = setup_task_repo().await;
+        let handler = RetryProcessingHandler::new(repo.clone(), 5);
+
+        // Create a task that has already hit budget failure 3 times
+        let mut task = Task::new("Budget-exhausted task");
+        task.max_retries = 5;
+        task.context.custom.insert(
+            "consecutive_budget_failures".to_string(),
+            serde_json::Value::Number(3.into()),
+        );
+        task.context.custom.insert(
+            "last_failure_reason".to_string(),
+            serde_json::Value::String("error_max_turns: exceeded 40 turns".to_string()),
+        );
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task.transition_to(TaskStatus::Failed).unwrap();
+        repo.create(&task).await.unwrap();
+
+        let event = make_retry_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should NOT retry — circuit breaker tripped
+        assert!(matches!(reaction, Reaction::None));
+        let updated = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Failed);
     }
 
     // ========================================================================

@@ -506,6 +506,14 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 - Create agents: Use the `agent_create` tool directly
 - Track progress: Use `task_list` and `task_get` tools
 - Store learnings: Use the `memory_store` tool directly
+
+## Efficiency Rules
+- Use Glob for file discovery — never shell ls or find.
+- Use Grep to search code — never Read entire files looking for a pattern.
+- NEVER re-read a file you already read this session.
+- Store findings incrementally via memory_store as you go, not all at the end.
+- When done, call task_update_status immediately — no self-verification reads.
+- If retrying a task, call memory_search FIRST to find prior work and build on it.
 ";
                 if let Err(e) = std::fs::write(&claude_md_path, claude_md_content) {
                     tracing::warn!("Failed to write CLAUDE.md to worktree: {}", e);
@@ -638,20 +646,42 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let event_tx = event_tx.clone();
             let event_bus = self.event_bus.clone();
             let command_bus = self.command_bus.read().await.clone();
-            // Use agent template's max_turns if set (non-zero), otherwise fall
-            // back to the orchestrator's default. This ensures agents like the
-            // overmind (max_turns=50) get their configured turn budget.
+            // Role-aware max_turns defaults — the ceiling should be 2-3x
+            // typical usage so agents aren't cut short on complex tasks.
+            let role_max_turns = {
+                let lower = agent_type.to_lowercase();
+                if lower.contains("researcher") || lower.contains("analyst")
+                    || lower.contains("explorer") || lower.contains("auditor")
+                {
+                    40  // Research: typical ~15 turns, ceiling 40
+                } else if lower.contains("planner") || lower.contains("architect")
+                    || lower.contains("designer")
+                {
+                    30  // Planning: typical ~10 turns, ceiling 30
+                } else if lower.contains("reviewer") || lower.contains("verifier") {
+                    30  // Review: typical ~10 turns, ceiling 30
+                } else if lower.contains("implement") || lower.contains("coder")
+                    || lower.contains("builder") || lower.contains("fixer")
+                {
+                    75  // Implementation: typical ~25 turns, ceiling 75
+                } else {
+                    self.config.default_max_turns  // Fallback to config default
+                }
+            };
+
+            // Use agent template's max_turns if explicitly set (non-zero),
+            // then role-aware default, then orchestrator config default.
             let mut max_turns = if template_max_turns > 0 {
                 template_max_turns
             } else {
-                self.config.default_max_turns
+                role_max_turns
             };
 
             // Bump turn budget for tasks retrying after max_turns exhaustion.
-            // Increase by 50% per retry, capped at architect-tier limit (50).
+            // Increase by 50% per retry, capped to prevent unbounded growth.
             if task.context.hints.iter().any(|h| h == "retry:max_turns_exceeded") {
                 let multiplier = 1.5_f64.powi(task.retry_count as i32);
-                max_turns = ((max_turns as f64 * multiplier) as u32).min(50);
+                max_turns = ((max_turns as f64 * multiplier) as u32).min(100);
             }
             let total_tokens = self.total_tokens.clone();
             let circuit_breaker = self.circuit_breaker.clone();
@@ -1497,14 +1527,24 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 evolution_loop.record_execution(execution).await;
                             }
 
-                            // Log task failure
+                            // Log task failure with retry state for debugging
+                            let consecutive_budget = completed_task.context.custom
+                                .get("consecutive_budget_failures")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
                             audit_log.log(
                                 AuditEntry::new(
                                     AuditLevel::Warning,
                                     AuditCategory::Task,
                                     AuditAction::TaskFailed,
                                     AuditActor::System,
-                                    format!("Task failed: {}", error_msg),
+                                    format!(
+                                        "Task failed: {} (retry {}/{}, consecutive_budget_failures: {})",
+                                        error_msg,
+                                        completed_task.retry_count,
+                                        completed_task.max_retries,
+                                        consecutive_budget,
+                                    ),
                                 )
                                 .with_entity(task_id, "task"),
                             ).await;

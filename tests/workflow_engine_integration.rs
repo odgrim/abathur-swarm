@@ -1062,7 +1062,7 @@ async fn test_get_state() {
 }
 
 // ============================================================================
-// Test: phase failure transitions to Failed state
+// Test: phase failure transitions to Failed state after exhausting phase retries
 // ============================================================================
 
 #[tokio::test]
@@ -1078,31 +1078,52 @@ async fn test_phase_failure_transitions_to_failed() {
         _ => panic!("Expected PhaseStarted"),
     };
 
-    // Fail the subtask
-    let mut sub = repo.get(subtask_id).await.unwrap().unwrap();
-    let _ = sub.transition_to(TaskStatus::Running);
-    repo.update(&sub).await.unwrap();
-    let _ = sub.transition_to(TaskStatus::Failed);
-    repo.update(&sub).await.unwrap();
-
-    // Handle phase completion — should detect failure
-    engine
-        .handle_phase_complete(task.id, subtask_id)
-        .await
-        .unwrap();
-
-    let reloaded = repo.get(task.id).await.unwrap().unwrap();
-    let ws: WorkflowState =
-        serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
-    match ws {
-        WorkflowState::Failed { error, .. } => {
-            assert!(
-                error.contains("research"),
-                "Error should mention the failed phase name, got: {}",
-                error
-            );
+    // Phase-level retry allows up to 2 retries before failing the workflow.
+    // We need to fail → handle_phase_complete 3 times to exhaust them.
+    for i in 0..3 {
+        let mut sub = repo.get(subtask_id).await.unwrap().unwrap();
+        // Transition through Running → Failed (subtask may be in Ready after retry)
+        if sub.status == TaskStatus::Ready {
+            let _ = sub.transition_to(TaskStatus::Running);
+            repo.update(&sub).await.unwrap();
         }
-        other => panic!("Expected Failed, got {:?}", other),
+        if sub.status == TaskStatus::Running {
+            let _ = sub.transition_to(TaskStatus::Failed);
+            repo.update(&sub).await.unwrap();
+        }
+
+        engine
+            .handle_phase_complete(task.id, subtask_id)
+            .await
+            .unwrap();
+
+        let reloaded = repo.get(task.id).await.unwrap().unwrap();
+        let ws: WorkflowState =
+            serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
+
+        if i < 2 {
+            // First two failures: subtask retried, workflow stays in PhaseRunning
+            assert!(
+                matches!(ws, WorkflowState::PhaseRunning { .. }),
+                "Phase retry {}: expected PhaseRunning, got {:?}",
+                i + 1,
+                ws
+            );
+            let retried_sub = repo.get(subtask_id).await.unwrap().unwrap();
+            assert_eq!(retried_sub.status, TaskStatus::Ready);
+        } else {
+            // Third failure: phase retries exhausted, workflow transitions to Failed
+            match ws {
+                WorkflowState::Failed { error, .. } => {
+                    assert!(
+                        error.contains("research"),
+                        "Error should mention the failed phase name, got: {}",
+                        error
+                    );
+                }
+                other => panic!("Expected Failed, got {:?}", other),
+            }
+        }
     }
 }
 

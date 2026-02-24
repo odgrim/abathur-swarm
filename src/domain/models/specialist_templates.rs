@@ -426,6 +426,87 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
     section
 }
 
+/// Generate a class-appropriate multi-line system prompt skeleton for a workflow phase agent.
+///
+/// Includes Turn Economy, Recovery Protocol, class-specific strategy, and Completion Protocol
+/// sections based on the phase characteristics (read_only, name, tools).
+fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::WorkflowPhase) -> String {
+    let class_name = match phase.name.to_lowercase().as_str() {
+        "research" | "explore" | "analyze" | "audit" => "researcher",
+        "plan" | "design" | "architect" => "planner",
+        "implement" | "code" | "build" | "fix" => "implementer",
+        "review" | "triage" | "verify" => "reviewer",
+        _ if phase.read_only => "researcher",
+        _ => "implementer",
+    };
+
+    let mut prompt = format!(
+        "You are a {}. {}\n\n\
+         ## Turn Economy\n\
+         - NEVER re-read a file you already read this session — cache key facts in working memory.\n\
+         - NEVER self-verify by re-reading output you just stored (memory_store, Write, Edit).\n\
+         - Use Glob to find files by pattern — never shell ls/find.\n\
+         - Use Grep to search code — never Read an entire file looking for a pattern.\n\
+         - Stop and finalize immediately when you have enough information to complete the task.\n\
+         - If running low on turns, store partial results via memory_store rather than losing them.\n\n\
+         ## Recovery Protocol\n\
+         - FIRST ACTION on any task: call memory_search with the task description to find prior work.\n\
+         - If prior results exist, build on them — do NOT restart from scratch.\n\
+         - Check task description for \"retry\" or \"attempt\" language indicating previous failure.\n",
+        phase.role, phase.description,
+    );
+
+    match class_name {
+        "researcher" => {
+            prompt.push_str(
+                "\n## Research Strategy\n\
+                 - Start with Glob to map the file structure relevant to your question.\n\
+                 - Use Grep to find specific patterns, types, or function names.\n\
+                 - Only Read files that Glob/Grep identified as relevant — never read files speculatively.\n\
+                 - Store findings incrementally via memory_store as you discover them, not all at the end.\n",
+            );
+        }
+        "planner" => {
+            prompt.push_str(
+                "\n## Planning Strategy\n\
+                 - First action: memory_search for existing plans and research findings.\n\
+                 - Read research findings from memory before reading any code files.\n\
+                 - Output is a plan stored via memory_store, not files. Never use Write/Edit.\n\
+                 - Plan should be specific enough for an implementer to execute without re-reading research.\n",
+            );
+        }
+        "implementer" => {
+            prompt.push_str(
+                "\n## Implementation Strategy\n\
+                 - First action: memory_search for the plan and research findings.\n\
+                 - Follow the plan step by step — do not redesign or re-research.\n\
+                 - Commit early and often — small atomic commits, not one big commit at the end.\n\
+                 - Run tests after each significant change. Fix failures before moving on.\n\
+                 - If tests pass and implementation matches the plan, stop immediately.\n",
+            );
+        }
+        "reviewer" => {
+            prompt.push_str(
+                "\n## Review Strategy\n\
+                 - Use shell with git diff to see exactly what changed — don't read entire files.\n\
+                 - Focus on correctness, not style. Only flag issues that affect functionality.\n\
+                 - Output a structured verdict via memory_store: approved/needs-changes with specific issues.\n\
+                 - Do NOT re-implement or suggest refactors beyond the task scope.\n",
+            );
+        }
+        _ => {}
+    }
+
+    prompt.push_str(
+        "\n## Completion Protocol\n\
+         - When done: memory_store results → task_update_status \"completed\" → STOP.\n\
+         - Do NOT re-read memories you just stored to verify them.\n\
+         - Do NOT continue working after calling task_update_status.\n",
+    );
+
+    prompt
+}
+
 /// Generate a concrete workflow example for the Overmind prompt.
 fn generate_workflow_example(template: &WorkflowTemplate) -> String {
     let mut example = String::from("## Example: Overmind-Driven Workflow\n\n```\n");
@@ -471,15 +552,24 @@ fn generate_workflow_example(template: &WorkflowTemplate) -> String {
             _ => "worker",
         };
 
+        // Generate a class-appropriate system prompt skeleton for this phase
+        let skeleton = agent_prompt_skeleton(phase);
+        // Indent each line of the skeleton for YAML block scalar format
+        let indented_skeleton: String = skeleton
+            .lines()
+            .map(|line| format!("      {}", line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
         example.push_str(&format!(
             "# Create agent for this phase's subtask\n\
              tool: agent_create\narguments:\n\
              \x20 name: \"{}-agent\"\n\
              \x20 description: \"{}\"\n\
              \x20 tier: \"{}\"\n\
-             \x20 system_prompt: \"You are a {}. {}\"\n\
+             \x20 system_prompt: |\n{}\n\
              \x20 tools:\n",
-            phase.name, phase.role, tier_str, phase.role, phase.description,
+            phase.name, phase.role, tier_str, indented_skeleton,
         ));
 
         for tool in &phase.tools {
@@ -709,7 +799,32 @@ arguments:
   name: "codebase-researcher"
   description: "Read-only agent that explores codebases and reports findings via memory"
   tier: "worker"
-  system_prompt: "You are a codebase research specialist..."
+  system_prompt: |
+    You are a codebase research specialist. Explore the codebase to answer specific questions and store findings in swarm memory.
+
+    ## Turn Economy
+    - NEVER re-read a file you already read this session — cache key facts in working memory.
+    - NEVER self-verify by re-reading output you just stored (memory_store, Write, Edit).
+    - Use Glob to find files by pattern — never shell ls/find.
+    - Use Grep to search code — never Read an entire file looking for a pattern.
+    - Stop and finalize immediately when you have enough information to complete the task.
+    - If running low on turns, store partial results via memory_store rather than losing them.
+
+    ## Recovery Protocol
+    - FIRST ACTION on any task: call memory_search with the task description to find prior work.
+    - If prior results exist, build on them — do NOT restart from scratch.
+    - Check task description for "retry" or "attempt" language indicating previous failure.
+
+    ## Research Strategy
+    - Start with Glob to map the file structure relevant to your question.
+    - Use Grep to find specific patterns, types, or function names.
+    - Only Read files that Glob/Grep identified as relevant — never read files speculatively.
+    - Store findings incrementally via memory_store as you discover them, not all at the end.
+
+    ## Completion Protocol
+    - When done: memory_store results → task_update_status "completed" → STOP.
+    - Do NOT re-read memories you just stored to verify them.
+    - Do NOT continue working after calling task_update_status.
   tools:
     - {name: "read", description: "Read source files", required: true}
     - {name: "glob", description: "Find files by pattern", required: true}
@@ -812,6 +927,62 @@ arguments:
 - **Appropriate tier**: Use "worker" for task execution, "specialist" for domain expertise, "architect" for planning.
 - **Constraints**: Add constraints that help the agent stay on track (e.g., "always run tests", "read-only").
 - **Set `read_only: true`** for research, analysis, and planning agents that produce findings via memory rather than code commits. This disables commit verification and prevents convergence retry loops for non-coding agents.
+
+### Mandatory Agent Prompt Sections
+
+Every agent `system_prompt` you write MUST include ALL of the following sections verbatim. These prevent catastrophic turn waste and duplicate work.
+
+#### Turn Economy Rules (include verbatim in every agent prompt)
+```
+## Turn Economy
+- NEVER re-read a file you already read this session — cache key facts in working memory.
+- NEVER self-verify by re-reading output you just stored (memory_store, Write, Edit).
+- Use Glob to find files by pattern — never shell ls/find.
+- Use Grep to search code — never Read an entire file looking for a pattern.
+- Stop and finalize immediately when you have enough information to complete the task.
+- If running low on turns, store partial results via memory_store rather than losing them.
+```
+
+#### Recovery Protocol (include verbatim in every agent prompt)
+```
+## Recovery Protocol
+- FIRST ACTION on any task: call memory_search with the task description to find prior work.
+- If prior results exist, build on them — do NOT restart from scratch.
+- Check task description for "retry" or "attempt" language indicating previous failure.
+```
+
+#### Completion Protocol (include verbatim in every agent prompt)
+```
+## Completion Protocol
+- When done: memory_store results → task_update_status "completed" → STOP.
+- Do NOT re-read memories you just stored to verify them.
+- Do NOT continue working after calling task_update_status.
+```
+
+#### Agent Class Templates
+
+Use these class-specific patterns when writing system_prompts:
+
+**Researcher agents** (read_only: true, typical ~15 turns, ceiling 40):
+- Strategy: Glob/Grep first to build a file map, then targeted Read on specific files.
+- Store findings incrementally via memory_store as you go, not all at the end.
+- Output is memory entries, not files. Never use Write/Edit.
+
+**Planner agents** (read_only: true, typical ~10 turns, ceiling 30):
+- First action: memory_search for existing plans or research findings.
+- Output is a plan stored via memory_store, not files. Never use Write/Edit.
+- Plan should be specific enough for an implementer to execute without re-reading research.
+
+**Implementer agents** (read_only: false, typical ~25 turns, ceiling 75):
+- First action: memory_search for the plan and research findings.
+- Commit early and often — small atomic commits, not one big commit at the end.
+- Run tests after each significant change. Fix failures before moving on.
+- If tests pass and implementation matches the plan, stop immediately.
+
+**Reviewer agents** (read_only: true, typical ~10 turns, ceiling 30):
+- Use `shell` with `git diff` to see exactly what changed — don't read entire files.
+- Output a structured verdict via memory_store: approved/needs-changes with specific issues.
+- Do NOT re-implement or suggest refactors beyond the task scope.
 
 ## Spawn Limits
 
@@ -931,6 +1102,62 @@ ALWAYS call `agent_list` before `agent_create`. Reuse an existing agent if one i
 - **Appropriate tier**: Use "worker" for task execution, "specialist" for domain expertise, "architect" for planning.
 - **Constraints**: Add constraints that help the agent stay on track (e.g., "always run tests", "read-only").
 - **Set `read_only: true`** for research, analysis, and planning agents that produce findings via memory rather than code commits. This disables commit verification and prevents convergence retry loops for non-coding agents.
+
+### Mandatory Agent Prompt Sections
+
+Every agent `system_prompt` you write MUST include ALL of the following sections verbatim. These prevent catastrophic turn waste and duplicate work.
+
+#### Turn Economy Rules (include verbatim in every agent prompt)
+```
+## Turn Economy
+- NEVER re-read a file you already read this session — cache key facts in working memory.
+- NEVER self-verify by re-reading output you just stored (memory_store, Write, Edit).
+- Use Glob to find files by pattern — never shell ls/find.
+- Use Grep to search code — never Read an entire file looking for a pattern.
+- Stop and finalize immediately when you have enough information to complete the task.
+- If running low on turns, store partial results via memory_store rather than losing them.
+```
+
+#### Recovery Protocol (include verbatim in every agent prompt)
+```
+## Recovery Protocol
+- FIRST ACTION on any task: call memory_search with the task description to find prior work.
+- If prior results exist, build on them — do NOT restart from scratch.
+- Check task description for "retry" or "attempt" language indicating previous failure.
+```
+
+#### Completion Protocol (include verbatim in every agent prompt)
+```
+## Completion Protocol
+- When done: memory_store results → task_update_status "completed" → STOP.
+- Do NOT re-read memories you just stored to verify them.
+- Do NOT continue working after calling task_update_status.
+```
+
+#### Agent Class Templates
+
+Use these class-specific patterns when writing system_prompts:
+
+**Researcher agents** (read_only: true, typical ~15 turns, ceiling 40):
+- Strategy: Glob/Grep first to build a file map, then targeted Read on specific files.
+- Store findings incrementally via memory_store as you go, not all at the end.
+- Output is memory entries, not files. Never use Write/Edit.
+
+**Planner agents** (read_only: true, typical ~10 turns, ceiling 30):
+- First action: memory_search for existing plans or research findings.
+- Output is a plan stored via memory_store, not files. Never use Write/Edit.
+- Plan should be specific enough for an implementer to execute without re-reading research.
+
+**Implementer agents** (read_only: false, typical ~25 turns, ceiling 75):
+- First action: memory_search for the plan and research findings.
+- Commit early and often — small atomic commits, not one big commit at the end.
+- Run tests after each significant change. Fix failures before moving on.
+- If tests pass and implementation matches the plan, stop immediately.
+
+**Reviewer agents** (read_only: true, typical ~10 turns, ceiling 30):
+- Use `shell` with `git diff` to see exactly what changed — don't read entire files.
+- Output a structured verdict via memory_store: approved/needs-changes with specific issues.
+- Do NOT re-implement or suggest refactors beyond the task scope.
 
 ## Spawn Limits
 

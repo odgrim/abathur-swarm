@@ -374,12 +374,72 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             return Ok(());
         }
 
-        // Check if any subtask failed
+        // Check if any subtask failed — retry at the phase level before
+        // failing the entire workflow.
         let any_failed = self.any_subtask_failed(&subtask_ids).await?;
         if any_failed {
+            const MAX_PHASE_RETRIES: u64 = 2;
+
+            // Track phase retry count on the parent task's custom context
+            let phase_retry_key = format!("phase_{}_retry_count", phase_index);
+            let mut parent = self.task_repo.get(parent_task_id).await?
+                .ok_or(DomainError::TaskNotFound(parent_task_id))?;
+            let phase_retry_count = parent.context.custom
+                .get(&phase_retry_key)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+
+            if phase_retry_count < MAX_PHASE_RETRIES {
+                // Retry failed subtasks at the phase level
+                let mut retried_any = false;
+                for &sid in &subtask_ids {
+                    if let Some(mut sub) = self.task_repo.get(sid).await? {
+                        if sub.status == TaskStatus::Failed && sub.can_retry() {
+                            if sub.retry().is_ok() {
+                                self.task_repo.update(&sub).await?;
+                                self.event_bus
+                                    .publish(event_factory::make_event(
+                                        EventSeverity::Info,
+                                        EventCategory::Task,
+                                        None,
+                                        Some(sid),
+                                        EventPayload::TaskReady {
+                                            task_id: sid,
+                                            task_title: sub.title.clone(),
+                                        },
+                                    ))
+                                    .await;
+                                retried_any = true;
+                            }
+                        }
+                    }
+                }
+
+                if retried_any {
+                    // Increment phase retry count and stay in PhaseRunning
+                    parent.context.custom.insert(
+                        phase_retry_key,
+                        serde_json::Value::Number((phase_retry_count + 1).into()),
+                    );
+                    self.task_repo.update(&parent).await?;
+                    tracing::info!(
+                        parent_id = %parent_task_id,
+                        phase = %phase_name,
+                        retry = phase_retry_count + 1,
+                        max = MAX_PHASE_RETRIES,
+                        "Retrying failed phase subtasks"
+                    );
+                    return Ok(());
+                }
+            }
+
+            // Exhausted phase retries (or no subtask was retryable) → fail the workflow
             let failed_state = WorkflowState::Failed {
                 workflow_name,
-                error: format!("Phase '{}' subtask failed", phase_name),
+                error: format!(
+                    "Phase '{}' subtask failed after {} retries",
+                    phase_name, phase_retry_count
+                ),
             };
             self.write_state(parent_task_id, &failed_state).await?;
             return Ok(());
