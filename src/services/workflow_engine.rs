@@ -287,7 +287,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
     pub async fn handle_phase_complete(
         &self,
         parent_task_id: Uuid,
-        _subtask_id: Uuid,
+        subtask_id: Uuid,
     ) -> DomainResult<()> {
         let task = self
             .task_repo
@@ -357,6 +357,16 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             }
             _ => return Ok(()), // Not in a completable state
         };
+
+        // Guard: ignore completions for subtasks not in the current phase
+        if !subtask_ids.contains(&subtask_id) {
+            tracing::debug!(
+                parent_id = %parent_task_id,
+                subtask_id = %subtask_id,
+                "Ignoring stale phase completion — subtask not in current phase"
+            );
+            return Ok(());
+        }
 
         // Check if ALL subtasks for this phase are done
         let all_done = self.all_subtasks_done(&subtask_ids).await?;

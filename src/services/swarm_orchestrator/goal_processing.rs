@@ -901,21 +901,31 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                             let _ = t.transition_to(target_status);
                                             let _ = task_repo.update(&t).await;
                                         }
+                                        // Fallback: emit event manually since CommandBus didn't
+                                        event_bus.publish(crate::services::event_factory::task_event(
+                                            crate::services::event_bus::EventSeverity::Info,
+                                            None,
+                                            task_id,
+                                            crate::services::event_bus::EventPayload::TaskCompleted {
+                                                task_id,
+                                                tokens_used: 0,
+                                            },
+                                        )).await;
                                     }
                                 } else if let Ok(Some(mut t)) = task_repo.get(task_id).await {
                                     let _ = t.transition_to(target_status);
                                     let _ = task_repo.update(&t).await;
-                                }
-
-                                event_bus.publish(crate::services::event_factory::task_event(
-                                    crate::services::event_bus::EventSeverity::Info,
-                                    None,
-                                    task_id,
-                                    crate::services::event_bus::EventPayload::TaskCompleted {
+                                    // No CommandBus: emit event manually
+                                    event_bus.publish(crate::services::event_factory::task_event(
+                                        crate::services::event_bus::EventSeverity::Info,
+                                        None,
                                         task_id,
-                                        tokens_used: 0, // token tracking aggregated inside convergence loop
-                                    },
-                                )).await;
+                                        crate::services::event_bus::EventPayload::TaskCompleted {
+                                            task_id,
+                                            tokens_used: 0,
+                                        },
+                                    )).await;
+                                }
 
                                 circuit_breaker.record_success(circuit_scope.clone()).await;
 
@@ -1286,23 +1296,32 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     tracing::warn!("Failed to complete task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
                                     let _ = completed_task.transition_to(target_status);
                                     let _ = task_repo.update(&completed_task).await;
+                                    // Fallback: emit event manually since CommandBus didn't
+                                    event_bus.publish(crate::services::event_factory::task_event(
+                                        crate::services::event_bus::EventSeverity::Info,
+                                        None,
+                                        task_id,
+                                        crate::services::event_bus::EventPayload::TaskCompleted {
+                                            task_id,
+                                            tokens_used: tokens,
+                                        },
+                                    )).await;
                                 }
                             } else {
                                 tracing::warn!("CommandBus not available for task {} completion, using non-atomic fallback", task_id);
                                 let _ = completed_task.transition_to(target_status);
                                 let _ = task_repo.update(&completed_task).await;
-                            }
-
-                            // Publish TaskCompleted event with actual token count via EventBus
-                            event_bus.publish(crate::services::event_factory::task_event(
-                                crate::services::event_bus::EventSeverity::Info,
-                                None,
-                                task_id,
-                                crate::services::event_bus::EventPayload::TaskCompleted {
+                                // No CommandBus: emit event manually
+                                event_bus.publish(crate::services::event_factory::task_event(
+                                    crate::services::event_bus::EventSeverity::Info,
+                                    None,
                                     task_id,
-                                    tokens_used: tokens,
-                                },
-                            )).await;
+                                    crate::services::event_bus::EventPayload::TaskCompleted {
+                                        task_id,
+                                        tokens_used: tokens,
+                                    },
+                                )).await;
+                            }
 
                             // Record success with circuit breaker
                             circuit_breaker.record_success(circuit_scope.clone()).await;
