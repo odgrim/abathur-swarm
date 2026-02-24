@@ -859,6 +859,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                         {
                             let outcome_str = match &outcome {
                                 Ok(super::convergent_execution::ConvergentOutcome::Converged) => "converged",
+                                Ok(super::convergent_execution::ConvergentOutcome::IndeterminateAccepted) => "indeterminate_accepted",
                                 Ok(super::convergent_execution::ConvergentOutcome::PartialAccepted) => "partial_accepted",
                                 Ok(super::convergent_execution::ConvergentOutcome::Decomposed(_)) => "decomposed",
                                 Ok(super::convergent_execution::ConvergentOutcome::Failed(_)) => "failed",
@@ -876,8 +877,14 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
                         // Map ConvergentOutcome to task status transitions
                         match outcome {
-                            Ok(super::convergent_execution::ConvergentOutcome::Converged)
-                            | Ok(super::convergent_execution::ConvergentOutcome::PartialAccepted) => {
+                            Ok(ref convergent_outcome @ super::convergent_execution::ConvergentOutcome::Converged)
+                            | Ok(ref convergent_outcome @ super::convergent_execution::ConvergentOutcome::IndeterminateAccepted)
+                            | Ok(ref convergent_outcome @ super::convergent_execution::ConvergentOutcome::PartialAccepted) => {
+                                let intent_satisfied = !matches!(
+                                    convergent_outcome,
+                                    super::convergent_execution::ConvergentOutcome::IndeterminateAccepted
+                                );
+
                                 let target_status = if verify_on_completion {
                                     TaskStatus::Validating
                                 } else {
@@ -952,7 +959,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         &repo_path,
                                         &default_base_ref,
                                         require_commits,
-                                        true, // intent_satisfied: convergence engine verified intent
+                                        intent_satisfied,
                                         output_delivery.clone(),
                                     ).await;
                                 }

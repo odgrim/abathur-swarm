@@ -80,6 +80,12 @@ pub trait ConvergentIntentVerifier: Send + Sync {
 pub enum ConvergentOutcome {
     /// The trajectory converged to a satisfactory result.
     Converged,
+    /// Convergence accepted based on overseer signals, but intent was never
+    /// positively verified (e.g. 3x consecutive Indeterminate results).
+    /// The orchestrator should treat this as success but NOT override
+    /// `require_commits`, since the system could not confirm the work
+    /// matches the original intent.
+    IndeterminateAccepted,
     /// Budget exhausted, but the best observation was above the partial
     /// acceptance threshold. The orchestrator should treat this as success.
     PartialAccepted,
@@ -1000,9 +1006,22 @@ where
                                     if overseers_clean {
                                         tracing::info!(
                                             task_id = %task.id,
-                                            "Intent verification indeterminate 3x; overseers all passing — accepting convergence"
+                                            "Intent verification indeterminate 3x; overseers all passing — accepting as indeterminate"
                                         );
-                                        // Fall through to finalize as converged below
+                                        let final_seq = trajectory
+                                            .observations
+                                            .last()
+                                            .map(|o| o.sequence)
+                                            .unwrap_or(0);
+                                        let outcome = ConvergenceOutcome::Converged {
+                                            trajectory_id: trajectory.id.to_string(),
+                                            final_observation_sequence: final_seq,
+                                        };
+                                        engine.finalize(&mut trajectory, &outcome, &bandit).await?;
+                                        emit_convergence_terminated(
+                                            event_bus, task, goal_id, &trajectory, "indeterminate_accepted",
+                                        ).await;
+                                        return Ok(ConvergentOutcome::IndeterminateAccepted);
                                     } else {
                                         tracing::warn!(
                                             task_id = %task.id,
@@ -1059,9 +1078,22 @@ where
                             if overseers_clean {
                                 tracing::info!(
                                     task_id = %task.id,
-                                    "Intent extraction failed 3x; overseers all passing — accepting convergence"
+                                    "Intent extraction failed 3x; overseers all passing — accepting as indeterminate"
                                 );
-                                // Fall through to finalize as converged below
+                                let final_seq = trajectory
+                                    .observations
+                                    .last()
+                                    .map(|o| o.sequence)
+                                    .unwrap_or(0);
+                                let outcome = ConvergenceOutcome::Converged {
+                                    trajectory_id: trajectory.id.to_string(),
+                                    final_observation_sequence: final_seq,
+                                };
+                                engine.finalize(&mut trajectory, &outcome, &bandit).await?;
+                                emit_convergence_terminated(
+                                    event_bus, task, goal_id, &trajectory, "indeterminate_accepted",
+                                ).await;
+                                return Ok(ConvergentOutcome::IndeterminateAccepted);
                             } else {
                                 tracing::warn!(
                                     task_id = %task.id,
@@ -1108,9 +1140,22 @@ where
                             if overseers_clean {
                                 tracing::info!(
                                     task_id = %task.id,
-                                    "Intent verification failed 3x; overseers all passing — accepting convergence"
+                                    "Intent verification failed 3x; overseers all passing — accepting as indeterminate"
                                 );
-                                // Fall through to finalize as converged below
+                                let final_seq = trajectory
+                                    .observations
+                                    .last()
+                                    .map(|o| o.sequence)
+                                    .unwrap_or(0);
+                                let outcome = ConvergenceOutcome::Converged {
+                                    trajectory_id: trajectory.id.to_string(),
+                                    final_observation_sequence: final_seq,
+                                };
+                                engine.finalize(&mut trajectory, &outcome, &bandit).await?;
+                                emit_convergence_terminated(
+                                    event_bus, task, goal_id, &trajectory, "indeterminate_accepted",
+                                ).await;
+                                return Ok(ConvergentOutcome::IndeterminateAccepted);
                             } else {
                                 tracing::warn!(
                                     task_id = %task.id,

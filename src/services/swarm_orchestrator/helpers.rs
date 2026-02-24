@@ -934,10 +934,25 @@ where
     let root_task = task_repo.get(root_id).await.ok()??;
 
     // Root must be terminal
-    if !root_task.is_terminal() { return None; }
+    if !root_task.is_terminal() {
+        tracing::warn!(
+            root_task_id = %root_id,
+            triggering_task_id = %triggering_task_id,
+            status = ?root_task.status,
+            "try_auto_ship called but root task is not terminal"
+        );
+        return None;
+    }
 
     // All descendants must be terminal
-    if !all_descendants_terminal(root_id, &*task_repo).await { return None; }
+    if !all_descendants_terminal(root_id, &*task_repo).await {
+        tracing::warn!(
+            root_task_id = %root_id,
+            triggering_task_id = %triggering_task_id,
+            "try_auto_ship called but not all descendants are terminal"
+        );
+        return None;
+    }
 
     // At least one descendant must have succeeded
     if root_task.status != TaskStatus::Complete
@@ -980,11 +995,25 @@ where
     };
 
     if !has_commits {
+        tracing::warn!(
+            root_task_id = %root_id,
+            branch = %root_wt.branch,
+            base_ref = %default_base_ref,
+            "Completed task tree has no commits to ship — feature branch has no commits ahead of base"
+        );
         audit_log.info(
             AuditCategory::Task,
             AuditAction::TaskCompleted,
             format!("Feature branch {} has no commits ahead of {} - no PR", root_wt.branch, default_base_ref),
         ).await;
+        let _ = event_tx.send(SwarmEvent::TaskFailed {
+            task_id: root_id,
+            error: format!(
+                "Task tree completed but produced no commits (branch {} has nothing ahead of {})",
+                root_wt.branch, default_base_ref,
+            ),
+            retry_count: 0,
+        }).await;
         return None;
     }
 
