@@ -173,6 +173,14 @@ pub struct PollingConfig {
     pub startup_max_replay_events: u64,
     /// Stale task threshold in seconds for startup orphan detection (default: 300).
     pub startup_stale_task_threshold_secs: u64,
+
+    // --- Obstacle escalation ---
+    /// Whether obstacle escalation is enabled (default: true).
+    pub obstacle_escalation_enabled: bool,
+    /// Number of failures of the same pattern before escalating to a goal (default: 3).
+    pub obstacle_escalation_threshold: u32,
+    /// Sliding window in seconds for counting failures (default: 86400 = 24 hours).
+    pub obstacle_escalation_window_secs: u64,
 }
 
 impl Default for PollingConfig {
@@ -233,6 +241,11 @@ impl Default for PollingConfig {
             startup_catchup_enabled: true,
             startup_max_replay_events: 10000,
             startup_stale_task_threshold_secs: 300,
+
+            // Obstacle escalation
+            obstacle_escalation_enabled: true,
+            obstacle_escalation_threshold: 3,
+            obstacle_escalation_window_secs: 86400,
         }
     }
 }

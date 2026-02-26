@@ -23,6 +23,7 @@ use crate::services::builtin_handlers::{
     IngestionPollHandler,
     MemoryConflictEscalationHandler, MemoryInformedDecompositionHandler,
     MemoryMaintenanceHandler, MemoryReconciliationHandler,
+    ObstacleEscalationHandler,
     PriorityAgingHandler, ReconciliationHandler,
     ReviewFailureLoopHandler, RetryProcessingHandler, SpecialistCheckHandler,
     StartupCatchUpHandler, StatsUpdateHandler, SystemStallDetectorHandler,
@@ -519,6 +520,22 @@ where
                     p.task_learning_store_efficiency,
                 )))
                 .await;
+        }
+
+        // ObstacleEscalationHandler (LOW) — detect repeated failure patterns and escalate to goals
+        if p.obstacle_escalation_enabled {
+            if let Some(ref memory_repo) = self.memory_repo {
+                reactor
+                    .register(Arc::new(ObstacleEscalationHandler::new(
+                        self.task_repo.clone(),
+                        memory_repo.clone(),
+                        self.goal_repo.clone(),
+                        command_bus.clone(),
+                        p.obstacle_escalation_threshold,
+                        p.obstacle_escalation_window_secs,
+                    )))
+                    .await;
+            }
         }
 
         // GoalEvaluationTaskCreationHandler (NORMAL) — create diagnostic/remediation tasks

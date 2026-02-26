@@ -1017,37 +1017,76 @@ where
         return None;
     }
 
-    // Build PR content from task tree
-    let (pr_title, pr_body) = build_pr_description(
-        root_id,
-        &*task_repo,
-        &root_wt.path,
-        &root_wt.branch,
-        default_base_ref,
-    ).await;
+    // Merge directly to main
+    use tokio::process::Command as TokioCommand;
 
-    // Create the single PR using existing function
-    let pr_url = try_create_pull_request(
-        &root_wt.path,
-        &root_wt.branch,
-        &pr_title,
-        &pr_body,
-        default_base_ref,
-    ).await?;
+    // Merge feature branch into base ref from the repo root
+    let merge_output = TokioCommand::new("git")
+        .args(["merge", "--ff-only", &root_wt.branch])
+        .current_dir(repo_path)
+        .output()
+        .await;
 
-    let _ = event_tx.send(SwarmEvent::PullRequestCreated {
+    let commit_sha = match merge_output {
+        Ok(output) if output.status.success() => {
+            // Get the resulting commit SHA
+            TokioCommand::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo_path)
+                .output()
+                .await
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default()
+        }
+        Ok(output) => {
+            // ff-only failed, try a regular merge
+            let merge_msg = format!("Merge task tree {} into {}", root_id, default_base_ref);
+            let retry = TokioCommand::new("git")
+                .args(["merge", "--no-edit", "-m", &merge_msg, &root_wt.branch])
+                .current_dir(repo_path)
+                .output()
+                .await;
+            match retry {
+                Ok(o) if o.status.success() => {
+                    TokioCommand::new("git")
+                        .args(["rev-parse", "HEAD"])
+                        .current_dir(repo_path)
+                        .output()
+                        .await
+                        .ok()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .unwrap_or_default()
+                }
+                _ => {
+                    tracing::warn!(
+                        root_task_id = %root_id,
+                        branch = %root_wt.branch,
+                        stderr = %String::from_utf8_lossy(&output.stderr),
+                        "git merge failed for auto-ship"
+                    );
+                    return None;
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(root_task_id = %root_id, "git merge command failed: {}", e);
+            return None;
+        }
+    };
+
+    let _ = event_tx.send(SwarmEvent::TaskMerged {
         task_id: root_id,
-        pr_url: pr_url.clone(),
-        branch: root_wt.branch.clone(),
+        commit_sha: commit_sha.clone(),
     }).await;
 
     audit_log.info(
         AuditCategory::Task,
         AuditAction::TaskCompleted,
-        format!("Feature branch PR created for tree {}: {}", root_id, pr_url),
+        format!("Task tree {} merged to {}: {}", root_id, default_base_ref, commit_sha),
     ).await;
 
-    Some(pr_url)
+    Some(commit_sha)
 }
 
 /// BFS-walk the task tree from root and merge any unmerged descendant branches
@@ -1192,70 +1231,6 @@ async fn has_any_successful_descendant<T: TaskRepository>(root_id: Uuid, task_re
         }
     }
     false
-}
-
-/// Build combined PR title and body from the task tree.
-///
-/// Produces a structured PR description with:
-/// - A truncated intent summary (not the full convergence prompt)
-/// - Git commit log and diffstat for the branch
-/// - A checklist of subtask statuses
-async fn build_pr_description<T: TaskRepository>(
-    root_id: Uuid,
-    task_repo: &T,
-    worktree_path: &str,
-    branch: &str,
-    base_ref: &str,
-) -> (String, String) {
-    let root = task_repo.get(root_id).await.ok().flatten();
-
-    let root_title = root.as_ref()
-        .map(|t| t.title.clone())
-        .unwrap_or_else(|| format!("Task {}", &root_id.to_string()[..8]));
-
-    let root_desc = root.as_ref()
-        .map(|t| t.description.clone())
-        .unwrap_or_default();
-
-    let mut body = String::new();
-
-    // Intent section — short summary, never the full prompt
-    let intent = truncate_description(&root_desc, 300);
-    if !intent.is_empty() {
-        body.push_str("## Summary\n\n");
-        body.push_str(&intent);
-        body.push_str("\n\n");
-    }
-
-    // Changes section from git
-    let changes = summarize_branch_changes(worktree_path, branch, base_ref).await;
-    if !changes.is_empty() {
-        body.push_str("## Changes\n\n");
-        body.push_str(&changes);
-        body.push_str("\n");
-    }
-
-    // Subtasks section
-    body.push_str("## Subtasks\n\n");
-    let mut bfs = vec![root_id];
-    while let Some(id) = bfs.pop() {
-        if let Ok(subtasks) = task_repo.get_subtasks(id).await {
-            for st in &subtasks {
-                let marker = match st.status {
-                    TaskStatus::Complete => "- [x]",
-                    TaskStatus::Failed => "- [-]",
-                    TaskStatus::Canceled => "- [~]",
-                    _ => "- [ ]",
-                };
-                body.push_str(&format!("{} {} ({})\n", marker, st.title, st.status.as_str()));
-                bfs.push(st.id);
-            }
-        }
-    }
-
-    body.push_str("\n---\n🤖 Generated by [Abathur Swarm](https://github.com/abathur-swarm)\n");
-
-    (root_title, body)
 }
 
 #[cfg(test)]
