@@ -714,9 +714,9 @@ where
 {
     let start = std::time::Instant::now();
 
-    // Check guardrails before starting
+    // Check guardrails before starting (atomic check+register to avoid TOCTOU)
     if let Some(ref g) = guardrails {
-        match g.check_task_start(task_id).await {
+        match g.check_and_register_task(task_id).await {
             GuardrailResult::Blocked(reason) => {
                 return TaskResult {
                     task_id,
@@ -732,7 +732,6 @@ where
             }
             GuardrailResult::Allowed => {}
         }
-        g.register_task_start(task_id).await;
     }
 
     // Get full task from repository
@@ -1033,9 +1032,27 @@ where
                     );
                 }
 
-                // Record tokens with guardrails
+                // Record tokens with guardrails (atomic check+record)
                 if let Some(ref g) = guardrails {
-                    g.record_tokens(tokens_used);
+                    match g.check_and_record_tokens(tokens_used) {
+                        crate::services::guardrails::GuardrailResult::Blocked(reason) => {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                tokens_used,
+                                "Token recording blocked by guardrails: {}",
+                                reason
+                            );
+                        }
+                        crate::services::guardrails::GuardrailResult::Warning(reason) => {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                tokens_used,
+                                "Token usage warning: {}",
+                                reason
+                            );
+                        }
+                        crate::services::guardrails::GuardrailResult::Allowed => {}
+                    }
                     if let Some(cost_cents) = estimated_cost_cents {
                         g.record_cost(cost_cents);
                     }
