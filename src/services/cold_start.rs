@@ -240,8 +240,8 @@ where
         }
 
         // Run LLM analysis if configured and substrate available
-        if self.config.use_llm_analysis {
-            if let Some(ref substrate) = self.substrate {
+        if self.config.use_llm_analysis
+            && let Some(ref substrate) = self.substrate {
                 match self.analyze_with_llm(&report, substrate.as_ref()).await {
                     Ok(insights) => {
                         for (i, insight) in insights.iter().enumerate() {
@@ -264,7 +264,6 @@ where
                     }
                 }
             }
-        }
 
         // Store memories
         report.memories_created += self.store_memories(&report).await?;
@@ -332,16 +331,16 @@ where
 
         let mut types = Vec::new();
 
-        if file_names.iter().any(|f| *f == "Cargo.toml") {
+        if file_names.contains(&"Cargo.toml") {
             types.push(ProjectType::Rust);
         }
-        if file_names.iter().any(|f| *f == "package.json") {
+        if file_names.contains(&"package.json") {
             types.push(ProjectType::Node);
         }
         if file_names.iter().any(|f| *f == "pyproject.toml" || *f == "setup.py" || *f == "requirements.txt") {
             types.push(ProjectType::Python);
         }
-        if file_names.iter().any(|f| *f == "go.mod") {
+        if file_names.contains(&"go.mod") {
             types.push(ProjectType::Go);
         }
         if file_names.iter().any(|f| *f == "pom.xml" || *f == "build.gradle") {
@@ -623,9 +622,9 @@ where
                 }
 
                 // Parse requirement line (name==version or name>=version, etc.)
-                let (name, version) = if let Some(idx) = trimmed.find(|c| c == '=' || c == '>' || c == '<') {
+                let (name, version) = if let Some(idx) = trimmed.find(['=', '>', '<']) {
                     let name = trimmed[..idx].trim();
-                    let version = trimmed[idx..].trim_start_matches(|c| c == '=' || c == '>' || c == '<');
+                    let version = trimmed[idx..].trim_start_matches(['=', '>', '<']);
                     (name.to_string(), Some(version.to_string()))
                 } else {
                     (trimmed.to_string(), None)
@@ -657,7 +656,7 @@ where
                     let dep = trimmed.trim_matches(|c| c == '"' || c == ',' || c == ' ');
                     if !dep.is_empty() {
                         dependencies.push(Dependency {
-                            name: dep.split(|c| c == '>' || c == '<' || c == '=' || c == '[')
+                            name: dep.split(['>', '<', '=', '['])
                                 .next()
                                 .unwrap_or(dep)
                                 .trim()

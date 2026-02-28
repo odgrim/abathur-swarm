@@ -328,8 +328,8 @@ async fn cmd_list(adapters_dir: &Path, json_mode: bool) -> Result<()> {
     }
 
     // Scan for enabled adapters not in KNOWN_ADAPTERS
-    if adapters_dir.exists() {
-        if let Ok(entries_iter) = std::fs::read_dir(adapters_dir) {
+    if adapters_dir.exists()
+        && let Ok(entries_iter) = std::fs::read_dir(adapters_dir) {
             for entry in entries_iter.flatten() {
                 let path = entry.path();
                 if !path.is_dir() {
@@ -370,7 +370,6 @@ async fn cmd_list(adapters_dir: &Path, json_mode: bool) -> Result<()> {
                 }
             }
         }
-    }
 
     output(&AdapterListOutput { adapters: entries }, json_mode);
     Ok(())
@@ -452,19 +451,17 @@ async fn cmd_disable(
     }
 
     // Check if config has been customized (differs from default template)
-    if !force {
-        if let Some(known) = find_known_adapter(name) {
+    if !force
+        && let Some(known) = find_known_adapter(name) {
             let manifest_path = adapter_dir.join("adapter.toml");
-            if let Ok(current) = std::fs::read_to_string(&manifest_path) {
-                if current.trim() != known.default_config.trim() {
+            if let Ok(current) = std::fs::read_to_string(&manifest_path)
+                && current.trim() != known.default_config.trim() {
                     bail!(
                         "Adapter '{}' has a customized adapter.toml. Use --force to remove anyway.",
                         name
                     );
                 }
-            }
         }
-    }
 
     fs::remove_dir_all(&adapter_dir)
         .await
@@ -556,18 +553,16 @@ async fn cmd_doctor(
     } else {
         // Check all enabled adapters
         let mut names = Vec::new();
-        if adapters_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(adapters_dir) {
+        if adapters_dir.exists()
+            && let Ok(entries) = std::fs::read_dir(adapters_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.is_dir() && path.join("adapter.toml").exists() {
-                        if let Some(n) = path.file_name() {
+                    if path.is_dir() && path.join("adapter.toml").exists()
+                        && let Some(n) = path.file_name() {
                             names.push(n.to_string_lossy().to_string());
                         }
-                    }
                 }
             }
-        }
         if names.is_empty() {
             bail!("No enabled adapters found. Enable one with: abathur adapter enable <name>");
         }
@@ -720,11 +715,10 @@ fn run_doctor_checks(adapters_dir: &Path, name: &str) -> Vec<DoctorCheck> {
         .config
         .iter()
         .filter_map(|(k, v)| {
-            if let serde_json::Value::String(s) = v {
-                if s.is_empty() {
+            if let serde_json::Value::String(s) = v
+                && s.is_empty() {
                     return Some(k.clone());
                 }
-            }
             None
         })
         .collect();

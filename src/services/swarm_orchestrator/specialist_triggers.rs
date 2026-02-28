@@ -78,8 +78,8 @@ where
                 .chain(self.task_repo.list_by_status(TaskStatus::Running).await?.iter())
                 .any(|t| t.title.contains("Diagnostic:") && t.title.contains(id_prefix));
 
-            if !diagnostic_exists {
-                if let Err(e) = self.spawn_specialist_for_failure(task, event_tx).await {
+            if !diagnostic_exists
+                && let Err(e) = self.spawn_specialist_for_failure(task, event_tx).await {
                     self.audit_log.log(
                         AuditEntry::new(
                             AuditLevel::Warning,
@@ -91,12 +91,11 @@ where
                         .with_entity(task.id, "task"),
                     ).await;
                 }
-            }
         }
 
         // Check for merge conflicts needing specialist resolution
-        if self.config.use_merge_queue {
-            if let Err(e) = self.process_merge_conflict_specialists(event_tx).await {
+        if self.config.use_merge_queue
+            && let Err(e) = self.process_merge_conflict_specialists(event_tx).await {
                 self.audit_log.log(
                     AuditEntry::new(
                         AuditLevel::Warning,
@@ -107,7 +106,6 @@ where
                     ),
                 ).await;
             }
-        }
 
         Ok(())
     }
@@ -307,7 +305,7 @@ where
         let mut title_to_id: Vec<(String, Uuid)> = Vec::new();
         for spec in new_tasks {
             let priority = match spec.priority {
-                TaskPriorityModifier::Same => failed_task.priority.clone(),
+                TaskPriorityModifier::Same => failed_task.priority,
                 TaskPriorityModifier::Higher => TaskPriority::High,
                 TaskPriorityModifier::Lower => TaskPriority::Low,
             };
@@ -328,7 +326,7 @@ where
                         title: Some(spec.title.clone()),
                         description: spec.description.clone(),
                         parent_id: None,
-                        priority: priority.clone(),
+                        priority,
                         agent_type: spec.agent_type.clone(),
                         depends_on: depends_on.clone(),
                         context: Box::new(None),

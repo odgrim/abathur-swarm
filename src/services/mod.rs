@@ -91,23 +91,20 @@ pub fn extract_json_from_response(response: &str) -> String {
     let trimmed = response.trim();
 
     // Handle ```json ... ``` blocks
-    if trimmed.starts_with("```json") {
-        if let Some(end) = trimmed.rfind("```") {
-            if end > 7 {
+    if trimmed.starts_with("```json")
+        && let Some(end) = trimmed.rfind("```")
+            && end > 7 {
                 return trimmed[7..end].trim().to_string();
             }
-        }
-    }
 
     // Handle ``` ... ``` blocks
-    if trimmed.starts_with("```") {
-        if let Some(end) = trimmed.rfind("```") {
+    if trimmed.starts_with("```")
+        && let Some(end) = trimmed.rfind("```") {
             let start = if trimmed.starts_with("```\n") { 4 } else { 3 };
             if end > start {
                 return trimmed[start..end].trim().to_string();
             }
         }
-    }
 
     // If it already looks like a JSON object, use it directly
     if trimmed.starts_with('{') && trimmed.ends_with('}') {
@@ -115,13 +112,11 @@ pub fn extract_json_from_response(response: &str) -> String {
     }
 
     // Try to find a JSON object embedded in text
-    if let Some(start) = trimmed.find('{') {
-        if let Some(end) = trimmed.rfind('}') {
-            if end > start {
+    if let Some(start) = trimmed.find('{')
+        && let Some(end) = trimmed.rfind('}')
+            && end > start {
                 return trimmed[start..=end].to_string();
             }
-        }
-    }
 
     trimmed.to_string()
 }

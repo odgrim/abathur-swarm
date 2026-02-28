@@ -146,7 +146,7 @@ pub fn generate_overmind_prompt_multi(workflows: &[WorkflowTemplate]) -> String 
     // Full phase details for every workflow, clearly separated
     let workflow_sections: String = workflows
         .iter()
-        .map(|wf| generate_workflow_prompt_section(wf))
+        .map(generate_workflow_prompt_section)
         .collect::<Vec<_>>()
         .join("\n---\n\n");
 

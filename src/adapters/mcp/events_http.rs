@@ -332,16 +332,14 @@ fn create_event_stream_with_replay(
             loop {
                 match rx.recv().await {
                     Ok(event) => {
-                        if let Some(goal_id) = goal_filter {
-                            if event.goal_id != Some(goal_id) {
+                        if let Some(goal_id) = goal_filter
+                            && event.goal_id != Some(goal_id) {
                                 continue;
                             }
-                        }
-                        if let Some(task_id) = task_filter {
-                            if event.task_id != Some(task_id) {
+                        if let Some(task_id) = task_filter
+                            && event.task_id != Some(task_id) {
                                 continue;
                             }
-                        }
 
                         let sse_event = Event::default()
                             .event(format!("{}", event.category))
@@ -399,8 +397,8 @@ async fn handle_ws_events(
     let category_filter = params.category.as_deref().and_then(parse_category);
 
     // Replay missed events if since_sequence is provided
-    if let Some(since) = params.since_sequence {
-        if let Some(ref store) = state.event_store {
+    if let Some(since) = params.since_sequence
+        && let Some(ref store) = state.event_store {
             let query = EventQuery::new()
                 .since_sequence(SequenceNumber(since))
                 .limit(state.config.max_history_limit)
@@ -408,11 +406,10 @@ async fn handle_ws_events(
 
             if let Ok(events) = store.query(query).await {
                 for event in &events {
-                    if let Some(cat) = category_filter {
-                        if event.category != cat {
+                    if let Some(cat) = category_filter
+                        && event.category != cat {
                             continue;
                         }
-                    }
                     let json = serde_json::to_string(event).unwrap_or_default();
                     if socket.send(Message::Text(json.into())).await.is_err() {
                         return;
@@ -420,7 +417,6 @@ async fn handle_ws_events(
                 }
             }
         }
-    }
 
     // Stream live events
     let mut receiver = state.event_bus.subscribe();
@@ -430,11 +426,10 @@ async fn handle_ws_events(
             result = receiver.recv() => {
                 match result {
                     Ok(event) => {
-                        if let Some(cat) = category_filter {
-                            if event.category != cat {
+                        if let Some(cat) = category_filter
+                            && event.category != cat {
                                 continue;
                             }
-                        }
                         let json = serde_json::to_string(&event).unwrap_or_default();
                         if socket.send(Message::Text(json.into())).await.is_err() {
                             break;
@@ -672,7 +667,7 @@ async fn test_webhook(
 
     let status = response.status().as_u16();
     Ok(Json(serde_json::json!({
-        "delivered": status >= 200 && status < 300,
+        "delivered": (200..300).contains(&status),
         "response_status": status,
     })))
 }
@@ -766,11 +761,10 @@ async fn query_history(
     if let Some(corr_id) = params.correlation_id {
         query = query.correlation_id(corr_id);
     }
-    if let Some(ref cat) = params.category {
-        if let Some(category) = parse_category(cat) {
+    if let Some(ref cat) = params.category
+        && let Some(category) = parse_category(cat) {
             query = query.category(category);
         }
-    }
     if let Some(offset) = params.offset {
         query = query.offset(offset);
     }

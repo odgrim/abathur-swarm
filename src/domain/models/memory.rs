@@ -551,7 +551,7 @@ impl Memory {
     /// Uses a rough heuristic of ~4 characters per token.
     pub fn estimated_tokens(&self) -> usize {
         // Rough approximation: 1 token ≈ 4 characters for English text
-        (self.content.len() + 3) / 4
+        self.content.len().div_ceil(4)
     }
 
     /// Validate memory.

@@ -426,41 +426,35 @@ impl AuditFilter {
 
     /// Check if an entry matches this filter.
     pub fn matches(&self, entry: &AuditEntry) -> bool {
-        if let Some(min_level) = self.min_level {
-            if entry.level < min_level {
+        if let Some(min_level) = self.min_level
+            && entry.level < min_level {
                 return false;
             }
-        }
 
-        if let Some(ref category) = self.category {
-            if &entry.category != category {
+        if let Some(ref category) = self.category
+            && &entry.category != category {
                 return false;
             }
-        }
 
-        if let Some(ref action) = self.action {
-            if &entry.action != action {
+        if let Some(ref action) = self.action
+            && &entry.action != action {
                 return false;
             }
-        }
 
-        if let Some(entity_id) = self.entity_id {
-            if entry.entity_id != Some(entity_id) {
+        if let Some(entity_id) = self.entity_id
+            && entry.entity_id != Some(entity_id) {
                 return false;
             }
-        }
 
-        if let Some(from) = self.from {
-            if entry.timestamp < from {
+        if let Some(from) = self.from
+            && entry.timestamp < from {
                 return false;
             }
-        }
 
-        if let Some(to) = self.to {
-            if entry.timestamp > to {
+        if let Some(to) = self.to
+            && entry.timestamp > to {
                 return false;
             }
-        }
 
         true
     }

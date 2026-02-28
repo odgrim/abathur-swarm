@@ -1421,8 +1421,8 @@ where
             let tasks = self.task_service.repo().list_by_status(*status).await
                 .map_err(|e| format!("Failed to list tasks: {}", e))?;
             for task in tasks {
-                if let Some(ws_value) = task.context.custom.get("workflow_state") {
-                    if let Ok(ws) = serde_json::from_value::<crate::domain::models::workflow_state::WorkflowState>(ws_value.clone()) {
+                if let Some(ws_value) = task.context.custom.get("workflow_state")
+                    && let Ok(ws) = serde_json::from_value::<crate::domain::models::workflow_state::WorkflowState>(ws_value.clone()) {
                         workflows.push(serde_json::json!({
                             "task_id": task.id.to_string(),
                             "task_title": task.title,
@@ -1432,7 +1432,6 @@ where
                             "state": serde_json::to_value(&ws).unwrap_or_default(),
                         }));
                     }
-                }
             }
         }
 

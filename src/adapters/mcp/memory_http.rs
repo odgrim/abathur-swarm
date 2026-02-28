@@ -263,11 +263,10 @@ async fn list_memories<M: MemoryRepository + Clone + Send + Sync + 'static>(
     if let Some(ns) = &params.namespace {
         query = query.namespace(ns);
     }
-    if let Some(t) = &params.tier {
-        if let Some(tier) = MemoryTier::from_str(t) {
+    if let Some(t) = &params.tier
+        && let Some(tier) = MemoryTier::from_str(t) {
             query = query.tier(tier);
         }
-    }
     if let Some(pattern) = &params.key_pattern {
         query = query.key_like(pattern);
     }

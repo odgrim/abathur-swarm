@@ -511,15 +511,12 @@ where
                 let mut conflicts = Vec::new();
                 for line in stdout.lines() {
                     // merge-tree output format includes file paths
-                    if line.starts_with("+++") || line.starts_with("---") {
-                        if let Some(path) = line.split_whitespace().nth(1) {
-                            if !path.starts_with("a/") && !path.starts_with("b/") {
-                                if !conflicts.contains(&path.to_string()) {
+                    if (line.starts_with("+++") || line.starts_with("---"))
+                        && let Some(path) = line.split_whitespace().nth(1)
+                            && !path.starts_with("a/") && !path.starts_with("b/")
+                                && !conflicts.contains(&path.to_string()) {
                                     conflicts.push(path.to_string());
                                 }
-                            }
-                        }
-                    }
                 }
                 Ok((conflicts, true))
             } else {
@@ -685,12 +682,11 @@ where
         }
 
         // Check worktree exists and is completed
-        if let Some(worktree) = self.worktree_repo.get_by_task(task_id).await? {
-            if worktree.status == WorktreeStatus::Completed {
+        if let Some(worktree) = self.worktree_repo.get_by_task(task_id).await?
+            && worktree.status == WorktreeStatus::Completed {
                 let id = self.queue_stage2(task_id).await?;
                 return Ok(Some(id));
             }
-        }
 
         Ok(None)
     }
@@ -713,8 +709,8 @@ where
 
         // Check queue for conflicts
         for req in queue.iter() {
-            if req.status == MergeStatus::Conflict {
-                if let Some(ref error) = req.error {
+            if req.status == MergeStatus::Conflict
+                && let Some(ref error) = req.error {
                     // Parse conflict files from error message
                     let conflict_files = if error.contains("Merge conflicts in:") {
                         error
@@ -737,13 +733,12 @@ where
                         attempts: 0,
                     });
                 }
-            }
         }
 
         // Also check history for recent conflicts (might be retryable)
         for req in history.iter().rev().take(10) {
-            if req.status == MergeStatus::Conflict {
-                if let Some(ref error) = req.error {
+            if req.status == MergeStatus::Conflict
+                && let Some(ref error) = req.error {
                     let conflict_files = if error.contains("Merge conflicts in:") {
                         error
                             .replace("Merge conflicts in:", "")
@@ -765,7 +760,6 @@ where
                         attempts: 0,
                     });
                 }
-            }
         }
 
         conflicts
@@ -779,21 +773,20 @@ where
         // Check queue for the request
         {
             let mut queue = self.queue.write().await;
-            if let Some(req) = queue.iter_mut().find(|r| r.id == merge_request_id) {
-                if req.status == MergeStatus::Conflict {
+            if let Some(req) = queue.iter_mut().find(|r| r.id == merge_request_id)
+                && req.status == MergeStatus::Conflict {
                     req.status = MergeStatus::Queued;
                     req.error = None;
                     req.updated_at = Utc::now();
                     return Ok(true);
                 }
-            }
         }
 
         // Check history and re-queue if found
         {
             let history = self.history.read().await;
-            if let Some(req) = history.iter().find(|r| r.id == merge_request_id) {
-                if req.status == MergeStatus::Conflict {
+            if let Some(req) = history.iter().find(|r| r.id == merge_request_id)
+                && req.status == MergeStatus::Conflict {
                     let mut new_req = req.clone();
                     new_req.status = MergeStatus::Queued;
                     new_req.error = None;
@@ -803,7 +796,6 @@ where
                     self.queue.write().await.push_back(new_req);
                     return Ok(true);
                 }
-            }
         }
 
         Ok(false)

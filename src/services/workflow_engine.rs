@@ -393,9 +393,9 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 // Retry failed subtasks at the phase level
                 let mut retried_any = false;
                 for &sid in &subtask_ids {
-                    if let Some(mut sub) = self.task_repo.get(sid).await? {
-                        if sub.status == TaskStatus::Failed && sub.can_retry() {
-                            if sub.retry().is_ok() {
+                    if let Some(mut sub) = self.task_repo.get(sid).await?
+                        && sub.status == TaskStatus::Failed && sub.can_retry()
+                            && sub.retry().is_ok() {
                                 self.task_repo.update(&sub).await?;
                                 self.event_bus
                                     .publish(event_factory::make_event(
@@ -411,8 +411,6 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                                     .await;
                                 retried_any = true;
                             }
-                        }
-                    }
                 }
 
                 if retried_any {
@@ -1208,9 +1206,9 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         );
 
         // Append verification feedback for rework subtasks
-        if let Some(feedback) = parent_task.context.custom.get("verification_feedback") {
-            if let Some(arr) = feedback.as_array() {
-                if !arr.is_empty() {
+        if let Some(feedback) = parent_task.context.custom.get("verification_feedback")
+            && let Some(arr) = feedback.as_array()
+                && !arr.is_empty() {
                     description.push_str("\n\n--- VERIFICATION FEEDBACK (from previous attempt) ---\n");
                     for (i, item) in arr.iter().enumerate() {
                         if let Some(s) = item.as_str() {
@@ -1219,8 +1217,6 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                     }
                     description.push_str("--- Please address the above feedback in this attempt. ---\n");
                 }
-            }
-        }
 
         let mut subtask = Task::with_title(&title, &description);
         subtask.parent_id = Some(parent_task_id);
@@ -1329,7 +1325,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         );
 
         let mut agg_subtask = Task::with_title(
-            &format!("[{}/{}:{}] Aggregate fan-out results", workflow_name, phase_index, phase_name),
+            format!("[{}/{}:{}] Aggregate fan-out results", workflow_name, phase_index, phase_name),
             &aggregation_desc,
         );
         agg_subtask.parent_id = Some(parent_task_id);

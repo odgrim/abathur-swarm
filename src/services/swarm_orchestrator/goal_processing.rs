@@ -187,11 +187,10 @@ where
         }
 
         // 3. Capability matching - try to find an agent whose tools satisfy required_tools
-        if !task.routing_hints.required_tools.is_empty() {
-            if let Some(matched) = self.match_agent_by_tools(&task.routing_hints.required_tools).await {
+        if !task.routing_hints.required_tools.is_empty()
+            && let Some(matched) = self.match_agent_by_tools(&task.routing_hints.required_tools).await {
                 return matched;
             }
-        }
 
         // 4. For subtasks created by the overmind, don't recurse back into overmind.
         //    If a parent task was assigned to overmind and created this subtask without
@@ -278,12 +277,11 @@ where
         let agent_type = self.route_task(task).await;
 
         // Persist the routing decision so it's visible in logs and task queries
-        if task.agent_type.is_none() {
-            if let Ok(Some(mut updated)) = self.task_repo.get(task.id).await {
+        if task.agent_type.is_none()
+            && let Ok(Some(mut updated)) = self.task_repo.get(task.id).await {
                 updated.agent_type = Some(agent_type.clone());
                 let _ = self.task_repo.update(&updated).await;
             }
-        }
 
         // Check circuit breaker
         let scope = CircuitScope::agent(&agent_type);
@@ -304,8 +302,8 @@ where
         }
 
         // Budget gate: defer low-priority tasks under elevated pressure
-        if let Some(ref bt) = self.budget_tracker {
-            if !bt.should_dispatch_task(task.priority).await {
+        if let Some(ref bt) = self.budget_tracker
+            && !bt.should_dispatch_task(task.priority).await {
                 tracing::debug!(
                     task_id = %task.id,
                     priority = ?task.priority,
@@ -313,7 +311,6 @@ where
                 );
                 return Ok(());
             }
-        }
 
         // Budget gate: respect budget-adjusted concurrency ceiling
         if let Some(ref bt) = self.budget_tracker {
@@ -377,10 +374,10 @@ where
                     // create the WorkflowEngine and advance to the first phase.
                     // Return early — the phase subtask will be picked up in the
                     // next scheduling cycle.
-                    if let Ok(Some(claimed_task)) = self.task_repo.get(task.id).await {
-                        if let Some(ws_val) = claimed_task.context.custom.get("workflow_state") {
-                            if let Ok(ws) = serde_json::from_value::<crate::domain::models::workflow_state::WorkflowState>(ws_val.clone()) {
-                                if matches!(ws, crate::domain::models::workflow_state::WorkflowState::Pending { .. }) {
+                    if let Ok(Some(claimed_task)) = self.task_repo.get(task.id).await
+                        && let Some(ws_val) = claimed_task.context.custom.get("workflow_state")
+                            && let Ok(ws) = serde_json::from_value::<crate::domain::models::workflow_state::WorkflowState>(ws_val.clone())
+                                && matches!(ws, crate::domain::models::workflow_state::WorkflowState::Pending { .. }) {
                                     let verification_enabled = self.intent_verifier.is_some();
                                     let engine = crate::services::workflow_engine::WorkflowEngine::new(
                                         self.task_repo.clone(),
@@ -420,9 +417,6 @@ where
                                         }
                                     }
                                 }
-                            }
-                        }
-                    }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to atomically claim task {}: {}", task.id, e);
@@ -464,11 +458,10 @@ where
             };
 
             // Register agent capabilities with A2A gateway if configured
-            if self.config.mcp_servers.a2a_gateway.is_some() {
-                if let Err(e) = self.register_agent_capabilities(&agent_type, capabilities).await {
+            if self.config.mcp_servers.a2a_gateway.is_some()
+                && let Err(e) = self.register_agent_capabilities(&agent_type, capabilities).await {
                     tracing::warn!("Failed to register agent '{}' capabilities: {}", agent_type, e);
                 }
-            }
 
             // Publish TaskSpawned via EventBus (bridge forwards to event_tx)
             self.event_bus.publish(crate::services::event_factory::task_event(
@@ -554,11 +547,10 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                         "allowedTools": tools
                     }
                 });
-                if let Ok(pretty) = serde_json::to_string_pretty(&settings_content) {
-                    if let Err(e) = std::fs::write(claude_dir.join("settings.json"), format!("{pretty}\n")) {
+                if let Ok(pretty) = serde_json::to_string_pretty(&settings_content)
+                    && let Err(e) = std::fs::write(claude_dir.join("settings.json"), format!("{pretty}\n")) {
                         tracing::warn!("Failed to write .claude/settings.json to worktree: {}", e);
                     }
-                }
             }
 
             // Load relevant goal context for the task
@@ -675,10 +667,9 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                     40  // Research: typical ~15 turns, ceiling 40
                 } else if lower.contains("planner") || lower.contains("architect")
                     || lower.contains("designer")
+                    || lower.contains("reviewer") || lower.contains("verifier")
                 {
-                    30  // Planning: typical ~10 turns, ceiling 30
-                } else if lower.contains("reviewer") || lower.contains("verifier") {
-                    30  // Review: typical ~10 turns, ceiling 30
+                    30  // Planning/Review: typical ~10 turns, ceiling 30
                 } else if lower.contains("implement") || lower.contains("coder")
                     || lower.contains("builder") || lower.contains("fixer")
                 {
@@ -988,12 +979,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 circuit_breaker.record_success(circuit_scope.clone()).await;
 
                                 // Mark worktree as completed
-                                if worktree_path.is_some() {
-                                    if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                                if worktree_path.is_some()
+                                    && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
                                         wt.complete();
                                         let _ = worktree_repo.update(&wt).await;
                                     }
-                                }
 
                                 // Run post-completion workflow (verify, merge, PR)
                                 if verify_on_completion || use_merge_queue || prefer_pull_requests {
@@ -1070,7 +1060,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     // No granular criteria -- create a single child with the
                                     // full specification as a retry in Direct mode
                                     let mut child = Task::with_title(
-                                        &format!("Decomposed from {}", task_id),
+                                        format!("Decomposed from {}", task_id),
                                         &spec.content,
                                     );
                                     child.parent_id = Some(task_id);
@@ -1148,12 +1138,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 circuit_breaker.record_failure(circuit_scope.clone(), &msg).await;
 
                                 // Mark worktree as failed
-                                if worktree_path.is_some() {
-                                    if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                                if worktree_path.is_some()
+                                    && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
                                         wt.fail(msg.clone());
                                         let _ = worktree_repo.update(&wt).await;
                                     }
-                                }
 
                                 // Record failure in evolution loop for template improvement
                                 if track_evolution {
@@ -1190,12 +1179,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     let _ = task_repo.update(&t).await;
                                 }
 
-                                if worktree_path.is_some() {
-                                    if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                                if worktree_path.is_some()
+                                    && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
                                         wt.fail("cancelled".to_string());
                                         let _ = worktree_repo.update(&wt).await;
                                     }
-                                }
 
                                 audit_log.log(
                                     crate::services::AuditEntry::new(
@@ -1228,12 +1216,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
                                 circuit_breaker.record_failure(circuit_scope.clone(), &error_msg).await;
 
-                                if worktree_path.is_some() {
-                                    if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                                if worktree_path.is_some()
+                                    && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
                                         wt.fail(error_msg.clone());
                                         let _ = worktree_repo.update(&wt).await;
                                     }
-                                }
 
                                 audit_log.log(
                                     crate::services::AuditEntry::new(
@@ -1398,8 +1385,8 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             ).await;
 
                             // Mark worktree as completed and create artifact reference
-                            if worktree_path.is_some() {
-                                if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                            if worktree_path.is_some()
+                                && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
                                     wt.complete();
                                     let _ = worktree_repo.update(&wt).await;
 
@@ -1414,7 +1401,6 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         let _ = task_repo.update(&task).await;
                                     }
                                 }
-                            }
 
                             // (Bridge forwards EventBus→event_tx automatically)
 
@@ -1572,12 +1558,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             ).await;
 
                             // Mark worktree as failed
-                            if worktree_path.is_some() {
-                                if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                            if worktree_path.is_some()
+                                && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
                                     wt.fail(error_msg.clone());
                                     let _ = worktree_repo.update(&wt).await;
                                 }
-                            }
 
                             // (Bridge forwards EventBus→event_tx automatically)
                         }
@@ -1658,12 +1643,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             ).await;
 
                             // Mark worktree as failed
-                            if worktree_path.is_some() {
-                                if let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                            if worktree_path.is_some()
+                                && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
                                     wt.fail(error_msg.clone());
                                     let _ = worktree_repo.update(&wt).await;
                                 }
-                            }
 
                             // (Bridge forwards EventBus→event_tx automatically)
                         }

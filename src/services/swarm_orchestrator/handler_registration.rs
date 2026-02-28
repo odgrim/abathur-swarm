@@ -523,8 +523,8 @@ where
         }
 
         // ObstacleEscalationHandler (LOW) — detect repeated failure patterns and escalate to goals
-        if p.obstacle_escalation_enabled {
-            if let Some(ref memory_repo) = self.memory_repo {
+        if p.obstacle_escalation_enabled
+            && let Some(ref memory_repo) = self.memory_repo {
                 reactor
                     .register(Arc::new(ObstacleEscalationHandler::new(
                         self.task_repo.clone(),
@@ -536,7 +536,6 @@ where
                     )))
                     .await;
             }
-        }
 
         // GoalEvaluationTaskCreationHandler (NORMAL) — create diagnostic/remediation tasks
         if p.auto_create_diagnostic_tasks || p.auto_create_remediation_tasks {
@@ -847,8 +846,8 @@ where
         }
 
         // Adapter ingestion poll — periodic external system ingestion
-        if let Some(ref adapter_registry) = self.adapter_registry {
-            if !adapter_registry.ingestion_names().is_empty() {
+        if let Some(ref adapter_registry) = self.adapter_registry
+            && !adapter_registry.ingestion_names().is_empty() {
                 scheduler
                     .register(interval_schedule(
                         "adapter-ingestion-poll",
@@ -858,7 +857,6 @@ where
                     ))
                     .await;
             }
-        }
 
         // Event store polling — cross-process event propagation
         if self.event_bus.store().is_some() {

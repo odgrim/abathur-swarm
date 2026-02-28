@@ -80,25 +80,22 @@ impl EventFilter {
         }
 
         // Severity filter
-        if let Some(min_sev) = self.min_severity {
-            if severity_order(event.severity) < severity_order(min_sev) {
+        if let Some(min_sev) = self.min_severity
+            && severity_order(event.severity) < severity_order(min_sev) {
                 return false;
             }
-        }
 
         // Goal filter
-        if let Some(gid) = self.goal_id {
-            if event.goal_id != Some(gid) {
+        if let Some(gid) = self.goal_id
+            && event.goal_id != Some(gid) {
                 return false;
             }
-        }
 
         // Task filter
-        if let Some(tid) = self.task_id {
-            if event.task_id != Some(tid) {
+        if let Some(tid) = self.task_id
+            && event.task_id != Some(tid) {
                 return false;
             }
-        }
 
         // Payload type filter
         if !self.payload_types.is_empty() {
@@ -109,11 +106,10 @@ impl EventFilter {
         }
 
         // Custom predicate
-        if let Some(ref pred) = self.custom_predicate {
-            if !pred(event) {
+        if let Some(ref pred) = self.custom_predicate
+            && !pred(event) {
                 return false;
             }
-        }
 
         true
     }
@@ -217,11 +213,10 @@ impl CircuitBreakerState {
     fn record_failure(&mut self, threshold: u32, window: Duration) {
         let now = Instant::now();
         // Reset if outside the window
-        if let Some(last) = self.last_failure {
-            if now.duration_since(last) > window {
+        if let Some(last) = self.last_failure
+            && now.duration_since(last) > window {
                 self.failure_count = 0;
             }
-        }
         self.failure_count += 1;
         self.last_failure = Some(now);
 
@@ -236,24 +231,21 @@ impl CircuitBreakerState {
             return false;
         }
         // Auto-reset after cooldown
-        if let Some(tripped_at) = self.tripped_at {
-            if Instant::now().duration_since(tripped_at) > cooldown {
+        if let Some(tripped_at) = self.tripped_at
+            && Instant::now().duration_since(tripped_at) > cooldown {
                 return false;
             }
-        }
         true
     }
 
     fn reset_if_cooled(&mut self, cooldown: Duration) {
-        if self.tripped {
-            if let Some(tripped_at) = self.tripped_at {
-                if Instant::now().duration_since(tripped_at) > cooldown {
+        if self.tripped
+            && let Some(tripped_at) = self.tripped_at
+                && Instant::now().duration_since(tripped_at) > cooldown {
                     self.tripped = false;
                     self.failure_count = 0;
                     self.tripped_at = None;
                 }
-            }
-        }
     }
 }
 
@@ -538,8 +530,8 @@ impl EventReactor {
                         Ok(Err(e)) => {
                             tracing::warn!("EventReactor: handler '{}' error: {}", meta.name, e);
                             // Write to dead letter queue
-                            if let Some(ref store) = event_store {
-                                if let Err(dlq_err) = store.append_dead_letter(
+                            if let Some(ref store) = event_store
+                                && let Err(dlq_err) = store.append_dead_letter(
                                     &event.id.0.to_string(),
                                     event.sequence.0,
                                     &meta.name,
@@ -548,7 +540,6 @@ impl EventReactor {
                                 ).await {
                                     tracing::warn!("EventReactor: failed to write DLQ entry: {}", dlq_err);
                                 }
-                            }
                             let mut tripped = false;
                             if meta.error_strategy == ErrorStrategy::CircuitBreak {
                                 let mut cbs = circuit_breakers.write().await;
@@ -587,8 +578,8 @@ impl EventReactor {
                                 meta.name, timeout_msg
                             );
                             // Write to dead letter queue
-                            if let Some(ref store) = event_store {
-                                if let Err(dlq_err) = store.append_dead_letter(
+                            if let Some(ref store) = event_store
+                                && let Err(dlq_err) = store.append_dead_letter(
                                     &event.id.0.to_string(),
                                     event.sequence.0,
                                     &meta.name,
@@ -597,7 +588,6 @@ impl EventReactor {
                                 ).await {
                                     tracing::warn!("EventReactor: failed to write DLQ entry: {}", dlq_err);
                                 }
-                            }
                             let mut cbs = circuit_breakers.write().await;
                             if let Some(cb) = cbs.get_mut(&meta.id) {
                                 cb.record_failure(
@@ -647,8 +637,8 @@ impl EventReactor {
                             let hs = handlers.read().await;
                             for handler in hs.iter() {
                                 let meta = handler.metadata();
-                                if let Some(cb) = cbs.get(&meta.id) {
-                                    if cb.failure_count > 0 || cb.tripped {
+                                if let Some(cb) = cbs.get(&meta.id)
+                                    && (cb.failure_count > 0 || cb.tripped) {
                                         let tripped_at = cb.tripped_at.map(|_| chrono::Utc::now());
                                         let last_failure_at = cb.last_failure.map(|_| chrono::Utc::now());
                                         if let Err(e) = store.save_circuit_breaker_state(
@@ -661,7 +651,6 @@ impl EventReactor {
                                             tracing::warn!("Failed to flush CB state for {}: {}", meta.name, e);
                                         }
                                     }
-                                }
                             }
                         } else {
                             drop(wm_buf);
@@ -815,15 +804,14 @@ impl EventReactor {
             .map_err(|e| format!("Failed to replay events: {}", e))?;
 
         // Apply max replay limit from config
-        if let Some(max) = self.config.startup_max_replay_events {
-            if events.len() > max {
+        if let Some(max) = self.config.startup_max_replay_events
+            && events.len() > max {
                 tracing::warn!(
                     "Truncating replay from {} to {} events (startup_max_replay_events)",
                     events.len(), max
                 );
                 events.truncate(max);
             }
-        }
 
         let mut replayed_count: u64 = 0;
 

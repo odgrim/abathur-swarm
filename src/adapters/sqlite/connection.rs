@@ -85,11 +85,10 @@ fn ensure_database_directory(database_url: &str) -> Result<(), ConnectionError> 
     }
 
     let path = Path::new(path);
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty() && !parent.exists() {
             std::fs::create_dir_all(parent).map_err(ConnectionError::DirectoryCreationFailed)?;
         }
-    }
     Ok(())
 }
 

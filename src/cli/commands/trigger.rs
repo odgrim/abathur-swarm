@@ -269,11 +269,10 @@ async fn find_rule(
     }
 
     // Try by UUID (prefix match)
-    if let Ok(uuid) = resolve_trigger_rule_id(pool, id_or_name).await {
-        if let Some(rule) = repo.get(uuid).await? {
+    if let Ok(uuid) = resolve_trigger_rule_id(pool, id_or_name).await
+        && let Some(rule) = repo.get(uuid).await? {
             return Ok(rule);
         }
-    }
 
     anyhow::bail!("Trigger rule not found: {}", id_or_name)
 }

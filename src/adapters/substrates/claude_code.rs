@@ -330,11 +330,10 @@ impl ClaudeCodeSubstrate {
         }
 
         // Try JSON first
-        if trimmed.starts_with('{') {
-            if let Some(output) = Self::parse_stream_json(trimmed) {
+        if trimmed.starts_with('{')
+            && let Some(output) = Self::parse_stream_json(trimmed) {
                 return Some(output);
             }
-        }
 
         // Fall back to plain text
         Some(SubstrateOutput::AssistantText {
@@ -352,14 +351,13 @@ impl ClaudeCodeSubstrate {
         let mut cache_write = 0u64;
 
         for line in output.lines() {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-                if let Some(usage) = json.get("usage") {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(line)
+                && let Some(usage) = json.get("usage") {
                     input_tokens += usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
                     output_tokens += usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
                     cache_read += usage.get("cache_read_input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
                     cache_write += usage.get("cache_creation_input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
                 }
-            }
         }
 
         (input_tokens, output_tokens, cache_read, cache_write)
@@ -474,12 +472,11 @@ impl Substrate for ClaudeCodeSubstrate {
             }
 
             // Capture the "result" event for final metadata extraction
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-                if json.get("type").and_then(|t| t.as_str()) == Some("result") {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line)
+                && json.get("type").and_then(|t| t.as_str()) == Some("result") {
                     result_json = Some(json);
                     continue;
                 }
-            }
 
             if let Some(parsed) = Self::parse_output_line(&line) {
                 match parsed {
@@ -567,7 +564,7 @@ impl Substrate for ClaudeCodeSubstrate {
                 .and_then(|s| s.as_str())
                 == Some("error_max_turns");
             if is_max_turns {
-                session.fail(&format!(
+                session.fail(format!(
                     "error_max_turns: Agent exhausted {} turns without completing. Last output: {}",
                     session.turns_completed,
                     result_text.chars().take(500).collect::<String>()
@@ -763,7 +760,7 @@ impl Substrate for ClaudeCodeSubstrate {
                             let _ = tx.send(SubstrateOutput::Error { message: error }).await;
                         }
                         Err(e) => {
-                            session.fail(&e.to_string());
+                            session.fail(e.to_string());
                             let _ = tx.send(SubstrateOutput::Error {
                                 message: e.to_string(),
                             }).await;

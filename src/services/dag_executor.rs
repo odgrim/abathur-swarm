@@ -401,8 +401,8 @@ where
             }
 
             // Check for permanent failures and signal for restructure if service is available
-            if wave_failed > 0 {
-                if let Some(ref restructure_svc) = self.restructure_service {
+            if wave_failed > 0
+                && let Some(ref restructure_svc) = self.restructure_service {
                     // Get permanently failed task IDs from this wave
                     let failed_tasks: Vec<(Uuid, u32)> = {
                         let results = self.results.read().await;
@@ -435,7 +435,6 @@ where
                         }
                     }
                 }
-            }
         }
 
         // Finalize results
@@ -658,8 +657,8 @@ async fn build_upstream_artifacts_context<T: TaskRepository>(
     let mut artifacts_found = false;
 
     for dep_id in &task.depends_on {
-        if let Ok(Some(dep_task)) = task_repo.get(*dep_id).await {
-            if dep_task.status == TaskStatus::Complete && !dep_task.artifacts.is_empty() {
+        if let Ok(Some(dep_task)) = task_repo.get(*dep_id).await
+            && dep_task.status == TaskStatus::Complete && !dep_task.artifacts.is_empty() {
                 if !artifacts_found {
                     context.push_str("\n\n## Upstream Artifacts\n\n");
                     context.push_str("The following artifacts from completed dependency tasks are available:\n\n");
@@ -669,8 +668,8 @@ async fn build_upstream_artifacts_context<T: TaskRepository>(
                 context.push_str(&format!("### From: {}\n", dep_task.title));
                 for artifact in &dep_task.artifacts {
                     context.push_str(&format!(
-                        "- **{}**: `{}`\n",
-                        format!("{:?}", artifact.artifact_type),
+                        "- **{:?}**: `{}`\n",
+                        artifact.artifact_type,
                         artifact.uri
                     ));
                     if let Some(ref checksum) = artifact.checksum {
@@ -682,7 +681,6 @@ async fn build_upstream_artifacts_context<T: TaskRepository>(
                 }
                 context.push('\n');
             }
-        }
     }
 
     if artifacts_found {
@@ -1057,7 +1055,7 @@ where
                             task_id,
                             crate::services::event_bus::EventPayload::TaskCompleted {
                                 task_id,
-                                tokens_used: tokens_used,
+                                tokens_used,
                             },
                         )).await;
                     }

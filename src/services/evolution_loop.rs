@@ -408,17 +408,16 @@ impl EvolutionLoop {
                 }
 
                 // Check for regression
-                if trigger.is_none() {
-                    if let Some((new_version, change_time)) =
+                if trigger.is_none()
+                    && let Some((new_version, change_time)) =
                         state.version_change_times.get(&template_name)
-                    {
-                        if stats.template_version == *new_version {
+                        && stats.template_version == *new_version {
                             let window =
                                 Duration::hours(self.config.regression_detection_window_hours);
                             let in_window = Utc::now() - *change_time < window;
 
-                            if in_window && stats.total_tasks >= self.config.regression_min_tasks {
-                                if let Some(prev_stats) =
+                            if in_window && stats.total_tasks >= self.config.regression_min_tasks
+                                && let Some(prev_stats) =
                                     state.previous_version_stats.get(&template_name)
                                 {
                                     let rate_drop = prev_stats.success_rate - stats.success_rate;
@@ -427,10 +426,7 @@ impl EvolutionLoop {
                                         severity = RefinementSeverity::Immediate;
                                     }
                                 }
-                            }
                         }
-                    }
-                }
 
                 if let Some(trig) = trigger {
                     let action = if trig == EvolutionTrigger::Regression
@@ -571,17 +567,15 @@ impl EvolutionLoop {
             found
         }; // write lock dropped here
 
-        if found {
-            if let Some(ref repo) = self.refinement_repo {
-                if let Err(e) = repo.update_status(request_id, RefinementStatus::InProgress).await {
+        if found
+            && let Some(ref repo) = self.refinement_repo
+                && let Err(e) = repo.update_status(request_id, RefinementStatus::InProgress).await {
                     tracing::warn!(
                         "Failed to persist InProgress status for refinement {}: {}",
                         request_id,
                         e
                     );
                 }
-            }
-        }
 
         found
     }
@@ -604,8 +598,8 @@ impl EvolutionLoop {
             }
         } // write lock dropped here
 
-        if let Some(ref repo) = self.refinement_repo {
-            if let Err(e) = repo.update_status(request_id, new_status).await {
+        if let Some(ref repo) = self.refinement_repo
+            && let Err(e) = repo.update_status(request_id, new_status).await {
                 tracing::warn!(
                     "Failed to persist {} status for refinement {}: {}",
                     if success { "Completed" } else { "Failed" },
@@ -613,7 +607,6 @@ impl EvolutionLoop {
                     e
                 );
             }
-        }
     }
 
     /// Record a version change for a template.

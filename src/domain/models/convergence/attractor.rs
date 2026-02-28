@@ -529,11 +529,10 @@ pub fn detect_cycle(signatures: &[String]) -> Option<u32> {
     // If all signatures are identical, there is no oscillation -- this is a
     // plateau or uniform state, not a limit cycle.  A true cycle requires at
     // least two distinct signature values within the period.
-    if let Some(first) = signatures.first() {
-        if signatures.iter().all(|s| s == first) {
+    if let Some(first) = signatures.first()
+        && signatures.iter().all(|s| s == first) {
             return None;
         }
-    }
 
     for period in 2..=4usize {
         if signatures.len() < period * 2 {

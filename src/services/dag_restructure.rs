@@ -216,11 +216,10 @@ impl DagRestructureService {
             }
 
             // Check cooldown
-            if let Some(last) = state.last_attempt {
-                if last.elapsed() < self.config.restructure_cooldown {
+            if let Some(last) = state.last_attempt
+                && last.elapsed() < self.config.restructure_cooldown {
                     return false;
                 }
-            }
         }
 
         true
@@ -236,8 +235,8 @@ impl DagRestructureService {
         context: &RestructureContext,
     ) -> DomainResult<RestructureDecision> {
         // Try LLM path if configured
-        if self.config.use_llm_restructure {
-            if let Some(overmind) = self.overmind.clone() {
+        if self.config.use_llm_restructure
+            && let Some(overmind) = self.overmind.clone() {
                 match self.analyze_with_overmind(context, &overmind).await {
                     Ok(decision) => return Ok(decision),
                     Err(e) => {
@@ -245,7 +244,6 @@ impl DagRestructureService {
                     }
                 }
             }
-        }
 
         self.analyze_and_decide_heuristic(context)
     }

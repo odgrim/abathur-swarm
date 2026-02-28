@@ -257,14 +257,13 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
 
         // -- DECIDE phase --
         // Check for proactive decomposition
-        if self.config.enable_proactive_decomposition {
-            if let Some(outcome) = self
+        if self.config.enable_proactive_decomposition
+            && let Some(outcome) = self
                 .maybe_decompose_proactively(&mut trajectory)
                 .await?
             {
                 return Ok(outcome);
             }
-        }
 
         // Select convergence mode
         let basin = estimate_basin_width(
@@ -453,8 +452,8 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                         continue;
                     }
                     // Check partial acceptance
-                    if trajectory.policy.partial_acceptance {
-                        if let Some(best) = trajectory.best_observation() {
+                    if trajectory.policy.partial_acceptance
+                        && let Some(best) = trajectory.best_observation() {
                             let level = best
                                 .metrics
                                 .as_ref()
@@ -470,7 +469,6 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                                 return Ok(outcome);
                             }
                         }
-                    }
                     let outcome = ConvergenceOutcome::Exhausted {
                         trajectory_id: trajectory.id.to_string(),
                         best_observation_sequence: trajectory
@@ -724,7 +722,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         let iteration = trajectory.observations.len() as u32;
         let interval = trajectory.policy.intent_check_interval.max(1);
 
-        let interval_trigger = iteration > 0 && iteration % interval == 0;
+        let interval_trigger = iteration > 0 && iteration.is_multiple_of(interval);
 
         let at_fixed_point = matches!(
             &trajectory.attractor_state.classification,
@@ -999,8 +997,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                 }
                 if let AttractorType::Divergent { .. } =
                     &trajectories[i].attractor_state.classification
-                {
-                    if trajectories[i].observations.len() >= 3 {
+                    && trajectories[i].observations.len() >= 3 {
                         tracing::info!(
                             trajectory_id = %trajectories[i].id,
                             "Parallel convergence: filtering out divergent \
@@ -1008,7 +1005,6 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                         );
                         active[i] = false;
                     }
-                }
             }
 
             // Check if any trajectories are still active.
@@ -1295,7 +1291,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
 
         // Check frequency
         if trajectory.policy.intent_verification_frequency > 0
-            && obs_count % trajectory.policy.intent_verification_frequency == 0
+            && obs_count.is_multiple_of(trajectory.policy.intent_verification_frequency)
         {
             return true;
         }
@@ -1367,8 +1363,8 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         let mut gaps: Vec<IntentGap> = Vec::new();
 
         // Build failure is a critical gap
-        if let Some(ref build) = signals.build_result {
-            if !build.success {
+        if let Some(ref build) = signals.build_result
+            && !build.success {
                 let mut gap = IntentGap::new(
                     format!("Build failure: {} error(s)", build.error_count),
                     GapSeverity::Critical,
@@ -1380,11 +1376,10 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                 }
                 gaps.push(gap);
             }
-        }
 
         // Type check failure
-        if let Some(ref tc) = signals.type_check {
-            if !tc.clean {
+        if let Some(ref tc) = signals.type_check
+            && !tc.clean {
                 let mut gap = IntentGap::new(
                     format!("Type check failure: {} error(s)", tc.error_count),
                     GapSeverity::Major,
@@ -1396,11 +1391,10 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                 }
                 gaps.push(gap);
             }
-        }
 
         // Failing tests
-        if let Some(ref tests) = signals.test_results {
-            if tests.failed > 0 {
+        if let Some(ref tests) = signals.test_results
+            && tests.failed > 0 {
                 let gap = IntentGap::new(
                     format!(
                         "Test failures: {}/{} tests failing ({}  regressions)",
@@ -1426,7 +1420,6 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                 ));
                 gaps.push(gap);
             }
-        }
 
         // Security vulnerabilities
         if let Some(ref sec) = signals.security_scan {
@@ -1450,8 +1443,8 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         }
 
         // Lint errors (not warnings)
-        if let Some(ref lint) = signals.lint_results {
-            if lint.error_count > 0 {
+        if let Some(ref lint) = signals.lint_results
+            && lint.error_count > 0 {
                 gaps.push(
                     IntentGap::new(
                         format!("Lint errors: {} error(s)", lint.error_count),
@@ -1461,7 +1454,6 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                     .with_task(task_id),
                 );
             }
-        }
 
         // Failing custom checks
         for check in &signals.custom_checks {
@@ -2080,13 +2072,12 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         match strategy {
             StrategyKind::FocusedRepair => {
                 // Add failing test names as focus hints
-                if let Some(signals) = &latest_signals {
-                    if let Some(ref tests) = signals.test_results {
+                if let Some(signals) = &latest_signals
+                    && let Some(ref tests) = signals.test_results {
                         for test_name in &tests.failing_test_names {
                             hints.push(format!("Focus on fixing: {}", test_name));
                         }
                     }
-                }
             }
             StrategyKind::Reframe => {
                 hints.push(
@@ -2109,19 +2100,17 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         // Build focus areas from recent overseer feedback
         let mut focus_areas = Vec::new();
         if let Some(signals) = &latest_signals {
-            if let Some(ref build) = signals.build_result {
-                if !build.success {
+            if let Some(ref build) = signals.build_result
+                && !build.success {
                     focus_areas.push("Fix build errors first".to_string());
                     for error in &build.errors {
                         focus_areas.push(format!("Build error: {}", error));
                     }
                 }
-            }
-            if let Some(ref tc) = signals.type_check {
-                if !tc.clean {
+            if let Some(ref tc) = signals.type_check
+                && !tc.clean {
                     focus_areas.push("Resolve type errors".to_string());
                 }
-            }
         }
 
         StrategyContext {

@@ -677,12 +677,11 @@ where
             if !task.depends_on.is_empty() {
                 let mut all_deps_complete = true;
                 for dep_id in &task.depends_on {
-                    if let Ok(Some(dep)) = self.task_repo.get(*dep_id).await {
-                        if dep.status != TaskStatus::Complete {
+                    if let Ok(Some(dep)) = self.task_repo.get(*dep_id).await
+                        && dep.status != TaskStatus::Complete {
                             all_deps_complete = false;
                             break;
                         }
-                    }
                 }
                 if !all_deps_complete {
                     tracing::info!(
@@ -735,12 +734,11 @@ where
             } else {
                 let mut all_complete = true;
                 for dep_id in &task.depends_on {
-                    if let Ok(Some(dep)) = self.task_repo.get(*dep_id).await {
-                        if dep.status != TaskStatus::Complete {
+                    if let Ok(Some(dep)) = self.task_repo.get(*dep_id).await
+                        && dep.status != TaskStatus::Complete {
                             all_complete = false;
                             break;
                         }
-                    }
                 }
                 all_complete
             };

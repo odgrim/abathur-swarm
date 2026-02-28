@@ -301,12 +301,11 @@ where
     }
 
     // Link trajectory to task
-    if task.trajectory_id.is_none() {
-        if let Ok(Some(mut t)) = task_repo.get(task.id).await {
+    if task.trajectory_id.is_none()
+        && let Ok(Some(mut t)) = task_repo.get(task.id).await {
             t.trajectory_id = Some(base_trajectory.id);
             let _ = task_repo.update(&t).await;
         }
-    }
 
     // Emit ConvergenceStarted event
     event_bus.publish(event_factory::make_event(
@@ -449,41 +448,39 @@ where
     // 3. PHASE 1 -- Measure each artifact and record observations
     // -----------------------------------------------------------------------
 
-    for result in &results {
-        if let Some((idx, strategy, artifact, tokens_used, wall_time_ms)) = result {
-            // Measure with overseers (Part 5)
-            let overseer_signals = engine
-                .measure(artifact, &sample_trajectories[*idx].policy)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        sample = *idx,
-                        error = %e,
-                        "Overseer measurement failed for parallel sample {}; using empty signals",
-                        *idx
-                    );
-                    OverseerSignals::default()
-                });
+    for (idx, strategy, artifact, tokens_used, wall_time_ms) in results.iter().flatten() {
+        // Measure with overseers (Part 5)
+        let overseer_signals = engine
+            .measure(artifact, &sample_trajectories[*idx].policy)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    sample = *idx,
+                    error = %e,
+                    "Overseer measurement failed for parallel sample {}; using empty signals",
+                    *idx
+                );
+                OverseerSignals::default()
+            });
 
-            let sequence = sample_trajectories[*idx].observations.len() as u32;
-            let observation = Observation::new(
-                sequence,
-                artifact.clone(),
-                overseer_signals,
-                strategy.clone(),
-                *tokens_used,
-                *wall_time_ms,
-            );
+        let sequence = sample_trajectories[*idx].observations.len() as u32;
+        let observation = Observation::new(
+            sequence,
+            artifact.clone(),
+            overseer_signals,
+            strategy.clone(),
+            *tokens_used,
+            *wall_time_ms,
+        );
 
-            let _ = engine
-                .iterate_once(
-                    &mut sample_trajectories[*idx],
-                    &mut sample_bandits[*idx],
-                    strategy,
-                    observation,
-                )
-                .await;
-        }
+        let _ = engine
+            .iterate_once(
+                &mut sample_trajectories[*idx],
+                &mut sample_bandits[*idx],
+                strategy,
+                observation,
+            )
+            .await;
     }
 
     // -----------------------------------------------------------------------
@@ -520,7 +517,7 @@ where
                 trajectory_id: base_trajectory.id.to_string(),
                 best_observation_sequence: None,
             };
-            engine.finalize(&mut base_trajectory, &outcome, &sample_bandits.first().unwrap_or(&StrategyBandit::with_default_priors())).await?;
+            engine.finalize(&mut base_trajectory, &outcome, sample_bandits.first().unwrap_or(&StrategyBandit::with_default_priors())).await?;
             emit_convergence_terminated(
                 event_bus, task, goal_id, &base_trajectory, "exhausted",
             ).await;
@@ -633,14 +630,13 @@ where
     // so that pre-existing warnings (e.g. from `cargo clippy -- -D warnings`)
     // don't permanently block convergence via `all_passing()`.
     // Initialize from existing observations if resuming a trajectory.
-    if trajectory.lint_baseline == 0 {
-        if let Some(baseline) = trajectory.observations.first()
+    if trajectory.lint_baseline == 0
+        && let Some(baseline) = trajectory.observations.first()
             .and_then(|o| o.overseer_signals.lint_results.as_ref())
             .map(|l| l.error_count)
         {
             trajectory.lint_baseline = baseline;
         }
-    }
 
     loop {
         // Check cancellation
