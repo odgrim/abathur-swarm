@@ -235,6 +235,7 @@ where
         agent_branch: &str,
         task_branch: &str,
     ) -> DomainResult<Uuid> {
+        tracing::info!(%task_id, source_branch = %agent_branch, target_branch = %task_branch, "queueing stage 1 merge");
         // Get worktree for this task
         let worktree = self.worktree_repo.get_by_task(task_id).await?
             .ok_or_else(|| DomainError::ValidationFailed(
@@ -249,6 +250,7 @@ where
         );
 
         let id = request.id;
+        tracing::info!(%task_id, merge_request_id = %id, "stage 1 merge request queued");
         self.queue.write().await.push_back(request);
         Ok(id)
     }
@@ -261,6 +263,7 @@ where
         target_branch: &str,
         target_workdir: &str,
     ) -> DomainResult<Uuid> {
+        tracing::info!(%task_id, %source_branch, %target_branch, "queueing merge-back: subtask → feature branch");
         let request = MergeRequest::new_stage1(
             task_id,
             source_branch.to_string(),
@@ -268,12 +271,14 @@ where
             target_workdir.to_string(),
         );
         let id = request.id;
+        tracing::info!(%task_id, merge_request_id = %id, "merge-back request queued");
         self.queue.write().await.push_back(request);
         Ok(id)
     }
 
     /// Queue a Stage 2 merge (task → main).
     pub async fn queue_stage2(&self, task_id: Uuid) -> DomainResult<Uuid> {
+        tracing::info!(%task_id, "queueing stage 2 merge: task → main");
         // Get worktree for this task
         let worktree = self.worktree_repo.get_by_task(task_id).await?
             .ok_or_else(|| DomainError::ValidationFailed(
@@ -288,6 +293,7 @@ where
         );
 
         let id = request.id;
+        tracing::info!(%task_id, merge_request_id = %id, "stage 2 merge request queued");
         self.queue.write().await.push_back(request);
         Ok(id)
     }
@@ -301,12 +307,16 @@ where
             match queue.iter().position(|r| r.status == MergeStatus::Queued) {
                 Some(idx) => {
                     let mut req = queue.remove(idx).unwrap();
+                    tracing::info!(merge_request_id = %req.id, stage = ?req.stage, task_id = %req.task_id, "processing merge request");
                     req.status = MergeStatus::InProgress;
                     req.updated_at = Utc::now();
                     queue.push_front(req.clone());
                     req
                 }
-                None => return Ok(None),
+                None => {
+                    tracing::debug!("no queued merge requests to process");
+                    return Ok(None);
+                }
             }
         };
 
@@ -347,6 +357,7 @@ where
         ).await?;
 
         if !conflict_check.0.is_empty() {
+            tracing::warn!(task_id = %request.task_id, conflict_count = conflict_check.0.len(), "stage 1 merge: conflicts detected");
             request.status = MergeStatus::Conflict;
             request.error = Some(format!("Merge conflicts in: {}", conflict_check.0.join(", ")));
             request.updated_at = Utc::now();
@@ -364,6 +375,7 @@ where
         // Perform the merge
         match self.git_merge(&request.workdir, &request.source_branch, &request.target_branch).await {
             Ok(commit_sha) => {
+                tracing::info!(task_id = %request.task_id, %commit_sha, "stage 1 merge completed successfully");
                 request.status = MergeStatus::Completed;
                 request.commit_sha = Some(commit_sha.clone());
                 request.updated_at = Utc::now();
@@ -378,6 +390,7 @@ where
                 })
             }
             Err(e) => {
+                tracing::error!(task_id = %request.task_id, error = %e, "stage 1 merge failed");
                 request.status = MergeStatus::Failed;
                 request.error = Some(e.to_string());
                 request.updated_at = Utc::now();
@@ -403,6 +416,7 @@ where
             request.verification = Some(verification.clone());
 
             if !verification.passed {
+                tracing::warn!(task_id = %request.task_id, "stage 2 merge blocked: verification failed");
                 request.status = MergeStatus::VerificationFailed;
                 request.error = verification.failures_summary.clone();
                 request.updated_at = Utc::now();
@@ -426,6 +440,7 @@ where
         ).await?;
 
         if !conflict_check.0.is_empty() {
+            tracing::warn!(task_id = %request.task_id, conflict_count = conflict_check.0.len(), "stage 2 merge: conflicts detected");
             request.status = MergeStatus::Conflict;
             request.error = Some(format!("Merge conflicts in: {}", conflict_check.0.join(", ")));
             request.updated_at = Utc::now();
@@ -443,6 +458,7 @@ where
         // Perform the merge to main
         match self.git_merge(&self.config.repo_path, &request.source_branch, &request.target_branch).await {
             Ok(commit_sha) => {
+                tracing::info!(task_id = %request.task_id, %commit_sha, "stage 2 merge to main completed successfully");
                 request.status = MergeStatus::Completed;
                 request.commit_sha = Some(commit_sha.clone());
                 request.updated_at = Utc::now();
@@ -463,6 +479,7 @@ where
                 })
             }
             Err(e) => {
+                tracing::error!(task_id = %request.task_id, error = %e, "stage 2 merge to main failed");
                 request.status = MergeStatus::Failed;
                 request.error = Some(e.to_string());
                 request.updated_at = Utc::now();
@@ -646,6 +663,7 @@ where
 
     /// Cancel a queued merge request.
     pub async fn cancel(&self, id: Uuid) -> DomainResult<bool> {
+        tracing::info!(merge_request_id = %id, "cancelling merge request");
         let mut queue = self.queue.write().await;
         if let Some(idx) = queue.iter().position(|r| r.id == id && r.status == MergeStatus::Queued) {
             queue.remove(idx);
@@ -656,10 +674,12 @@ where
 
     /// Process all queued merges.
     pub async fn process_all(&self) -> DomainResult<Vec<MergeResult>> {
+        tracing::info!("processing all queued merge requests");
         let mut results = Vec::new();
         while let Some(result) = self.process_next().await? {
             results.push(result);
         }
+        tracing::info!(processed_count = results.len(), "finished processing all merge requests");
         Ok(results)
     }
 
@@ -670,6 +690,7 @@ where
 
         // Check if task is complete
         if task.status != TaskStatus::Complete {
+            tracing::debug!(%task_id, status = ?task.status, "task not ready for stage 2: not complete");
             return Ok(None);
         }
 
@@ -678,12 +699,14 @@ where
         let all_deps_complete = deps.iter().all(|t| t.status == TaskStatus::Complete);
 
         if !all_deps_complete {
+            tracing::debug!(%task_id, "task not ready for stage 2: dependencies incomplete");
             return Ok(None);
         }
 
         // Check worktree exists and is completed
         if let Some(worktree) = self.worktree_repo.get_by_task(task_id).await?
             && worktree.status == WorktreeStatus::Completed {
+                tracing::info!(%task_id, "task ready for stage 2 — merge queued");
                 let id = self.queue_stage2(task_id).await?;
                 return Ok(Some(id));
             }
@@ -770,6 +793,7 @@ where
     /// Should be called after a specialist agent has resolved the conflicts
     /// in the working directory.
     pub async fn retry_after_conflict_resolution(&self, merge_request_id: Uuid) -> DomainResult<bool> {
+        tracing::info!(merge_request_id = %merge_request_id, "re-queuing merge request after conflict resolution");
         // Check queue for the request
         {
             let mut queue = self.queue.write().await;
