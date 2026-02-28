@@ -119,5 +119,10 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
             description: "Refinement requests persistence for evolution loop".to_string(),
             sql: include_str!("../../../migrations/007_refinement_requests.sql").to_string(),
         },
+        Migration {
+            version: 8,
+            description: "FK constraints on convergence_trajectories and worktrees".to_string(),
+            sql: include_str!("../../../migrations/008_fk_constraints.sql").to_string(),
+        },
     ]
 }
