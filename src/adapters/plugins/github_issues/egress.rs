@@ -193,12 +193,13 @@ impl EgressAdapter for GitHubEgressAdapter {
             }
 
             EgressAction::AttachArtifact { external_id, .. } => {
-                tracing::warn!(
+                tracing::debug!(
                     issue = %external_id,
-                    "GitHub Issues: AttachArtifact is not yet implemented"
+                    "GitHub Issues adapter does not support AttachArtifact"
                 );
                 Ok(EgressResult::fail(
-                    "AttachArtifact is not yet supported by the GitHub Issues adapter",
+                    "AttachArtifact is not a supported operation for the GitHub Issues adapter. \
+                     Use PostComment to share artifact details instead.",
                 ))
             }
 

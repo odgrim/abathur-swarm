@@ -108,12 +108,13 @@ impl EgressAdapter for ClickUpEgressAdapter {
             }
 
             EgressAction::AttachArtifact { external_id, .. } => {
-                tracing::warn!(
+                tracing::debug!(
                     task_id = %external_id,
-                    "ClickUp: AttachArtifact is not yet implemented"
+                    "ClickUp adapter does not support AttachArtifact"
                 );
                 Ok(EgressResult::fail(
-                    "AttachArtifact is not yet supported by the ClickUp adapter",
+                    "AttachArtifact is not a supported operation for the ClickUp adapter. \
+                     Use PostComment to share artifact details instead.",
                 ))
             }
 
