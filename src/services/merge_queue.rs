@@ -7,16 +7,16 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::process::Command;
 use std::sync::Arc;
-use tokio::process::Command;
 use tokio::sync::RwLock;
+use tracing::instrument;
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{TaskStatus, WorktreeStatus};
-use crate::domain::ports::{TaskRepository, WorktreeRepository};
+use crate::domain::ports::{GoalRepository, TaskRepository, WorktreeRepository};
 use crate::services::integration_verifier::{IntegrationVerifierService, VerificationResult};
-use crate::domain::ports::GoalRepository;
 
 /// Stage of the merge process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -293,6 +293,7 @@ where
     }
 
     /// Process the next merge in the queue.
+    #[instrument(skip(self), fields(stage))]
     pub async fn process_next(&self) -> DomainResult<Option<MergeResult>> {
         // Get next queued request
         let mut request = {
@@ -336,6 +337,7 @@ where
     }
 
     /// Process a Stage 1 merge (agent → task branch).
+    #[instrument(skip(self, request), fields(task_id = %request.task_id, source = %request.source_branch, target = %request.target_branch))]
     async fn process_stage1(&self, request: &mut MergeRequest) -> DomainResult<MergeResult> {
         // Check for conflicts first
         let conflict_check = self.check_merge_conflicts(
@@ -393,6 +395,7 @@ where
     }
 
     /// Process a Stage 2 merge (task → main with verification).
+    #[instrument(skip(self, request), fields(task_id = %request.task_id, source = %request.source_branch, target = %request.target_branch))]
     async fn process_stage2(&self, request: &mut MergeRequest) -> DomainResult<MergeResult> {
         // Run verification first if required
         if self.config.require_verification {
@@ -477,97 +480,114 @@ where
     }
 
     /// Check for merge conflicts without actually merging.
+    #[instrument(skip(self), fields(%workdir, %source, %target))]
     async fn check_merge_conflicts(
         &self,
         workdir: &str,
         source: &str,
         target: &str,
     ) -> DomainResult<(Vec<String>, bool)> {
-        // Use git merge-tree to check for conflicts without modifying worktree
-        let output = Command::new("git")
-            .args(["merge-tree", target, source])
-            .current_dir(workdir)
-            .output()
-            .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+        let workdir = workdir.to_string();
+        let source = source.to_string();
+        let target = target.to_string();
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        tokio::task::spawn_blocking(move || {
+            let _span = tracing::info_span!("git_merge_tree", %workdir).entered();
 
-        // Look for conflict markers
-        let has_conflicts = stdout.contains("<<<<<<<") || stdout.contains(">>>>>>>");
+            // Use git merge-tree to check for conflicts without modifying worktree
+            let output = Command::new("git")
+                .args(["merge-tree", &target, &source])
+                .current_dir(&workdir)
+                .output()
+                .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
 
-        if has_conflicts {
-            // Extract conflicting file names
-            let mut conflicts = Vec::new();
-            for line in stdout.lines() {
-                // merge-tree output format includes file paths
-                if line.starts_with("+++") || line.starts_with("---") {
-                    if let Some(path) = line.split_whitespace().nth(1) {
-                        if !path.starts_with("a/") && !path.starts_with("b/") {
-                            if !conflicts.contains(&path.to_string()) {
-                                conflicts.push(path.to_string());
+            let stdout = String::from_utf8_lossy(&output.stdout);
+
+            // Look for conflict markers
+            let has_conflicts = stdout.contains("<<<<<<<") || stdout.contains(">>>>>>>");
+
+            if has_conflicts {
+                // Extract conflicting file names
+                let mut conflicts = Vec::new();
+                for line in stdout.lines() {
+                    // merge-tree output format includes file paths
+                    if line.starts_with("+++") || line.starts_with("---") {
+                        if let Some(path) = line.split_whitespace().nth(1) {
+                            if !path.starts_with("a/") && !path.starts_with("b/") {
+                                if !conflicts.contains(&path.to_string()) {
+                                    conflicts.push(path.to_string());
+                                }
                             }
                         }
                     }
                 }
+                Ok((conflicts, true))
+            } else {
+                Ok((vec![], false))
             }
-            Ok((conflicts, true))
-        } else {
-            Ok((vec![], false))
-        }
+        })
+        .await
+        .map_err(|e| DomainError::ValidationFailed(format!("spawn_blocking panicked: {}", e)))?
     }
 
     /// Perform a git merge.
+    #[instrument(skip(self), fields(%workdir, %source, %target))]
     async fn git_merge(
         &self,
         workdir: &str,
         source: &str,
         target: &str,
     ) -> DomainResult<String> {
-        // Checkout target branch
-        let checkout = Command::new("git")
-            .args(["checkout", target])
-            .current_dir(workdir)
-            .output()
-            .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+        let workdir = workdir.to_string();
+        let source = source.to_string();
+        let target = target.to_string();
 
-        if !checkout.status.success() {
-            let stderr = String::from_utf8_lossy(&checkout.stderr);
-            return Err(DomainError::ValidationFailed(format!("Git checkout failed: {}", stderr)));
-        }
+        tokio::task::spawn_blocking(move || {
+            let _span = tracing::info_span!("git_merge_ops", %workdir, %source, %target).entered();
 
-        // Merge source into target
-        let merge_msg = format!("Merge {} into {}", source, target);
-        let merge = Command::new("git")
-            .args(["merge", "--no-ff", source, "-m", &merge_msg])
-            .current_dir(workdir)
-            .output()
-            .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
-
-        if !merge.status.success() {
-            // Abort the merge if it failed
-            let _ = Command::new("git")
-                .args(["merge", "--abort"])
-                .current_dir(workdir)
+            // Checkout target branch
+            let checkout = Command::new("git")
+                .args(["checkout", &target])
+                .current_dir(&workdir)
                 .output()
-                .await;
+                .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
 
-            let stderr = String::from_utf8_lossy(&merge.stderr);
-            return Err(DomainError::ValidationFailed(format!("Git merge failed: {}", stderr)));
-        }
+            if !checkout.status.success() {
+                let stderr = String::from_utf8_lossy(&checkout.stderr);
+                return Err(DomainError::ValidationFailed(format!("Git checkout failed: {}", stderr)));
+            }
 
-        // Get the merge commit SHA
-        let rev_parse = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(workdir)
-            .output()
-            .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+            // Merge source into target
+            let merge_msg = format!("Merge {} into {}", source, target);
+            let merge = Command::new("git")
+                .args(["merge", "--no-ff", &source, "-m", &merge_msg])
+                .current_dir(&workdir)
+                .output()
+                .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
 
-        let commit_sha = String::from_utf8_lossy(&rev_parse.stdout).trim().to_string();
-        Ok(commit_sha)
+            if !merge.status.success() {
+                // Abort the merge if it failed
+                let _ = Command::new("git")
+                    .args(["merge", "--abort"])
+                    .current_dir(&workdir)
+                    .output();
+
+                let stderr = String::from_utf8_lossy(&merge.stderr);
+                return Err(DomainError::ValidationFailed(format!("Git merge failed: {}", stderr)));
+            }
+
+            // Get the merge commit SHA
+            let rev_parse = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&workdir)
+                .output()
+                .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+
+            let commit_sha = String::from_utf8_lossy(&rev_parse.stdout).trim().to_string();
+            Ok(commit_sha)
+        })
+        .await
+        .map_err(|e| DomainError::ValidationFailed(format!("spawn_blocking panicked: {}", e)))?
     }
 
     /// Get the current queue status.

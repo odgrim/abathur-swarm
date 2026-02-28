@@ -5,12 +5,13 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::process::Command;
 use std::sync::Arc;
-use tokio::process::Command;
+use tracing::instrument;
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
-use crate::domain::models::{GoalConstraint, ConstraintType, Task, TaskStatus};
+use crate::domain::models::{ConstraintType, GoalConstraint, Task, TaskStatus};
 use crate::domain::ports::{GoalRepository, TaskRepository, WorktreeRepository};
 
 /// Configuration for the integration verifier.
@@ -264,53 +265,71 @@ where
     }
 
     /// Check that the worktree branch has commits ahead of its base ref.
+    #[instrument(skip(self), fields(%worktree_path, %base_ref))]
     async fn check_has_commits(&self, worktree_path: &str, base_ref: &str) -> VerificationCheck {
-        let output = Command::new("git")
-            .args(["rev-list", "--count", &format!("{}..HEAD", base_ref)])
-            .current_dir(worktree_path)
-            .output()
-            .await;
+        let worktree_path = worktree_path.to_string();
+        let base_ref = base_ref.to_string();
 
-        match output {
-            Ok(output) if output.status.success() => {
-                let count_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let count: u64 = count_str.parse().unwrap_or(0);
+        let result = tokio::task::spawn_blocking(move || {
+            let _span = tracing::info_span!("git_rev_list", %worktree_path).entered();
 
-                if count > 0 {
-                    VerificationCheck {
-                        name: "has_commits".to_string(),
-                        passed: true,
-                        message: format!("{} commit(s) ahead of {}", count, base_ref),
-                        details: Some(serde_json::json!({
-                            "commits_ahead": count,
-                            "base_ref": base_ref
-                        })),
+            let output = Command::new("git")
+                .args(["rev-list", "--count", &format!("{}..HEAD", base_ref)])
+                .current_dir(&worktree_path)
+                .output();
+
+            match output {
+                Ok(output) if output.status.success() => {
+                    let count_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let count: u64 = count_str.parse().unwrap_or(0);
+
+                    if count > 0 {
+                        VerificationCheck {
+                            name: "has_commits".to_string(),
+                            passed: true,
+                            message: format!("{} commit(s) ahead of {}", count, base_ref),
+                            details: Some(serde_json::json!({
+                                "commits_ahead": count,
+                                "base_ref": base_ref
+                            })),
+                        }
+                    } else {
+                        VerificationCheck {
+                            name: "has_commits".to_string(),
+                            passed: false,
+                            message: format!("No commits ahead of {} — agent produced no changes", base_ref),
+                            details: Some(serde_json::json!({
+                                "commits_ahead": 0,
+                                "base_ref": base_ref
+                            })),
+                        }
                     }
-                } else {
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
                     VerificationCheck {
                         name: "has_commits".to_string(),
                         passed: false,
-                        message: format!("No commits ahead of {} — agent produced no changes", base_ref),
-                        details: Some(serde_json::json!({
-                            "commits_ahead": 0,
-                            "base_ref": base_ref
-                        })),
+                        message: format!("Failed to check commits: {}", stderr.trim()),
+                        details: None,
                     }
                 }
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                VerificationCheck {
+                Err(e) => VerificationCheck {
                     name: "has_commits".to_string(),
                     passed: false,
-                    message: format!("Failed to check commits: {}", stderr.trim()),
+                    message: format!("Failed to run git: {}", e),
                     details: None,
-                }
+                },
             }
+        })
+        .await;
+
+        match result {
+            Ok(check) => check,
             Err(e) => VerificationCheck {
                 name: "has_commits".to_string(),
                 passed: false,
-                message: format!("Failed to run git: {}", e),
+                message: format!("spawn_blocking panicked: {}", e),
                 details: None,
             },
         }
@@ -459,190 +478,195 @@ where
     }
 
     /// Run integration tests in the worktree.
+    #[instrument(skip(self), fields(%path))]
     async fn run_integration_tests(&self, path: &str) -> VerificationCheck {
-        let start = std::time::Instant::now();
+        let path = path.to_string();
 
-        let output = Command::new("cargo")
-            .args(["test", "--", "--test-threads=1"])
-            .current_dir(path)
-            .output()
-            .await;
+        let result = tokio::task::spawn_blocking(move || {
+            let _span = tracing::info_span!("cargo_test", %path).entered();
+            let start = std::time::Instant::now();
 
-        match output {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let duration_ms = start.elapsed().as_millis() as u64;
+            let output = Command::new("cargo")
+                .args(["test", "--", "--test-threads=1"])
+                .current_dir(&path)
+                .output();
 
-                let test_result = self.parse_test_output(&stdout, &stderr);
+            match output {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let duration_ms = start.elapsed().as_millis() as u64;
 
-                if output.status.success() {
-                    VerificationCheck {
-                        name: "integration_tests".to_string(),
-                        passed: true,
-                        message: format!("{} tests passed", test_result.passed_count),
-                        details: Some(serde_json::json!({
-                            "total": test_result.total,
-                            "passed": test_result.passed_count,
-                            "duration_ms": duration_ms
-                        })),
-                    }
-                } else {
-                    VerificationCheck {
-                        name: "integration_tests".to_string(),
-                        passed: false,
-                        message: format!("{} test failures", test_result.failed_count),
-                        details: Some(serde_json::json!({
-                            "total": test_result.total,
-                            "passed": test_result.passed_count,
-                            "failed": test_result.failed_count,
-                            "failures": test_result.failures,
-                            "duration_ms": duration_ms
-                        })),
+                    let test_result = parse_test_output(&stdout, &stderr);
+
+                    if output.status.success() {
+                        VerificationCheck {
+                            name: "integration_tests".to_string(),
+                            passed: true,
+                            message: format!("{} tests passed", test_result.passed_count),
+                            details: Some(serde_json::json!({
+                                "total": test_result.total,
+                                "passed": test_result.passed_count,
+                                "duration_ms": duration_ms
+                            })),
+                        }
+                    } else {
+                        VerificationCheck {
+                            name: "integration_tests".to_string(),
+                            passed: false,
+                            message: format!("{} test failures", test_result.failed_count),
+                            details: Some(serde_json::json!({
+                                "total": test_result.total,
+                                "passed": test_result.passed_count,
+                                "failed": test_result.failed_count,
+                                "failures": test_result.failures,
+                                "duration_ms": duration_ms
+                            })),
+                        }
                     }
                 }
+                Err(e) => VerificationCheck {
+                    name: "integration_tests".to_string(),
+                    passed: false,
+                    message: format!("Failed to run tests: {}", e),
+                    details: None,
+                },
             }
+        })
+        .await;
+
+        match result {
+            Ok(check) => check,
             Err(e) => VerificationCheck {
                 name: "integration_tests".to_string(),
                 passed: false,
-                message: format!("Failed to run tests: {}", e),
+                message: format!("spawn_blocking panicked: {}", e),
                 details: None,
             },
         }
     }
 
-    /// Parse test output to extract results.
-    fn parse_test_output(&self, stdout: &str, stderr: &str) -> TestResult {
-        let mut total = 0;
-        let mut passed = 0;
-        let mut failed = 0;
-        let mut failures = Vec::new();
-
-        // Count tests from "running X tests" lines
-        for line in stdout.lines() {
-            if line.contains("running") && line.contains("test") {
-                if let Some(count) = line.split_whitespace().nth(1).and_then(|s| s.parse::<usize>().ok()) {
-                    total += count;
-                }
-            }
-            if line.contains("... ok") {
-                passed += 1;
-            } else if line.contains("... FAILED") {
-                failed += 1;
-                if let Some(test_name) = line.split("...").next() {
-                    failures.push(test_name.trim().to_string());
-                }
-            }
-        }
-
-        // Also check stderr
-        for line in stderr.lines() {
-            if line.contains("... FAILED") {
-                failed += 1;
-                if let Some(test_name) = line.split("...").next() {
-                    let name = test_name.trim().to_string();
-                    if !failures.contains(&name) {
-                        failures.push(name);
-                    }
-                }
-            }
-        }
-
-        TestResult {
-            passed: failed == 0,
-            total,
-            passed_count: passed,
-            failed_count: failed,
-            failures,
-            duration_ms: 0,
-        }
-    }
-
     /// Run lint check (cargo clippy).
+    #[instrument(skip(self), fields(%path))]
     async fn run_lint_check(&self, path: &str) -> VerificationCheck {
-        let args = if self.config.fail_on_warnings {
-            vec!["clippy", "--", "-D", "warnings"]
-        } else {
-            vec!["clippy"]
-        };
+        let path = path.to_string();
+        let fail_on_warnings = self.config.fail_on_warnings;
 
-        let output = Command::new("cargo")
-            .args(&args)
-            .current_dir(path)
-            .output()
-            .await;
+        let result = tokio::task::spawn_blocking(move || {
+            let _span = tracing::info_span!("cargo_clippy", %path).entered();
 
-        match output {
-            Ok(output) => {
-                if output.status.success() {
-                    VerificationCheck {
-                        name: "lint".to_string(),
-                        passed: true,
-                        message: "Lint check passed".to_string(),
-                        details: None,
-                    }
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let issues: Vec<String> = stderr
-                        .lines()
-                        .filter(|l| l.contains("warning:") || l.contains("error:"))
-                        .take(10) // Limit to first 10 issues
-                        .map(String::from)
-                        .collect();
+            let args: Vec<&str> = if fail_on_warnings {
+                vec!["clippy", "--", "-D", "warnings"]
+            } else {
+                vec!["clippy"]
+            };
 
-                    VerificationCheck {
-                        name: "lint".to_string(),
-                        passed: false,
-                        message: format!("{} lint issues", issues.len()),
-                        details: Some(serde_json::json!({ "issues": issues })),
+            let output = Command::new("cargo")
+                .args(&args)
+                .current_dir(&path)
+                .output();
+
+            match output {
+                Ok(output) => {
+                    if output.status.success() {
+                        VerificationCheck {
+                            name: "lint".to_string(),
+                            passed: true,
+                            message: "Lint check passed".to_string(),
+                            details: None,
+                        }
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        let issues: Vec<String> = stderr
+                            .lines()
+                            .filter(|l| l.contains("warning:") || l.contains("error:"))
+                            .take(10) // Limit to first 10 issues
+                            .map(String::from)
+                            .collect();
+
+                        VerificationCheck {
+                            name: "lint".to_string(),
+                            passed: false,
+                            message: format!("{} lint issues", issues.len()),
+                            details: Some(serde_json::json!({ "issues": issues })),
+                        }
                     }
                 }
+                Err(e) => VerificationCheck {
+                    name: "lint".to_string(),
+                    passed: false,
+                    message: format!("Failed to run lint: {}", e),
+                    details: None,
+                },
             }
+        })
+        .await;
+
+        match result {
+            Ok(check) => check,
             Err(e) => VerificationCheck {
                 name: "lint".to_string(),
                 passed: false,
-                message: format!("Failed to run lint: {}", e),
+                message: format!("spawn_blocking panicked: {}", e),
                 details: None,
             },
         }
     }
 
     /// Run format check (cargo fmt --check).
+    #[instrument(skip(self), fields(%path))]
     async fn run_format_check(&self, path: &str) -> VerificationCheck {
-        let output = Command::new("cargo")
-            .args(["fmt", "--check"])
-            .current_dir(path)
-            .output()
-            .await;
+        let path = path.to_string();
 
-        match output {
-            Ok(output) => {
-                if output.status.success() {
-                    VerificationCheck {
-                        name: "format".to_string(),
-                        passed: true,
-                        message: "Code is properly formatted".to_string(),
-                        details: None,
-                    }
-                } else {
-                    VerificationCheck {
-                        name: "format".to_string(),
-                        passed: false,
-                        message: "Code needs formatting".to_string(),
-                        details: None,
+        let result = tokio::task::spawn_blocking(move || {
+            let _span = tracing::info_span!("cargo_fmt", %path).entered();
+
+            let output = Command::new("cargo")
+                .args(["fmt", "--check"])
+                .current_dir(&path)
+                .output();
+
+            match output {
+                Ok(output) => {
+                    if output.status.success() {
+                        VerificationCheck {
+                            name: "format".to_string(),
+                            passed: true,
+                            message: "Code is properly formatted".to_string(),
+                            details: None,
+                        }
+                    } else {
+                        VerificationCheck {
+                            name: "format".to_string(),
+                            passed: false,
+                            message: "Code needs formatting".to_string(),
+                            details: None,
+                        }
                     }
                 }
+                Err(e) => VerificationCheck {
+                    name: "format".to_string(),
+                    passed: false,
+                    message: format!("Failed to run format check: {}", e),
+                    details: None,
+                },
             }
+        })
+        .await;
+
+        match result {
+            Ok(check) => check,
             Err(e) => VerificationCheck {
                 name: "format".to_string(),
                 passed: false,
-                message: format!("Failed to run format check: {}", e),
+                message: format!("spawn_blocking panicked: {}", e),
                 details: None,
             },
         }
     }
 
     /// Verify a task can be merged (no conflicts).
+    #[instrument(skip(self), fields(%task_id, %base_branch))]
     pub async fn verify_mergeable(&self, task_id: Uuid, base_branch: &str) -> DomainResult<VerificationCheck> {
         let worktree = self.worktree_repo.get_by_task(task_id).await?;
 
@@ -655,41 +679,100 @@ where
             });
         };
 
+        let wt_path = wt.path.clone();
+        let wt_branch = wt.branch.clone();
+        let base_branch = base_branch.to_string();
+
         // Check if branch can merge into base
-        let output = Command::new("git")
-            .args(["merge-tree", base_branch, &wt.branch])
-            .current_dir(&wt.path)
-            .output()
-            .await;
+        tokio::task::spawn_blocking(move || {
+            let _span = tracing::info_span!("git_merge_tree_check", %wt_path).entered();
 
-        match output {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let has_conflicts = stdout.contains("<<<<<<");
+            let output = Command::new("git")
+                .args(["merge-tree", &base_branch, &wt_branch])
+                .current_dir(&wt_path)
+                .output();
 
-                if has_conflicts {
-                    Ok(VerificationCheck {
-                        name: "mergeable".to_string(),
-                        passed: false,
-                        message: format!("Merge conflicts with {}", base_branch),
-                        details: None,
-                    })
-                } else {
-                    Ok(VerificationCheck {
-                        name: "mergeable".to_string(),
-                        passed: true,
-                        message: format!("Can merge into {}", base_branch),
-                        details: None,
-                    })
+            match output {
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let has_conflicts = stdout.contains("<<<<<<");
+
+                    if has_conflicts {
+                        Ok(VerificationCheck {
+                            name: "mergeable".to_string(),
+                            passed: false,
+                            message: format!("Merge conflicts with {}", base_branch),
+                            details: None,
+                        })
+                    } else {
+                        Ok(VerificationCheck {
+                            name: "mergeable".to_string(),
+                            passed: true,
+                            message: format!("Can merge into {}", base_branch),
+                            details: None,
+                        })
+                    }
+                }
+                Err(e) => Ok(VerificationCheck {
+                    name: "mergeable".to_string(),
+                    passed: false,
+                    message: format!("Failed to check mergeability: {}", e),
+                    details: None,
+                }),
+            }
+        })
+        .await
+        .map_err(|e| DomainError::ValidationFailed(format!("spawn_blocking panicked: {}", e)))?
+    }
+}
+
+/// Parse test output to extract results.
+///
+/// Free function so it can be called from within `spawn_blocking` closures
+/// without needing `&self`.
+fn parse_test_output(stdout: &str, stderr: &str) -> TestResult {
+    let mut total = 0;
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut failures = Vec::new();
+
+    // Count tests from "running X tests" lines
+    for line in stdout.lines() {
+        if line.contains("running") && line.contains("test") {
+            if let Some(count) = line.split_whitespace().nth(1).and_then(|s| s.parse::<usize>().ok()) {
+                total += count;
+            }
+        }
+        if line.contains("... ok") {
+            passed += 1;
+        } else if line.contains("... FAILED") {
+            failed += 1;
+            if let Some(test_name) = line.split("...").next() {
+                failures.push(test_name.trim().to_string());
+            }
+        }
+    }
+
+    // Also check stderr
+    for line in stderr.lines() {
+        if line.contains("... FAILED") {
+            failed += 1;
+            if let Some(test_name) = line.split("...").next() {
+                let name = test_name.trim().to_string();
+                if !failures.contains(&name) {
+                    failures.push(name);
                 }
             }
-            Err(e) => Ok(VerificationCheck {
-                name: "mergeable".to_string(),
-                passed: false,
-                message: format!("Failed to check mergeability: {}", e),
-                details: None,
-            }),
         }
+    }
+
+    TestResult {
+        passed: failed == 0,
+        total,
+        passed_count: passed,
+        failed_count: failed,
+        failures,
+        duration_ms: 0,
     }
 }
 
