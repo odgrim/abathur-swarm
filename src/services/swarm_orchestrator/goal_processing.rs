@@ -402,6 +402,7 @@ where
                                                 task_id = %task.id,
                                                 "Workflow completed immediately on advance (no phases)"
                                             );
+                                            self.guardrails.register_agent_end(&agent_unique_id).await;
                                             drop(permit);
                                             return Ok(());
                                         }
@@ -413,6 +414,7 @@ where
                                             );
                                             // Don't fall through to normal spawn — the task is enrolled
                                             // in a workflow and should not be processed directly.
+                                            self.guardrails.register_agent_end(&agent_unique_id).await;
                                             drop(permit);
                                             return Ok(());
                                         }
