@@ -638,6 +638,16 @@ where
         let reconciliation_secs = self.config.reconciliation_interval_secs.unwrap_or(30);
         let loop_interval = tokio::time::Duration::from_secs(reconciliation_secs);
 
+        // Periodic cleanup for processed_commands table (Issue #59).
+        // Every ~24h worth of ticks, prune entries older than 7 days.
+        let cleanup_every_n_ticks: u64 = if reconciliation_secs > 0 {
+            (24 * 3600) / reconciliation_secs  // ~2880 ticks at 30s
+        } else {
+            2880
+        };
+        let mut tick_counter: u64 = 0;
+        let command_retention = std::time::Duration::from_secs(7 * 24 * 3600); // 7 days
+
         // Main orchestration loop
         loop {
             let current_status = self.status.read().await.clone();
@@ -666,6 +676,21 @@ where
 
             if self.config.track_evolution {
                 self.process_evolution_refinements(&event_tx).await?;
+            }
+
+            // Periodic maintenance: prune stale processed_commands entries
+            tick_counter += 1;
+            if tick_counter % cleanup_every_n_ticks == 0 {
+                if let Some(bus) = self.command_bus.read().await.as_ref() {
+                    let pruned = bus.prune_old_commands(command_retention).await;
+                    if pruned > 0 {
+                        tracing::info!(
+                            pruned_count = pruned,
+                            retention_days = 7,
+                            "Pruned stale processed_commands entries"
+                        );
+                    }
+                }
             }
 
             // Wait before next iteration

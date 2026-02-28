@@ -228,20 +228,20 @@ impl<T: TaskRepository> TaskService<T> {
     }
 
     /// Calculate the depth of a task in the hierarchy (0 = root).
+    ///
+    /// Uses lightweight `get_parent_id` queries to traverse the ancestry chain
+    /// without loading full `Task` structs at each level.
     async fn calculate_depth(&self, task: &Task) -> DomainResult<u32> {
         let mut depth = 0;
-        let mut current = task.clone();
+        let mut current_parent = task.parent_id;
 
-        while let Some(parent_id) = current.parent_id {
+        while let Some(pid) = current_parent {
             depth += 1;
             if depth > 100 {
                 // Safety limit to prevent infinite loops
                 break;
             }
-            match self.task_repo.get(parent_id).await? {
-                Some(parent) => current = parent,
-                None => break,
-            }
+            current_parent = self.task_repo.get_parent_id(pid).await?;
         }
 
         Ok(depth)
@@ -258,17 +258,17 @@ impl<T: TaskRepository> TaskService<T> {
     }
 
     /// Find the root task (task with no parent).
+    ///
+    /// Uses lightweight `get_parent_id` queries to walk up the task tree
+    /// without allocating full `Task` structs at each level.
     async fn find_root_task(&self, task: &Task) -> DomainResult<Uuid> {
-        let mut current = task.clone();
+        let mut current_id = task.id;
 
-        while let Some(parent_id) = current.parent_id {
-            match self.task_repo.get(parent_id).await? {
-                Some(parent) => current = parent,
-                None => break,
-            }
+        while let Some(pid) = self.task_repo.get_parent_id(current_id).await? {
+            current_id = pid;
         }
 
-        Ok(current.id)
+        Ok(current_id)
     }
 
     /// Count all descendants of a task using iterative BFS.
