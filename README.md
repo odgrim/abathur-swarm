@@ -9,8 +9,8 @@ Abathur coordinates multiple AI agents to work on complex tasks. It handles task
 - **Task orchestration**: Break down work into a DAG of subtasks, route them to specialized agents, run them in parallel waves
 - **Git worktree isolation**: Each task runs in its own worktree so agents can work on different parts of the codebase simultaneously without stepping on each other
 - **Three-tier memory**: Working, episodic, and semantic memory with configurable decay. Agents can query past context and learnings
-- **Agent evolution**: Track success rates per agent template version. Underperforming agents get refined, regressions get reverted
-- **Meta-planning**: A meta-planner agent analyzes incoming tasks, detects capability gaps, and can spawn new specialist agents when needed
+- **Agent evolution** *(planned)*: Track success rates per agent template version. Underperforming agents get refined, regressions get reverted
+- **Meta-planning** *(planned)*: A meta-planner agent analyzes incoming tasks, detects capability gaps, and can spawn new specialist agents when needed
 
 ## Prerequisites
 
@@ -229,6 +229,15 @@ status_done        = "COMPLETED"
 ```
 
 Requires `CLICKUP_API_KEY` in the environment.
+
+## Roadmap
+
+The following features are designed but not yet implemented:
+
+- **Agent evolution** — Success rate tracking per agent template version, automatic template refinement, and regression detection/rollback
+- **Meta-planning** — Capability gap detection, dynamic specialist agent spawning, and task routing optimization
+
+Contributions toward these features are welcome! See the issues labeled with these topics for discussion.
 
 ## Contributing
 
