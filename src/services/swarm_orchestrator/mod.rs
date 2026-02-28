@@ -362,15 +362,6 @@ where
         &self.evolution_loop
     }
 
-    /// Get the command bus (available after `register_builtin_handlers()`).
-    #[allow(dead_code)]
-    pub(crate) async fn command_bus(&self) -> Arc<CommandBus> {
-        self.command_bus.read().await
-            .as_ref()
-            .expect("command_bus not initialized — call register_builtin_handlers() first")
-            .clone()
-    }
-
     // ========================================================================
     // Main Orchestration Loop
     // ========================================================================

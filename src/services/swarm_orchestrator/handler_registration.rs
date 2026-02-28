@@ -196,7 +196,6 @@ where
         // EscalationTimeoutHandler (NORMAL) — check escalation deadlines
         reactor
             .register(Arc::new(EscalationTimeoutHandler::new(
-                self.event_bus.clone(),
                 self.escalation_store.clone(),
             )))
             .await;
@@ -345,16 +344,12 @@ where
         }
 
         // GoalEvaluationHandler (NORMAL) — periodic goal progress observation
-        if let Some(ref memory_repo) = self.memory_repo {
-            reactor
-                .register(Arc::new(GoalEvaluationHandler::new(
-                    self.goal_repo.clone(),
-                    self.task_repo.clone(),
-                    memory_repo.clone(),
-                    None, // event_store is optional for goal evaluation
-                )))
-                .await;
-        }
+        reactor
+            .register(Arc::new(GoalEvaluationHandler::new(
+                self.goal_repo.clone(),
+                self.task_repo.clone(),
+            )))
+            .await;
 
         // TriggerRuleEngine (NORMAL) — declarative event-driven automation
         let trigger_engine = {

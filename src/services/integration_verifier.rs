@@ -98,7 +98,6 @@ where
     W: WorktreeRepository + 'static,
 {
     task_repo: Arc<T>,
-    #[allow(dead_code)]
     goal_repo: Arc<G>,
     worktree_repo: Arc<W>,
     config: VerifierConfig,
@@ -134,6 +133,15 @@ where
         // 1. Check all dependencies complete
         let deps_check = self.check_dependencies_complete(&task).await?;
         checks.push(deps_check);
+
+        // 2. Verify goal constraints if the task has a goal_id
+        let goal_id = task.context.custom.get("goal_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok());
+        if let Some(goal_id) = goal_id {
+            let constraints_check = self.verify_goal_constraints(&task, goal_id).await?;
+            checks.push(constraints_check);
+        }
 
         // 3. Get worktree and check for commits / run code checks
         let worktree = self.worktree_repo.get_by_task(task_id).await?;
@@ -336,7 +344,6 @@ where
     }
 
     /// Verify goal constraints are satisfied.
-    #[allow(dead_code)]
     async fn verify_goal_constraints(
         &self,
         task: &Task,
@@ -397,7 +404,6 @@ where
     /// Checks the task's title, description, and context against the constraint's
     /// description to detect potential violations. This is a text-based heuristic —
     /// not a semantic guarantee — but provides useful signal for invariant/boundary checks.
-    #[allow(dead_code)]
     fn evaluate_constraint(&self, task: &Task, constraint: &GoalConstraint) -> (bool, Option<String>) {
         // Build a searchable text corpus from the task
         let task_text = format!(
