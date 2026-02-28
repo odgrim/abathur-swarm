@@ -12,7 +12,7 @@ use tokio::sync::{RwLock, Semaphore};
 use crate::domain::models::{Goal, HumanEscalationEvent, Task, TaskSource, TaskStatus};
 use crate::domain::models::convergence::{AmendmentSource, SpecificationAmendment};
 use crate::domain::models::task_schedule::*;
-use crate::domain::ports::{AgentRepository, GoalRepository, MemoryRepository, TaskRepository, TaskScheduleRepository, TrajectoryRepository, WorktreeRepository};
+use crate::domain::ports::{GoalRepository, MemoryRepository, TaskRepository, TaskScheduleRepository, TrajectoryRepository, WorktreeRepository};
 use crate::services::event_store::EventStore;
 use crate::services::goal_context_service::GoalContextService;
 use crate::services::event_bus::{
@@ -359,14 +359,12 @@ impl<G: GoalRepository + 'static> EventHandler for GoalRetiredHandler<G> {
 /// This handler provides a fast-path signal: when it fires, the orchestrator
 /// can immediately check deadlines rather than waiting for the next poll tick.
 pub struct EscalationTimeoutHandler {
-    #[allow(dead_code)]
-    event_bus: Arc<EventBus>,
     escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>,
 }
 
 impl EscalationTimeoutHandler {
-    pub fn new(event_bus: Arc<EventBus>, escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>) -> Self {
-        Self { event_bus, escalation_store }
+    pub fn new(escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>) -> Self {
+        Self { escalation_store }
     }
 }
 
@@ -1496,20 +1494,18 @@ impl<T: TaskRepository + 'static> EventHandler for SpecialistCheckHandler<T> {
 /// Triggered by the "evolution-evaluation" scheduled event (120s).
 /// Queries recently completed/failed tasks, computes per-agent-type success
 /// rates, and emits EvolutionTriggered when refinement is warranted.
-pub struct EvolutionEvaluationHandler<T: TaskRepository, A: AgentRepository> {
+pub struct EvolutionEvaluationHandler<T: TaskRepository> {
     task_repo: Arc<T>,
-    #[allow(dead_code)]
-    agent_repo: Arc<A>,
 }
 
-impl<T: TaskRepository, A: AgentRepository> EvolutionEvaluationHandler<T, A> {
-    pub fn new(task_repo: Arc<T>, agent_repo: Arc<A>) -> Self {
-        Self { task_repo, agent_repo }
+impl<T: TaskRepository> EvolutionEvaluationHandler<T> {
+    pub fn new(task_repo: Arc<T>) -> Self {
+        Self { task_repo }
     }
 }
 
 #[async_trait]
-impl<T: TaskRepository + 'static, A: AgentRepository + 'static> EventHandler for EvolutionEvaluationHandler<T, A> {
+impl<T: TaskRepository + 'static> EventHandler for EvolutionEvaluationHandler<T> {
     fn metadata(&self) -> HandlerMetadata {
         HandlerMetadata {
             id: HandlerId::new(),
@@ -1739,29 +1735,23 @@ impl EventHandler for A2APollHandler {
 /// Observes task/memory state independently and emits signal events about
 /// goal progress. This is a read-only observer that never modifies goals,
 /// tasks, or memories.
-pub struct GoalEvaluationHandler<G: GoalRepository, T: TaskRepository, M: MemoryRepository> {
+pub struct GoalEvaluationHandler<G: GoalRepository, T: TaskRepository> {
     goal_repo: Arc<G>,
     task_repo: Arc<T>,
-    #[allow(dead_code)]
-    memory_repo: Arc<M>,
-    #[allow(dead_code)]
-    event_store: Option<Arc<dyn EventStore>>,
 }
 
-impl<G: GoalRepository, T: TaskRepository, M: MemoryRepository> GoalEvaluationHandler<G, T, M> {
+impl<G: GoalRepository, T: TaskRepository> GoalEvaluationHandler<G, T> {
     pub fn new(
         goal_repo: Arc<G>,
         task_repo: Arc<T>,
-        memory_repo: Arc<M>,
-        event_store: Option<Arc<dyn EventStore>>,
     ) -> Self {
-        Self { goal_repo, task_repo, memory_repo, event_store }
+        Self { goal_repo, task_repo }
     }
 }
 
 #[async_trait]
-impl<G: GoalRepository + 'static, T: TaskRepository + 'static, M: MemoryRepository + 'static>
-    EventHandler for GoalEvaluationHandler<G, T, M>
+impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
+    EventHandler for GoalEvaluationHandler<G, T>
 {
     fn metadata(&self) -> HandlerMetadata {
         HandlerMetadata {
@@ -1797,8 +1787,6 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static, M: MemoryReposito
             .map_err(|e| format!("Failed to list completed tasks: {}", e))?;
         let failed = self.task_repo.list_by_status(TaskStatus::Failed).await
             .map_err(|e| format!("Failed to list failed tasks: {}", e))?;
-        let running = self.task_repo.list_by_status(TaskStatus::Running).await
-            .map_err(|e| format!("Failed to list running tasks: {}", e))?;
 
         let mut new_events = Vec::new();
 
@@ -1817,15 +1805,6 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static, M: MemoryReposito
                 .collect();
 
             let relevant_failed: Vec<&Task> = failed.iter()
-                .filter(|t| {
-                    goal_domains.is_empty() || {
-                        let task_domains = GoalContextService::<G>::infer_task_domains(t);
-                        task_domains.iter().any(|d| goal_domains.contains(d))
-                    }
-                })
-                .collect();
-
-            let _relevant_running: Vec<&Task> = running.iter()
                 .filter(|t| {
                     goal_domains.is_empty() || {
                         let task_domains = GoalContextService::<G>::infer_task_domains(t);
