@@ -193,8 +193,15 @@ impl Guardrails {
     }
 
     /// Check if we can spawn a new agent.
-    pub async fn check_agent_spawn(&self, _agent_id: &str) -> GuardrailResult {
+    pub async fn check_agent_spawn(&self, agent_id: &str) -> GuardrailResult {
         let agents = self.current_agents.read().await;
+
+        if agents.contains(agent_id) {
+            return GuardrailResult::Blocked(format!(
+                "Agent '{}' is already running",
+                agent_id
+            ));
+        }
 
         if agents.len() >= self.config.max_concurrent_agents {
             return GuardrailResult::Blocked(format!(
@@ -394,5 +401,92 @@ mod tests {
 
         // Should block when exceeding
         assert!(guardrails.check_tokens(300).is_blocked());
+    }
+
+    #[tokio::test]
+    async fn test_agent_limit() {
+        let config = GuardrailsConfig {
+            max_concurrent_agents: 2,
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        assert!(guardrails.check_agent_spawn("agent-1").await.is_allowed());
+        guardrails.register_agent_spawn("agent-1").await;
+
+        assert!(guardrails.check_agent_spawn("agent-2").await.is_allowed());
+        guardrails.register_agent_spawn("agent-2").await;
+
+        // Third agent should be blocked — at capacity
+        assert!(guardrails.check_agent_spawn("agent-3").await.is_blocked());
+
+        // Free up a slot
+        guardrails.register_agent_end("agent-1").await;
+        assert!(guardrails.check_agent_spawn("agent-3").await.is_allowed());
+    }
+
+    #[tokio::test]
+    async fn test_agent_tracking_with_duplicate_template_names() {
+        // THE KEY BUG FIX: Two agents using the same template name ("implementer")
+        // must be tracked independently by unique task IDs, not template names.
+        let config = GuardrailsConfig {
+            max_concurrent_agents: 3,
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        // Simulate two tasks both routed to the "implementer" template,
+        // but tracked by unique task_id strings (as spawn_task_agent does).
+        let task_id_a = uuid::Uuid::new_v4().to_string();
+        let task_id_b = uuid::Uuid::new_v4().to_string();
+
+        assert!(guardrails.check_agent_spawn(&task_id_a).await.is_allowed());
+        guardrails.register_agent_spawn(&task_id_a).await;
+
+        // Second agent with a DIFFERENT unique ID must also be allowed
+        assert!(guardrails.check_agent_spawn(&task_id_b).await.is_allowed());
+        guardrails.register_agent_spawn(&task_id_b).await;
+
+        // Both agents tracked independently — count is 2
+        {
+            let agents = guardrails.current_agents.read().await;
+            assert_eq!(agents.len(), 2);
+        }
+
+        // Ending one agent doesn't affect the other
+        guardrails.register_agent_end(&task_id_a).await;
+        {
+            let agents = guardrails.current_agents.read().await;
+            assert_eq!(agents.len(), 1);
+            assert!(agents.contains(&task_id_b));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_agent_duplicate_registration_blocked() {
+        let config = GuardrailsConfig {
+            max_concurrent_agents: 4,
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        let agent_id = "task-abc-123";
+
+        assert!(guardrails.check_agent_spawn(agent_id).await.is_allowed());
+        guardrails.register_agent_spawn(agent_id).await;
+
+        // Same ID should be blocked even though we haven't hit the limit
+        let result = guardrails.check_agent_spawn(agent_id).await;
+        assert!(result.is_blocked());
+        match result {
+            GuardrailResult::Blocked(msg) => {
+                assert!(msg.contains("already running"), "Expected 'already running' message, got: {}", msg);
+            }
+            _ => panic!("Expected Blocked result"),
+        }
+
+        // After ending, the same ID can be re-used
+        guardrails.register_agent_end(agent_id).await;
+        assert!(guardrails.check_agent_spawn(agent_id).await.is_allowed());
     }
 }

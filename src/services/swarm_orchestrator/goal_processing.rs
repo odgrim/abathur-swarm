@@ -331,6 +331,20 @@ where
             }
         }
 
+        // Check guardrails before spawning (uses task_id as unique agent identifier)
+        let agent_unique_id = task.id.to_string();
+        {
+            let spawn_check = self.guardrails.check_agent_spawn(&agent_unique_id).await;
+            if spawn_check.is_blocked() {
+                tracing::debug!(
+                    task_id = %task.id,
+                    "spawn_task_agent: blocked by guardrails — {:?}",
+                    spawn_check
+                );
+                return Ok(());
+            }
+        }
+
         // Try to acquire agent permit
         if let Ok(permit) = self.agent_semaphore.clone().try_acquire_owned() {
             // Atomically claim the task (Ready→Running) BEFORE spawning.
@@ -344,6 +358,9 @@ where
                     return Ok(());
                 }
                 Ok(Some(_)) => {
+                    // Register agent spawn with guardrails using unique task_id
+                    self.guardrails.register_agent_spawn(&agent_unique_id).await;
+
                     // Successfully claimed — publish event and continue to spawn
                     self.event_bus.publish(crate::services::event_factory::task_event(
                         crate::services::event_bus::EventSeverity::Info,
@@ -385,6 +402,7 @@ where
                                                 task_id = %task.id,
                                                 "Workflow completed immediately on advance (no phases)"
                                             );
+                                            self.guardrails.register_agent_end(&agent_unique_id).await;
                                             drop(permit);
                                             return Ok(());
                                         }
@@ -396,6 +414,7 @@ where
                                             );
                                             // Don't fall through to normal spawn — the task is enrolled
                                             // in a workflow and should not be processed directly.
+                                            self.guardrails.register_agent_end(&agent_unique_id).await;
                                             drop(permit);
                                             return Ok(());
                                         }
@@ -709,6 +728,8 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let trajectory_repo = self.trajectory_repo.clone();
             let convergence_engine_config = self.convergence_engine_config.clone();
             let memory_repo = self.memory_repo.clone();
+            let guardrails = self.guardrails.clone();
+            let agent_unique_id_for_spawn = agent_unique_id.clone();
 
             // Cast the generic IntentVerifierService to the trait object for
             // convergent execution. This erases the <G, T> generics.
@@ -1228,6 +1249,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                         }
 
                         // Convergent path complete -- skip direct execution below
+                        guardrails.register_agent_end(&agent_unique_id_for_spawn).await;
                         return;
                     } else {
                         // Missing convergence infrastructure -- fall back to direct
@@ -1647,6 +1669,9 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                         }
                     }
                 }
+
+                // Unregister agent from guardrails on ALL direct execution exit paths
+                guardrails.register_agent_end(&agent_unique_id_for_spawn).await;
             });
         }
 

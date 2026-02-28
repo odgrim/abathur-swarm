@@ -8679,19 +8679,27 @@ impl<T: TaskRepository, M: MemoryRepository, G: GoalRepository>
 
         let count = timestamps.len() as u32;
 
-        // Store updated record
+        // Store updated record (update if exists, store if new)
         let content = serde_json::to_string(&timestamps)
             .map_err(|e| format!("Failed to serialize timestamps: {}", e))?;
 
-        let memory = crate::domain::models::Memory::episodic(pattern_key.to_string(), content)
-            .with_namespace("obstacle-escalation")
-            .with_type(crate::domain::models::MemoryType::Pattern)
-            .with_source("obstacle_escalation_handler");
+        if let Some(mut existing_mem) = existing {
+            existing_mem.content = content;
+            self.memory_repo
+                .update(&existing_mem)
+                .await
+                .map_err(|e| format!("Failed to update failure pattern: {}", e))?;
+        } else {
+            let memory = crate::domain::models::Memory::episodic(pattern_key.to_string(), content)
+                .with_namespace("obstacle-escalation")
+                .with_type(crate::domain::models::MemoryType::Pattern)
+                .with_source("obstacle_escalation_handler");
 
-        self.memory_repo
-            .store(&memory)
-            .await
-            .map_err(|e| format!("Failed to store failure pattern: {}", e))?;
+            self.memory_repo
+                .store(&memory)
+                .await
+                .map_err(|e| format!("Failed to store failure pattern: {}", e))?;
+        }
 
         Ok((count >= self.threshold, count))
     }
