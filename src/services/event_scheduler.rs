@@ -214,7 +214,7 @@ impl EventScheduler {
         .bind(&sched.name)
         .bind(sched.schedule.as_str())
         .bind(&schedule_data)
-        .bind(&payload_json)
+        .bind(payload_json)
         .bind(&category)
         .bind(&severity)
         .bind(&goal_id)
