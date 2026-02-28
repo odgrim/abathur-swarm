@@ -513,12 +513,11 @@ pub fn eligible_strategies(
             .filter(|s| !used_recently.contains(s.kind_name()))
             .collect();
 
-            if cands.is_empty() {
-                if budget.allows_strategy_cost(&StrategyKind::Decompose) {
+            if cands.is_empty()
+                && budget.allows_strategy_cost(&StrategyKind::Decompose) {
                     cands.push(StrategyKind::Decompose);
                 }
                 // If still empty -> Trapped (handled by loop control).
-            }
             cands
         }
 

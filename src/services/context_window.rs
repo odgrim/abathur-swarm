@@ -6,16 +6,10 @@
 use crate::services::context_truncation::estimate_tokens;
 
 /// Context window sizes for known models (in tokens).
-pub fn model_context_window(model: &str) -> usize {
-    let model_lower = model.to_lowercase();
-    if model_lower.contains("opus") || model_lower.contains("sonnet") {
-        200_000
-    } else if model_lower.contains("haiku") {
-        200_000
-    } else {
-        // Conservative default
-        200_000
-    }
+pub fn model_context_window(_model: &str) -> usize {
+    // All current Anthropic models (opus, sonnet, haiku) share the same 200k window.
+    // If model-specific windows are needed in the future, match on model name here.
+    200_000
 }
 
 /// Thresholds for the context window guard.

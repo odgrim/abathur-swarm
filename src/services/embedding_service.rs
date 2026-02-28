@@ -130,7 +130,7 @@ impl EmbeddingService {
         let api_calls = if inputs.len() < self.config.batch_threshold {
             inputs.len()
         } else {
-            (inputs.len() + max_size - 1) / max_size
+            inputs.len().div_ceil(max_size)
         };
 
         match self.embed_many(inputs).await {

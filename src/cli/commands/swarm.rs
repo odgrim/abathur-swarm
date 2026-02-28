@@ -816,13 +816,12 @@ async fn run_swarm_foreground(
                     if !json_mode {
                         let status = if *passed { "passed" } else { "failed" };
                         println!("  Task verified: {} - {} ({}/{})", task_id, status, checks_passed, checks_total);
-                        if !passed {
-                            if let Some(summary) = failures_summary {
+                        if !passed
+                            && let Some(summary) = failures_summary {
                                 for line in summary.lines() {
                                     println!("    FAILED CHECK: {}", line);
                                 }
                             }
-                        }
                     }
                 }
                 SwarmEvent::TaskQueuedForMerge { task_id, stage } => {
@@ -1194,7 +1193,7 @@ async fn start_mcp_servers(
 
 /// Extract port from URL like "http://localhost:9100"
 fn extract_port(url: &str) -> Option<u16> {
-    url.split(':').last()?.parse().ok()
+    url.split(':').next_back()?.parse().ok()
 }
 
 /// Stop MCP servers
@@ -1362,31 +1361,29 @@ async fn show_escalations(json_mode: bool) -> Result<()> {
             })
         }).collect();
         println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if escalations.is_empty() {
+        println!("No pending escalations.");
     } else {
-        if escalations.is_empty() {
-            println!("No pending escalations.");
-        } else {
-            println!("Pending Escalations ({}):", escalations.len());
-            println!("{}", "=".repeat(60));
-            for e in &escalations {
-                println!("\nID:       {}", e.id);
-                println!("Urgency:  {}", e.escalation.urgency.as_str());
-                println!("Reason:   {}", e.escalation.reason);
-                if let Some(gid) = e.goal_id {
-                    println!("Goal:     {}", gid);
-                }
-                if let Some(tid) = e.task_id {
-                    println!("Task:     {}", tid);
-                }
-                if !e.escalation.questions.is_empty() {
-                    println!("Questions:");
-                    for q in &e.escalation.questions {
-                        println!("  - {}", q);
-                    }
-                }
-                println!("Blocking: {}", e.is_blocking());
-                println!("Created:  {}", e.created_at.to_rfc3339());
+        println!("Pending Escalations ({}):", escalations.len());
+        println!("{}", "=".repeat(60));
+        for e in &escalations {
+            println!("\nID:       {}", e.id);
+            println!("Urgency:  {}", e.escalation.urgency.as_str());
+            println!("Reason:   {}", e.escalation.reason);
+            if let Some(gid) = e.goal_id {
+                println!("Goal:     {}", gid);
             }
+            if let Some(tid) = e.task_id {
+                println!("Task:     {}", tid);
+            }
+            if !e.escalation.questions.is_empty() {
+                println!("Questions:");
+                for q in &e.escalation.questions {
+                    println!("  - {}", q);
+                }
+            }
+            println!("Blocking: {}", e.is_blocking());
+            println!("Created:  {}", e.created_at.to_rfc3339());
         }
     }
 
@@ -1453,8 +1450,10 @@ async fn respond_to_escalation(id: &str, decision: &str, message: Option<&str>, 
 }
 
 async fn run_tick(json_mode: bool) -> Result<()> {
-    let mut config = SwarmConfig::default();
-    config.use_worktrees = false; // Disable worktrees for tick command
+    let config = SwarmConfig {
+        use_worktrees: false, // Disable worktrees for tick command
+        ..SwarmConfig::default()
+    };
 
     let orchestrator = build_cli_orchestrator(config).await?;
 

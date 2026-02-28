@@ -385,46 +385,38 @@ impl EventStore for InMemoryEventStore {
         let mut result: Vec<_> = events
             .iter()
             .filter(|e| {
-                if let Some(seq) = query.since_sequence {
-                    if e.sequence < seq {
+                if let Some(seq) = query.since_sequence
+                    && e.sequence < seq {
                         return false;
                     }
-                }
-                if let Some(seq) = query.until_sequence {
-                    if e.sequence > seq {
+                if let Some(seq) = query.until_sequence
+                    && e.sequence > seq {
                         return false;
                     }
-                }
-                if let Some(goal_id) = query.goal_id {
-                    if e.goal_id != Some(goal_id) {
+                if let Some(goal_id) = query.goal_id
+                    && e.goal_id != Some(goal_id) {
                         return false;
                     }
-                }
-                if let Some(task_id) = query.task_id {
-                    if e.task_id != Some(task_id) {
+                if let Some(task_id) = query.task_id
+                    && e.task_id != Some(task_id) {
                         return false;
                     }
-                }
-                if let Some(corr_id) = query.correlation_id {
-                    if e.correlation_id != Some(corr_id) {
+                if let Some(corr_id) = query.correlation_id
+                    && e.correlation_id != Some(corr_id) {
                         return false;
                     }
-                }
-                if let Some(category) = query.category {
-                    if e.category != category {
+                if let Some(category) = query.category
+                    && e.category != category {
                         return false;
                     }
-                }
-                if let Some(since) = query.since_time {
-                    if e.timestamp < since {
+                if let Some(since) = query.since_time
+                    && e.timestamp < since {
                         return false;
                     }
-                }
-                if let Some(until) = query.until_time {
-                    if e.timestamp > until {
+                if let Some(until) = query.until_time
+                    && e.timestamp > until {
                         return false;
                     }
-                }
                 true
             })
             .cloned()
@@ -539,7 +531,7 @@ impl EventStore for InMemoryEventStore {
             .filter(|dl| {
                 dl.resolved_at.is_none()
                     && dl.retry_count < dl.max_retries
-                    && dl.next_retry_at.map_or(true, |t| t <= now)
+                    && dl.next_retry_at.is_none_or(|t| t <= now)
             })
             .take(limit as usize)
             .cloned()
@@ -572,7 +564,7 @@ impl EventStore for InMemoryEventStore {
         let dead_letters = self.dead_letters.read().await;
         let result: Vec<_> = dead_letters
             .iter()
-            .filter(|dl| handler_name.map_or(true, |h| dl.handler_name == h))
+            .filter(|dl| handler_name.is_none_or(|h| dl.handler_name == h))
             .take(limit as usize)
             .cloned()
             .collect();
@@ -673,7 +665,7 @@ impl EventStore for InMemoryEventStore {
         let result: Vec<_> = webhooks
             .iter()
             .filter(|w| {
-                w.active && w.filter_category.as_deref().map_or(true, |c| c == category)
+                w.active && w.filter_category.as_deref().is_none_or(|c| c == category)
             })
             .cloned()
             .collect();

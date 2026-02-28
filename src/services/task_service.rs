@@ -383,13 +383,11 @@ impl<T: TaskRepository> TaskService<T> {
         // --- Parent inheritance ---
         // Subtasks of convergent parents inherit the convergent mode unless
         // other signals strongly push toward Direct.
-        if let TaskSource::SubtaskOf(_) = &task.source {
-            if let Some(parent_exec_mode) = parent_mode {
-                if parent_exec_mode.is_convergent() {
+        if let TaskSource::SubtaskOf(_) = &task.source
+            && let Some(parent_exec_mode) = parent_mode
+                && parent_exec_mode.is_convergent() {
                     convergent_score += 3;
                 }
-            }
-        }
 
         // --- Priority signal ---
         // Low priority tasks are "fast-lane": favor Direct execution to
@@ -440,11 +438,10 @@ impl<T: TaskRepository> TaskService<T> {
         let mut events = Vec::new();
 
         // Check for duplicate by idempotency key
-        if let Some(ref key) = idempotency_key {
-            if let Some(existing) = self.task_repo.get_by_idempotency_key(key).await? {
+        if let Some(ref key) = idempotency_key
+            && let Some(existing) = self.task_repo.get_by_idempotency_key(key).await? {
                 return Ok((existing, events));
             }
-        }
 
         // Validate parent exists if specified
         if let Some(pid) = parent_id {
@@ -552,8 +549,8 @@ impl<T: TaskRepository> TaskService<T> {
         ));
 
         // Emit WorkflowEnrolled if auto-enrolled
-        if task.context.custom.contains_key("workflow_state") {
-            if let Some(ref wf_name) = task.routing_hints.workflow_name {
+        if task.context.custom.contains_key("workflow_state")
+            && let Some(ref wf_name) = task.routing_hints.workflow_name {
                 events.push(Self::make_event(
                     EventSeverity::Info,
                     EventCategory::Workflow,
@@ -565,7 +562,6 @@ impl<T: TaskRepository> TaskService<T> {
                     },
                 ));
             }
-        }
 
         // If the task is immediately ready (no deps), collect TaskReady event
         if task.status == TaskStatus::Ready {
@@ -883,8 +879,8 @@ impl<T: TaskRepository> TaskService<T> {
                     reason: e,
                 });
             }
-        } else if self.are_dependencies_complete(task).await? {
-            if let Err(e) = task.transition_to(TaskStatus::Ready) {
+        } else if self.are_dependencies_complete(task).await?
+            && let Err(e) = task.transition_to(TaskStatus::Ready) {
                 warn!(task_id = %task.id, error = %e, "Failed to transition task to Ready");
                 return Err(DomainError::InvalidStateTransition {
                     from: task.status.as_str().to_string(),
@@ -892,7 +888,6 @@ impl<T: TaskRepository> TaskService<T> {
                     reason: e,
                 });
             }
-        }
 
         Ok(())
     }

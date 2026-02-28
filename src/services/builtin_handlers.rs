@@ -397,7 +397,7 @@ impl EventHandler for EscalationTimeoutHandler {
         let now = chrono::Utc::now();
         let store = self.escalation_store.read().await;
         let expired: Vec<_> = store.iter()
-            .filter(|e| e.escalation.deadline.map_or(false, |d| now > d))
+            .filter(|e| e.escalation.deadline.is_some_and(|d| now > d))
             .cloned()
             .collect();
         drop(store);
@@ -638,11 +638,10 @@ impl<T: TaskRepository> ReviewFailureLoopHandler<T> {
 
     /// Check whether a task is a review task based on agent_type or title.
     fn is_review_task(task: &Task) -> bool {
-        if let Some(ref agent_type) = task.agent_type {
-            if agent_type == "code-reviewer" {
+        if let Some(ref agent_type) = task.agent_type
+            && agent_type == "code-reviewer" {
                 return true;
             }
-        }
         task.title.starts_with("Review")
     }
 }
@@ -728,8 +727,10 @@ impl<T: TaskRepository + 'static> EventHandler for ReviewFailureLoopHandler<T> {
 
         // --- Create re-plan task ---
         let replan_id = uuid::Uuid::new_v4();
-        let mut replan_context = TaskContext::default();
-        replan_context.input = review_feedback.clone();
+        let mut replan_context = TaskContext {
+            input: review_feedback.clone(),
+            ..TaskContext::default()
+        };
         replan_context.custom.insert(
             "review_iteration".to_string(),
             serde_json::json!(next_iteration),
@@ -1386,7 +1387,7 @@ impl<T: TaskRepository + 'static> EventHandler for RetryProcessingHandler<T> {
             // exhaust their turn budget should not retry indefinitely.
             if task.context.custom.get("last_failure_reason")
                 .and_then(|v| v.as_str())
-                .map_or(false, |e| e.starts_with("error_max_turns"))
+                .is_some_and(|e| e.starts_with("error_max_turns"))
             {
                 let consecutive = task.context.custom
                     .get("consecutive_budget_failures")
@@ -2687,11 +2688,10 @@ impl EventHandler for TriggerCatchupHandler {
         }
 
         // Update watermark after processing
-        if max_seq > since_seq {
-            if let Err(e) = self.event_store.set_watermark("TriggerRuleEngine", max_seq).await {
+        if max_seq > since_seq
+            && let Err(e) = self.event_store.set_watermark("TriggerRuleEngine", max_seq).await {
                 tracing::warn!("TriggerCatchup: failed to update watermark: {}", e);
             }
-        }
 
         tracing::debug!(
             events_replayed = events.len(),
@@ -2759,17 +2759,14 @@ impl EventStorePollerHandler {
             Ok(None) => {
                 // No watermark yet — start from max_sequence - replay_window to
                 // ensure recent events are replayed for catch-up
-                match self.event_store.latest_sequence().await {
-                    Ok(Some(seq)) => {
-                        let start_from = seq.0.saturating_sub(replay_window);
-                        let mut hwm = self.high_water_mark.write().await;
-                        *hwm = start_from;
-                        tracing::info!(
-                            "EventStorePoller: no watermark found, starting from seq {} (latest {} - window {})",
-                            start_from, seq.0, replay_window
-                        );
-                    }
-                    _ => {}
+                if let Ok(Some(seq)) = self.event_store.latest_sequence().await {
+                    let start_from = seq.0.saturating_sub(replay_window);
+                    let mut hwm = self.high_water_mark.write().await;
+                    *hwm = start_from;
+                    tracing::info!(
+                        "EventStorePoller: no watermark found, starting from seq {} (latest {} - window {})",
+                        start_from, seq.0, replay_window
+                    );
                 }
             }
             Err(e) => {
@@ -3117,7 +3114,7 @@ impl<T: TaskRepository + 'static> EventHandler for TaskSLAEnforcementHandler<T> 
 
                 if remaining <= 0 {
                     // Breached
-                    let overdue_secs = (-remaining) as i64;
+                    let overdue_secs = -remaining;
                     new_events.push(UnifiedEvent {
                         id: EventId::new(),
                         sequence: SequenceNumber(0),
@@ -3379,11 +3376,10 @@ impl<G: GoalRepository + 'static> EventHandler for MemoryInformedDecompositionHa
             }
 
             // Check cooldown
-            if let Some(last) = cooldowns.get(&goal.id) {
-                if (now - *last).num_seconds() < self.cooldown_secs as i64 {
+            if let Some(last) = cooldowns.get(&goal.id)
+                && (now - *last).num_seconds() < self.cooldown_secs as i64 {
                     continue;
                 }
-            }
 
             cooldowns.insert(goal.id, now);
 
@@ -3437,6 +3433,12 @@ impl<G: GoalRepository + 'static> EventHandler for MemoryInformedDecompositionHa
 /// Triggered by `MemoryConflictDetected`. Escalates conflicts that are
 /// flagged for review (low similarity) in semantic-tier memories.
 pub struct MemoryConflictEscalationHandler;
+
+impl Default for MemoryConflictEscalationHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl MemoryConflictEscalationHandler {
     pub fn new() -> Self {
@@ -3894,7 +3896,7 @@ impl<T: TaskRepository + 'static, G: GoalRepository + 'static> EventHandler for 
         let stale_cutoff = now - chrono::Duration::seconds(self.stale_threshold_secs as i64);
 
         for task in running {
-            let is_stale = task.started_at.map_or(true, |s| s < stale_cutoff);
+            let is_stale = task.started_at.is_none_or(|s| s < stale_cutoff);
             if is_stale {
                 let mut updated = task.clone();
                 updated.retry_count += 1;
@@ -7417,7 +7419,7 @@ impl<G: GoalRepository, T: TaskRepository> GoalConvergenceCheckHandler<G, T> {
         // Inject the full Overmind MCP tools reference and agent design principles
         desc.push_str("---\n\n");
         desc.push_str(OVERMIND_PROMPT_PREFIX);
-        desc.push_str("\n");
+        desc.push('\n');
         desc.push_str(OVERMIND_PROMPT_SUFFIX);
         desc.push_str("\n---\n\n");
 
@@ -7445,7 +7447,7 @@ impl<G: GoalRepository, T: TaskRepository> GoalConvergenceCheckHandler<G, T> {
                 for c in &goal.constraints {
                     desc.push_str(&format!("- **{}** ({:?}): {}\n", c.name, c.constraint_type, c.description));
                 }
-                desc.push_str("\n");
+                desc.push('\n');
             }
         }
 
@@ -7538,14 +7540,12 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
 
         // Budget gate: if triggered by the scheduler (not a budget opportunity), and budget
         // pressure is critical, skip creating new work.
-        if !is_budget_trigger {
-            if let Some(ref bt) = self.budget_tracker {
-                if bt.should_pause_new_work().await {
+        if !is_budget_trigger
+            && let Some(ref bt) = self.budget_tracker
+                && bt.should_pause_new_work().await {
                     tracing::debug!("GoalConvergenceCheckHandler: pausing convergence check — budget at critical pressure");
                     return Ok(Reaction::None);
                 }
-            }
-        }
 
         // Build idempotency key.
         // Budget-triggered checks get a unique key per timestamp to bypass the 4-hour window.
@@ -8022,13 +8022,11 @@ fn get_status_string(
     config_key: &str,
     default: &str,
 ) -> String {
-    if let Some(m) = manifest {
-        if let Some(val) = m.config.get(config_key) {
-            if let Some(s) = val.as_str() {
+    if let Some(m) = manifest
+        && let Some(val) = m.config.get(config_key)
+            && let Some(s) = val.as_str() {
                 return s.to_string();
             }
-        }
-    }
     default.to_string()
 }
 

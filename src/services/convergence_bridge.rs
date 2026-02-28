@@ -184,8 +184,8 @@ pub fn build_convergent_prompt(
 
     // Acceptance criteria from overseers (latest observation)
     if let Some(obs) = trajectory.observations.last() {
-        if let Some(ref test_results) = obs.overseer_signals.test_results {
-            if !test_results.failing_test_names.is_empty() {
+        if let Some(ref test_results) = obs.overseer_signals.test_results
+            && !test_results.failing_test_names.is_empty() {
                 sections.push(format!(
                     "Failing tests that must pass:\n{}",
                     test_results.failing_test_names.iter()
@@ -194,15 +194,13 @@ pub fn build_convergent_prompt(
                         .join("\n")
                 ));
             }
-        }
-        if let Some(ref build_result) = obs.overseer_signals.build_result {
-            if !build_result.success {
+        if let Some(ref build_result) = obs.overseer_signals.build_result
+            && !build_result.success {
                 sections.push(format!(
                     "Build errors that must be fixed:\n{}",
                     build_result.errors.join("\n")
                 ));
             }
-        }
     }
 
     // Intent verification feedback from previous LLM-based verification
@@ -248,14 +246,13 @@ pub fn build_convergent_prompt(
             }
         }
 
-        if let Some(ref guidance) = ivr.reprompt_guidance {
-            if !guidance.focus_areas.is_empty() {
+        if let Some(ref guidance) = ivr.reprompt_guidance
+            && !guidance.focus_areas.is_empty() {
                 verification_section.push_str("\n**Focus Areas** (prioritize these):\n");
                 for area in &guidance.focus_areas {
                     verification_section.push_str(&format!("- {}\n", area));
                 }
             }
-        }
 
         sections.push(verification_section);
     }
@@ -274,9 +271,11 @@ pub fn build_convergent_prompt(
 pub fn build_engine_config(config: &SwarmConfig) -> ConvergenceEngineConfig {
     let loop_config = &config.convergence;
 
-    let mut policy = ConvergencePolicy::default();
-    policy.acceptance_threshold = loop_config.min_confidence_threshold;
-    policy.partial_acceptance = loop_config.auto_retry_partial;
+    let policy = ConvergencePolicy {
+        acceptance_threshold: loop_config.min_confidence_threshold,
+        partial_acceptance: loop_config.auto_retry_partial,
+        ..ConvergencePolicy::default()
+    };
 
     ConvergenceEngineConfig {
         default_policy: policy,
@@ -433,13 +432,12 @@ fn persistent_gaps(trajectory: &Trajectory) -> Vec<String> {
                 result.push(format!("- Failing test: {}", failure));
             }
         }
-        if let Some(ref build_result) = obs.overseer_signals.build_result {
-            if !build_result.success {
+        if let Some(ref build_result) = obs.overseer_signals.build_result
+            && !build_result.success {
                 for error in &build_result.errors {
                     result.push(format!("- Build error: {}", error));
                 }
             }
-        }
     }
 
     result

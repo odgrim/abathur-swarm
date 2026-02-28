@@ -88,13 +88,12 @@ impl<W: WorktreeRepository> WorktreeService<W> {
         base_ref: Option<&str>,
     ) -> DomainResult<Worktree> {
         // Check if worktree already exists for this task
-        if let Some(existing) = self.repo.get_by_task(task_id).await? {
-            if !existing.status.is_terminal() {
+        if let Some(existing) = self.repo.get_by_task(task_id).await?
+            && !existing.status.is_terminal() {
                 return Err(DomainError::ValidationFailed(
                     format!("Worktree already exists for task {}", task_id)
                 ));
             }
-        }
 
         let base = base_ref.unwrap_or(&self.config.default_base_ref);
         let branch = Worktree::branch_name_for_task(task_id);
@@ -214,11 +213,10 @@ impl<W: WorktreeRepository> WorktreeService<W> {
         }
 
         // Delete branch if merged
-        if worktree.status == WorktreeStatus::Merged {
-            if let Err(e) = self.git_delete_branch(&worktree.branch).await {
+        if worktree.status == WorktreeStatus::Merged
+            && let Err(e) = self.git_delete_branch(&worktree.branch).await {
                 tracing::warn!("Failed to delete branch: {}", e);
             }
-        }
 
         worktree.remove();
         self.repo.update(&worktree).await?;

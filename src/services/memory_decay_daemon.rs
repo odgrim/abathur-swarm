@@ -109,6 +109,7 @@ pub enum StopReason {
 
 /// Status of the decay daemon.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct DaemonStatus {
     /// Whether the daemon is running.
     pub running: bool,
@@ -128,20 +129,6 @@ pub struct DaemonStatus {
     pub total_promoted: u64,
 }
 
-impl Default for DaemonStatus {
-    fn default() -> Self {
-        Self {
-            running: false,
-            total_runs: 0,
-            successful_runs: 0,
-            failed_runs: 0,
-            consecutive_failures: 0,
-            last_run: None,
-            total_pruned: 0,
-            total_promoted: 0,
-        }
-    }
-}
 
 /// Handle to control the decay daemon.
 pub struct DaemonHandle {

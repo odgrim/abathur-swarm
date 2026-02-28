@@ -93,13 +93,11 @@ impl ClickUpIngestionAdapter {
         }
 
         // Parse date_updated (Unix ms) to DateTime<Utc>.
-        if let Some(ref ts_str) = task.date_updated {
-            if let Ok(ts_ms) = ts_str.parse::<i64>() {
-                if let Some(dt) = DateTime::from_timestamp_millis(ts_ms) {
+        if let Some(ref ts_str) = task.date_updated
+            && let Ok(ts_ms) = ts_str.parse::<i64>()
+                && let Some(dt) = DateTime::from_timestamp_millis(ts_ms) {
                     item = item.with_external_updated_at(dt);
                 }
-            }
-        }
 
         item
     }

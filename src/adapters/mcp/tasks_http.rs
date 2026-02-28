@@ -265,11 +265,10 @@ async fn list_tasks<T: TaskRepository + Clone + Send + Sync + 'static>(
             let mut tasks: Vec<_> = tasks.into_iter().map(TaskResponse::from).collect();
 
             // Filter by status if specified
-            if let Some(status_str) = &params.status {
-                if let Some(status) = TaskStatus::from_str(status_str) {
+            if let Some(status_str) = &params.status
+                && let Some(status) = TaskStatus::from_str(status_str) {
                     tasks.retain(|t| t.status == status.as_str());
                 }
-            }
 
             tasks.truncate(params.limit);
             Ok(Json(tasks))

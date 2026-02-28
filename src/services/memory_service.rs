@@ -791,7 +791,7 @@ impl<R: MemoryRepository> MemoryService<R> {
 
         // Medium similarity (0.3-0.7) with same tier: try semantic merge
         // This combines information from both memories when they're complementary
-        if similarity >= 0.3 && similarity < 0.7 {
+        if (0.3..0.7).contains(&similarity) {
             let merged_content = self.create_merged_content(mem_a, mem_b);
             // Use the newer memory as the base to merge into
             let merged_id = if mem_a.created_at > mem_b.created_at {
@@ -833,13 +833,13 @@ impl<R: MemoryRepository> MemoryService<R> {
 
         // Extract sentences/paragraphs from each
         let newer_parts: Vec<&str> = newer.content
-            .split(|c| c == '.' || c == '\n')
+            .split(['.', '\n'])
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();
 
         let older_parts: Vec<&str> = older.content
-            .split(|c| c == '.' || c == '\n')
+            .split(['.', '\n'])
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .collect();
@@ -918,12 +918,11 @@ impl<R: MemoryRepository> MemoryService<R> {
             Some(ConflictResolution::FlaggedForReview) | None => {
                 // Just mark both memories as needing review
                 for id in [conflict.memory_a, conflict.memory_b] {
-                    if let Some(mut mem) = self.repository.get(id).await? {
-                        if !mem.metadata.tags.contains(&"needs-review".to_string()) {
+                    if let Some(mut mem) = self.repository.get(id).await?
+                        && !mem.metadata.tags.contains(&"needs-review".to_string()) {
                             mem.metadata.tags.push("needs-review".to_string());
                             self.repository.update(&mem).await?;
                         }
-                    }
                 }
             }
         }

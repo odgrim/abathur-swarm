@@ -369,11 +369,10 @@ async fn find_schedule(
     }
 
     // Try by UUID prefix
-    if let Ok(uuid) = resolve_schedule_id(pool, id_or_name).await {
-        if let Some(schedule) = repo.get(uuid).await? {
+    if let Ok(uuid) = resolve_schedule_id(pool, id_or_name).await
+        && let Some(schedule) = repo.get(uuid).await? {
             return Ok(schedule);
         }
-    }
 
     anyhow::bail!("Task schedule not found: {}", id_or_name)
 }

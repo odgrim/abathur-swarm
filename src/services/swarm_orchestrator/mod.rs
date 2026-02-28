@@ -448,8 +448,8 @@ where
         }
 
         // Start memory decay daemon if memory repo is available
-        if self.memory_repo.is_some() {
-            if let Err(e) = self.start_decay_daemon().await {
+        if self.memory_repo.is_some()
+            && let Err(e) = self.start_decay_daemon().await {
                 self.audit_log.log(
                     AuditEntry::new(
                         AuditLevel::Warning,
@@ -460,7 +460,6 @@ where
                     ),
                 ).await;
             }
-        }
 
         // Refresh active goals cache for agent context
         if let Err(e) = self.refresh_active_goals_cache().await {
@@ -512,8 +511,8 @@ where
         }
 
         // Register existing agent templates with A2A gateway for discovery
-        if self.config.mcp_servers.a2a_gateway.is_some() {
-            if let Err(e) = self.register_all_agent_templates().await {
+        if self.config.mcp_servers.a2a_gateway.is_some()
+            && let Err(e) = self.register_all_agent_templates().await {
                 self.audit_log.log(
                     AuditEntry::new(
                         AuditLevel::Warning,
@@ -524,7 +523,6 @@ where
                     ),
                 ).await;
             }
-        }
 
         // Wait for MCP servers to become healthy before entering the main loop.
         // If servers never come up, abort startup rather than spawning agents
@@ -726,12 +724,11 @@ where
 
         while let Ok(task_id) = rx.try_recv() {
             // Fetch and validate task is still Ready
-            if let Ok(Some(task)) = self.task_repo.get(task_id).await {
-                if task.status == crate::domain::models::TaskStatus::Ready {
+            if let Ok(Some(task)) = self.task_repo.get(task_id).await
+                && task.status == crate::domain::models::TaskStatus::Ready {
                     self.spawn_task_agent(&task, event_tx).await?;
                     spawned_ids.insert(task_id);
                 }
-            }
         }
 
         // Also pick up any ready tasks not yet signaled via the channel
@@ -752,13 +749,12 @@ where
 
         while let Ok(task_id) = rx.try_recv() {
             // Validate task is still in a state that warrants specialist attention
-            if let Ok(Some(task)) = self.task_repo.get(task_id).await {
-                if task.status == crate::domain::models::TaskStatus::Failed {
+            if let Ok(Some(task)) = self.task_repo.get(task_id).await
+                && task.status == crate::domain::models::TaskStatus::Failed {
                     // Delegate to existing specialist processing
                     self.process_specialist_triggers(event_tx).await?;
                     break; // process_specialist_triggers handles all pending specialists
                 }
-            }
         }
 
         Ok(())

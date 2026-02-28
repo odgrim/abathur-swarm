@@ -102,9 +102,9 @@ where
         match &response.decision {
             EscalationDecision::Accept => {
                 // Unblock associated task if it was blocked
-                if let Some(task_id) = escalation.task_id {
-                    if let Ok(Some(task)) = self.task_repo.get(task_id).await {
-                        if task.status == TaskStatus::Blocked {
+                if let Some(task_id) = escalation.task_id
+                    && let Ok(Some(task)) = self.task_repo.get(task_id).await
+                        && task.status == TaskStatus::Blocked {
                             let envelope = CommandEnvelope::new(
                                 CommandSource::Human,
                                 DomainCommand::Task(TaskCommand::Transition {
@@ -115,8 +115,6 @@ where
                             command_bus.dispatch(envelope).await
                                 .map_err(|e| DomainError::ExecutionFailed(format!("Command dispatch failed: {}", e)))?;
                         }
-                    }
-                }
             }
             EscalationDecision::Reject => {
                 // Fail the associated task
@@ -134,8 +132,8 @@ where
             }
             EscalationDecision::Clarify { clarification } => {
                 // Append clarification to task description, then unblock via CommandBus
-                if let Some(task_id) = escalation.task_id {
-                    if let Ok(Some(task)) = self.task_repo.get(task_id).await {
+                if let Some(task_id) = escalation.task_id
+                    && let Ok(Some(task)) = self.task_repo.get(task_id).await {
                         // Update description directly (no command for description updates)
                         let mut updated = task.clone();
                         updated.description = format!(
@@ -168,12 +166,11 @@ where
                                 .map_err(|e| DomainError::ExecutionFailed(format!("Command dispatch failed: {}", e)))?;
                         }
                     }
-                }
             }
             EscalationDecision::ModifyIntent { new_requirements, removed_requirements } => {
                 // Update goal description directly (no command for description updates)
-                if let Some(goal_id) = escalation.goal_id {
-                    if let Ok(Some(mut goal)) = self.goal_repo.get(goal_id).await {
+                if let Some(goal_id) = escalation.goal_id
+                    && let Ok(Some(mut goal)) = self.goal_repo.get(goal_id).await {
                         for req in new_requirements {
                             goal.description = format!("{}\n- {}", goal.description, req);
                         }
@@ -199,11 +196,10 @@ where
                             },
                         )).await;
                     }
-                }
                 // Unblock associated task via CommandBus
-                if let Some(task_id) = escalation.task_id {
-                    if let Ok(Some(task)) = self.task_repo.get(task_id).await {
-                        if task.status == TaskStatus::Blocked {
+                if let Some(task_id) = escalation.task_id
+                    && let Ok(Some(task)) = self.task_repo.get(task_id).await
+                        && task.status == TaskStatus::Blocked {
                             let envelope = CommandEnvelope::new(
                                 CommandSource::Human,
                                 DomainCommand::Task(TaskCommand::Transition {
@@ -214,8 +210,6 @@ where
                             command_bus.dispatch(envelope).await
                                 .map_err(|e| DomainError::ExecutionFailed(format!("Command dispatch failed: {}", e)))?;
                         }
-                    }
-                }
             }
             EscalationDecision::Abort => {
                 // Suspend the goal via CommandBus
@@ -280,7 +274,7 @@ where
             let store = self.escalation_store.read().await;
             store.iter()
                 .filter(|e| {
-                    e.escalation.deadline.map_or(false, |d| now > d)
+                    e.escalation.deadline.is_some_and(|d| now > d)
                 })
                 .cloned()
                 .collect()

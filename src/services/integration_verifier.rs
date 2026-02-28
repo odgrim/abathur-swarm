@@ -738,11 +738,10 @@ fn parse_test_output(stdout: &str, stderr: &str) -> TestResult {
 
     // Count tests from "running X tests" lines
     for line in stdout.lines() {
-        if line.contains("running") && line.contains("test") {
-            if let Some(count) = line.split_whitespace().nth(1).and_then(|s| s.parse::<usize>().ok()) {
+        if line.contains("running") && line.contains("test")
+            && let Some(count) = line.split_whitespace().nth(1).and_then(|s| s.parse::<usize>().ok()) {
                 total += count;
             }
-        }
         if line.contains("... ok") {
             passed += 1;
         } else if line.contains("... FAILED") {

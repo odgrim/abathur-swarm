@@ -750,7 +750,7 @@ async fn send_a2a_message(
     // Send to gateway
     let client = reqwest::Client::new();
     let response = client
-        .post(&format!("{}/rpc", gateway))
+        .post(format!("{}/rpc", gateway))
         .header("Content-Type", "application/json")
         .json(&request)
         .send()
@@ -844,7 +844,7 @@ async fn handle_cards_command(command: CardsCommands, json_mode: bool) -> Result
     match command {
         CardsCommands::List { gateway } => {
             let client = reqwest::Client::new();
-            let response = client.get(&format!("{}/agents", gateway)).send().await;
+            let response = client.get(format!("{}/agents", gateway)).send().await;
 
             match response {
                 Ok(resp) if resp.status().is_success() => {
@@ -880,7 +880,7 @@ async fn handle_cards_command(command: CardsCommands, json_mode: bool) -> Result
             gateway,
         } => {
             let client = reqwest::Client::new();
-            let response = client.get(&format!("{}/agents", gateway)).send().await;
+            let response = client.get(format!("{}/agents", gateway)).send().await;
 
             match response {
                 Ok(resp) if resp.status().is_success() => {
@@ -932,7 +932,7 @@ async fn handle_cards_command(command: CardsCommands, json_mode: bool) -> Result
         CardsCommands::Show { agent_id, gateway } => {
             let client = reqwest::Client::new();
             let response = client
-                .get(&format!("{}/agents/{}", gateway, agent_id))
+                .get(format!("{}/agents/{}", gateway, agent_id))
                 .send()
                 .await;
 

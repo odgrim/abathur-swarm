@@ -397,7 +397,7 @@ impl Substrate for AnthropicApiSubstrate {
                 session.complete(&text);
             }
             Err(e) => {
-                session.fail(&e.to_string());
+                session.fail(e.to_string());
             }
         }
 
@@ -522,10 +522,8 @@ impl Substrate for AnthropicApiSubstrate {
                                 message: error.message,
                             }).await;
                         }
-                        StreamEvent::ContentBlockStart { content_block, .. } => {
-                            if let ContentBlock::ToolUse { id, name, .. } = content_block {
-                                let _ = tx.send(SubstrateOutput::ToolStart { name, id }).await;
-                            }
+                        StreamEvent::ContentBlockStart { content_block: ContentBlock::ToolUse { id, name, .. }, .. } => {
+                            let _ = tx.send(SubstrateOutput::ToolStart { name, id }).await;
                         }
                         _ => {}
                     }
@@ -533,8 +531,8 @@ impl Substrate for AnthropicApiSubstrate {
             }
 
             // If we didn't get streaming events, try parsing as a regular JSON response
-            if all_text.is_empty() {
-                if let Ok(result) = serde_json::from_str::<MessagesResponse>(&body) {
+            if all_text.is_empty()
+                && let Ok(result) = serde_json::from_str::<MessagesResponse>(&body) {
                     for block in &result.content {
                         if let ContentBlock::Text { text } = block {
                             all_text.push_str(text);
@@ -556,7 +554,6 @@ impl Substrate for AnthropicApiSubstrate {
                         result: all_text.clone(),
                     }).await;
                 }
-            }
 
             // Update session
             {

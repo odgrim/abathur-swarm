@@ -37,13 +37,12 @@ impl<R: TaskScheduleRepository> TaskScheduleService<R> {
         }
 
         // Validate interval
-        if let TaskScheduleType::Interval { every_secs } = schedule.schedule {
-            if every_secs < 10 {
+        if let TaskScheduleType::Interval { every_secs } = schedule.schedule
+            && every_secs < 10 {
                 return Err(crate::domain::errors::DomainError::ValidationFailed(
                     "Interval must be at least 10 seconds".to_string()
                 ));
             }
-        }
 
         self.repo.create(&schedule).await?;
         Ok(schedule)

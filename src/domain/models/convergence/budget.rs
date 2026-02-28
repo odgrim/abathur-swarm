@@ -122,7 +122,7 @@ impl ConvergenceBudget {
     /// `max_iterations`.
     pub fn allows_strategy_cost(&self, strategy: &StrategyKind) -> bool {
         self.tokens_used + strategy.estimated_cost() <= self.max_tokens
-            && self.iterations_used + 1 <= self.max_iterations
+            && self.iterations_used < self.max_iterations
     }
 
     /// Whether the engine should request a budget extension.

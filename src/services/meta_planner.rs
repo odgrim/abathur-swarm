@@ -319,8 +319,8 @@ where
             .ok_or_else(|| DomainError::ValidationFailed(format!("Agent not found: {}", agent_name)))?;
 
         // Query real metrics from EvolutionLoop if available
-        if let Some(ref evo) = self.evolution_loop {
-            if let Some(stats) = evo.get_stats(agent_name).await {
+        if let Some(ref evo) = self.evolution_loop
+            && let Some(stats) = evo.get_stats(agent_name).await {
                 return Ok(AgentMetrics {
                     total_tasks: stats.total_tasks as u64,
                     successful_tasks: stats.successful_tasks as u64,
@@ -330,7 +330,6 @@ where
                     success_rate: stats.success_rate,
                 });
             }
-        }
 
         Ok(AgentMetrics::default())
     }

@@ -232,11 +232,10 @@ impl CommandOutput for TaskDetailOutput {
             if let Some(serde_json::Value::String(sat)) = self.context_custom.get("satisfaction") {
                 lines.push(format!("  Satisfaction: {}", sat));
             }
-            if let Some(serde_json::Value::Number(conf)) = self.context_custom.get("confidence") {
-                if let Some(c) = conf.as_f64() {
+            if let Some(serde_json::Value::Number(conf)) = self.context_custom.get("confidence")
+                && let Some(c) = conf.as_f64() {
                     lines.push(format!("  Confidence: {:.0}%", c * 100.0));
                 }
-            }
             if let Some(serde_json::Value::Number(iter)) = self.context_custom.get("iteration") {
                 lines.push(format!("  Iteration: {}", iter));
             }

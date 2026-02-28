@@ -336,8 +336,6 @@ impl OvermindService {
         Ok(decision)
     }
 
-    /// Extract JSON from a response that might have surrounding text.
-
     // ========================================================================
     // Configuration
     // ========================================================================

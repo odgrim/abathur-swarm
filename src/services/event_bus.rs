@@ -1626,9 +1626,9 @@ impl EventBus {
         }
 
         // Persist if store is configured
-        if self.config.persist_events {
-            if let Some(ref store) = self.store {
-                if let Err(e) = store.append(&event).await {
+        if self.config.persist_events
+            && let Some(ref store) = self.store
+                && let Err(e) = store.append(&event).await {
                     let err_msg = e.to_string();
                     if err_msg.contains("UNIQUE constraint failed: events.sequence") {
                         // Sequence collision with another process — re-sync counter and retry
@@ -1644,8 +1644,6 @@ impl EventBus {
                         tracing::warn!("Failed to persist event: {}", e);
                     }
                 }
-            }
-        }
 
         // Broadcast to subscribers (ignore send errors - may have no subscribers)
         let _ = self.sender.send(event);

@@ -204,11 +204,10 @@ impl<G: GoalRepository> GoalContextService<G> {
         // Check for explicit domains in task context
         if let Some(serde_json::Value::Array(explicit)) = task.context.custom.get("domains") {
             for d in explicit {
-                if let Some(s) = d.as_str() {
-                    if !domains.contains(&s.to_string()) {
+                if let Some(s) = d.as_str()
+                    && !domains.contains(&s.to_string()) {
                         domains.push(s.to_string());
                     }
-                }
             }
         }
 

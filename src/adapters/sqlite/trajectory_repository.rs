@@ -74,7 +74,7 @@ impl TrajectoryRepository for SqliteTrajectoryRepository {
         let forced_strategy_json = trajectory
             .forced_strategy
             .as_ref()
-            .map(|s| serde_json::to_string(s))
+            .map(serde_json::to_string)
             .transpose()?;
 
         let created_at = trajectory.created_at.to_rfc3339();
@@ -204,11 +204,10 @@ impl TrajectoryRepository for SqliteTrajectoryRepository {
 
             // Collect strategy entries with positive convergence delta
             for entry in &trajectory.strategy_log {
-                if let Some(delta) = entry.convergence_delta_achieved {
-                    if delta > 0.0 {
+                if let Some(delta) = entry.convergence_delta_achieved
+                    && delta > 0.0 {
                         successful_entries.push(entry.clone());
                     }
-                }
             }
 
             if successful_entries.len() >= limit {

@@ -676,14 +676,13 @@ impl TriggerRuleEngine {
                 }
 
                 // 2. Cooldown check
-                if let Some(cooldown) = rule.cooldown {
-                    if let Some(last) = rule.last_fired {
+                if let Some(cooldown) = rule.cooldown
+                    && let Some(last) = rule.last_fired {
                         let elapsed = (now - last).to_std().unwrap_or_default();
                         if elapsed < cooldown {
                             continue;
                         }
                     }
-                }
 
                 // 3. Condition check
                 let condition_met = match &rule.condition {

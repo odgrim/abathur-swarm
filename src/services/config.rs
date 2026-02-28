@@ -546,9 +546,8 @@ impl Config {
     }
 
     fn apply_env_overrides(&mut self) {
-        if let Ok(val) = std::env::var("ABATHUR_LIMITS_MAX_DEPTH") {
-            if let Ok(v) = val.parse() { self.limits.max_depth = v; }
-        }
+        if let Ok(val) = std::env::var("ABATHUR_LIMITS_MAX_DEPTH")
+            && let Ok(v) = val.parse() { self.limits.max_depth = v; }
         if let Ok(val) = std::env::var("ABATHUR_DATABASE_PATH") {
             self.database.path = val;
         }

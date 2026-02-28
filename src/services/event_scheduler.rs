@@ -361,7 +361,7 @@ impl EventScheduler {
                             ScheduleType::Cron { expression } => {
                                 if let Ok(schedule) = cron::Schedule::from_str(expression) {
                                     let reference_time = sched.last_fired.unwrap_or(sched.created_at);
-                                    schedule.after(&reference_time).next().map_or(false, |next| now >= next)
+                                    schedule.after(&reference_time).next().is_some_and(|next| now >= next)
                                 } else {
                                     false
                                 }
@@ -413,26 +413,26 @@ impl EventScheduler {
                 }
 
                 // Batch-flush fire state to DB every 10 ticks
-                if pool.is_some() && tick_count % 10 == 0 && fire_state_dirty.load(Ordering::Acquire) > 0 {
-                    let scheds = schedules.read().await;
-                    let pool_ref = pool.as_ref().unwrap();
-                    for sched in scheds.iter() {
-                        if let Some(last_fired) = sched.last_fired {
-                            let id = sched.id.to_string();
-                            let last_fired_str = last_fired.to_rfc3339();
-                            let _ = sqlx::query(
-                                "UPDATE scheduled_events SET last_fired = ?1, fire_count = ?2, active = ?3 WHERE id = ?4"
-                            )
-                            .bind(&last_fired_str)
-                            .bind(sched.fire_count as i64)
-                            .bind(sched.active as i32)
-                            .bind(&id)
-                            .execute(pool_ref)
-                            .await;
+                if let Some(pool_ref) = pool.as_ref()
+                    && tick_count.is_multiple_of(10) && fire_state_dirty.load(Ordering::Acquire) > 0 {
+                        let scheds = schedules.read().await;
+                        for sched in scheds.iter() {
+                            if let Some(last_fired) = sched.last_fired {
+                                let id = sched.id.to_string();
+                                let last_fired_str = last_fired.to_rfc3339();
+                                let _ = sqlx::query(
+                                    "UPDATE scheduled_events SET last_fired = ?1, fire_count = ?2, active = ?3 WHERE id = ?4"
+                                )
+                                .bind(&last_fired_str)
+                                .bind(sched.fire_count as i64)
+                                .bind(sched.active as i32)
+                                .bind(&id)
+                                .execute(pool_ref)
+                                .await;
+                            }
                         }
+                        fire_state_dirty.store(0, Ordering::Release);
                     }
-                    fire_state_dirty.store(0, Ordering::Release);
-                }
             }
         })
     }

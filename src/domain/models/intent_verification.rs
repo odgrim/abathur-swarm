@@ -590,22 +590,21 @@ impl IntentVerificationResult {
     /// Check if we should attempt another iteration.
     pub fn should_iterate(&self) -> bool {
         // Don't iterate if human escalation is blocking
-        if let Some(ref esc) = self.escalation {
-            if esc.needs_human && esc.urgency == EscalationUrgency::Blocking {
+        if let Some(ref esc) = self.escalation
+            && esc.needs_human && esc.urgency == EscalationUrgency::Blocking {
                 return false;
             }
-        }
         self.satisfaction.should_retry() && self.reprompt_guidance.is_some()
     }
 
     /// Check if human judgment is required.
     pub fn needs_human(&self) -> bool {
-        self.escalation.as_ref().map_or(false, |e| e.needs_human)
+        self.escalation.as_ref().is_some_and(|e| e.needs_human)
     }
 
     /// Check if progress is blocked pending human input.
     pub fn is_blocked_on_human(&self) -> bool {
-        self.escalation.as_ref().map_or(false, |e| {
+        self.escalation.as_ref().is_some_and(|e| {
             e.needs_human && e.urgency == EscalationUrgency::Blocking
         })
     }
@@ -896,13 +895,12 @@ impl RepromptStrategySelector {
     /// Select the best re-prompt strategy based on verification results.
     pub fn select_strategy(result: &IntentVerificationResult) -> RepromptApproach {
         // Check for escalation triggers first
-        if let Some(ref escalation) = result.escalation {
-            if escalation.needs_human && escalation.urgency == EscalationUrgency::Blocking {
+        if let Some(ref escalation) = result.escalation
+            && escalation.needs_human && escalation.urgency == EscalationUrgency::Blocking {
                 return RepromptApproach::Escalate {
                     reason: escalation.reason.clone(),
                 };
             }
-        }
 
         // Check for critical gaps - may need restructure
         if result.has_critical_gaps() {

@@ -257,12 +257,12 @@ fn parse_duration(s: &str) -> Result<std::time::Duration> {
     if s.is_empty() {
         anyhow::bail!("Empty duration string");
     }
-    let (num_str, suffix) = if s.ends_with('d') {
-        (&s[..s.len() - 1], "d")
-    } else if s.ends_with('h') {
-        (&s[..s.len() - 1], "h")
-    } else if s.ends_with('m') {
-        (&s[..s.len() - 1], "m")
+    let (num_str, suffix) = if let Some(prefix) = s.strip_suffix('d') {
+        (prefix, "d")
+    } else if let Some(prefix) = s.strip_suffix('h') {
+        (prefix, "h")
+    } else if let Some(prefix) = s.strip_suffix('m') {
+        (prefix, "m")
     } else {
         anyhow::bail!("Duration must end with 'd', 'h', or 'm' (e.g., '7d', '24h', '30m')");
     };

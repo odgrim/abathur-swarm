@@ -221,7 +221,7 @@ where
         iteration: u32,
     ) -> DomainResult<IntentVerificationResult> {
         let intent = self.extract_task_intent(task.id).await?;
-        self.verify_intent(&intent, &[task.clone()], iteration).await
+        self.verify_intent(&intent, std::slice::from_ref(task), iteration).await
     }
 
     /// Verify that completed tasks satisfy the original intent.
@@ -407,7 +407,7 @@ where
             if !task.artifacts.is_empty() && self.config.include_artifacts {
                 prompt.push_str("**Artifacts**:\n");
                 for artifact in &task.artifacts {
-                    prompt.push_str(&format!("- {} ({})\n", artifact.uri, format!("{:?}", artifact.artifact_type)));
+                    prompt.push_str(&format!("- {} ({:?})\n", artifact.uri, artifact.artifact_type));
                 }
                 prompt.push('\n');
             }
@@ -520,11 +520,10 @@ where
                     in_gaps = false;
                     continue;
                 }
-                if line.starts_with("- ") {
-                    if let Some(gap) = Self::parse_gap_line(line, false) {
+                if line.starts_with("- ")
+                    && let Some(gap) = Self::parse_gap_line(line, false) {
                         result = result.with_gap(gap);
                     }
-                }
             }
         }
 
@@ -541,11 +540,10 @@ where
                     in_implicit = false;
                     continue;
                 }
-                if line.starts_with("- ") {
-                    if let Some(gap) = Self::parse_gap_line(line, true) {
+                if line.starts_with("- ")
+                    && let Some(gap) = Self::parse_gap_line(line, true) {
                         result = result.with_implicit_gap(gap);
                     }
-                }
             }
         }
 
@@ -660,19 +658,11 @@ where
                             let description = parts[1].trim();
                             let mut task = NewTaskGuidance::new(title, description);
 
-                            if parts.len() > 2 {
-                                match parts[2].trim().to_lowercase().as_str() {
-                                    "high" => task = task.high_priority(),
-                                    _ => {}
-                                }
-                            }
+                            if parts.len() > 2
+                                && parts[2].trim().to_lowercase().as_str() == "high" { task = task.high_priority() }
 
-                            if parts.len() > 3 {
-                                match parts[3].trim().to_lowercase().as_str() {
-                                    "blocking" => task = task.blocking(),
-                                    _ => {}
-                                }
-                            }
+                            if parts.len() > 3
+                                && parts[3].trim().to_lowercase().as_str() == "blocking" { task = task.blocking() }
 
                             guidance = guidance.with_new_task(task);
                         }
@@ -698,11 +688,10 @@ where
         }
 
         // Check for auto-escalation based on gap patterns
-        if result.escalation.is_none() {
-            if let Some(auto_escalation) = result.should_escalate() {
+        if result.escalation.is_none()
+            && let Some(auto_escalation) = result.should_escalate() {
                 result = result.with_escalation(auto_escalation);
             }
-        }
 
         Ok(result)
     }
@@ -741,11 +730,10 @@ where
             if parts.len() > 2 {
                 gap = gap.with_action(parts[2].trim());
             }
-            if parts.len() > 3 {
-                if let Some(cat) = GapCategory::from_str(parts[3].trim()) {
+            if parts.len() > 3
+                && let Some(cat) = GapCategory::from_str(parts[3].trim()) {
                     gap = gap.with_category(cat);
                 }
-            }
         }
 
         Some(gap)
@@ -759,11 +747,10 @@ where
         // Collect completed tasks in the branch
         let mut branch_tasks = Vec::new();
         for task_id in &request.branch_tasks {
-            if let Some(task) = self.task_repo.get(*task_id).await? {
-                if task.status == TaskStatus::Complete {
+            if let Some(task) = self.task_repo.get(*task_id).await?
+                && task.status == TaskStatus::Complete {
                     branch_tasks.push(task);
                 }
-            }
         }
 
         if branch_tasks.is_empty() {
@@ -1168,7 +1155,7 @@ where
 
         // Execute the actual verification
         match self
-            .verify_intent(&intent, &[task.clone()], iteration)
+            .verify_intent(&intent, std::slice::from_ref(task), iteration)
             .await
         {
             Ok(result) => {

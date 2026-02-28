@@ -57,7 +57,7 @@ impl TruncationConfig {
 
 /// Estimate the number of tokens in a string using the chars/token heuristic.
 pub fn estimate_tokens(text: &str) -> usize {
-    (text.len() + CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN
+    text.len().div_ceil(CHARS_PER_TOKEN)
 }
 
 /// Truncate a context section to fit within the configured budget.

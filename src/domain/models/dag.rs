@@ -265,11 +265,10 @@ impl TaskDag {
         }
 
         while let Some(id) = queue.pop_front() {
-            if result.insert(id) {
-                if let Some(node) = self.nodes.get(&id) {
+            if result.insert(id)
+                && let Some(node) = self.nodes.get(&id) {
                     queue.extend(&node.dependents);
                 }
-            }
         }
 
         result
@@ -285,11 +284,10 @@ impl TaskDag {
         }
 
         while let Some(id) = queue.pop_front() {
-            if result.insert(id) {
-                if let Some(node) = self.nodes.get(&id) {
+            if result.insert(id)
+                && let Some(node) = self.nodes.get(&id) {
                     queue.extend(&node.dependencies);
                 }
-            }
         }
 
         result
