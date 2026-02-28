@@ -81,7 +81,6 @@ pub struct ScheduledEvent {
     pub id: Uuid,
     pub name: String,
     pub schedule: ScheduleType,
-    pub payload: EventPayload,
     pub category: EventCategory,
     pub severity: EventSeverity,
     pub goal_id: Option<Uuid>,
@@ -193,7 +192,10 @@ impl EventScheduler {
 
         let schedule_data = serde_json::to_string(&ScheduleData::from(&sched.schedule))
             .unwrap_or_default();
-        let payload_json = serde_json::to_string(&sched.payload).unwrap_or_default();
+        // payload column kept for DB schema compatibility; the scheduler always
+        // fires ScheduledEventFired events directly, so the stored value is unused.
+        let payload_json = "\"ScheduledEventFired\"";
+
         let category = format!("{:?}", sched.category).to_lowercase();
         let severity = format!("{:?}", sched.severity).to_lowercase();
         let id = sched.id.to_string();
@@ -459,7 +461,6 @@ pub fn interval_schedule(
         id: Uuid::new_v4(),
         name: name.into(),
         schedule: ScheduleType::Interval { every },
-        payload: EventPayload::OrchestratorStarted, // placeholder, overridden by ScheduledEventFired
         category,
         severity,
         goal_id: None,
@@ -479,6 +480,7 @@ struct ScheduleRow {
     #[allow(dead_code)]
     schedule_type: String,
     schedule_data: String,
+    #[allow(dead_code)]
     payload: String,
     category: String,
     severity: String,
@@ -494,7 +496,6 @@ impl ScheduleRow {
     fn to_scheduled_event(&self) -> Option<ScheduledEvent> {
         let schedule_data: ScheduleData = serde_json::from_str(&self.schedule_data).ok()?;
         let schedule = schedule_data.to_schedule_type()?;
-        let payload: EventPayload = serde_json::from_str(&self.payload).ok()?;
         let category = match self.category.as_str() {
             "scheduler" => EventCategory::Scheduler,
             "task" => EventCategory::Task,
@@ -530,7 +531,6 @@ impl ScheduleRow {
             id,
             name: self.name.clone(),
             schedule,
-            payload,
             category,
             severity,
             goal_id,

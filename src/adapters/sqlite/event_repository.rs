@@ -753,7 +753,6 @@ impl SqliteEventRepository {
 }
 
 #[derive(Debug, sqlx::FromRow)]
-#[allow(dead_code)]
 struct DeadLetterRow {
     id: String,
     event_id: String,
@@ -764,6 +763,7 @@ struct DeadLetterRow {
     max_retries: i64,
     next_retry_at: Option<String>,
     created_at: String,
+    #[allow(dead_code)] // Selected by sqlx::FromRow but not accessed in conversion
     resolved_at: Option<String>,
 }
 
