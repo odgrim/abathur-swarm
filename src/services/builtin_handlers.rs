@@ -1737,6 +1737,24 @@ impl EventHandler for A2APollHandler {
 
 /// Triggered by the "goal-evaluation" scheduled event (60s).
 /// Observes task/memory state independently and emits signal events about
+/// Filter tasks whose inferred domains overlap with a goal's applicability domains.
+///
+/// Universal goals (empty domains) match all tasks. Otherwise, each task's
+/// domains are inferred via `GoalContextService::infer_task_domains` and
+/// checked for overlap with the goal's domains.
+fn filter_tasks_by_goal_domains<'a, G: GoalRepository>(tasks: &'a [Task], goal: &Goal) -> Vec<&'a Task> {
+    let goal_domains = &goal.applicability_domains;
+    tasks
+        .iter()
+        .filter(|t| {
+            goal_domains.is_empty() || {
+                let task_domains = GoalContextService::<G>::infer_task_domains(t);
+                task_domains.iter().any(|d| goal_domains.contains(d))
+            }
+        })
+        .collect()
+}
+
 /// goal progress. This is a read-only observer that never modifies goals,
 /// tasks, or memories.
 pub struct GoalEvaluationHandler<G: GoalRepository, T: TaskRepository, M: MemoryRepository> {
@@ -1803,36 +1821,10 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static, M: MemoryReposito
         let mut new_events = Vec::new();
 
         for goal in &goals {
-            let goal_domains = &goal.applicability_domains;
-            // Universal goals (empty domains) match all tasks; otherwise filter by domain overlap.
-
             // Find tasks whose inferred domains overlap with this goal's domains
-            let relevant_completed: Vec<&Task> = completed.iter()
-                .filter(|t| {
-                    goal_domains.is_empty() || {
-                        let task_domains = GoalContextService::<G>::infer_task_domains(t);
-                        task_domains.iter().any(|d| goal_domains.contains(d))
-                    }
-                })
-                .collect();
-
-            let relevant_failed: Vec<&Task> = failed.iter()
-                .filter(|t| {
-                    goal_domains.is_empty() || {
-                        let task_domains = GoalContextService::<G>::infer_task_domains(t);
-                        task_domains.iter().any(|d| goal_domains.contains(d))
-                    }
-                })
-                .collect();
-
-            let _relevant_running: Vec<&Task> = running.iter()
-                .filter(|t| {
-                    goal_domains.is_empty() || {
-                        let task_domains = GoalContextService::<G>::infer_task_domains(t);
-                        task_domains.iter().any(|d| goal_domains.contains(d))
-                    }
-                })
-                .collect();
+            let relevant_completed = filter_tasks_by_goal_domains::<G>(&completed, goal);
+            let relevant_failed = filter_tasks_by_goal_domains::<G>(&failed, goal);
+            let _relevant_running = filter_tasks_by_goal_domains::<G>(&running, goal);
 
             // Emit GoalIterationCompleted if there are completed tasks in matching domains
             if !relevant_completed.is_empty() {
