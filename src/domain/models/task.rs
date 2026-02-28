@@ -93,6 +93,12 @@ impl TaskStatus {
     }
 }
 
+impl std::fmt::Display for TaskStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Where a task originated from.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TaskSource {
@@ -587,13 +593,21 @@ impl Task {
         self.status.can_transition_to(new_status)
     }
 
-    /// Transition to new status.
+    /// Transition to new status with strict state machine enforcement.
     pub fn transition_to(&mut self, new_status: TaskStatus) -> Result<(), String> {
         if !self.can_transition_to(new_status) {
+            let valid = self.status.valid_transitions();
+            let valid_strs: Vec<&str> = valid.iter().map(|s| s.as_str()).collect();
             return Err(format!(
-                "Cannot transition from {} to {}",
+                "Invalid state transition from '{}' to '{}'. Valid transitions from '{}': [{}]",
                 self.status.as_str(),
-                new_status.as_str()
+                new_status.as_str(),
+                self.status.as_str(),
+                if valid_strs.is_empty() {
+                    "none (terminal state)".to_string()
+                } else {
+                    valid_strs.join(", ")
+                }
             ));
         }
 
@@ -835,4 +849,291 @@ mod tests {
             format!("hint-{}", TaskContext::MAX_HINTS - 1)
         );
     }
+
+    // ===== State Machine Transition Tests =====
+
+    const ALL_STATUSES: [TaskStatus; 8] = [
+        TaskStatus::Pending,
+        TaskStatus::Ready,
+        TaskStatus::Blocked,
+        TaskStatus::Running,
+        TaskStatus::Validating,
+        TaskStatus::Complete,
+        TaskStatus::Failed,
+        TaskStatus::Canceled,
+    ];
+
+    #[test]
+    fn test_valid_transitions_pending() {
+        let valid = TaskStatus::Pending.valid_transitions();
+        assert_eq!(valid, vec![TaskStatus::Ready, TaskStatus::Blocked, TaskStatus::Canceled]);
+    }
+
+    #[test]
+    fn test_valid_transitions_ready() {
+        let valid = TaskStatus::Ready.valid_transitions();
+        assert_eq!(valid, vec![TaskStatus::Running, TaskStatus::Blocked, TaskStatus::Canceled]);
+    }
+
+    #[test]
+    fn test_valid_transitions_blocked() {
+        let valid = TaskStatus::Blocked.valid_transitions();
+        assert_eq!(valid, vec![TaskStatus::Ready, TaskStatus::Canceled]);
+    }
+
+    #[test]
+    fn test_valid_transitions_running() {
+        let valid = TaskStatus::Running.valid_transitions();
+        assert_eq!(valid, vec![TaskStatus::Validating, TaskStatus::Complete, TaskStatus::Failed, TaskStatus::Canceled]);
+    }
+
+    #[test]
+    fn test_valid_transitions_validating() {
+        let valid = TaskStatus::Validating.valid_transitions();
+        assert_eq!(valid, vec![TaskStatus::Running, TaskStatus::Complete, TaskStatus::Failed]);
+    }
+
+    #[test]
+    fn test_valid_transitions_complete() {
+        let valid = TaskStatus::Complete.valid_transitions();
+        assert!(valid.is_empty(), "Terminal state Complete should have no valid transitions");
+    }
+
+    #[test]
+    fn test_valid_transitions_failed() {
+        let valid = TaskStatus::Failed.valid_transitions();
+        assert_eq!(valid, vec![TaskStatus::Ready]);
+    }
+
+    #[test]
+    fn test_valid_transitions_canceled() {
+        let valid = TaskStatus::Canceled.valid_transitions();
+        assert!(valid.is_empty(), "Terminal state Canceled should have no valid transitions");
+    }
+
+    #[test]
+    fn test_can_transition_to_matches_valid_transitions_exhaustive() {
+        // Verify that the optimized matches! implementation agrees with
+        // valid_transitions() for all 64 (8x8) state pairs.
+        for from in &ALL_STATUSES {
+            let valid = from.valid_transitions();
+            for to in &ALL_STATUSES {
+                let expected = valid.contains(to);
+                assert_eq!(
+                    from.can_transition_to(*to),
+                    expected,
+                    "can_transition_to({} -> {}) returned {} but valid_transitions says {}",
+                    from.as_str(),
+                    to.as_str(),
+                    from.can_transition_to(*to),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_invalid_transitions_rejected() {
+        // Every (from, to) pair NOT in valid_transitions must be rejected
+        let mut tested_invalid = 0;
+        for from in &ALL_STATUSES {
+            let valid = from.valid_transitions();
+            for to in &ALL_STATUSES {
+                if !valid.contains(to) {
+                    let mut task = Task::new("Test invalid transition");
+                    task.status = *from;
+                    let result = task.transition_to(*to);
+                    assert!(
+                        result.is_err(),
+                        "Transition {} -> {} should be rejected but was allowed",
+                        from.as_str(),
+                        to.as_str(),
+                    );
+                    tested_invalid += 1;
+                }
+            }
+        }
+        // 64 total pairs - 16 valid = 48 invalid (including self-transitions)
+        assert!(tested_invalid > 40, "Expected at least 40 invalid transitions tested, got {}", tested_invalid);
+    }
+
+    #[test]
+    fn test_all_valid_transitions_succeed() {
+        let valid_pairs: Vec<(TaskStatus, TaskStatus)> = vec![
+            (TaskStatus::Pending, TaskStatus::Ready),
+            (TaskStatus::Pending, TaskStatus::Blocked),
+            (TaskStatus::Pending, TaskStatus::Canceled),
+            (TaskStatus::Ready, TaskStatus::Running),
+            (TaskStatus::Ready, TaskStatus::Blocked),
+            (TaskStatus::Ready, TaskStatus::Canceled),
+            (TaskStatus::Blocked, TaskStatus::Ready),
+            (TaskStatus::Blocked, TaskStatus::Canceled),
+            (TaskStatus::Running, TaskStatus::Validating),
+            (TaskStatus::Running, TaskStatus::Complete),
+            (TaskStatus::Running, TaskStatus::Failed),
+            (TaskStatus::Running, TaskStatus::Canceled),
+            (TaskStatus::Validating, TaskStatus::Running),
+            (TaskStatus::Validating, TaskStatus::Complete),
+            (TaskStatus::Validating, TaskStatus::Failed),
+            (TaskStatus::Failed, TaskStatus::Ready),
+        ];
+
+        for (from, to) in &valid_pairs {
+            let mut task = Task::new("Test valid transition");
+            task.status = *from;
+            let initial_version = task.version;
+            let result = task.transition_to(*to);
+            assert!(
+                result.is_ok(),
+                "Transition {} -> {} should succeed but failed: {:?}",
+                from.as_str(),
+                to.as_str(),
+                result.err()
+            );
+            assert_eq!(task.status, *to, "Status should be {} after transition", to.as_str());
+            assert_eq!(task.version, initial_version + 1, "Version should increment on transition");
+        }
+    }
+
+    #[test]
+    fn test_terminal_states_reject_all_transitions() {
+        let terminal_states = [TaskStatus::Complete, TaskStatus::Canceled];
+        for terminal in &terminal_states {
+            for target in &ALL_STATUSES {
+                let mut task = Task::new("Test terminal rejection");
+                task.status = *terminal;
+                let result = task.transition_to(*target);
+                assert!(
+                    result.is_err(),
+                    "Terminal state {} should reject transition to {}",
+                    terminal.as_str(),
+                    target.as_str(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_failed_only_allows_ready() {
+        for target in &ALL_STATUSES {
+            let mut task = Task::new("Test failed transitions");
+            task.status = TaskStatus::Failed;
+            let result = task.transition_to(*target);
+            if *target == TaskStatus::Ready {
+                assert!(result.is_ok(), "Failed -> Ready should be allowed (retry)");
+            } else {
+                assert!(result.is_err(), "Failed -> {} should be rejected", target.as_str());
+            }
+        }
+    }
+
+    #[test]
+    fn test_self_transitions_rejected() {
+        for status in &ALL_STATUSES {
+            let mut task = Task::new("Test self-transition");
+            task.status = *status;
+            let result = task.transition_to(*status);
+            assert!(
+                result.is_err(),
+                "Self-transition {} -> {} should be rejected",
+                status.as_str(),
+                status.as_str(),
+            );
+        }
+    }
+
+    #[test]
+    fn test_transition_error_message_contains_states_and_valid_targets() {
+        let mut task = Task::new("Test error message");
+        // Pending cannot go directly to Complete
+        let result = task.transition_to(TaskStatus::Complete);
+        let err = result.unwrap_err();
+        assert!(err.contains("pending"), "Error should contain from-state 'pending': {}", err);
+        assert!(err.contains("complete"), "Error should contain to-state 'complete': {}", err);
+        assert!(err.contains("ready"), "Error should list valid target 'ready': {}", err);
+    }
+
+    #[test]
+    fn test_terminal_state_error_message_shows_none() {
+        let mut task = Task::new("Test terminal error");
+        task.status = TaskStatus::Complete;
+        let result = task.transition_to(TaskStatus::Running);
+        let err = result.unwrap_err();
+        assert!(err.contains("none (terminal state)"), "Error for terminal state should indicate no valid transitions: {}", err);
+    }
+
+    #[test]
+    fn test_transition_timestamps() {
+        // Running -> Complete sets completed_at
+        let mut task = Task::new("Test timestamps");
+        task.status = TaskStatus::Running;
+        assert!(task.completed_at.is_none());
+        task.transition_to(TaskStatus::Complete).unwrap();
+        assert!(task.completed_at.is_some());
+
+        // Pending -> Ready -> Running sets started_at
+        let mut task2 = Task::new("Test timestamps 2");
+        assert!(task2.started_at.is_none());
+        task2.transition_to(TaskStatus::Ready).unwrap();
+        assert!(task2.started_at.is_none());
+        task2.transition_to(TaskStatus::Running).unwrap();
+        assert!(task2.started_at.is_some());
+
+        // Running -> Canceled sets completed_at
+        let mut task3 = Task::new("Test timestamps 3");
+        task3.status = TaskStatus::Running;
+        task3.transition_to(TaskStatus::Canceled).unwrap();
+        assert!(task3.completed_at.is_some());
+
+        // Running -> Failed sets completed_at
+        let mut task4 = Task::new("Test timestamps 4");
+        task4.status = TaskStatus::Running;
+        task4.transition_to(TaskStatus::Failed).unwrap();
+        assert!(task4.completed_at.is_some());
+
+        // Running -> Validating does NOT set completed_at
+        let mut task5 = Task::new("Test timestamps 5");
+        task5.status = TaskStatus::Running;
+        task5.transition_to(TaskStatus::Validating).unwrap();
+        assert!(task5.completed_at.is_none());
+    }
+
+    #[test]
+    fn test_retry_from_non_failed_state_rejected() {
+        for status in &ALL_STATUSES {
+            if *status == TaskStatus::Failed {
+                continue;
+            }
+            let mut task = Task::new("Test retry rejection");
+            task.status = *status;
+            assert!(
+                task.retry().is_err(),
+                "retry() should be rejected from state {}",
+                status.as_str(),
+            );
+        }
+    }
+
+    #[test]
+    fn test_retry_max_retries_exceeded() {
+        let mut task = Task::new("Test retry limit");
+        task.status = TaskStatus::Failed;
+        task.max_retries = 2;
+        task.retry_count = 2;
+        assert!(!task.can_retry());
+        assert!(task.retry().is_err());
+    }
+
+    #[test]
+    fn test_task_status_display() {
+        assert_eq!(format!("{}", TaskStatus::Pending), "pending");
+        assert_eq!(format!("{}", TaskStatus::Ready), "ready");
+        assert_eq!(format!("{}", TaskStatus::Blocked), "blocked");
+        assert_eq!(format!("{}", TaskStatus::Running), "running");
+        assert_eq!(format!("{}", TaskStatus::Validating), "validating");
+        assert_eq!(format!("{}", TaskStatus::Complete), "complete");
+        assert_eq!(format!("{}", TaskStatus::Failed), "failed");
+        assert_eq!(format!("{}", TaskStatus::Canceled), "canceled");
+    }
+
 }
