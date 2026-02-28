@@ -52,7 +52,7 @@ impl GoalRepository for SqliteGoalRepository {
 
     async fn get(&self, id: Uuid) -> DomainResult<Option<Goal>> {
         let row: Option<GoalRow> = sqlx::query_as(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at, last_convergence_check_at FROM goals WHERE id = ?"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, created_at, updated_at, last_convergence_check_at FROM goals WHERE id = ?"
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -107,7 +107,7 @@ impl GoalRepository for SqliteGoalRepository {
 
     async fn list(&self, filter: GoalFilter) -> DomainResult<Vec<Goal>> {
         let mut query = String::from(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at, last_convergence_check_at FROM goals WHERE 1=1"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, created_at, updated_at, last_convergence_check_at FROM goals WHERE 1=1"
         );
         let mut bindings: Vec<String> = Vec::new();
 
@@ -139,7 +139,7 @@ impl GoalRepository for SqliteGoalRepository {
 
     async fn get_children(&self, parent_id: Uuid) -> DomainResult<Vec<Goal>> {
         let rows: Vec<GoalRow> = sqlx::query_as(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at, last_convergence_check_at FROM goals WHERE parent_id = ? ORDER BY created_at"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, created_at, updated_at, last_convergence_check_at FROM goals WHERE parent_id = ? ORDER BY created_at"
         )
         .bind(parent_id.to_string())
         .fetch_all(&self.pool)
@@ -150,7 +150,7 @@ impl GoalRepository for SqliteGoalRepository {
 
     async fn get_active_with_constraints(&self) -> DomainResult<Vec<Goal>> {
         let rows: Vec<GoalRow> = sqlx::query_as(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at, last_convergence_check_at FROM goals WHERE status = 'active' ORDER BY priority DESC, created_at"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, created_at, updated_at, last_convergence_check_at FROM goals WHERE status = 'active' ORDER BY priority DESC, created_at"
         )
         .fetch_all(&self.pool)
         .await?;
@@ -161,7 +161,7 @@ impl GoalRepository for SqliteGoalRepository {
     async fn find_by_domains(&self, domains: &[String]) -> DomainResult<Vec<Goal>> {
         // Load all active goals, then filter in-code (SQLite JSON support is limited)
         let rows: Vec<GoalRow> = sqlx::query_as(
-            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at, last_convergence_check_at FROM goals WHERE status = 'active'"
+            "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, created_at, updated_at, last_convergence_check_at FROM goals WHERE status = 'active'"
         )
         .fetch_all(&self.pool)
         .await?;
@@ -221,8 +221,6 @@ struct GoalRow {
     constraints: Option<String>,
     metadata: Option<String>,
     applicability_domains: Option<String>,
-    #[allow(dead_code)]
-    evaluation_criteria: Option<String>,
     created_at: String,
     updated_at: String,
     last_convergence_check_at: Option<String>,
@@ -244,7 +242,6 @@ impl TryFrom<GoalRow> for Goal {
         let constraints: Vec<GoalConstraint> = super::parse_json_or_default(row.constraints)?;
         let metadata: GoalMetadata = super::parse_json_or_default(row.metadata)?;
         let applicability_domains: Vec<String> = super::parse_json_or_default(row.applicability_domains)?;
-        // evaluation_criteria column exists in DB but is no longer used; ignore it.
 
         let created_at = super::parse_datetime(&row.created_at)?;
         let updated_at = super::parse_datetime(&row.updated_at)?;
