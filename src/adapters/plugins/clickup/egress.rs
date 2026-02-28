@@ -112,9 +112,9 @@ impl EgressAdapter for ClickUpEgressAdapter {
                     task_id = %external_id,
                     "ClickUp adapter does not support AttachArtifact"
                 );
-                Ok(EgressResult::fail(
-                    "AttachArtifact is not a supported operation for the ClickUp adapter. \
-                     Use PostComment to share artifact details instead.",
+                Err(DomainError::ValidationFailed(
+                    "Unsupported operation: AttachArtifact is not supported by the ClickUp adapter. \
+                     Use PostComment to share artifact details instead.".to_string(),
                 ))
             }
 

@@ -197,9 +197,9 @@ impl EgressAdapter for GitHubEgressAdapter {
                     issue = %external_id,
                     "GitHub Issues adapter does not support AttachArtifact"
                 );
-                Ok(EgressResult::fail(
-                    "AttachArtifact is not a supported operation for the GitHub Issues adapter. \
-                     Use PostComment to share artifact details instead.",
+                Err(DomainError::ValidationFailed(
+                    "Unsupported operation: AttachArtifact is not supported by the GitHub Issues adapter. \
+                     Use PostComment to share artifact details instead.".to_string(),
                 ))
             }
 
