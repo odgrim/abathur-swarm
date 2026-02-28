@@ -160,6 +160,7 @@ impl Guardrails {
         let tasks = self.current_tasks.read().await;
 
         if tasks.len() >= self.config.max_concurrent_tasks {
+            tracing::warn!(%task_id, current_count = tasks.len(), max = self.config.max_concurrent_tasks, "task start blocked: max concurrent tasks reached");
             return GuardrailResult::Blocked(format!(
                 "Maximum concurrent tasks ({}) reached",
                 self.config.max_concurrent_tasks
@@ -167,6 +168,7 @@ impl Guardrails {
         }
 
         if tasks.contains(&task_id) {
+            tracing::warn!(%task_id, "task start blocked: task already running");
             return GuardrailResult::Blocked("Task already running".to_string());
         }
 
@@ -178,18 +180,21 @@ impl Guardrails {
         let mut tasks = self.current_tasks.write().await;
         tasks.insert(task_id);
         self.metrics.record_task_started();
+        tracing::info!(%task_id, current_count = tasks.len(), "task registered as started");
     }
 
     /// Register a task as finished.
     pub async fn register_task_end(&self, task_id: uuid::Uuid, success: bool) {
         let mut tasks = self.current_tasks.write().await;
         tasks.remove(&task_id);
+        let remaining = tasks.len();
 
         if success {
             self.metrics.record_task_completed();
         } else {
             self.metrics.record_task_failed();
         }
+        tracing::info!(%task_id, success, remaining_count = remaining, "task registered as ended");
     }
 
     /// Check if we can spawn a new agent.
@@ -197,6 +202,7 @@ impl Guardrails {
         let agents = self.current_agents.read().await;
 
         if agents.contains(agent_id) {
+            tracing::warn!(agent_id, "agent spawn blocked: agent already running");
             return GuardrailResult::Blocked(format!(
                 "Agent '{}' is already running",
                 agent_id
@@ -204,6 +210,7 @@ impl Guardrails {
         }
 
         if agents.len() >= self.config.max_concurrent_agents {
+            tracing::warn!(agent_id, current_count = agents.len(), max = self.config.max_concurrent_agents, "agent spawn blocked: max concurrent agents reached");
             return GuardrailResult::Blocked(format!(
                 "Maximum concurrent agents ({}) reached",
                 self.config.max_concurrent_agents
@@ -218,18 +225,21 @@ impl Guardrails {
         let mut agents = self.current_agents.write().await;
         agents.insert(agent_id.to_string());
         self.metrics.record_agent_spawned();
+        tracing::info!(agent_id, current_count = agents.len(), "agent registered as spawned");
     }
 
     /// Register an agent as finished.
     pub async fn register_agent_end(&self, agent_id: &str) {
         let mut agents = self.current_agents.write().await;
         agents.remove(agent_id);
+        tracing::info!(agent_id, remaining_count = agents.len(), "agent registered as ended");
     }
 
     /// Check if a tool is allowed.
     pub fn check_tool(&self, tool_name: &str) -> GuardrailResult {
         for blocked in &self.config.blocked_tools {
             if tool_name.eq_ignore_ascii_case(blocked) {
+                tracing::warn!(tool_name, blocked_pattern = %blocked, "tool usage blocked");
                 return GuardrailResult::Blocked(format!("Tool '{}' is blocked", tool_name));
             }
         }
@@ -240,6 +250,7 @@ impl Guardrails {
     pub fn check_file_path(&self, path: &str) -> GuardrailResult {
         for pattern in &self.config.blocked_files {
             if Self::matches_pattern(path, pattern) {
+                tracing::warn!(path, blocked_pattern = %pattern, "file access blocked");
                 return GuardrailResult::Blocked(format!(
                     "Access to '{}' is blocked by pattern '{}'",
                     path, pattern
@@ -253,6 +264,7 @@ impl Guardrails {
     pub fn check_tokens(&self, requested: u64) -> GuardrailResult {
         let current = self.metrics.get_tokens_this_hour();
         if current + requested > self.config.max_tokens_per_hour {
+            tracing::warn!(requested, current, max = self.config.max_tokens_per_hour, "token usage blocked: limit would be exceeded");
             return GuardrailResult::Blocked(format!(
                 "Token limit ({}/hour) would be exceeded",
                 self.config.max_tokens_per_hour
@@ -261,6 +273,7 @@ impl Guardrails {
 
         // Warn at 80%
         if current + requested > (self.config.max_tokens_per_hour * 80) / 100 {
+            tracing::warn!(requested, current = current + requested, max = self.config.max_tokens_per_hour, "token usage warning: approaching limit");
             return GuardrailResult::Warning(format!(
                 "Approaching token limit: {}/{} used",
                 current + requested,
@@ -279,6 +292,7 @@ impl Guardrails {
 
         let current = self.metrics.get_cost_cents();
         if current + additional_cents > self.config.budget_limit_cents {
+            tracing::warn!(additional_cents, current_cents = current, limit_cents = self.config.budget_limit_cents, "budget blocked: limit would be exceeded");
             return GuardrailResult::Blocked(format!(
                 "Budget limit (${:.2}) would be exceeded",
                 self.config.budget_limit_cents / 100.0
@@ -291,6 +305,7 @@ impl Guardrails {
     /// Check decomposition depth.
     pub fn check_decomposition_depth(&self, current_depth: usize) -> GuardrailResult {
         if current_depth >= self.config.max_decomposition_depth {
+            tracing::warn!(current_depth, max_depth = self.config.max_decomposition_depth, "decomposition blocked: max depth reached");
             return GuardrailResult::Blocked(format!(
                 "Maximum decomposition depth ({}) reached",
                 self.config.max_decomposition_depth
@@ -302,11 +317,13 @@ impl Guardrails {
     /// Record token usage.
     pub fn record_tokens(&self, tokens: u64) {
         self.metrics.record_tokens(tokens);
+        tracing::debug!(tokens, "recorded token usage");
     }
 
     /// Record cost.
     pub fn record_cost(&self, cents: f64) {
         self.metrics.record_cost(cents);
+        tracing::debug!(cents, "recorded cost");
     }
 
     /// Get current metrics.
