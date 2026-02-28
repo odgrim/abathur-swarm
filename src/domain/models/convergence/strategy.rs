@@ -95,7 +95,7 @@ pub enum StrategyKind {
     /// the LLM gets a clean context with only curated `CarryForward` signals.
     FreshStart {
         /// Knowledge to carry across the context boundary.
-        carry_forward: CarryForward,
+        carry_forward: Box<CarryForward>,
     },
 }
 
@@ -557,7 +557,7 @@ pub fn eligible_strategies(
                 // Context is likely degraded; fresh start is the best bet.
                 // CarryForward will be populated by the caller.
                 vec![StrategyKind::FreshStart {
-                    carry_forward: CarryForward::placeholder(),
+                    carry_forward: Box::new(CarryForward::placeholder()),
                 }]
             } else if *stall_duration >= 3 {
                 // Fresh start limit reached; escalate.
@@ -859,7 +859,7 @@ mod tests {
                 target: Uuid::nil(),
             },
             StrategyKind::FreshStart {
-                carry_forward: CarryForward::placeholder(),
+                carry_forward: Box::new(CarryForward::placeholder()),
             },
         ];
 

@@ -35,6 +35,9 @@ impl Default for HandlerId {
     }
 }
 
+/// Thread-safe predicate for custom event filtering.
+pub type EventPredicate = Arc<dyn Fn(&UnifiedEvent) -> bool + Send + Sync>;
+
 /// Filter that determines which events a handler matches.
 #[derive(Default)]
 pub struct EventFilter {
@@ -49,7 +52,7 @@ pub struct EventFilter {
     /// Match events whose payload variant name is in this list (empty = match all).
     pub payload_types: Vec<String>,
     /// Custom predicate for advanced filtering.
-    pub custom_predicate: Option<Arc<dyn Fn(&UnifiedEvent) -> bool + Send + Sync>>,
+    pub custom_predicate: Option<EventPredicate>,
 }
 
 impl EventFilter {

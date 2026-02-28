@@ -24,6 +24,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use uuid::Uuid;
 
 /// Result of an intent verification evaluation.
@@ -184,25 +185,29 @@ impl GapCategory {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "functional" => Some(Self::Functional),
-            "error_handling" | "errorhandling" => Some(Self::ErrorHandling),
-            "integration" => Some(Self::Integration),
-            "testing" => Some(Self::Testing),
-            "security" => Some(Self::Security),
-            "performance" => Some(Self::Performance),
-            "observability" => Some(Self::Observability),
-            "documentation" => Some(Self::Documentation),
-            "maintainability" => Some(Self::Maintainability),
-            "constraint_violation" | "constraintviolation" => Some(Self::ConstraintViolation),
-            _ => None,
-        }
-    }
-
     /// Whether this category typically requires human judgment
     pub fn typically_needs_human(&self) -> bool {
         matches!(self, Self::Security | Self::Integration)
+    }
+}
+
+impl FromStr for GapCategory {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "functional" => Ok(Self::Functional),
+            "error_handling" | "errorhandling" => Ok(Self::ErrorHandling),
+            "integration" => Ok(Self::Integration),
+            "testing" => Ok(Self::Testing),
+            "security" => Ok(Self::Security),
+            "performance" => Ok(Self::Performance),
+            "observability" => Ok(Self::Observability),
+            "documentation" => Ok(Self::Documentation),
+            "maintainability" => Ok(Self::Maintainability),
+            "constraint_violation" | "constraintviolation" => Ok(Self::ConstraintViolation),
+            _ => Err(format!("unknown gap category: {s}")),
+        }
     }
 }
 
@@ -348,13 +353,17 @@ impl ConstraintConformance {
             Self::Violating => "violating",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl FromStr for ConstraintConformance {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "conforming" => Some(Self::Conforming),
-            "deviating" => Some(Self::Deviating),
-            "violating" => Some(Self::Violating),
-            _ => None,
+            "conforming" => Ok(Self::Conforming),
+            "deviating" => Ok(Self::Deviating),
+            "violating" => Ok(Self::Violating),
+            _ => Err(format!("unknown constraint conformance: {s}")),
         }
     }
 }
@@ -511,14 +520,18 @@ impl EscalationUrgency {
             Self::Blocking => "blocking",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl FromStr for EscalationUrgency {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "low" => Some(Self::Low),
-            "normal" => Some(Self::Normal),
-            "high" => Some(Self::High),
-            "blocking" => Some(Self::Blocking),
-            _ => None,
+            "low" => Ok(Self::Low),
+            "normal" => Ok(Self::Normal),
+            "high" => Ok(Self::High),
+            "blocking" => Ok(Self::Blocking),
+            _ => Err(format!("unknown escalation urgency: {s}")),
         }
     }
 }
@@ -856,26 +869,6 @@ impl RepromptApproach {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "retry_same" => Some(Self::RetrySame),
-            "retry_with_context" | "retry_context" => Some(Self::RetryWithContext),
-            "retry_augmented" => Some(Self::RetryAugmented {
-                augmentation_instructions: String::new(),
-            }),
-            "add_tasks" => Some(Self::AddTasks),
-            "retry_and_add_tasks" | "retry_and_add" => Some(Self::RetryAndAddTasks),
-            "restructure" => Some(Self::Restructure {
-                original_problem: String::new(),
-                suggested_approach: String::new(),
-            }),
-            "escalate" => Some(Self::Escalate {
-                reason: String::new(),
-            }),
-            _ => None,
-        }
-    }
-
     /// Whether this approach requires human involvement
     pub fn needs_human(&self) -> bool {
         matches!(self, Self::Escalate { .. })
@@ -884,6 +877,30 @@ impl RepromptApproach {
     /// Whether this approach involves restructuring work
     pub fn is_restructure(&self) -> bool {
         matches!(self, Self::Restructure { .. })
+    }
+}
+
+impl FromStr for RepromptApproach {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "retry_same" => Ok(Self::RetrySame),
+            "retry_with_context" | "retry_context" => Ok(Self::RetryWithContext),
+            "retry_augmented" => Ok(Self::RetryAugmented {
+                augmentation_instructions: String::new(),
+            }),
+            "add_tasks" => Ok(Self::AddTasks),
+            "retry_and_add_tasks" | "retry_and_add" => Ok(Self::RetryAndAddTasks),
+            "restructure" => Ok(Self::Restructure {
+                original_problem: String::new(),
+                suggested_approach: String::new(),
+            }),
+            "escalate" => Ok(Self::Escalate {
+                reason: String::new(),
+            }),
+            _ => Err(format!("unknown reprompt approach: {s}")),
+        }
     }
 }
 
@@ -2306,11 +2323,11 @@ mod tests {
 
     #[test]
     fn test_constraint_conformance_from_str() {
-        assert_eq!(ConstraintConformance::from_str("conforming"), Some(ConstraintConformance::Conforming));
-        assert_eq!(ConstraintConformance::from_str("deviating"), Some(ConstraintConformance::Deviating));
-        assert_eq!(ConstraintConformance::from_str("violating"), Some(ConstraintConformance::Violating));
-        assert_eq!(ConstraintConformance::from_str("Conforming"), Some(ConstraintConformance::Conforming));
-        assert_eq!(ConstraintConformance::from_str("unknown"), None);
+        assert_eq!("conforming".parse::<ConstraintConformance>(), Ok(ConstraintConformance::Conforming));
+        assert_eq!("deviating".parse::<ConstraintConformance>(), Ok(ConstraintConformance::Deviating));
+        assert_eq!("violating".parse::<ConstraintConformance>(), Ok(ConstraintConformance::Violating));
+        assert_eq!("Conforming".parse::<ConstraintConformance>(), Ok(ConstraintConformance::Conforming));
+        assert!("unknown".parse::<ConstraintConformance>().is_err());
     }
 
     #[test]
@@ -2368,7 +2385,7 @@ mod tests {
     #[test]
     fn test_gap_category_constraint_violation() {
         assert_eq!(GapCategory::ConstraintViolation.as_str(), "constraint_violation");
-        assert_eq!(GapCategory::from_str("constraint_violation"), Some(GapCategory::ConstraintViolation));
-        assert_eq!(GapCategory::from_str("constraintviolation"), Some(GapCategory::ConstraintViolation));
+        assert_eq!("constraint_violation".parse::<GapCategory>(), Ok(GapCategory::ConstraintViolation));
+        assert_eq!("constraintviolation".parse::<GapCategory>(), Ok(GapCategory::ConstraintViolation));
     }
 }

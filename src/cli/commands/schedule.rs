@@ -19,6 +19,7 @@ pub struct ScheduleArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum ScheduleCommands {
     /// Create a new periodic task schedule
     Create {

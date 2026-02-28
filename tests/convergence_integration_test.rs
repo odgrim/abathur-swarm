@@ -1095,7 +1095,7 @@ async fn test_build_convergent_prompt_fresh_start() {
         hints: vec![],
     };
 
-    let strategy = StrategyKind::FreshStart { carry_forward };
+    let strategy = StrategyKind::FreshStart { carry_forward: Box::new(carry_forward) };
 
     let prompt = build_convergent_prompt(&task, &trajectory, &strategy, None);
 

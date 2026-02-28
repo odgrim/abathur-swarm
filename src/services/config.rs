@@ -654,7 +654,8 @@ impl Config {
         let mut workflows = Vec::new();
 
         // Add each built-in workflow unless shadowed by a user-defined one.
-        let builtins: [(&str, fn() -> WorkflowTemplate); 5] = [
+        type BuiltinEntry = (&'static str, fn() -> WorkflowTemplate);
+        let builtins: [BuiltinEntry; 5] = [
             ("code",     WorkflowTemplate::default_code_workflow),
             ("analysis", WorkflowTemplate::analysis_workflow),
             ("docs",     WorkflowTemplate::docs_workflow),

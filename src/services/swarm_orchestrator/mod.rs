@@ -671,16 +671,16 @@ where
 
             // Periodic maintenance: prune stale processed_commands entries
             tick_counter += 1;
-            if tick_counter % cleanup_every_n_ticks == 0 {
-                if let Some(bus) = self.command_bus.read().await.as_ref() {
-                    let pruned = bus.prune_old_commands(command_retention).await;
-                    if pruned > 0 {
-                        tracing::info!(
-                            pruned_count = pruned,
-                            retention_days = 7,
-                            "Pruned stale processed_commands entries"
-                        );
-                    }
+            if tick_counter.is_multiple_of(cleanup_every_n_ticks)
+                && let Some(bus) = self.command_bus.read().await.as_ref()
+            {
+                let pruned = bus.prune_old_commands(command_retention).await;
+                if pruned > 0 {
+                    tracing::info!(
+                        pruned_count = pruned,
+                        retention_days = 7,
+                        "Pruned stale processed_commands entries"
+                    );
                 }
             }
 

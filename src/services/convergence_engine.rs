@@ -334,7 +334,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                     },
                 );
                 trajectory.forced_strategy = Some(StrategyKind::FreshStart {
-                    carry_forward: carry,
+                    carry_forward: Box::new(carry),
                 });
                 trajectory.total_fresh_starts += 1;
             }
@@ -2063,7 +2063,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         let latest_signals = trajectory.latest_overseer_signals().cloned();
 
         let carry_forward = match strategy {
-            StrategyKind::FreshStart { carry_forward } => Some(carry_forward.clone()),
+            StrategyKind::FreshStart { carry_forward } => Some((**carry_forward).clone()),
             _ => None,
         };
 

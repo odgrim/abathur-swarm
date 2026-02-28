@@ -564,7 +564,7 @@ where
                     let parts: Vec<&str> = line.trim_start_matches("- ").split('|').collect();
                     if parts.len() >= 2 {
                         let constraint = parts[0].trim().to_string();
-                        let status = ConstraintConformance::from_str(parts[1].trim())
+                        let status = parts[1].trim().parse::<ConstraintConformance>()
                             .unwrap_or(ConstraintConformance::Deviating);
                         let explanation = if parts.len() > 2 {
                             parts[2].trim().to_string()
@@ -604,7 +604,7 @@ where
             .find(|l| l.starts_with("REPROMPT_STRATEGY:"))
             .and_then(|l| {
                 let s = l.trim_start_matches("REPROMPT_STRATEGY:").trim();
-                RepromptApproach::from_str(s)
+                s.parse::<RepromptApproach>().ok()
             });
 
         let _strategy_rationale = response_text.lines()
@@ -731,7 +731,7 @@ where
                 gap = gap.with_action(parts[2].trim());
             }
             if parts.len() > 3
-                && let Some(cat) = GapCategory::from_str(parts[3].trim()) {
+                && let Ok(cat) = parts[3].trim().parse::<GapCategory>() {
                     gap = gap.with_category(cat);
                 }
         }
@@ -1801,7 +1801,7 @@ NEW_TASKS:
                     let parts: Vec<&str> = line.trim_start_matches("- ").split('|').collect();
                     if parts.len() >= 2 {
                         let constraint = parts[0].trim().to_string();
-                        let status = ConstraintConformance::from_str(parts[1].trim())
+                        let status = parts[1].trim().parse::<ConstraintConformance>()
                             .unwrap_or(ConstraintConformance::Deviating);
                         let explanation = if parts.len() > 2 {
                             parts[2].trim().to_string()
