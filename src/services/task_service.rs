@@ -14,7 +14,6 @@ use crate::services::event_bus::{
     EventCategory, EventPayload, EventSeverity, UnifiedEvent,
 };
 use crate::services::event_factory;
-use tracing::warn;
 
 /// Configuration for spawn limits.
 #[derive(Debug, Clone)]
@@ -191,6 +190,7 @@ impl<T: TaskRepository> TaskService<T> {
         // Check subtask depth
         let depth = self.calculate_depth(&parent).await?;
         if depth >= self.spawn_limits.max_subtask_depth {
+            tracing::warn!(%parent_id, current_depth = depth, max_depth = self.spawn_limits.max_subtask_depth, "spawn limit exceeded: subtask depth");
             return Ok(SpawnLimitResult::LimitExceeded {
                 limit_type: SpawnLimitType::SubtaskDepth,
                 current_value: depth,
@@ -202,6 +202,7 @@ impl<T: TaskRepository> TaskService<T> {
         // Check direct subtasks count
         let direct_subtasks = self.count_direct_subtasks(parent_id).await?;
         if direct_subtasks >= self.spawn_limits.max_subtasks_per_task {
+            tracing::warn!(%parent_id, current_count = direct_subtasks, max_count = self.spawn_limits.max_subtasks_per_task, "spawn limit exceeded: subtasks per task");
             return Ok(SpawnLimitResult::LimitExceeded {
                 limit_type: SpawnLimitType::SubtasksPerTask,
                 current_value: direct_subtasks,
@@ -214,6 +215,7 @@ impl<T: TaskRepository> TaskService<T> {
         let root_id = self.find_root_task(&parent).await?;
         let total_descendants = self.count_all_descendants(root_id).await?;
         if total_descendants >= self.spawn_limits.max_total_descendants {
+            tracing::warn!(%parent_id, current_count = total_descendants, max_count = self.spawn_limits.max_total_descendants, "spawn limit exceeded: total descendants");
             return Ok(SpawnLimitResult::LimitExceeded {
                 limit_type: SpawnLimitType::TotalDescendants,
                 current_value: total_descendants,
@@ -437,9 +439,20 @@ impl<T: TaskRepository> TaskService<T> {
     ) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         let mut events = Vec::new();
 
+        tracing::info!(
+            parent_id = ?parent_id,
+            priority = ?priority,
+            agent_type = ?agent_type,
+            source = ?source,
+            execution_mode = ?execution_mode,
+            has_idempotency_key = idempotency_key.is_some(),
+            "submitting new task"
+        );
+
         // Check for duplicate by idempotency key
         if let Some(ref key) = idempotency_key
             && let Some(existing) = self.task_repo.get_by_idempotency_key(key).await? {
+                tracing::debug!(task_id = %existing.id, "returning existing task (idempotency dedup)");
                 return Ok((existing, events));
             }
 
@@ -519,7 +532,7 @@ impl<T: TaskRepository> TaskService<T> {
                     task.context.custom.insert("workflow_state".to_string(), val);
                 }
             } else {
-                warn!(
+                tracing::warn!(
                     task_id = %task.id,
                     workflow_name = %wf_name,
                     "Skipping workflow auto-enrollment: unknown template"
@@ -529,6 +542,7 @@ impl<T: TaskRepository> TaskService<T> {
 
         task.validate().map_err(DomainError::ValidationFailed)?;
         self.task_repo.create(&task).await?;
+        tracing::info!(task_id = %task.id, status = ?task.status, execution_mode = ?task.execution_mode, "task submitted successfully");
 
         // Check if task is ready
         self.check_and_update_readiness(&mut task).await?;
@@ -597,10 +611,12 @@ impl<T: TaskRepository> TaskService<T> {
 
     /// Transition task to Running state (claim it).
     pub async fn claim_task(&self, task_id: Uuid, agent_type: &str) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        tracing::info!(%task_id, agent_type, "claiming task");
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
         if task.status != TaskStatus::Ready {
+            tracing::warn!(%task_id, current_status = ?task.status, agent_type, "claim rejected: task not in Ready state");
             return Err(DomainError::InvalidStateTransition {
                 from: task.status.as_str().to_string(),
                 to: "running".to_string(),
@@ -616,6 +632,7 @@ impl<T: TaskRepository> TaskService<T> {
         })?;
 
         self.task_repo.update(&task).await?;
+        tracing::info!(%task_id, agent_type, "task claimed successfully");
 
         let events = vec![Self::make_event(
             EventSeverity::Info,
@@ -641,6 +658,7 @@ impl<T: TaskRepository> TaskService<T> {
     /// classification heuristic to learn which complexity levels benefit from
     /// convergence.
     pub async fn complete_task(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        tracing::info!(%task_id, "completing task");
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
@@ -651,6 +669,7 @@ impl<T: TaskRepository> TaskService<T> {
         })?;
 
         self.task_repo.update(&task).await?;
+        tracing::info!(%task_id, execution_mode = ?task.execution_mode, "task completed successfully");
 
         let mut events = vec![Self::make_event(
             EventSeverity::Info,
@@ -696,6 +715,7 @@ impl<T: TaskRepository> TaskService<T> {
     /// Also emits a `TaskExecutionRecorded` event for opportunistic convergence
     /// memory recording, mirroring the event emitted on success (Part 10.3).
     pub async fn fail_task(&self, task_id: Uuid, error_message: Option<String>) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        tracing::warn!(%task_id, error = ?error_message, "failing task");
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
@@ -711,6 +731,7 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         self.task_repo.update(&task).await?;
+        tracing::warn!(%task_id, retry_count = task.retry_count, execution_mode = ?task.execution_mode, "task marked as failed");
 
         let execution_mode_str = if task.execution_mode.is_convergent() {
             "convergent".to_string()
@@ -766,6 +787,7 @@ impl<T: TaskRepository> TaskService<T> {
     /// strategy on the next iteration. This helps escape the attractor by
     /// resetting the working state while carrying forward learned context.
     pub async fn retry_task(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        tracing::info!(%task_id, "retrying task");
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
@@ -790,6 +812,7 @@ impl<T: TaskRepository> TaskService<T> {
 
         task.retry().map_err(DomainError::ValidationFailed)?;
         self.task_repo.update(&task).await?;
+        tracing::info!(%task_id, attempt = task.retry_count, max_retries = task.max_retries, "task retry initiated");
 
         let events = vec![Self::make_event(
             EventSeverity::Warning,
@@ -808,6 +831,7 @@ impl<T: TaskRepository> TaskService<T> {
 
     /// Cancel a task.
     pub async fn cancel_task(&self, task_id: Uuid, reason: &str) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        tracing::info!(%task_id, reason, "cancelling task");
         let mut task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
@@ -824,6 +848,7 @@ impl<T: TaskRepository> TaskService<T> {
         })?;
 
         self.task_repo.update(&task).await?;
+        tracing::info!(%task_id, reason, "task cancelled successfully");
 
         let events = vec![Self::make_event(
             EventSeverity::Warning,
@@ -872,7 +897,7 @@ impl<T: TaskRepository> TaskService<T> {
 
         if self.has_failed_dependency(task).await? {
             if let Err(e) = task.transition_to(TaskStatus::Blocked) {
-                warn!(task_id = %task.id, error = %e, "Failed to transition task to Blocked");
+                tracing::warn!(task_id = %task.id, error = %e, "Failed to transition task to Blocked");
                 return Err(DomainError::InvalidStateTransition {
                     from: task.status.as_str().to_string(),
                     to: "blocked".to_string(),
@@ -881,7 +906,7 @@ impl<T: TaskRepository> TaskService<T> {
             }
         } else if self.are_dependencies_complete(task).await?
             && let Err(e) = task.transition_to(TaskStatus::Ready) {
-                warn!(task_id = %task.id, error = %e, "Failed to transition task to Ready");
+                tracing::warn!(task_id = %task.id, error = %e, "Failed to transition task to Ready");
                 return Err(DomainError::InvalidStateTransition {
                     from: task.status.as_str().to_string(),
                     to: "ready".to_string(),
