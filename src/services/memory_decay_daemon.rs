@@ -227,40 +227,34 @@ where
 
         let mut consecutive_failures = 0u32;
         let mut interval_timer = interval(self.config.maintenance_interval);
-        // Track the stop reason so we emit exactly one Stopped event at the end.
-        #[allow(unused_assignments)]
-        let mut stopped_reason: Option<StopReason> = None;
 
         // Run on startup if configured
         if self.config.run_on_startup {
             self.run_maintenance_cycle(&tx, &mut consecutive_failures).await;
         }
 
-        loop {
+        let stopped_reason = loop {
             // Wait for next interval or stop signal
             tokio::select! {
                 _ = interval_timer.tick() => {
                     if self.stop_flag.load(Ordering::Acquire) {
-                        stopped_reason = Some(StopReason::Requested);
-                        break;
+                        break StopReason::Requested;
                     }
 
                     self.run_maintenance_cycle(&tx, &mut consecutive_failures).await;
 
                     // Check for too many failures
                     if consecutive_failures >= self.config.max_consecutive_failures {
-                        stopped_reason = Some(StopReason::TooManyFailures);
-                        break;
+                        break StopReason::TooManyFailures;
                     }
                 }
             }
 
             // Check stop flag
             if self.stop_flag.load(Ordering::Acquire) {
-                stopped_reason = Some(StopReason::Requested);
-                break;
+                break StopReason::Requested;
             }
-        }
+        };
 
         // Mark as stopped
         {
@@ -269,8 +263,7 @@ where
         }
 
         // Emit exactly one Stopped event.
-        let reason = stopped_reason.unwrap_or(StopReason::ChannelClosed);
-        let _ = tx.send(DecayDaemonEvent::Stopped { reason }).await;
+        let _ = tx.send(DecayDaemonEvent::Stopped { reason: stopped_reason }).await;
     }
 
     /// Run a single maintenance cycle.

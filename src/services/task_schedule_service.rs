@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::domain::errors::DomainResult;
 use crate::domain::models::task_schedule::*;
 use crate::domain::ports::task_schedule_repository::{TaskScheduleFilter, TaskScheduleRepository};
-use crate::services::event_bus::{EventCategory, EventPayload, EventSeverity};
+use crate::services::event_bus::{EventCategory, EventSeverity};
 use crate::services::event_scheduler::{EventScheduler, ScheduleType, ScheduledEvent};
 
 pub struct TaskScheduleService<R: TaskScheduleRepository> {
@@ -125,10 +125,6 @@ impl<R: TaskScheduleRepository> TaskScheduleService<R> {
             id: Uuid::new_v4(),
             name: schedule.event_name(),
             schedule: Self::to_event_schedule_type(&schedule.schedule),
-            payload: EventPayload::ScheduledEventFired {
-                schedule_id: schedule.id,
-                name: schedule.event_name(),
-            },
             category: EventCategory::Scheduler,
             severity: EventSeverity::Info,
             goal_id: None,
