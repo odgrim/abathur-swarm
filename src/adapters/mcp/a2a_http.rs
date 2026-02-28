@@ -410,6 +410,50 @@ pub struct InMemoryTask {
     pub push_config: Option<PushNotificationConfig>,
 }
 
+impl InMemoryTask {
+    /// Create a new task from send parameters.
+    fn from_params(params: &TaskSendParams) -> Self {
+        let task_id = params.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+        let session_id = params
+            .session_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let now = Utc::now();
+
+        Self {
+            id: task_id,
+            session_id,
+            state: A2ATaskState::Submitted,
+            history: vec![params.message.clone()],
+            artifacts: vec![],
+            metadata: params.metadata.clone(),
+            created_at: now,
+            updated_at: now,
+            push_config: None,
+        }
+    }
+
+    /// Convert to an A2ATask response.
+    fn to_a2a_task(&self) -> A2ATask {
+        A2ATask {
+            id: self.id.clone(),
+            session_id: self.session_id.clone(),
+            status: A2ATaskStatus {
+                state: self.state,
+                message: None,
+                timestamp: Some(self.updated_at.to_rfc3339()),
+            },
+            history: Some(self.history.clone()),
+            artifacts: if self.artifacts.is_empty() {
+                None
+            } else {
+                Some(self.artifacts.clone())
+            },
+            metadata: self.metadata.clone(),
+        }
+    }
+}
+
 /// In-memory session for multi-turn conversations.
 #[derive(Debug, Clone)]
 pub struct A2ASession {
@@ -681,37 +725,23 @@ async fn handle_tasks_send(
         }
     };
 
-    let task_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let session_id = params
-        .session_id
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    // Check if task exists (continue existing task) or create new
+    let new_task = InMemoryTask::from_params(&params);
+    let task_id = new_task.id.clone();
+    let session_id = new_task.session_id.clone();
 
-    let now = Utc::now();
-
-    // Check if task exists (continue existing task)
     let mut tasks = state.tasks.write().await;
     let task = if let Some(existing) = tasks.get_mut(&task_id) {
         existing.history.push(params.message);
         existing.state = A2ATaskState::Working;
-        existing.updated_at = now;
+        existing.updated_at = Utc::now();
         existing.clone()
     } else {
-        // Create new task
-        let new_task = InMemoryTask {
-            id: task_id.clone(),
-            session_id: session_id.clone(),
-            state: A2ATaskState::Submitted,
-            history: vec![params.message],
-            artifacts: vec![],
-            metadata: params.metadata,
-            created_at: now,
-            updated_at: now,
-            push_config: None,
-        };
         tasks.insert(task_id.clone(), new_task.clone());
 
         // Update session
         drop(tasks);
+        let now = new_task.created_at;
         let mut sessions = state.sessions.write().await;
         if let Some(session) = sessions.get_mut(&session_id) {
             if !session.task_ids.contains(&task_id) {
@@ -734,26 +764,9 @@ async fn handle_tasks_send(
         new_task
     };
 
-    let response = A2ATask {
-        id: task.id,
-        session_id: task.session_id,
-        status: A2ATaskStatus {
-            state: task.state,
-            message: None,
-            timestamp: Some(task.updated_at.to_rfc3339()),
-        },
-        history: Some(task.history),
-        artifacts: if task.artifacts.is_empty() {
-            None
-        } else {
-            Some(task.artifacts)
-        },
-        metadata: task.metadata,
-    };
-
     Json(JsonRpcResponse::success(
         request.id,
-        serde_json::to_value(response).unwrap(),
+        serde_json::to_value(task.to_a2a_task()).unwrap(),
     ))
 }
 
@@ -1074,40 +1087,11 @@ async fn create_task(
     State(state): State<Arc<A2AState>>,
     Json(params): Json<TaskSendParams>,
 ) -> Result<(StatusCode, Json<A2ATask>), (StatusCode, Json<ErrorResponse>)> {
-    let task_id = params.id.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let session_id = params
-        .session_id
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
-
-    let now = Utc::now();
-
-    let new_task = InMemoryTask {
-        id: task_id.clone(),
-        session_id: session_id.clone(),
-        state: A2ATaskState::Submitted,
-        history: vec![params.message],
-        artifacts: vec![],
-        metadata: params.metadata,
-        created_at: now,
-        updated_at: now,
-        push_config: None,
-    };
+    let new_task = InMemoryTask::from_params(&params);
+    let response = new_task.to_a2a_task();
 
     let mut tasks = state.tasks.write().await;
-    tasks.insert(task_id.clone(), new_task.clone());
-
-    let response = A2ATask {
-        id: new_task.id,
-        session_id: new_task.session_id,
-        status: A2ATaskStatus {
-            state: new_task.state,
-            message: None,
-            timestamp: Some(new_task.created_at.to_rfc3339()),
-        },
-        history: Some(new_task.history),
-        artifacts: None,
-        metadata: new_task.metadata,
-    };
+    tasks.insert(new_task.id.clone(), new_task);
 
     Ok((StatusCode::CREATED, Json(response)))
 }
@@ -1118,22 +1102,7 @@ async fn get_task(
 ) -> Result<Json<A2ATask>, (StatusCode, Json<ErrorResponse>)> {
     let tasks = state.tasks.read().await;
     match tasks.get(&task_id) {
-        Some(task) => Ok(Json(A2ATask {
-            id: task.id.clone(),
-            session_id: task.session_id.clone(),
-            status: A2ATaskStatus {
-                state: task.state,
-                message: None,
-                timestamp: Some(task.updated_at.to_rfc3339()),
-            },
-            history: Some(task.history.clone()),
-            artifacts: if task.artifacts.is_empty() {
-                None
-            } else {
-                Some(task.artifacts.clone())
-            },
-            metadata: task.metadata.clone(),
-        })),
+        Some(task) => Ok(Json(task.to_a2a_task())),
         None => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {

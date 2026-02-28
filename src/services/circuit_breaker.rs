@@ -404,10 +404,10 @@ impl RecoveryPolicy {
             // Escalate if we've exceeded threshold
             if open_count >= self.escalation_threshold {
                 return RecoveryAction::escalate(
-                    *task_id, // Using task_id as goal_id placeholder
+                    Uuid::nil(), // No goal_id available from circuit scope; consumer must resolve from task
                     format!(
-                        "Circuit opened {} times exceeds escalation threshold {}",
-                        open_count, self.escalation_threshold
+                        "Circuit opened {} times exceeds escalation threshold {} (task: {})",
+                        open_count, self.escalation_threshold, task_id
                     ),
                 );
             }

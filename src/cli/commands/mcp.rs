@@ -17,7 +17,57 @@ use crate::adapters::sqlite::{
 };
 use crate::domain::models::a2a::A2AAgentCard;
 use crate::services::command_bus::CommandBus;
+use crate::services::event_bus::EventBus;
 use crate::services::{AgentService, GoalService, MemoryService, TaskService};
+
+/// Common services shared across MCP server initialization functions.
+struct McpServices {
+    pool: sqlx::SqlitePool,
+    task_service: TaskService<SqliteTaskRepository>,
+    memory_service: MemoryService<SqliteMemoryRepository>,
+    goal_service: GoalService<SqliteGoalRepository>,
+    event_bus: Arc<EventBus>,
+}
+
+impl McpServices {
+    /// Initialize common services: DB pool, migrations, repos, services, and event bus.
+    async fn init(db_path: &str) -> Result<Self> {
+        let pool = create_pool(db_path, None).await?;
+        let migrator = Migrator::new(pool.clone());
+        migrator
+            .run_embedded_migrations(all_embedded_migrations())
+            .await?;
+
+        let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+        let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
+
+        let memory_service = MemoryService::new(memory_repo);
+        let task_service = TaskService::new(task_repo);
+        let goal_service = GoalService::new(goal_repo);
+
+        let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone()).await;
+
+        Ok(Self {
+            pool,
+            task_service,
+            memory_service,
+            goal_service,
+            event_bus,
+        })
+    }
+
+    /// Build a CommandBus from the common services, consuming self.
+    fn into_command_bus(self) -> (TaskService<SqliteTaskRepository>, MemoryService<SqliteMemoryRepository>, Arc<CommandBus>) {
+        let command_bus = Arc::new(CommandBus::new(
+            Arc::new(self.task_service.clone()),
+            Arc::new(self.goal_service),
+            Arc::new(self.memory_service.clone()),
+            self.event_bus,
+        ));
+        (self.task_service, self.memory_service, command_bus)
+    }
+}
 
 #[derive(Args, Debug)]
 pub struct McpArgs {
@@ -186,28 +236,8 @@ pub async fn execute(args: McpArgs, json_mode: bool) -> Result<()> {
 }
 
 async fn start_memory_http(host: String, port: u16, enable_cors: bool, json_mode: bool) -> Result<()> {
-    // Initialize database
-    let pool = create_pool("abathur.db", None).await?;
-    let migrator = Migrator::new(pool.clone());
-    migrator
-        .run_embedded_migrations(all_embedded_migrations())
-        .await?;
-
-    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-
-    let memory_service = MemoryService::new(memory_repo);
-    let task_service = TaskService::new(task_repo);
-    let goal_service = GoalService::new(goal_repo);
-
-    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool).await;
-    let command_bus = Arc::new(CommandBus::new(
-        Arc::new(task_service),
-        Arc::new(goal_service),
-        Arc::new(memory_service.clone()),
-        event_bus,
-    ));
+    let services = McpServices::init("abathur.db").await?;
+    let (_, memory_service, command_bus) = services.into_command_bus();
 
     let config = MemoryHttpConfig {
         host: host.clone(),
@@ -239,28 +269,8 @@ async fn start_memory_http(host: String, port: u16, enable_cors: bool, json_mode
 }
 
 async fn start_tasks_http(host: String, port: u16, enable_cors: bool, json_mode: bool) -> Result<()> {
-    // Initialize database
-    let pool = create_pool("abathur.db", None).await?;
-    let migrator = Migrator::new(pool.clone());
-    migrator
-        .run_embedded_migrations(all_embedded_migrations())
-        .await?;
-
-    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-
-    let task_service = TaskService::new(task_repo);
-    let goal_service = GoalService::new(goal_repo);
-    let memory_service = MemoryService::new(memory_repo);
-
-    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool).await;
-    let command_bus = Arc::new(CommandBus::new(
-        Arc::new(task_service.clone()),
-        Arc::new(goal_service),
-        Arc::new(memory_service),
-        event_bus,
-    ));
+    let services = McpServices::init("abathur.db").await?;
+    let (task_service, _, command_bus) = services.into_command_bus();
 
     let config = TasksHttpConfig {
         host: host.clone(),
@@ -292,16 +302,9 @@ async fn start_tasks_http(host: String, port: u16, enable_cors: bool, json_mode:
 }
 
 async fn start_agents_http(host: String, port: u16, enable_cors: bool, json_mode: bool) -> Result<()> {
-    // Initialize database
-    let pool = create_pool("abathur.db", None).await?;
-    let migrator = Migrator::new(pool.clone());
-    migrator
-        .run_embedded_migrations(all_embedded_migrations())
-        .await?;
-
-    let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-    let event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool).await;
-    let service = AgentService::new(agent_repo, event_bus);
+    let services = McpServices::init("abathur.db").await?;
+    let agent_repo = Arc::new(SqliteAgentRepository::new(services.pool));
+    let service = AgentService::new(agent_repo, services.event_bus);
 
     let config = AgentsHttpConfig {
         host: host.clone(),
@@ -398,12 +401,7 @@ async fn start_all(
     a2a_port: u16,
     json_mode: bool,
 ) -> Result<()> {
-    // Initialize database
-    let pool = create_pool("abathur.db", None).await?;
-    let migrator = Migrator::new(pool.clone());
-    migrator
-        .run_embedded_migrations(all_embedded_migrations())
-        .await?;
+    let services = McpServices::init("abathur.db").await?;
 
     if json_mode {
         let output = serde_json::json!({
@@ -427,28 +425,11 @@ async fn start_all(
         println!();
     }
 
-    // Create services with shared persistent EventBus
-    let shared_event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone()).await;
+    // Create agent service from the shared pool/event_bus before consuming services
+    let agent_repo = Arc::new(SqliteAgentRepository::new(services.pool.clone()));
+    let agent_service = AgentService::new(agent_repo, services.event_bus.clone());
 
-    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-    let memory_service = MemoryService::new(memory_repo);
-
-    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let task_service = TaskService::new(task_repo);
-
-    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-    let goal_service = GoalService::new(goal_repo);
-
-    let agent_repo = Arc::new(SqliteAgentRepository::new(pool));
-    let agent_service = AgentService::new(agent_repo, shared_event_bus.clone());
-
-    // Create shared CommandBus for mutation routing
-    let command_bus = Arc::new(CommandBus::new(
-        Arc::new(task_service.clone()),
-        Arc::new(goal_service),
-        Arc::new(memory_service.clone()),
-        shared_event_bus,
-    ));
+    let (task_service, memory_service, command_bus) = services.into_command_bus();
 
     // Create servers
     let memory_config = MemoryHttpConfig {
@@ -558,44 +539,21 @@ async fn start_all(
 
 async fn start_stdio(db_path: String, task_id: Option<String>) -> Result<()> {
     use crate::adapters::mcp::StdioServer;
-    use crate::adapters::sqlite::SqliteGoalRepository;
     use crate::cli::id_resolver::resolve_task_id;
 
-    // Initialize database first so we can use prefix resolution
-    let pool = create_pool(&db_path, None).await?;
-    let migrator = Migrator::new(pool.clone());
-    migrator
-        .run_embedded_migrations(all_embedded_migrations())
-        .await?;
+    let services = McpServices::init(&db_path).await?;
 
     // Resolve optional task ID (supports prefix matching)
     let task_uuid = match task_id {
-        Some(ref id) => Some(resolve_task_id(&pool, id).await?),
+        Some(ref id) => Some(resolve_task_id(&services.pool, id).await?),
         None => None,
     };
 
-    // Create repositories and services with shared persistent EventBus
-    let shared_event_bus = crate::cli::event_helpers::create_persistent_event_bus(pool.clone()).await;
+    let agent_repo = Arc::new(SqliteAgentRepository::new(services.pool.clone()));
+    let agent_service = AgentService::new(agent_repo, services.event_bus.clone());
+    let goal_repo = Arc::new(SqliteGoalRepository::new(services.pool.clone()));
 
-    let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
-    let task_service = TaskService::new(task_repo);
-
-    let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
-    let agent_service = AgentService::new(agent_repo, shared_event_bus.clone());
-
-    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-    let memory_service = MemoryService::new(memory_repo);
-
-    let goal_repo = Arc::new(SqliteGoalRepository::new(pool));
-    let goal_service = GoalService::new(goal_repo.clone());
-
-    // Create CommandBus for mutation routing
-    let command_bus = Arc::new(CommandBus::new(
-        Arc::new(task_service.clone()),
-        Arc::new(goal_service),
-        Arc::new(memory_service.clone()),
-        shared_event_bus,
-    ));
+    let (task_service, memory_service, command_bus) = services.into_command_bus();
 
     let server = StdioServer::new(task_service, agent_service, memory_service, goal_repo, command_bus, task_uuid);
     server.run().await?;
