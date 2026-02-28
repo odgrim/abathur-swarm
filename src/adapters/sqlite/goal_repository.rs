@@ -221,6 +221,7 @@ struct GoalRow {
     constraints: Option<String>,
     metadata: Option<String>,
     applicability_domains: Option<String>,
+    #[allow(dead_code)]
     evaluation_criteria: Option<String>,
     created_at: String,
     updated_at: String,
@@ -243,8 +244,7 @@ impl TryFrom<GoalRow> for Goal {
         let constraints: Vec<GoalConstraint> = super::parse_json_or_default(row.constraints)?;
         let metadata: GoalMetadata = super::parse_json_or_default(row.metadata)?;
         let applicability_domains: Vec<String> = super::parse_json_or_default(row.applicability_domains)?;
-        // evaluation_criteria column is kept for DB compatibility but no longer used
-        let _evaluation_criteria: Vec<String> = super::parse_json_or_default(row.evaluation_criteria)?;
+        // evaluation_criteria column exists in DB but is no longer used; ignore it.
 
         let created_at = super::parse_datetime(&row.created_at)?;
         let updated_at = super::parse_datetime(&row.updated_at)?;
