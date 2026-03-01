@@ -618,7 +618,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                 if lower.contains("researcher") || lower.contains("analyst")
                     || lower.contains("explorer") || lower.contains("auditor")
                 {
-                    40  // Research: typical ~15 turns, ceiling 40
+                    51  // Research: typical ~15 turns, ceiling 51
                 } else if lower.contains("planner") || lower.contains("architect")
                     || lower.contains("designer")
                     || lower.contains("reviewer") || lower.contains("verifier")

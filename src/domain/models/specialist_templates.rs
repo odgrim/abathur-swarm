@@ -465,7 +465,13 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
                  - Start with Glob to map the file structure relevant to your question.\n\
                  - Use Grep to find specific patterns, types, or function names.\n\
                  - Only Read files that Glob/Grep identified as relevant — never read files speculatively.\n\
-                 - Store findings incrementally via memory_store as you discover them, not all at the end.\n",
+                 - Store findings incrementally via memory_store as you discover them, not all at the end.\n\
+                 \n\
+                 ## Turn Budget Awareness\n\
+                 - You have a limited turn budget. At the halfway point, assess what you have and begin wrapping up.\n\
+                 - Prefer breadth over depth — cover all assigned scope areas before diving deep into any one.\n\
+                 - When you have sufficient findings, STOP researching and immediately move to the Completion Protocol.\n\
+                 - It is better to report partial findings on time than to exhaust your turns and lose everything.\n",
             );
         }
         "planner" => {
@@ -999,10 +1005,11 @@ Every agent `system_prompt` you write MUST include ALL of the following sections
 
 Use these class-specific patterns when writing system_prompts:
 
-**Researcher agents** (read_only: true, typical ~15 turns, ceiling 40):
+**Researcher agents** (read_only: true, typical ~15 turns, ceiling 51):
 - Strategy: Glob/Grep first to build a file map, then targeted Read on specific files.
 - Store findings incrementally via memory_store as you go, not all at the end.
 - Output is memory entries, not files. Never use Write/Edit.
+- At the halfway point, assess progress and begin wrapping up. Report partial findings rather than exhausting turns.
 
 **Planner agents** (read_only: true, typical ~10 turns, ceiling 30):
 - First action: memory_search for existing plans or research findings.
@@ -1177,10 +1184,11 @@ Every agent `system_prompt` you write MUST include ALL of the following sections
 
 Use these class-specific patterns when writing system_prompts:
 
-**Researcher agents** (read_only: true, typical ~15 turns, ceiling 40):
+**Researcher agents** (read_only: true, typical ~15 turns, ceiling 51):
 - Strategy: Glob/Grep first to build a file map, then targeted Read on specific files.
 - Store findings incrementally via memory_store as you go, not all at the end.
 - Output is memory entries, not files. Never use Write/Edit.
+- At the halfway point, assess progress and begin wrapping up. Report partial findings rather than exhausting turns.
 
 **Planner agents** (read_only: true, typical ~10 turns, ceiling 30):
 - First action: memory_search for existing plans or research findings.
