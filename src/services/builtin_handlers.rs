@@ -5417,11 +5417,8 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowVerificationHandler<T
 // WorkflowAutoAdvanceHandler — REMOVED
 // ============================================================================
 // Removed: `WorkflowAutoAdvanceHandler` reacted to `WorkflowEnrolled` and raced
-// with `spawn_task_agent()` (which also advances from Pending at claim time)
-// and the `workflow_advance` MCP tool. Since `spawn_task_agent()` already
-// auto-advances, this handler was redundant and caused orphaned subtasks.
-// The advance guard in `WorkflowEngine::advance()` now prevents double-advance
-// from active states as an additional safety net.
+// with `spawn_task_agent()` and the `workflow_advance` MCP tool.
+// The Overmind now owns the first advance — no system-side auto-advance from Pending.
 
 #[cfg(test)]
 mod tests {

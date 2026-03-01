@@ -91,7 +91,7 @@ where
                 .await;
         }
 
-        // WorkflowAutoAdvanceHandler — REMOVED (race condition with spawn_task_agent auto-advance)
+        // WorkflowAutoAdvanceHandler — REMOVED (Overmind owns first advance via MCP tools)
 
         // TaskFailedBlockHandler (SYSTEM) — block dependents on failure/cancel
         reactor

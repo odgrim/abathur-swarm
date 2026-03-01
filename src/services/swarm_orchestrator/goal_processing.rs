@@ -369,54 +369,9 @@ where
                         },
                     )).await;
 
-                    // Auto-advance from Pending workflow state (Step 1.3).
-                    // If this task is enrolled in a workflow and in Pending state,
-                    // create the WorkflowEngine and advance to the first phase.
-                    // Return early — the phase subtask will be picked up in the
-                    // next scheduling cycle.
-                    if let Ok(Some(claimed_task)) = self.task_repo.get(task.id).await
-                        && let Some(ws_val) = claimed_task.context.custom.get("workflow_state")
-                            && let Ok(ws) = serde_json::from_value::<crate::domain::models::workflow_state::WorkflowState>(ws_val.clone())
-                                && matches!(ws, crate::domain::models::workflow_state::WorkflowState::Pending { .. }) {
-                                    let verification_enabled = self.intent_verifier.is_some();
-                                    let engine = crate::services::workflow_engine::WorkflowEngine::new(
-                                        self.task_repo.clone(),
-                                        self.event_bus.clone(),
-                                        verification_enabled,
-                                    );
-                                    match engine.advance(task.id).await {
-                                        Ok(crate::services::workflow_engine::AdvanceResult::PhaseStarted { phase_name, .. }) => {
-                                            tracing::info!(
-                                                task_id = %task.id,
-                                                phase = %phase_name,
-                                                "Auto-advanced workflow from Pending to first phase — overmind session will orchestrate"
-                                            );
-                                            // Fall through — the overmind gets a long-running
-                                            // substrate session to orchestrate all phases.
-                                        }
-                                        Ok(crate::services::workflow_engine::AdvanceResult::Completed) => {
-                                            tracing::info!(
-                                                task_id = %task.id,
-                                                "Workflow completed immediately on advance (no phases)"
-                                            );
-                                            self.guardrails.register_agent_end(&agent_unique_id).await;
-                                            drop(permit);
-                                            return Ok(());
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                task_id = %task.id,
-                                                error = %e,
-                                                "Failed to auto-advance workflow from Pending"
-                                            );
-                                            // Don't fall through to normal spawn — the task is enrolled
-                                            // in a workflow and should not be processed directly.
-                                            self.guardrails.register_agent_end(&agent_unique_id).await;
-                                            drop(permit);
-                                            return Ok(());
-                                        }
-                                    }
-                                }
+                    // Workflow stays in Pending state — the Overmind decides
+                    // whether to workflow_advance (single subtask) or
+                    // workflow_fan_out (parallel slices) for the first phase.
                 }
                 Err(e) => {
                     tracing::warn!("Failed to atomically claim task {}: {}", task.id, e);
