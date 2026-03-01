@@ -219,46 +219,35 @@ async fn test_full_phase_progression_code_workflow() {
     harness::complete_subtask(&service, research_sub).await;
     engine.handle_phase_complete(task_id, research_sub).await.expect("handle research");
 
-    // Phase 1: plan
+    // Phase 1: plan — should be PhaseReady after research completes
     {
         let task = repo.get(task_id).await.unwrap().unwrap();
         let ws = harness::read_workflow_state(&task);
         match &ws {
-            WorkflowState::PhaseRunning { phase_index, phase_name, .. } => {
+            WorkflowState::PhaseReady { phase_index, phase_name, .. } => {
                 assert_eq!(*phase_index, 1);
                 assert_eq!(phase_name, "plan");
             }
-            other => panic!("Expected PhaseRunning(plan), got {:?}", other),
+            other => panic!("Expected PhaseReady(plan), got {:?}", other),
         }
     }
-    let plan_sub = match &harness::read_workflow_state(&repo.get(task_id).await.unwrap().unwrap()) {
-        WorkflowState::PhaseRunning { subtask_ids, .. } => subtask_ids[0],
-        other => panic!("Expected PhaseRunning, got {:?}", other),
-    };
+    let plan_sub = harness::advance_and_get_subtask(&engine, task_id).await;
     harness::complete_subtask(&service, plan_sub).await;
     engine.handle_phase_complete(task_id, plan_sub).await.expect("handle plan");
 
-    // Phase 2: implement (has verify: true → goes to Verifying)
+    // Phase 2: implement — should be PhaseReady after plan completes
     {
         let task = repo.get(task_id).await.unwrap().unwrap();
         let ws = harness::read_workflow_state(&task);
-        // After plan completes, engine auto-advances to implement (PhaseRunning)
-        // but since implement wasn't yet started by our handle, we need to check
         match &ws {
-            WorkflowState::PhaseRunning { phase_index, phase_name, .. } => {
+            WorkflowState::PhaseReady { phase_index, phase_name, .. } => {
                 assert_eq!(*phase_index, 2);
                 assert_eq!(phase_name, "implement");
             }
-            WorkflowState::Verifying { .. } => {
-                // Already in verifying — implementation phase auto-started and completed
-            }
-            other => panic!("Expected PhaseRunning(implement) or Verifying, got {:?}", other),
+            other => panic!("Expected PhaseReady(implement), got {:?}", other),
         }
     }
-    let implement_sub = match &harness::read_workflow_state(&repo.get(task_id).await.unwrap().unwrap()) {
-        WorkflowState::PhaseRunning { subtask_ids, .. } => subtask_ids[0],
-        other => panic!("Expected PhaseRunning at implement, got {:?}", other),
-    };
+    let implement_sub = harness::advance_and_get_subtask(&engine, task_id).await;
     harness::complete_subtask(&service, implement_sub).await;
     engine.handle_phase_complete(task_id, implement_sub).await.expect("handle implement");
 
@@ -350,19 +339,13 @@ async fn test_gate_verdict_reject() {
     // Phase 0: research
     harness::run_phase(&service, &engine, task_id).await;
 
-    // Phase 1: plan (auto-advanced from research completion)
-    let plan_sub = match &harness::read_workflow_state(&repo.get(task_id).await.unwrap().unwrap()) {
-        WorkflowState::PhaseRunning { subtask_ids, .. } => subtask_ids[0],
-        other => panic!("Expected PhaseRunning(plan), got {:?}", other),
-    };
+    // Phase 1: plan (PhaseReady after research completion, then advance)
+    let plan_sub = harness::advance_and_get_subtask(&engine, task_id).await;
     harness::complete_subtask(&service, plan_sub).await;
     engine.handle_phase_complete(task_id, plan_sub).await.unwrap();
 
-    // Phase 2: implement (auto-advanced)
-    let impl_sub = match &harness::read_workflow_state(&repo.get(task_id).await.unwrap().unwrap()) {
-        WorkflowState::PhaseRunning { subtask_ids, .. } => subtask_ids[0],
-        other => panic!("Expected PhaseRunning(implement), got {:?}", other),
-    };
+    // Phase 2: implement (PhaseReady after plan completion, then advance)
+    let impl_sub = harness::advance_and_get_subtask(&engine, task_id).await;
     harness::complete_subtask(&service, impl_sub).await;
     engine.handle_phase_complete(task_id, impl_sub).await.unwrap();
 
@@ -422,21 +405,13 @@ async fn test_verification_triggers_on_implement() {
     // Advance through research and plan
     harness::run_phase(&service, &engine, task_id).await; // research
 
-    let plan_sub = match &harness::read_workflow_state(&repo.get(task_id).await.unwrap().unwrap()) {
-        WorkflowState::PhaseRunning { subtask_ids, .. } => subtask_ids[0],
-        other => panic!("Expected PhaseRunning(plan), got {:?}", other),
-    };
+    // PhaseReady(plan) → advance
+    let plan_sub = harness::advance_and_get_subtask(&engine, task_id).await;
     harness::complete_subtask(&service, plan_sub).await;
     engine.handle_phase_complete(task_id, plan_sub).await.unwrap();
 
-    // Now at implement phase
-    let impl_sub = match &harness::read_workflow_state(&repo.get(task_id).await.unwrap().unwrap()) {
-        WorkflowState::PhaseRunning { subtask_ids, phase_name, .. } => {
-            assert_eq!(phase_name, "implement");
-            subtask_ids[0]
-        }
-        other => panic!("Expected PhaseRunning(implement), got {:?}", other),
-    };
+    // PhaseReady(implement) → advance
+    let impl_sub = harness::advance_and_get_subtask(&engine, task_id).await;
     harness::complete_subtask(&service, impl_sub).await;
     engine.handle_phase_complete(task_id, impl_sub).await.unwrap();
 
@@ -558,21 +533,13 @@ async fn test_convergent_skip_verification() {
     // Advance through research and plan normally
     harness::run_phase(&service, &engine, task_id).await; // research
 
-    let plan_sub = match &harness::read_workflow_state(&repo.get(task_id).await.unwrap().unwrap()) {
-        WorkflowState::PhaseRunning { subtask_ids, .. } => subtask_ids[0],
-        other => panic!("Expected PhaseRunning(plan), got {:?}", other),
-    };
+    // PhaseReady(plan) → advance
+    let plan_sub = harness::advance_and_get_subtask(&engine, task_id).await;
     harness::complete_subtask(&service, plan_sub).await;
     engine.handle_phase_complete(task_id, plan_sub).await.unwrap();
 
-    // At implement phase — mark the subtask as converged before completing
-    let impl_sub = match &harness::read_workflow_state(&repo.get(task_id).await.unwrap().unwrap()) {
-        WorkflowState::PhaseRunning { subtask_ids, phase_name, .. } => {
-            assert_eq!(phase_name, "implement");
-            subtask_ids[0]
-        }
-        other => panic!("Expected PhaseRunning(implement), got {:?}", other),
-    };
+    // PhaseReady(implement) → advance
+    let impl_sub = harness::advance_and_get_subtask(&engine, task_id).await;
 
     // Set convergence_outcome on the subtask before completing
     {
@@ -596,12 +563,12 @@ async fn test_convergent_skip_verification() {
         ws
     );
 
-    // Should have auto-advanced to the review phase (PhaseRunning or PhaseGate)
+    // Should be in PhaseReady for review (converged subtasks skip verification, no auto-advance)
     match &ws {
-        WorkflowState::PhaseRunning { phase_name, .. } | WorkflowState::PhaseGate { phase_name, .. } => {
-            assert_eq!(phase_name, "review", "Should have advanced to review");
+        WorkflowState::PhaseReady { phase_name, .. } => {
+            assert_eq!(phase_name, "review", "Should be PhaseReady for review");
         }
-        other => panic!("Expected review phase, got {:?}", other),
+        other => panic!("Expected PhaseReady(review), got {:?}", other),
     }
 }
 
@@ -664,18 +631,12 @@ async fn test_gate_verdict_rework() {
     // Advance through all phases to reach the review gate
     // Phase 0: research
     harness::run_phase(&service, &engine, task_id).await;
-    // Phase 1: plan (auto-advanced)
-    let plan_sub = match &harness::read_workflow_state(&repo.get(task_id).await.unwrap().unwrap()) {
-        WorkflowState::PhaseRunning { subtask_ids, .. } => subtask_ids[0],
-        other => panic!("Expected PhaseRunning(plan), got {:?}", other),
-    };
+    // Phase 1: plan (PhaseReady → advance)
+    let plan_sub = harness::advance_and_get_subtask(&engine, task_id).await;
     harness::complete_subtask(&service, plan_sub).await;
     engine.handle_phase_complete(task_id, plan_sub).await.unwrap();
-    // Phase 2: implement
-    let impl_sub = match &harness::read_workflow_state(&repo.get(task_id).await.unwrap().unwrap()) {
-        WorkflowState::PhaseRunning { subtask_ids, .. } => subtask_ids[0],
-        other => panic!("Expected PhaseRunning(implement), got {:?}", other),
-    };
+    // Phase 2: implement (PhaseReady → advance)
+    let impl_sub = harness::advance_and_get_subtask(&engine, task_id).await;
     harness::complete_subtask(&service, impl_sub).await;
     engine.handle_phase_complete(task_id, impl_sub).await.unwrap();
     // Pass verification

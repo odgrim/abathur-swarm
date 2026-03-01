@@ -253,20 +253,20 @@ async fn test_handle_phase_complete_single_subtask() {
         .await
         .unwrap();
 
-    // Should have auto-advanced to the next phase (plan)
+    // Should be in PhaseReady for the next phase (plan)
     let reloaded = repo.get(task.id).await.unwrap().unwrap();
     let ws: WorkflowState =
         serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
     match ws {
-        WorkflowState::PhaseRunning {
+        WorkflowState::PhaseReady {
             phase_index,
             phase_name,
             ..
         } => {
-            assert_eq!(phase_index, 1, "Should have advanced to phase 1 (plan)");
+            assert_eq!(phase_index, 1, "Should be PhaseReady at phase 1 (plan)");
             assert_eq!(phase_name, "plan");
         }
-        other => panic!("Expected PhaseRunning at phase 1, got {:?}", other),
+        other => panic!("Expected PhaseReady at phase 1, got {:?}", other),
     }
 }
 
@@ -558,20 +558,20 @@ async fn test_verification_result_auto_advance() {
         .await
         .unwrap();
 
-    // Should have advanced to review (gate phase)
+    // Should be PhaseReady for review (gate phase)
     let reloaded = repo.get(task.id).await.unwrap().unwrap();
     let ws: WorkflowState =
         serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
     match ws {
-        WorkflowState::PhaseRunning {
+        WorkflowState::PhaseReady {
             phase_index,
             phase_name,
             ..
         } => {
-            assert_eq!(phase_index, 3, "Should advance to phase 3 (review)");
+            assert_eq!(phase_index, 3, "Should be PhaseReady at phase 3 (review)");
             assert_eq!(phase_name, "review");
         }
-        other => panic!("Expected PhaseRunning at review, got {:?}", other),
+        other => panic!("Expected PhaseReady at review, got {:?}", other),
     }
 }
 
@@ -706,18 +706,23 @@ async fn test_create_phase_subtask_execution_mode() {
         .await
         .unwrap();
 
-    // Plan phase auto-advanced — check its execution mode
+    // Plan phase is now PhaseReady — advance to create the subtask, then check execution mode
     let parent = repo.get(task.id).await.unwrap().unwrap();
     let ws: WorkflowState =
         serde_json::from_value(parent.context.custom["workflow_state"].clone()).unwrap();
-    if let WorkflowState::PhaseRunning { subtask_ids, .. } = ws {
-        let plan_sub = repo.get(subtask_ids[0]).await.unwrap().unwrap();
+    if let WorkflowState::PhaseReady { .. } = ws {
+        let result = engine.advance(task.id).await.unwrap();
+        let plan_sub_id = match result {
+            AdvanceResult::PhaseStarted { subtask_id, .. } => subtask_id,
+            _ => panic!("Expected PhaseStarted"),
+        };
+        let plan_sub = repo.get(plan_sub_id).await.unwrap().unwrap();
         assert!(
             plan_sub.execution_mode.is_direct(),
             "Plan phase (read-only) should use Direct mode"
         );
 
-        // Complete plan and advance to implement
+        // Complete plan and handle phase complete
         let mut p = plan_sub;
         let _ = p.transition_to(TaskStatus::Running);
         repo.update(&p).await.unwrap();
@@ -727,12 +732,17 @@ async fn test_create_phase_subtask_execution_mode() {
 
         engine.handle_phase_complete(task.id, p.id).await.unwrap();
 
-        // Implement phase should use Convergent (has write tools)
+        // Implement phase is now PhaseReady — advance to create subtask
         let parent = repo.get(task.id).await.unwrap().unwrap();
         let ws: WorkflowState =
             serde_json::from_value(parent.context.custom["workflow_state"].clone()).unwrap();
-        if let WorkflowState::PhaseRunning { subtask_ids, .. } = ws {
-            let impl_sub = repo.get(subtask_ids[0]).await.unwrap().unwrap();
+        if let WorkflowState::PhaseReady { .. } = ws {
+            let result = engine.advance(task.id).await.unwrap();
+            let impl_sub_id = match result {
+                AdvanceResult::PhaseStarted { subtask_id, .. } => subtask_id,
+                _ => panic!("Expected PhaseStarted"),
+            };
+            let impl_sub = repo.get(impl_sub_id).await.unwrap().unwrap();
             assert!(
                 impl_sub.execution_mode.is_convergent(),
                 "Implement phase (write tools) should use Convergent mode"

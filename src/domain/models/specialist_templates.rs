@@ -300,11 +300,11 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
             );
         } else if phase.verify {
             section.push_str(
-                "- **Verified phase**: Create an agent, assign via `task_assign`, wait via `task_wait`. Verification runs on completion. If it passes, `task_wait` returns — call `workflow_advance`. If it fails repeatedly, escalated to a gate for your verdict.\n",
+                "- **Verified phase**: Create an agent, assign via `task_assign`, wait via `task_wait`. Verification runs on completion. If it passes, the system enters PhaseReady. Call `workflow_advance` (or `workflow_fan_out`) to start the next phase, then assign an agent. If verification fails repeatedly, escalated to a gate for your verdict.\n",
             );
         } else {
             section.push_str(
-                "- **Standard phase**: Create an agent, assign via `task_assign`, wait via `task_wait`. When it completes, call `workflow_advance` to start the next phase.\n",
+                "- **Standard phase**: Create an agent, assign via `task_assign`, wait via `task_wait`. When it completes, the system enters PhaseReady. Call `workflow_advance` (or `workflow_fan_out`) to start the next phase, then assign an agent.\n",
             );
         }
 
@@ -722,10 +722,10 @@ Tasks are **auto-enrolled** in workflows at submission time. You get a **long-ru
 4. Create a specialist via `agent_create` (or reuse via `agent_list`)
 5. Call `task_assign(subtask_id, specialist_name)` — this sets agent_type so the scheduler spawns it
 6. Call `task_wait(subtask_id)` — blocks until the specialist finishes
-7. When the phase completes:
-   - **Non-gate phase**: Call `workflow_advance` to create the next phase subtask. Repeat from step 4.
-   - **Gate phase** (triage, review): Evaluate the result and call `workflow_gate` with approve/reject/rework.
-8. When all phases complete, mark your parent task complete via `task_update_status`.
+7. When a non-gate phase completes, the system transitions to PhaseReady.
+   Call `workflow_status` to confirm, then `workflow_advance` to create a single subtask, or `workflow_fan_out` for parallel slices. Then assign agents via `task_assign`.
+8. Gate phases (triage, review): evaluate the result and call `workflow_gate` with approve/reject/rework.
+9. When all phases complete, mark your parent task complete via `task_update_status`.
 
 **IMPORTANT**: Do NOT call `workflow_advance` for the first phase — it was already advanced when your session started.
 
@@ -739,16 +739,16 @@ Call `workflow_status` to find the research subtask. Create a read-only research
 - Tools: `read`, `glob`, `grep`, `memory` — read-only. Include `task_status`.
 - **Fan-out heuristic**: If the task touches 3+ distinct codebase areas, call `workflow_fan_out` with one slice per area. Assign an agent to each slice via `task_assign`.
 
-**Phase 3: Plan** — call `workflow_advance` after research completes
+**Phase 3: Plan** — after research completes, call `workflow_status` to see PhaseReady, then `workflow_advance`
 Create a domain-specific planning agent and assign via `task_assign`.
 - Tools: `read`, `glob`, `grep`, `memory` — read-only plus memory to store the plan.
 
-**Phase 4: Implement** — call `workflow_advance` after plan completes
+**Phase 4: Implement** — after plan completes, call `workflow_status` to see PhaseReady, then `workflow_advance` (or `workflow_fan_out` for parallel tracks)
 Create an implementation agent and assign via `task_assign`.
 - Uses convergent execution automatically. Verification runs on completion.
 - If verification fails, the system auto-reworks. If retries exhausted, escalated to a gate for your verdict.
 
-**Phase 5: Review** — gate phase, call `workflow_advance` after implement completes
+**Phase 5: Review** — gate phase; after implement completes, call `workflow_status` to see PhaseReady, then `workflow_advance`
 Create a code review agent and assign via `task_assign`.
 - After the review subtask completes, call `workflow_gate` with approve/reject/rework.
 - Ensure review tasks use `agent_type: "code-reviewer"`.
@@ -767,7 +767,7 @@ Use `workflow_fan_out` when a phase can benefit from parallel execution. Assign 
 
 ### Intent Verification
 Some phases (e.g., `implement`) have automated intent verification. This is fully automatic:
-- **Verification passes**: `task_wait` returns. Call `workflow_advance` to proceed.
+- **Verification passes**: System transitions to PhaseReady for the next phase. Call `workflow_status` to confirm, then `workflow_advance` or `workflow_fan_out`.
 - **Verification fails (retries remaining)**: System automatically re-runs the phase with feedback. `task_wait` continues blocking.
 - **Verification fails (retries exhausted)**: Escalated to a gate. Review the feedback and decide: `approve`, `reject`, or `rework`.
 - **Convergent execution phases**: If a phase converged successfully, workflow verification is skipped.
@@ -843,7 +843,12 @@ tool: task_wait
 arguments:
   id: "<research_subtask_id>"
 
-# Research complete → advance to Phase 3: Plan
+# Research complete → system enters PhaseReady. Check status, then advance.
+tool: workflow_status
+arguments:
+  task_id: "<parent_task_id>"
+# → returns state: "phase_ready", phase_name: "plan", action_required: "Call workflow_advance or workflow_fan_out"
+
 tool: workflow_advance
 arguments:
   task_id: "<parent_task_id>"
@@ -864,7 +869,12 @@ tool: task_wait
 arguments:
   id: "<plan_subtask_id>"
 
-# Plan complete → advance to Phase 4: Implement
+# Plan complete → system enters PhaseReady. Advance to Phase 4: Implement
+tool: workflow_status
+arguments:
+  task_id: "<parent_task_id>"
+# → state: "phase_ready", phase_name: "implement"
+
 tool: workflow_advance
 arguments:
   task_id: "<parent_task_id>"
@@ -885,7 +895,12 @@ arguments:
   id: "<implement_subtask_id>"
   timeout_seconds: 1800
 
-# Implement complete → advance to Phase 5: Review (gate)
+# Implement complete → system enters PhaseReady. Advance to Phase 5: Review (gate)
+tool: workflow_status
+arguments:
+  task_id: "<parent_task_id>"
+# → state: "phase_ready", phase_name: "review"
+
 tool: workflow_advance
 arguments:
   task_id: "<parent_task_id>"
@@ -1049,11 +1064,11 @@ You get a **long-running session** for each workflow parent task. The system aut
 4. Create a specialist via `agent_create` (or reuse via `agent_list`)
 5. Call `task_assign(subtask_id, specialist_name)` — this sets agent_type so the scheduler spawns it
 6. Call `task_wait(subtask_id)` — blocks until the specialist finishes
-7. When the phase completes:
-   - **Non-gate phase**: Call `workflow_advance` to create the next phase subtask. Repeat from step 4.
-   - **Gate phase** (triage, review): Evaluate the result and call `workflow_gate` with approve/reject/rework. If approved with a next phase, the advance result includes the new subtask. Repeat from step 4.
-   - **Non-gate phase with verification**: The system runs intent verification on subtask completion. If it passes, `task_wait` returns and you can call `workflow_advance`. If it fails, the system auto-reworks. If retries exhausted, escalates to a gate for your verdict.
-8. When all phases complete, mark your parent task complete via `task_update_status`.
+7. When a non-gate phase completes, the system transitions to PhaseReady.
+   Call `workflow_status` to confirm, then `workflow_advance` to create a single subtask, or `workflow_fan_out` for parallel slices. Then assign agents via `task_assign`. Repeat from step 4.
+8. Gate phases (triage, review): evaluate the result and call `workflow_gate` with approve/reject/rework. If approved with a next phase, the advance result includes the new subtask. Repeat from step 4.
+9. Non-gate phases with verification: The system runs intent verification on subtask completion. If it passes, the system enters PhaseReady — call `workflow_status` then `workflow_advance`. If verification fails, the system auto-reworks. If retries exhausted, escalates to a gate for your verdict.
+10. When all phases complete, mark your parent task complete via `task_update_status`.
 
 **IMPORTANT**: Do NOT call `workflow_advance` for the first phase — it was already advanced when your session started. Start with `workflow_status` to find the subtask.
 
@@ -1073,7 +1088,7 @@ Use `workflow_fan_out` when a phase can benefit from parallel execution. The sys
 
 ### Intent Verification
 Some phases (e.g., `implement`) have automated intent verification. This is fully automatic:
-- **Verification passes**: System auto-advances to the next phase.
+- **Verification passes**: System transitions to PhaseReady for the next phase. Call `workflow_status` to confirm, then `workflow_advance` or `workflow_fan_out`.
 - **Verification fails (retries remaining)**: System automatically re-runs the phase with feedback. No action needed from you.
 - **Verification fails (retries exhausted)**: Escalated to a gate. Review the feedback and decide: `approve` to accept as-is, `reject` to fail the task, or `rework` to try again.
 - **Convergent execution phases**: If a phase used convergent execution and converged successfully, workflow verification is skipped (convergence already verified intent).

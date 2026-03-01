@@ -881,6 +881,13 @@ pub enum EventPayload {
         to_phase: usize,
     },
 
+    /// Non-gate phase completed; overmind must call workflow_advance or workflow_fan_out.
+    WorkflowPhaseReady {
+        task_id: Uuid,
+        phase_index: usize,
+        phase_name: String,
+    },
+
     /// All workflow phases completed.
     WorkflowCompleted {
         task_id: Uuid,
@@ -1025,6 +1032,7 @@ impl EventPayload {
             Self::WorkflowGateReached { .. } => "WorkflowGateReached",
             Self::WorkflowGateVerdict { .. } => "WorkflowGateVerdict",
             Self::WorkflowAdvanced { .. } => "WorkflowAdvanced",
+            Self::WorkflowPhaseReady { .. } => "WorkflowPhaseReady",
             Self::WorkflowCompleted { .. } => "WorkflowCompleted",
             Self::WorkflowVerificationRequested { .. } => "WorkflowVerificationRequested",
             Self::WorkflowVerificationCompleted { .. } => "WorkflowVerificationCompleted",

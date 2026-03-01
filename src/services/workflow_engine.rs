@@ -135,6 +135,11 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
 
         let (workflow_name, next_index) = match &state {
             WorkflowState::Pending { workflow_name } => (workflow_name.clone(), 0),
+            WorkflowState::PhaseReady {
+                workflow_name,
+                phase_index,
+                ..
+            } => (workflow_name.clone(), *phase_index), // already points to next phase
             WorkflowState::PhaseGate {
                 workflow_name,
                 phase_index,
@@ -555,30 +560,35 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 ))
                 .await;
         } else {
-            // Auto-advance to the next phase
-            match self.advance(parent_task_id).await {
-                Ok(AdvanceResult::PhaseStarted { phase_name, .. }) => {
-                    tracing::info!(
-                        task_id = %parent_task_id,
-                        phase = %phase_name,
-                        "Workflow auto-advanced to next phase"
-                    );
-                }
-                Ok(AdvanceResult::Completed) => {
-                    tracing::info!(
-                        task_id = %parent_task_id,
-                        "Workflow completed during auto-advance"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        task_id = %parent_task_id,
-                        error = %e,
-                        "Workflow auto-advance failed"
-                    );
-                    return Err(e);
-                }
-            }
+            // Transition to PhaseReady — the overmind decides single vs fan-out
+            let next_phase = &template.phases[next_index];
+            let ready_state = WorkflowState::PhaseReady {
+                workflow_name: workflow_name.clone(),
+                phase_index: next_index,
+                phase_name: next_phase.name.clone(),
+            };
+            self.write_state(parent_task_id, &ready_state).await?;
+
+            self.event_bus
+                .publish(event_factory::make_event(
+                    EventSeverity::Info,
+                    EventCategory::Workflow,
+                    None,
+                    Some(parent_task_id),
+                    EventPayload::WorkflowPhaseReady {
+                        task_id: parent_task_id,
+                        phase_index: next_index,
+                        phase_name: next_phase.name.clone(),
+                    },
+                ))
+                .await;
+
+            tracing::info!(
+                task_id = %parent_task_id,
+                phase = %next_phase.name,
+                phase_index = next_index,
+                "Workflow phase ready — awaiting overmind advance/fan_out"
+            );
         }
 
         Ok(())
@@ -683,7 +693,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                     ))
                     .await;
             } else {
-                // Auto-advance to next phase (Step 6.1)
+                // Transition to PhaseReady — overmind decides single vs fan-out (Step 6.1)
                 let next_index = phase_index + 1;
                 if next_index >= template.phases.len() {
                     let completed = WorkflowState::Completed {
@@ -713,30 +723,35 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                         ))
                         .await;
                 } else {
-                    // Auto-advance to next phase
-                    match self.advance(parent_task_id).await {
-                        Ok(AdvanceResult::PhaseStarted { phase_name: next_phase, .. }) => {
-                            tracing::info!(
-                                task_id = %parent_task_id,
-                                phase = %next_phase,
-                                "Workflow auto-advanced after verification"
-                            );
-                        }
-                        Ok(AdvanceResult::Completed) => {
-                            tracing::info!(
-                                task_id = %parent_task_id,
-                                "Workflow completed after verification"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                task_id = %parent_task_id,
-                                error = %e,
-                                "Workflow auto-advance after verification failed"
-                            );
-                            return Err(e);
-                        }
-                    }
+                    // Transition to PhaseReady
+                    let next_phase = &template.phases[next_index];
+                    let ready_state = WorkflowState::PhaseReady {
+                        workflow_name: workflow_name.clone(),
+                        phase_index: next_index,
+                        phase_name: next_phase.name.clone(),
+                    };
+                    self.write_state(parent_task_id, &ready_state).await?;
+
+                    self.event_bus
+                        .publish(event_factory::make_event(
+                            EventSeverity::Info,
+                            EventCategory::Workflow,
+                            None,
+                            Some(parent_task_id),
+                            EventPayload::WorkflowPhaseReady {
+                                task_id: parent_task_id,
+                                phase_index: next_index,
+                                phase_name: next_phase.name.clone(),
+                            },
+                        ))
+                        .await;
+
+                    tracing::info!(
+                        task_id = %parent_task_id,
+                        phase = %next_phase.name,
+                        phase_index = next_index,
+                        "Workflow phase ready after verification — awaiting overmind advance/fan_out"
+                    );
                 }
             }
         } else if retry_count < max_retries {
@@ -961,12 +976,17 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         })?;
 
         let (workflow_name, phase_index, phase_name) = match &state {
-            // Allow fan_out from Pending (replaces the first advance) or from PhaseGate
+            // Allow fan_out from Pending (replaces the first advance) or from PhaseGate/PhaseReady
             WorkflowState::Pending { workflow_name } => {
                 let template = self.get_template(workflow_name)?;
                 let phase = &template.phases[0];
                 (workflow_name.clone(), 0, phase.name.clone())
             }
+            WorkflowState::PhaseReady {
+                workflow_name,
+                phase_index,
+                phase_name,
+            } => (workflow_name.clone(), *phase_index, phase_name.clone()),
             WorkflowState::PhaseGate {
                 workflow_name,
                 phase_index,

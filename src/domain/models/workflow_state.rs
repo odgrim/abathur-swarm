@@ -50,6 +50,12 @@ pub enum WorkflowState {
         subtask_ids: Vec<Uuid>,
         retry_count: u32,
     },
+    /// Previous phase completed; overmind decides single vs fan-out.
+    PhaseReady {
+        workflow_name: String,
+        phase_index: usize,
+        phase_name: String,
+    },
     /// Gate phase; subtasks done, awaiting overmind verdict.
     PhaseGate {
         workflow_name: String,
@@ -82,6 +88,7 @@ impl WorkflowState {
             | Self::FanningOut { workflow_name, .. }
             | Self::Aggregating { workflow_name, .. }
             | Self::Verifying { workflow_name, .. }
+            | Self::PhaseReady { workflow_name, .. }
             | Self::PhaseGate { workflow_name, .. }
             | Self::Completed { workflow_name }
             | Self::Rejected { workflow_name, .. }
@@ -101,6 +108,7 @@ impl WorkflowState {
             | Self::FanningOut { phase_index, .. }
             | Self::Aggregating { phase_index, .. }
             | Self::Verifying { phase_index, .. }
+            | Self::PhaseReady { phase_index, .. }
             | Self::PhaseGate { phase_index, .. } => Some(*phase_index),
             _ => None,
         }

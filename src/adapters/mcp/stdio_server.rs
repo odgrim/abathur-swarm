@@ -1315,7 +1315,18 @@ where
         );
         let status = engine.get_state(task_id).await.map_err(|e| format!("{}", e))?;
 
-        serde_json::to_string_pretty(&status).map_err(|e| e.to_string())
+        // Enrich PhaseReady state with action_required guidance
+        let mut json = serde_json::to_value(&status).map_err(|e| e.to_string())?;
+        if let Some(state_str) = json.get("state").and_then(|s| s.as_str()) {
+            if state_str == "phase_ready" {
+                json.as_object_mut().unwrap().insert(
+                    "action_required".to_string(),
+                    serde_json::json!("Call workflow_advance or workflow_fan_out to start this phase"),
+                );
+            }
+        }
+
+        serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
     }
 
     async fn tool_workflow_gate(&self, args: &serde_json::Value) -> Result<String, String> {
