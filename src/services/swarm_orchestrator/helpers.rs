@@ -1014,19 +1014,89 @@ where
         return None;
     }
 
-    // Merge directly to main
+    // Build squash commit message from task metadata
     use tokio::process::Command as TokioCommand;
 
-    // Merge feature branch into base ref from the repo root
-    let merge_output = TokioCommand::new("git")
-        .args(["merge", "--ff-only", &root_wt.branch])
+    let squash_msg = {
+        let title = root_task.title.trim();
+        let desc = root_task.description.trim();
+        if desc.is_empty() || desc == title {
+            format!("{}\n\nTask-Id: {}", title, root_id)
+        } else {
+            // Truncate long descriptions to keep commit messages reasonable
+            let short_desc = if desc.len() > 500 {
+                format!("{}...", &desc[..497])
+            } else {
+                desc.to_string()
+            };
+            format!("{}\n\n{}\n\nTask-Id: {}", title, short_desc, root_id)
+        }
+    };
+
+    // Ensure we're on the base branch before merging
+    let checkout_output = TokioCommand::new("git")
+        .args(["checkout", default_base_ref])
         .current_dir(repo_path)
         .output()
         .await;
 
-    let commit_sha = match merge_output {
+    match &checkout_output {
+        Err(e) => {
+            tracing::warn!(root_task_id = %root_id, "git checkout {} failed: {}", default_base_ref, e);
+            return None;
+        }
+        Ok(o) if !o.status.success() => {
+            tracing::warn!(
+                root_task_id = %root_id,
+                stderr = %String::from_utf8_lossy(&o.stderr),
+                "git checkout {} failed", default_base_ref
+            );
+            return None;
+        }
+        _ => {}
+    }
+
+    // Squash merge: stages all changes from the feature branch without committing
+    let squash_output = TokioCommand::new("git")
+        .args(["merge", "--squash", &root_wt.branch])
+        .current_dir(repo_path)
+        .output()
+        .await;
+
+    match squash_output {
         Ok(output) if output.status.success() => {
-            // Get the resulting commit SHA
+            // --squash stages changes but does not commit; we commit below
+        }
+        Ok(output) => {
+            tracing::warn!(
+                root_task_id = %root_id,
+                branch = %root_wt.branch,
+                stderr = %String::from_utf8_lossy(&output.stderr),
+                "git merge --squash failed for auto-ship"
+            );
+            // Abort the merge to leave the repo in a clean state
+            let _ = TokioCommand::new("git")
+                .args(["merge", "--abort"])
+                .current_dir(repo_path)
+                .output()
+                .await;
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(root_task_id = %root_id, "git merge --squash command failed: {}", e);
+            return None;
+        }
+    }
+
+    // Commit the squashed changes with our crafted message
+    let commit_output = TokioCommand::new("git")
+        .args(["commit", "-m", &squash_msg])
+        .current_dir(repo_path)
+        .output()
+        .await;
+
+    let commit_sha = match commit_output {
+        Ok(output) if output.status.success() => {
             TokioCommand::new("git")
                 .args(["rev-parse", "HEAD"])
                 .current_dir(repo_path)
@@ -1037,37 +1107,21 @@ where
                 .unwrap_or_default()
         }
         Ok(output) => {
-            // ff-only failed, try a regular merge
-            let merge_msg = format!("Merge task tree {} into {}", root_id, default_base_ref);
-            let retry = TokioCommand::new("git")
-                .args(["merge", "--no-edit", "-m", &merge_msg, &root_wt.branch])
+            tracing::warn!(
+                root_task_id = %root_id,
+                stderr = %String::from_utf8_lossy(&output.stderr),
+                "git commit after squash merge failed"
+            );
+            // Reset to clean state
+            let _ = TokioCommand::new("git")
+                .args(["reset", "--hard", "HEAD"])
                 .current_dir(repo_path)
                 .output()
                 .await;
-            match retry {
-                Ok(o) if o.status.success() => {
-                    TokioCommand::new("git")
-                        .args(["rev-parse", "HEAD"])
-                        .current_dir(repo_path)
-                        .output()
-                        .await
-                        .ok()
-                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                        .unwrap_or_default()
-                }
-                _ => {
-                    tracing::warn!(
-                        root_task_id = %root_id,
-                        branch = %root_wt.branch,
-                        stderr = %String::from_utf8_lossy(&output.stderr),
-                        "git merge failed for auto-ship"
-                    );
-                    return None;
-                }
-            }
+            return None;
         }
         Err(e) => {
-            tracing::warn!(root_task_id = %root_id, "git merge command failed: {}", e);
+            tracing::warn!(root_task_id = %root_id, "git commit command failed: {}", e);
             return None;
         }
     };
