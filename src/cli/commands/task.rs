@@ -7,7 +7,10 @@ use std::sync::Arc;
 use crate::adapters::sqlite::{SqliteTaskRepository, initialize_default_database};
 use crate::cli::command_dispatcher::CliCommandDispatcher;
 use crate::cli::id_resolver::{resolve_goal_id, resolve_task_id};
-use crate::cli::output::{output, truncate, CommandOutput};
+use crate::cli::display::{
+    action_success, colorize_priority, colorize_status, list_table, output, render_list,
+    short_id, relative_time_str, truncate_ellipsis, CommandOutput, DetailView,
+};
 use crate::domain::models::{Task, TaskContext, TaskPriority, TaskSource, TaskStatus, TaskType};
 use crate::domain::ports::TaskFilter;
 use crate::services::command_bus::{CommandResult, DomainCommand, TaskCommand};
@@ -130,6 +133,7 @@ pub struct TaskOutput {
     pub depends_on: Vec<String>,
     pub retry_count: u32,
     pub task_type: String,
+    pub created_at: String,
 }
 
 impl From<&Task> for TaskOutput {
@@ -143,6 +147,7 @@ impl From<&Task> for TaskOutput {
             depends_on: task.depends_on.iter().map(|id| id.to_string()).collect(),
             retry_count: task.retry_count,
             task_type: task.task_type.as_str().to_string(),
+            created_at: task.created_at.to_rfc3339(),
         }
     }
 }
@@ -159,26 +164,21 @@ impl CommandOutput for TaskListOutput {
             return "No tasks found.".to_string();
         }
 
-        let mut lines = vec![format!("Found {} task(s):\n", self.total)];
-        lines.push(format!(
-            "{:<12} {:<25} {:<10} {:<10} {:<14} {:<12}",
-            "ID", "TITLE", "STATUS", "PRIORITY", "TYPE", "AGENT"
-        ));
-        lines.push("-".repeat(84));
+        let mut table = list_table(&["ID", "Title", "Status", "Priority", "Type", "Agent", "Age"]);
 
         for task in &self.tasks {
-            lines.push(format!(
-                "{:<12} {:<25} {:<10} {:<10} {:<14} {:<12}",
-                &task.id[..8],
-                truncate(&task.title, 23),
-                task.status,
-                task.priority,
-                task.task_type,
-                task.agent_type.as_deref().unwrap_or("-")
-            ));
+            table.add_row(vec![
+                short_id(&task.id).to_string(),
+                truncate_ellipsis(&task.title, 35),
+                colorize_status(&task.status).to_string(),
+                colorize_priority(&task.priority).to_string(),
+                task.task_type.clone(),
+                task.agent_type.as_deref().unwrap_or("-").to_string(),
+                relative_time_str(&task.created_at),
+            ]);
         }
 
-        lines.join("\n")
+        render_list("task", table, self.total)
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -200,75 +200,74 @@ pub struct TaskDetailOutput {
 
 impl CommandOutput for TaskDetailOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec![
-            format!("Task: {}", self.task.title),
-            format!("ID: {}", self.task.id),
-            format!("Status: {}", self.task.status),
-            format!("Priority: {}", self.task.priority),
-            format!("Type: {}", self.task.task_type),
-        ];
+        let mut view = DetailView::new(&self.task.title)
+            .field("ID", &self.task.id)
+            .field("Status", &colorize_status(&self.task.status).to_string())
+            .field("Priority", &colorize_priority(&self.task.priority).to_string())
+            .field("Type", &self.task.task_type)
+            .field_opt("Agent", self.task.agent_type.as_deref())
+            .field("Source", "human")
+            .section("Description");
 
-        if let Some(agent) = &self.task.agent_type {
-            lines.push(format!("Agent: {}", agent));
+        if self.description.is_empty() {
+            view = view.item("(none)");
+        } else {
+            view = view.item(&self.description);
         }
 
-        lines.push(format!("Description: {}", self.description));
-
         if !self.context_input.is_empty() {
-            lines.push(format!("Input: {}", truncate(&self.context_input, 100)));
+            view = view.section("Input")
+                .item(&truncate_ellipsis(&self.context_input, 200));
         }
 
         if !self.task.depends_on.is_empty() {
-            lines.push(format!("\nDependencies ({}):", self.task.depends_on.len()));
+            view = view.section(&format!("Dependencies ({})", self.task.depends_on.len()));
             for dep in &self.task.depends_on {
-                lines.push(format!("  - {}", &dep[..8]));
+                view = view.item(short_id(dep));
             }
         }
 
         // Verification-specific details
         if self.task.task_type == "verification" {
-            lines.push(String::new());
-            lines.push("Verification Details:".to_string());
+            view = view.section("Verification Details");
             if let Some(serde_json::Value::String(sat)) = self.context_custom.get("satisfaction") {
-                lines.push(format!("  Satisfaction: {}", sat));
+                view = view.field("Satisfaction", sat);
             }
-            if let Some(serde_json::Value::Number(conf)) = self.context_custom.get("confidence")
-                && let Some(c) = conf.as_f64() {
-                    lines.push(format!("  Confidence: {:.0}%", c * 100.0));
+            if let Some(serde_json::Value::Number(conf)) = self.context_custom.get("confidence") {
+                if let Some(c) = conf.as_f64() {
+                    view = view.field("Confidence", &format!("{:.0}%", c * 100.0));
                 }
+            }
             if let Some(serde_json::Value::Number(iter)) = self.context_custom.get("iteration") {
-                lines.push(format!("  Iteration: {}", iter));
+                view = view.field("Iteration", &iter.to_string());
             }
             if let Some(serde_json::Value::Number(gc)) = self.context_custom.get("gaps_count") {
-                lines.push(format!("  Gaps: {}", gc));
+                view = view.field("Gaps", &gc.to_string());
             }
             if let Some(serde_json::Value::Array(gaps)) = self.context_custom.get("gaps") {
                 for gap in gaps {
                     if let Some(desc) = gap.get("description").and_then(|d| d.as_str()) {
                         let severity = gap.get("severity").and_then(|s| s.as_str()).unwrap_or("?");
-                        lines.push(format!("    - [{}] {}", severity, desc));
+                        view = view.item(&format!("[{}] {}", severity, desc));
                     }
                 }
             }
             if let Some(serde_json::Value::String(summary)) = self.context_custom.get("accomplishment_summary") {
-                lines.push(format!("  Summary: {}", truncate(summary, 120)));
+                view = view.field("Summary", &truncate_ellipsis(summary, 120));
             }
         }
 
+        view = view.section("Timing")
+            .field("Created", &format!("{} ({})", relative_time_str(&self.created_at), &self.created_at))
+            .field("Started", &self.started_at.as_deref().map(|s| format!("{} ({})", relative_time_str(s), s)).unwrap_or_else(|| "-".to_string()))
+            .field("Completed", &self.completed_at.as_deref().map(|s| format!("{} ({})", relative_time_str(s), s)).unwrap_or_else(|| "-".to_string()))
+            .field("Retries", &self.task.retry_count.to_string());
+
         if let Some(path) = &self.worktree_path {
-            lines.push(format!("Worktree: {}", path));
+            view = view.field("Worktree", path);
         }
 
-        lines.push(format!("\nCreated: {}", self.created_at));
-        if let Some(started) = &self.started_at {
-            lines.push(format!("Started: {}", started));
-        }
-        if let Some(completed) = &self.completed_at {
-            lines.push(format!("Completed: {}", completed));
-        }
-        lines.push(format!("Retries: {}", self.task.retry_count));
-
-        lines.join("\n")
+        view.render()
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -285,7 +284,11 @@ pub struct TaskActionOutput {
 
 impl CommandOutput for TaskActionOutput {
     fn to_human(&self) -> String {
-        self.message.clone()
+        if self.success {
+            action_success(&self.message)
+        } else {
+            crate::cli::display::action_failure(&self.message)
+        }
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -307,16 +310,46 @@ pub struct TaskStatusOutput {
 
 impl CommandOutput for TaskStatusOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec!["Task Status Summary:".to_string()];
-        lines.push(format!("  Pending:   {}", self.pending));
-        lines.push(format!("  Ready:     {}", self.ready));
-        lines.push(format!("  Running:   {}", self.running));
-        lines.push(format!("  Blocked:   {}", self.blocked));
-        lines.push(format!("  Complete:  {}", self.complete));
-        lines.push(format!("  Failed:    {}", self.failed));
-        lines.push(format!("  Canceled:  {}", self.canceled));
-        lines.push("  -----------".to_string());
-        lines.push(format!("  Total:     {}", self.total));
+        use colored::Colorize;
+
+        let statuses = [
+            ("pending", self.pending, "blue"),
+            ("ready", self.ready, "blue"),
+            ("running", self.running, "yellow"),
+            ("blocked", self.blocked, "cyan"),
+            ("complete", self.complete, "green"),
+            ("failed", self.failed, "red"),
+            ("canceled", self.canceled, "white"),
+        ];
+
+        let max_count = statuses.iter().map(|(_, c, _)| *c).max().unwrap_or(1).max(1);
+        let bar_width = 20u64;
+
+        let mut lines = vec![format!("{}", "Task Status Summary".bold())];
+        for (label, count, _) in &statuses {
+            let bar_len = if *count > 0 {
+                ((*count as f64 / max_count as f64) * bar_width as f64).ceil() as usize
+            } else {
+                0
+            };
+            let bar = "\u{2588}".repeat(bar_len);
+            let colored_bar = match *label {
+                "complete" => bar.green().to_string(),
+                "failed" => bar.red().to_string(),
+                "running" => bar.yellow().to_string(),
+                "blocked" => bar.cyan().to_string(),
+                "pending" | "ready" => bar.blue().to_string(),
+                _ => bar.dimmed().to_string(),
+            };
+            lines.push(format!(
+                "  {:<12} {:>4}  {}",
+                colorize_status(label),
+                count,
+                colored_bar,
+            ));
+        }
+        lines.push(format!("  {:<12} {:>4}", "Total".bold(), self.total.to_string().bold()));
+
         lines.join("\n")
     }
 
