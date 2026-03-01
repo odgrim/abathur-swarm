@@ -1070,6 +1070,11 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             subtask.source = TaskSource::SubtaskOf(task_id);
             let _ = subtask.transition_to(TaskStatus::Ready);
 
+            // Assign agent_type inline if the slice specifies one
+            if let Some(ref agent) = slice.agent {
+                subtask.agent_type = Some(agent.clone());
+            }
+
             // Inherit worktree from parent
             subtask.worktree_path = task.worktree_path.clone();
 

@@ -132,6 +132,9 @@ pub enum GateVerdict {
 pub struct FanOutSlice {
     /// Description of this slice's work.
     pub description: String,
+    /// Agent template to assign to this subtask (sets `agent_type` at creation time).
+    #[serde(default)]
+    pub agent: Option<String>,
     /// Additional context for the subtask.
     #[serde(default)]
     pub context: std::collections::HashMap<String, serde_json::Value>,

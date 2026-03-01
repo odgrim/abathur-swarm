@@ -71,6 +71,7 @@ async fn advance_and_fan_out(
             task_id,
             vec![FanOutSlice {
                 description: "phase work".to_string(),
+                agent: None,
                 context: Default::default(),
             }],
         )
@@ -387,10 +388,12 @@ async fn test_fan_out_to_aggregation() {
     let slices = vec![
         FanOutSlice {
             description: "Research area A".to_string(),
+            agent: None,
             context: Default::default(),
         },
         FanOutSlice {
             description: "Research area B".to_string(),
+            agent: None,
             context: Default::default(),
         },
     ];
@@ -722,6 +725,7 @@ async fn test_advance_then_fan_out_creates_subtask() {
             task.id,
             vec![FanOutSlice {
                 description: "Research the codebase".to_string(),
+                agent: None,
                 context: Default::default(),
             }],
         )

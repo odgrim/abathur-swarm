@@ -133,6 +133,7 @@ mod harness {
                 task_id,
                 vec![FanOutSlice {
                     description: "phase work".to_string(),
+                    agent: None,
                     context: Default::default(),
                 }],
             )
@@ -312,6 +313,7 @@ async fn test_full_phase_progression_code_workflow() {
                     task_id,
                     vec![FanOutSlice {
                         description: "review work".to_string(),
+                        agent: None,
                         context: Default::default(),
                     }],
                 )
@@ -504,9 +506,9 @@ async fn test_fan_out_and_aggregation() {
     // Advance to PhaseReady first, then fan out research phase into 3 slices
     engine.advance(task_id).await.expect("advance to PhaseReady");
     let slices = vec![
-        FanOutSlice { description: "Research area A".into(), context: Default::default() },
-        FanOutSlice { description: "Research area B".into(), context: Default::default() },
-        FanOutSlice { description: "Research area C".into(), context: Default::default() },
+        FanOutSlice { description: "Research area A".into(), agent: None, context: Default::default() },
+        FanOutSlice { description: "Research area B".into(), agent: None, context: Default::default() },
+        FanOutSlice { description: "Research area C".into(), agent: None, context: Default::default() },
     ];
     let fan_result = engine.fan_out(task_id, slices).await.expect("fan_out");
     assert_eq!(fan_result.subtask_ids.len(), 3, "Should have 3 fan-out subtasks");
