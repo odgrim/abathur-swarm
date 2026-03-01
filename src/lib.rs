@@ -26,4 +26,9 @@ pub const ABATHUR_ALLOWED_TOOLS: &[&str] = &[
     "mcp__abathur__goals_list",
     "mcp__abathur__adapter_list",
     "mcp__abathur__egress_publish",
+    "mcp__abathur__workflow_status",
+    "mcp__abathur__workflow_advance",
+    "mcp__abathur__workflow_fan_out",
+    "mcp__abathur__workflow_gate",
+    "mcp__abathur__workflow_list",
 ];
