@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use abathur::adapters::sqlite::{create_migrated_test_pool, SqliteTaskRepository};
 use abathur::domain::models::task::{Task, TaskSource, TaskStatus, TaskType};
-use abathur::domain::models::workflow_state::WorkflowState;
+use abathur::domain::models::workflow_state::{FanOutSlice, WorkflowState};
 use abathur::domain::models::TaskPriority;
 use abathur::domain::ports::TaskRepository;
 use abathur::services::event_bus::{EventBus, EventBusConfig};
@@ -53,6 +53,31 @@ async fn submit_root_task(
         .await
         .unwrap();
     task
+}
+
+/// Helper: advance to PhaseReady, then fan_out with a single slice to create a subtask.
+/// Returns the subtask_id from the fan_out result.
+async fn advance_and_fan_out(
+    engine: &WorkflowEngine<SqliteTaskRepository>,
+    task_id: uuid::Uuid,
+) -> uuid::Uuid {
+    let result = engine.advance(task_id).await.expect("advance failed");
+    match &result {
+        AdvanceResult::PhaseReady { .. } => {}
+        AdvanceResult::Completed => panic!("Expected PhaseReady, got Completed"),
+    }
+    let fan_out_result = engine
+        .fan_out(
+            task_id,
+            vec![FanOutSlice {
+                description: "phase work".to_string(),
+                context: Default::default(),
+            }],
+        )
+        .await
+        .expect("fan_out failed");
+    assert_eq!(fan_out_result.subtask_ids.len(), 1);
+    fan_out_result.subtask_ids[0]
 }
 
 // ============================================================================
@@ -194,33 +219,30 @@ async fn test_advance_from_pending() {
 
     let result = engine.advance(task.id).await.unwrap();
     match result {
-        AdvanceResult::PhaseStarted {
+        AdvanceResult::PhaseReady {
             phase_index,
             phase_name,
-            ..
         } => {
             assert_eq!(phase_index, 0);
             assert_eq!(phase_name, "research");
         }
-        AdvanceResult::Completed => panic!("Expected PhaseStarted, got Completed"),
+        AdvanceResult::Completed => panic!("Expected PhaseReady, got Completed"),
     }
 
-    // Check state is now PhaseRunning
+    // Check state is now PhaseReady
     let reloaded = repo.get(task.id).await.unwrap().unwrap();
     let ws: WorkflowState =
         serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
     match ws {
-        WorkflowState::PhaseRunning {
+        WorkflowState::PhaseReady {
             phase_index,
             phase_name,
-            subtask_ids,
             ..
         } => {
             assert_eq!(phase_index, 0);
             assert_eq!(phase_name, "research");
-            assert_eq!(subtask_ids.len(), 1);
         }
-        other => panic!("Expected PhaseRunning, got {:?}", other),
+        other => panic!("Expected PhaseReady, got {:?}", other),
     }
 }
 
@@ -236,24 +258,35 @@ async fn test_handle_phase_complete_single_subtask() {
     // Claim the parent (transitions to Running)
     service.claim_task(task.id, "overmind").await.unwrap();
 
-    // Advance to first phase (research)
-    let result = engine.advance(task.id).await.unwrap();
-    let subtask_id = match result {
-        AdvanceResult::PhaseStarted { subtask_id, .. } => subtask_id,
-        _ => panic!("Expected PhaseStarted"),
-    };
+    // Advance to first phase (research), then fan_out to create subtask
+    let subtask_id = advance_and_fan_out(&engine, task.id).await;
 
     // Complete the subtask
     service.claim_task(subtask_id, "researcher").await.unwrap();
     service.complete_task(subtask_id).await.unwrap();
 
-    // Handle phase completion
+    // Handle phase completion — fan_out path goes through aggregation
     engine
         .handle_phase_complete(task.id, subtask_id)
         .await
         .unwrap();
 
-    // Should be in PhaseReady for the next phase (plan)
+    // State should be Aggregating (fan_out creates an aggregation subtask)
+    let reloaded = repo.get(task.id).await.unwrap().unwrap();
+    let ws: WorkflowState =
+        serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
+    let agg_subtask_ids = match ws {
+        WorkflowState::Aggregating { subtask_ids, .. } => subtask_ids,
+        other => panic!("Expected Aggregating, got {:?}", other),
+    };
+
+    // Complete the aggregation subtask
+    let agg_id = *agg_subtask_ids.last().unwrap();
+    service.claim_task(agg_id, "aggregator").await.unwrap();
+    service.complete_task(agg_id).await.unwrap();
+    engine.handle_phase_complete(task.id, agg_id).await.unwrap();
+
+    // Now should be in PhaseReady for the next phase (plan)
     let reloaded = repo.get(task.id).await.unwrap().unwrap();
     let ws: WorkflowState =
         serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
@@ -349,7 +382,8 @@ async fn test_fan_out_to_aggregation() {
     let task = submit_root_task(&service, "Fan-out test").await;
     service.claim_task(task.id, "overmind").await.unwrap();
 
-    // Fan out research phase into 2 slices
+    // Advance to PhaseReady first, then fan out research phase into 2 slices
+    engine.advance(task.id).await.unwrap();
     let slices = vec![
         FanOutSlice {
             description: "Research area A".to_string(),
@@ -643,12 +677,8 @@ async fn test_advance_guards_active_subtask() {
     let (service, engine, _repo, _) = setup().await;
     let task = submit_root_task(&service, "Guard test").await;
 
-    // Advance to first phase
-    let result = engine.advance(task.id).await.unwrap();
-    let subtask_id = match result {
-        AdvanceResult::PhaseStarted { subtask_id, .. } => subtask_id,
-        _ => panic!("Expected PhaseStarted"),
-    };
+    // Advance to first phase and fan_out to create subtask
+    let subtask_id = advance_and_fan_out(&engine, task.id).await;
 
     // Subtask is in Ready state (not terminal) — trying to advance should fail
     // First claim the subtask so it's Running (also non-terminal)
@@ -668,87 +698,52 @@ async fn test_advance_guards_active_subtask() {
 }
 
 // ============================================================================
-// Test 12: create_phase_subtask_execution_mode
+// Test 12: advance_then_fan_out_creates_subtask
 // ============================================================================
 
 #[tokio::test]
-async fn test_create_phase_subtask_execution_mode() {
+async fn test_advance_then_fan_out_creates_subtask() {
     let (service, engine, repo, _) = setup().await;
-    let task = submit_root_task(&service, "Exec mode test").await;
+    let task = submit_root_task(&service, "Advance+fan_out test").await;
 
-    // Advance to first phase (research — read_only)
+    // Advance to first phase (research) — should be PhaseReady
     let result = engine.advance(task.id).await.unwrap();
-    let research_subtask_id = match result {
-        AdvanceResult::PhaseStarted { subtask_id, .. } => subtask_id,
-        _ => panic!("Expected PhaseStarted"),
-    };
+    match &result {
+        AdvanceResult::PhaseReady { phase_index, phase_name } => {
+            assert_eq!(*phase_index, 0);
+            assert_eq!(phase_name, "research");
+        }
+        AdvanceResult::Completed => panic!("Expected PhaseReady, got Completed"),
+    }
 
-    // Research subtask should be Direct (read-only phase)
-    let research_sub = repo.get(research_subtask_id).await.unwrap().unwrap();
-    assert!(
-        research_sub.execution_mode.is_direct(),
-        "Read-only phase subtask should use Direct execution mode"
-    );
-
-    // Complete research subtask and advance to plan
-    let mut sub = research_sub;
-    let _ = sub.transition_to(TaskStatus::Running);
-    repo.update(&sub).await.unwrap();
-    let _ = sub.transition_to(TaskStatus::Complete);
-    sub.completed_at = Some(chrono::Utc::now());
-    repo.update(&sub).await.unwrap();
-
-    // Need to claim parent first so it's Running
-    service.claim_task(task.id, "overmind").await.unwrap();
-
-    engine
-        .handle_phase_complete(task.id, sub.id)
+    // fan_out from PhaseReady creates a subtask
+    let fan_result = engine
+        .fan_out(
+            task.id,
+            vec![FanOutSlice {
+                description: "Research the codebase".to_string(),
+                context: Default::default(),
+            }],
+        )
         .await
         .unwrap();
+    assert_eq!(fan_result.subtask_ids.len(), 1);
+    assert_eq!(fan_result.phase_name, "research");
 
-    // Plan phase is now PhaseReady — advance to create the subtask, then check execution mode
-    let parent = repo.get(task.id).await.unwrap().unwrap();
+    // Subtask should exist and be in Ready state
+    let sub = repo.get(fan_result.subtask_ids[0]).await.unwrap().unwrap();
+    assert_eq!(sub.status, TaskStatus::Ready);
+    assert_eq!(sub.parent_id, Some(task.id));
+
+    // Workflow state should now be FanningOut
+    let reloaded = repo.get(task.id).await.unwrap().unwrap();
     let ws: WorkflowState =
-        serde_json::from_value(parent.context.custom["workflow_state"].clone()).unwrap();
-    if let WorkflowState::PhaseReady { .. } = ws {
-        let result = engine.advance(task.id).await.unwrap();
-        let plan_sub_id = match result {
-            AdvanceResult::PhaseStarted { subtask_id, .. } => subtask_id,
-            _ => panic!("Expected PhaseStarted"),
-        };
-        let plan_sub = repo.get(plan_sub_id).await.unwrap().unwrap();
-        assert!(
-            plan_sub.execution_mode.is_direct(),
-            "Plan phase (read-only) should use Direct mode"
-        );
-
-        // Complete plan and handle phase complete
-        let mut p = plan_sub;
-        let _ = p.transition_to(TaskStatus::Running);
-        repo.update(&p).await.unwrap();
-        let _ = p.transition_to(TaskStatus::Complete);
-        p.completed_at = Some(chrono::Utc::now());
-        repo.update(&p).await.unwrap();
-
-        engine.handle_phase_complete(task.id, p.id).await.unwrap();
-
-        // Implement phase is now PhaseReady — advance to create subtask
-        let parent = repo.get(task.id).await.unwrap().unwrap();
-        let ws: WorkflowState =
-            serde_json::from_value(parent.context.custom["workflow_state"].clone()).unwrap();
-        if let WorkflowState::PhaseReady { .. } = ws {
-            let result = engine.advance(task.id).await.unwrap();
-            let impl_sub_id = match result {
-                AdvanceResult::PhaseStarted { subtask_id, .. } => subtask_id,
-                _ => panic!("Expected PhaseStarted"),
-            };
-            let impl_sub = repo.get(impl_sub_id).await.unwrap().unwrap();
-            assert!(
-                impl_sub.execution_mode.is_convergent(),
-                "Implement phase (write tools) should use Convergent mode"
-            );
-        }
-    }
+        serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
+    assert!(
+        matches!(ws, WorkflowState::FanningOut { phase_index: 0, .. }),
+        "Expected FanningOut at phase 0, got {:?}",
+        ws
+    );
 }
 
 // ============================================================================
@@ -1081,59 +1076,34 @@ async fn test_phase_failure_transitions_to_failed() {
     let task = submit_root_task(&service, "Phase failure test").await;
     service.claim_task(task.id, "overmind").await.unwrap();
 
-    // Advance to first phase
-    let result = engine.advance(task.id).await.unwrap();
-    let subtask_id = match result {
-        AdvanceResult::PhaseStarted { subtask_id, .. } => subtask_id,
-        _ => panic!("Expected PhaseStarted"),
-    };
+    // Advance to first phase and fan_out to create subtask
+    let subtask_id = advance_and_fan_out(&engine, task.id).await;
 
-    // Phase-level retry allows up to 2 retries before failing the workflow.
-    // We need to fail → handle_phase_complete 3 times to exhaust them.
-    for i in 0..3 {
-        let mut sub = repo.get(subtask_id).await.unwrap().unwrap();
-        // Transition through Running → Failed (subtask may be in Ready after retry)
-        if sub.status == TaskStatus::Ready {
-            let _ = sub.transition_to(TaskStatus::Running);
-            repo.update(&sub).await.unwrap();
-        }
-        if sub.status == TaskStatus::Running {
-            let _ = sub.transition_to(TaskStatus::Failed);
-            repo.update(&sub).await.unwrap();
-        }
+    // Fail the subtask
+    let mut sub = repo.get(subtask_id).await.unwrap().unwrap();
+    let _ = sub.transition_to(TaskStatus::Running);
+    repo.update(&sub).await.unwrap();
+    let _ = sub.transition_to(TaskStatus::Failed);
+    repo.update(&sub).await.unwrap();
 
-        engine
-            .handle_phase_complete(task.id, subtask_id)
-            .await
-            .unwrap();
+    // handle_phase_complete should transition to Failed (fan_out failure path)
+    engine
+        .handle_phase_complete(task.id, subtask_id)
+        .await
+        .unwrap();
 
-        let reloaded = repo.get(task.id).await.unwrap().unwrap();
-        let ws: WorkflowState =
-            serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
-
-        if i < 2 {
-            // First two failures: subtask retried, workflow stays in PhaseRunning
+    let reloaded = repo.get(task.id).await.unwrap().unwrap();
+    let ws: WorkflowState =
+        serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
+    match ws {
+        WorkflowState::Failed { error, .. } => {
             assert!(
-                matches!(ws, WorkflowState::PhaseRunning { .. }),
-                "Phase retry {}: expected PhaseRunning, got {:?}",
-                i + 1,
-                ws
+                error.contains("research"),
+                "Error should mention the failed phase name, got: {}",
+                error
             );
-            let retried_sub = repo.get(subtask_id).await.unwrap().unwrap();
-            assert_eq!(retried_sub.status, TaskStatus::Ready);
-        } else {
-            // Third failure: phase retries exhausted, workflow transitions to Failed
-            match ws {
-                WorkflowState::Failed { error, .. } => {
-                    assert!(
-                        error.contains("research"),
-                        "Error should mention the failed phase name, got: {}",
-                        error
-                    );
-                }
-                other => panic!("Expected Failed, got {:?}", other),
-            }
         }
+        other => panic!("Expected Failed, got {:?}", other),
     }
 }
 
@@ -1195,12 +1165,8 @@ async fn test_advance_errors_propagated() {
     let task = submit_root_task(&service, "Error propagation test").await;
     service.claim_task(task.id, "overmind").await.unwrap();
 
-    // Advance to first phase and complete the subtask
-    let result = engine.advance(task.id).await.unwrap();
-    let subtask_id = match result {
-        AdvanceResult::PhaseStarted { subtask_id, .. } => subtask_id,
-        _ => panic!("Expected PhaseStarted"),
-    };
+    // Advance to first phase, fan_out to create subtask, then complete it
+    let subtask_id = advance_and_fan_out(&engine, task.id).await;
     let mut sub = repo.get(subtask_id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Running);
     repo.update(&sub).await.unwrap();
@@ -1240,6 +1206,9 @@ async fn test_advance_errors_propagated() {
 async fn test_fan_out_empty_slices_rejected() {
     let (service, engine, _, _) = setup().await;
     let task = submit_root_task(&service, "Empty fan-out test").await;
+
+    // Advance to PhaseReady first (fan_out only accepts PhaseReady now)
+    engine.advance(task.id).await.unwrap();
 
     let result = engine.fan_out(task.id, vec![]).await;
     assert!(result.is_err(), "fan_out with empty slices should fail");
@@ -1326,22 +1295,20 @@ async fn test_verification_rework_auto_advance() {
         .await
         .unwrap();
 
-    // Should have auto-advanced: state is PhaseRunning at implement (re-created subtask)
+    // Should have auto-advanced: state is PhaseReady at implement (awaiting fan_out)
     let reloaded = repo.get(task.id).await.unwrap().unwrap();
     let ws: WorkflowState =
         serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
     match ws {
-        WorkflowState::PhaseRunning {
+        WorkflowState::PhaseReady {
             phase_index,
             phase_name,
-            subtask_ids,
             ..
         } => {
-            assert_eq!(phase_index, 2, "Should re-create implement phase");
+            assert_eq!(phase_index, 2, "Should be PhaseReady at implement phase");
             assert_eq!(phase_name, "implement");
-            assert_eq!(subtask_ids.len(), 1, "Should have one new subtask");
         }
-        other => panic!("Expected PhaseRunning at implement, got {:?}", other),
+        other => panic!("Expected PhaseReady at implement, got {:?}", other),
     }
 
     // verification_retry_count should be 1
@@ -1372,7 +1339,7 @@ async fn test_verification_rework_auto_advance() {
 }
 
 // ============================================================================
-// Test: provide_verdict Approve at mid-workflow gate returns PhaseStarted
+// Test: provide_verdict Approve at mid-workflow gate returns PhaseReady
 // ============================================================================
 
 #[tokio::test]
@@ -1438,37 +1405,32 @@ async fn test_provide_verdict_approve_mid_workflow() {
     parent.updated_at = chrono::Utc::now();
     repo.update(&parent).await.unwrap();
 
-    // Approve — should advance to research (index 1) and return PhaseStarted
+    // Approve — should advance to research (index 1) and return PhaseReady
     let result = engine
         .provide_verdict(task.id, GateVerdict::Approve, "Triage passed")
         .await
         .unwrap();
 
     match result {
-        Some(AdvanceResult::PhaseStarted {
+        Some(AdvanceResult::PhaseReady {
             phase_index,
             phase_name,
-            subtask_id,
-            ..
         }) => {
             assert_eq!(phase_index, 1, "Should advance to phase 1");
             assert_eq!(phase_name, "research", "Next phase should be research");
-            // The subtask should exist in the repo
-            let new_sub = repo.get(subtask_id).await.unwrap();
-            assert!(new_sub.is_some(), "PhaseStarted subtask should exist");
         }
         other => panic!(
-            "Approve at mid-workflow gate should return Some(PhaseStarted); got {:?}",
+            "Approve at mid-workflow gate should return Some(PhaseReady); got {:?}",
             other
         ),
     }
 
-    // Verify state is now PhaseRunning at research
+    // Verify state is now PhaseReady at research
     let reloaded = repo.get(task.id).await.unwrap().unwrap();
     let ws: WorkflowState =
         serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
     match ws {
-        WorkflowState::PhaseRunning {
+        WorkflowState::PhaseReady {
             phase_index,
             phase_name,
             ..
@@ -1476,6 +1438,6 @@ async fn test_provide_verdict_approve_mid_workflow() {
             assert_eq!(phase_index, 1);
             assert_eq!(phase_name, "research");
         }
-        other => panic!("Expected PhaseRunning at research, got {:?}", other),
+        other => panic!("Expected PhaseReady at research, got {:?}", other),
     }
 }

@@ -25,16 +25,13 @@ fn is_gate_phase(phase_name: &str) -> bool {
     matches!(phase_name, "triage" | "review")
 }
 
-/// Result of an `advance` call, giving the overmind enough info to create an agent.
+/// Result of an `advance` call, giving the overmind enough info to fan out.
 #[derive(Debug, Clone)]
 pub enum AdvanceResult {
-    /// A new phase subtask was created; the overmind should create an agent for it.
-    PhaseStarted {
-        subtask_id: Uuid,
+    /// The next phase is ready; the overmind should call `fan_out` to create subtasks.
+    PhaseReady {
         phase_index: usize,
         phase_name: String,
-        subtask_title: String,
-        subtask_description: String,
     },
     /// All phases are done; the workflow completed successfully.
     Completed,
@@ -194,11 +191,12 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
 
         let (workflow_name, next_index) = match &state {
             WorkflowState::Pending { workflow_name } => (workflow_name.clone(), 0),
-            WorkflowState::PhaseReady {
-                workflow_name,
-                phase_index,
-                ..
-            } => (workflow_name.clone(), *phase_index), // already points to next phase
+            WorkflowState::PhaseReady { .. } => {
+                return Err(DomainError::ValidationFailed(format!(
+                    "Task {} is already in PhaseReady — call fan_out to create subtasks",
+                    task_id
+                )));
+            }
             WorkflowState::PhaseGate {
                 workflow_name,
                 phase_index,
@@ -283,15 +281,11 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         let from_phase = state.phase_index();
         let phase = &template.phases[next_index];
 
-        // Create subtask for this phase
-        let subtask = self.create_phase_subtask(task_id, &workflow_name, next_index, phase, &task).await?;
-        let subtask_id = subtask.id;
-
-        let new_state = WorkflowState::PhaseRunning {
+        // Transition to PhaseReady — the overmind must call fan_out() next
+        let new_state = WorkflowState::PhaseReady {
             workflow_name: workflow_name.clone(),
             phase_index: next_index,
             phase_name: phase.name.clone(),
-            subtask_ids: vec![subtask_id],
         };
         self.write_state(task_id, &new_state).await?;
 
@@ -302,11 +296,10 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 EventCategory::Workflow,
                 None,
                 Some(task_id),
-                EventPayload::WorkflowPhaseStarted {
+                EventPayload::WorkflowPhaseReady {
                     task_id,
                     phase_index: next_index,
                     phase_name: phase.name.clone(),
-                    subtask_ids: vec![subtask_id],
                 },
             ))
             .await;
@@ -327,12 +320,9 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 .await;
         }
 
-        Ok(AdvanceResult::PhaseStarted {
-            subtask_id,
+        Ok(AdvanceResult::PhaseReady {
             phase_index: next_index,
             phase_name: phase.name.clone(),
-            subtask_title: subtask.title,
-            subtask_description: subtask.description,
         })
     }
 
@@ -837,14 +827,14 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 self.write_state(parent_task_id, &rework_state).await?;
             }
 
-            // Auto-advance to re-create the phase with feedback
+            // Auto-advance to prepare the phase for rework
             match self.advance(parent_task_id).await {
-                Ok(AdvanceResult::PhaseStarted { phase_name: rework_phase, .. }) => {
+                Ok(AdvanceResult::PhaseReady { phase_name: rework_phase, .. }) => {
                     tracing::info!(
                         task_id = %parent_task_id,
                         phase = %rework_phase,
                         retry = retry_count + 1,
-                        "Workflow auto-rework: re-created phase subtask with verification feedback"
+                        "Workflow auto-rework: phase ready for rework with verification feedback"
                     );
 
                     // Update retry count on the parent task regardless of workflow state
@@ -1035,41 +1025,15 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         })?;
 
         let (workflow_name, phase_index, phase_name) = match &state {
-            // Allow fan_out from Pending (replaces the first advance) or from PhaseGate/PhaseReady
-            WorkflowState::Pending { workflow_name } => {
-                let template = self.get_template(workflow_name)?;
-                let phase = &template.phases[0];
-                (workflow_name.clone(), 0, phase.name.clone())
-            }
+            // fan_out only accepts PhaseReady — overmind must call advance() first
             WorkflowState::PhaseReady {
                 workflow_name,
                 phase_index,
                 phase_name,
             } => (workflow_name.clone(), *phase_index, phase_name.clone()),
-            WorkflowState::PhaseGate {
-                workflow_name,
-                phase_index,
-                ..
-            } => {
-                let template = self.get_template(workflow_name)?;
-                let next_idx = phase_index + 1;
-                if next_idx >= template.phases.len() {
-                    return Err(DomainError::ValidationFailed(
-                        "No more phases to fan out".to_string(),
-                    ));
-                }
-                let phase = &template.phases[next_idx];
-                (workflow_name.clone(), next_idx, phase.name.clone())
-            }
-            WorkflowState::PhaseRunning {
-                workflow_name,
-                phase_index,
-                phase_name,
-                ..
-            } => (workflow_name.clone(), *phase_index, phase_name.clone()),
             _ => {
                 return Err(DomainError::ValidationFailed(format!(
-                    "Cannot fan_out task {} from state {:?}",
+                    "Cannot fan_out task {} from state {:?} — call advance() first to reach PhaseReady",
                     task_id, state
                 )));
             }
@@ -1204,6 +1168,11 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 phase_index,
                 phase_name,
                 ..
+            }
+            | WorkflowState::PhaseReady {
+                phase_index,
+                phase_name,
+                ..
             } => (Some(*phase_index), Some(phase_name.clone()), false, None),
             _ => (None, None, false, None),
         };
@@ -1252,83 +1221,6 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         task.updated_at = chrono::Utc::now();
         self.task_repo.update(&task).await?;
         Ok(())
-    }
-
-    /// Create a subtask for a workflow phase.
-    async fn create_phase_subtask(
-        &self,
-        parent_task_id: Uuid,
-        workflow_name: &str,
-        phase_index: usize,
-        phase: &crate::domain::models::workflow_template::WorkflowPhase,
-        parent_task: &Task,
-    ) -> DomainResult<Task> {
-        let template = self.get_template(workflow_name)?;
-        let title = format!(
-            "[{}/{}:{}] {}",
-            workflow_name,
-            phase_index,
-            phase.name,
-            phase.description.chars().take(60).collect::<String>()
-        );
-
-        // Build description, including verification feedback if present (rework scenario)
-        let mut description = format!(
-            "Workflow: {}\nPhase: {} ({}/{})\nPhase role: {}\nPhase description: {}\n\nParent task: {}",
-            workflow_name,
-            phase.name,
-            phase_index + 1,
-            template.phases.len(),
-            phase.role,
-            phase.description,
-            parent_task.description
-        );
-
-        // Append verification feedback for rework subtasks
-        if let Some(feedback) = parent_task.context.custom.get("verification_feedback")
-            && let Some(arr) = feedback.as_array()
-                && !arr.is_empty() {
-                    description.push_str("\n\n--- VERIFICATION FEEDBACK (from previous attempt) ---\n");
-                    for (i, item) in arr.iter().enumerate() {
-                        if let Some(s) = item.as_str() {
-                            description.push_str(&format!("Attempt {}: {}\n", i + 1, s));
-                        }
-                    }
-                    description.push_str("--- Please address the above feedback in this attempt. ---\n");
-                }
-
-        let mut subtask = Task::with_title(&title, &description);
-        subtask.parent_id = Some(parent_task_id);
-        subtask.source = TaskSource::SubtaskOf(parent_task_id);
-        let _ = subtask.transition_to(TaskStatus::Ready);
-
-        // Phase-driven execution mode (Step 2.1):
-        // read_only phases -> Direct; phases with write/edit/shell tools -> Convergent
-        let has_write_tools = phase.tools.iter().any(|t| {
-            let lower = t.to_lowercase();
-            lower == "write" || lower == "edit" || lower == "shell"
-        });
-        if phase.read_only || !has_write_tools {
-            subtask.execution_mode = ExecutionMode::Direct;
-        } else {
-            subtask.execution_mode = ExecutionMode::Convergent { parallel_samples: None };
-        }
-
-        // Inherit worktree from parent task
-        subtask.worktree_path = parent_task.worktree_path.clone();
-
-        // Tag subtask with workflow metadata
-        subtask.context.custom.insert(
-            "workflow_phase".to_string(),
-            serde_json::json!({
-                "workflow_name": workflow_name,
-                "phase_index": phase_index,
-                "phase_name": phase.name,
-            }),
-        );
-
-        self.task_repo.create(&subtask).await?;
-        Ok(subtask)
     }
 
     /// Handle fan-in: all fan-out subtasks are done, create aggregation task.

@@ -250,13 +250,6 @@ where
         task: &Task,
         event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
-        // Skip workflow phase subtasks awaiting agent assignment from overmind.
-        // The overmind's long-running session creates specialists and assigns them
-        // via task_assign. Until agent_type is set, leave the task in Ready.
-        if task.agent_type.is_none() && task.context.custom.contains_key("workflow_phase") {
-            return Ok(());
-        }
-
         // Runtime safety net: don't spawn agents if MCP servers are down.
         // The task stays Ready and will be retried on the next poll cycle.
         if !self.check_mcp_readiness().await {

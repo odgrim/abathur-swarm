@@ -244,9 +244,9 @@ where
     /// Tool definitions that are always available regardless of session type.
     fn always_available_tools() -> Vec<serde_json::Value> {
         vec![
-            serde_json::json!({"name":"workflow_advance","description":"Advance a workflow to its next phase. Creates a subtask for the phase and returns its details so you can create an agent for it. Call after enrollment to start the first phase, and after each non-gate phase completes.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string","description":"UUID of the parent task enrolled in the workflow"}},"required":["task_id"]}}),
+            serde_json::json!({"name":"workflow_advance","description":"Advance a workflow to its next phase. Transitions the workflow state to PhaseReady. Call workflow_fan_out next to create subtasks.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string","description":"UUID of the parent task enrolled in the workflow"}},"required":["task_id"]}}),
             serde_json::json!({"name":"workflow_status","description":"Get the current workflow state for a task — which phase is running, what subtasks are active, and overall progress.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string","description":"UUID of the task to check workflow status for"}},"required":["task_id"]}}),
-            serde_json::json!({"name":"workflow_gate","description":"Provide a verdict at a gate phase (triage or review). Returns status: 'approved_and_advanced' (with subtask details) if approve advances to the next phase, 'approved_and_completed' if approve finishes the workflow, or 'verdict_applied' for reject/rework.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string","description":"UUID of the parent task at the gate phase"},"verdict":{"type":"string","enum":["approve","reject","rework"],"description":"Gate verdict: approve (advance), reject (terminate), or rework (re-run phase)"},"reason":{"type":"string","description":"Reason for the verdict — especially important for reject and rework decisions"}},"required":["task_id","verdict"]}}),
+            serde_json::json!({"name":"workflow_gate","description":"Provide a verdict at a gate phase (triage or review). Returns status: 'approved_phase_ready' (call workflow_fan_out next) if approve advances to the next phase, 'approved_and_completed' if approve finishes the workflow, or 'verdict_applied' for reject/rework.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string","description":"UUID of the parent task at the gate phase"},"verdict":{"type":"string","enum":["approve","reject","rework"],"description":"Gate verdict: approve (advance), reject (terminate), or rework (re-run phase)"},"reason":{"type":"string","description":"Reason for the verdict — especially important for reject and rework decisions"}},"required":["task_id","verdict"]}}),
             serde_json::json!({"name":"workflow_fan_out","description":"Split the current workflow phase into parallel subtasks. Each slice gets its own subtask. Use when a phase can be parallelized. Create an agent for each returned subtask.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string","description":"UUID of the parent task to fan out"},"slices":{"type":"array","items":{"type":"object","properties":{"description":{"type":"string","description":"Description of this slice's work"}},"required":["description"]},"description":"Array of work slices — one subtask is created per slice"}},"required":["task_id","slices"]}}),
             serde_json::json!({"name":"workflow_list","description":"List all tasks that are currently enrolled in workflows, showing their workflow name, current phase, and state.","inputSchema":{"type":"object","properties":{}}}),
             serde_json::json!({"name":"task_list","description":"List tasks in the Abathur swarm. Use this to monitor the progress of subtasks you've created. Filter by status to find running, completed, or failed tasks. Without a status filter, returns tasks that are ready to execute.","inputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["pending","ready","running","complete","failed","blocked"],"description":"Filter by task status."},"task_type":{"type":"string","enum":["standard","verification","research","review"],"description":"Filter by task type."},"limit":{"type":"integer","description":"Maximum number of tasks to return (default: 50)"}}}}),
@@ -1098,19 +1098,14 @@ where
         let result = engine.advance(task_id).await.map_err(|e| format!("{}", e))?;
 
         let response = match result {
-            crate::services::workflow_engine::AdvanceResult::PhaseStarted {
-                subtask_id,
+            crate::services::workflow_engine::AdvanceResult::PhaseReady {
                 phase_index,
                 phase_name,
-                subtask_title,
-                subtask_description,
             } => serde_json::json!({
-                "status": "phase_started",
-                "subtask_id": subtask_id.to_string(),
+                "status": "phase_ready",
                 "phase_index": phase_index,
                 "phase_name": phase_name,
-                "subtask_title": subtask_title,
-                "subtask_description": subtask_description,
+                "action_required": "Call workflow_fan_out to create subtasks for this phase",
             }),
             crate::services::workflow_engine::AdvanceResult::Completed => serde_json::json!({
                 "status": "completed",
@@ -1146,13 +1141,13 @@ where
                 "pending" => {
                     json.as_object_mut().unwrap().insert(
                         "action_required".to_string(),
-                        serde_json::json!("Call workflow_advance or workflow_fan_out to start the first phase"),
+                        serde_json::json!("Call workflow_advance to prepare the first phase"),
                     );
                 }
                 "phase_ready" => {
                     json.as_object_mut().unwrap().insert(
                         "action_required".to_string(),
-                        serde_json::json!("Call workflow_advance or workflow_fan_out to start this phase"),
+                        serde_json::json!("Call workflow_fan_out to create subtasks for this phase"),
                     );
                 }
                 _ => {}
@@ -1194,17 +1189,15 @@ where
             .map_err(|e| format!("{}", e))?;
 
         let response = match result {
-            Some(crate::services::workflow_engine::AdvanceResult::PhaseStarted {
-                subtask_id, phase_index, phase_name, subtask_title, subtask_description,
+            Some(crate::services::workflow_engine::AdvanceResult::PhaseReady {
+                phase_index, phase_name,
             }) => serde_json::json!({
-                "status": "approved_and_advanced",
+                "status": "approved_phase_ready",
                 "task_id": task_id.to_string(),
                 "verdict": verdict_str,
-                "subtask_id": subtask_id.to_string(),
                 "phase_index": phase_index,
                 "phase_name": phase_name,
-                "subtask_title": subtask_title,
-                "subtask_description": subtask_description,
+                "action_required": "Call workflow_fan_out to create subtasks for this phase",
             }),
             Some(crate::services::workflow_engine::AdvanceResult::Completed) => serde_json::json!({
                 "status": "approved_and_completed",
