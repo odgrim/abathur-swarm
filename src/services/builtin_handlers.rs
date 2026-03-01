@@ -5236,7 +5236,7 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowVerificationHandler<T
                     "WorkflowVerificationRequested".to_string(),
                 ]),
             priority: HandlerPriority::HIGH,
-            error_strategy: ErrorStrategy::CircuitBreak,
+            error_strategy: ErrorStrategy::LogAndContinue,
         }
     }
 
@@ -5251,6 +5251,29 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowVerificationHandler<T
             _ => return Ok(Reaction::None),
         };
 
+        // Idempotency guard: skip if verification already dispatched for this
+        // task + phase + retry combination.
+        let idem_key = format!("wf-verify:{}:{}:{}", task_id, phase_name, retry_count);
+        match self.task_repo.get_by_idempotency_key(&idem_key).await {
+            Ok(Some(_)) => {
+                tracing::debug!(
+                    task_id = %task_id,
+                    phase = %phase_name,
+                    retry_count,
+                    "WorkflowVerificationHandler: verification already dispatched (idempotency dedup)"
+                );
+                return Ok(Reaction::None);
+            }
+            Ok(None) => {} // no duplicate — proceed
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "WorkflowVerificationHandler: idempotency check failed, proceeding anyway"
+                );
+            }
+        }
+
         // Load parent task
         let mut parent_task = match self.task_repo.get(task_id).await {
             Ok(Some(t)) => t,
@@ -5264,7 +5287,7 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowVerificationHandler<T
             }
         };
 
-        // Step 4.4: Enrich parent task with phase context before verification.
+        // Enrich parent task with phase context before verification.
         // This gives the verifier knowledge of which workflow phase just completed.
         {
             let workflow_state = parent_task.context.custom.get("workflow_state")
@@ -5272,7 +5295,6 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowVerificationHandler<T
 
             if let Some(ref ws) = workflow_state {
                 let phase_index = ws.phase_index().unwrap_or(0);
-                // Count total phases from workflow template name
                 let total_phases_hint = parent_task.context.custom.get("workflow_total_phases")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
@@ -5297,43 +5319,35 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowVerificationHandler<T
             }
         }
 
-        // Step 4.3: Create a Verification subtask for audit trail
-        {
-            use crate::domain::models::task::{Task, TaskStatus, TaskPriority};
-
-            let mut verification_task = Task::new(
-                format!("Verify phase '{}' for task {}", phase_name, task_id),
+        // Embed the idempotency key in parent task context so that
+        // IntentVerifierService::create_verification_task() can propagate it.
+        parent_task.context.custom.insert(
+            "verification_idempotency_key".to_string(),
+            serde_json::Value::String(idem_key),
+        );
+        if let Err(e) = self.task_repo.update(&parent_task).await {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "WorkflowVerificationHandler: failed to persist idempotency key on parent task"
             );
-            verification_task.task_type = crate::domain::models::task::TaskType::Verification;
-            verification_task.parent_id = Some(task_id);
-            verification_task.priority = TaskPriority::High;
-            verification_task.context.custom.insert(
-                "workflow_verification".to_string(),
-                serde_json::json!({
-                    "phase_name": phase_name,
-                    "retry_count": retry_count,
-                    "parent_task_id": task_id.to_string(),
-                }),
-            );
-            // Start it as running immediately since we're executing inline
-            verification_task.status = TaskStatus::Running;
-            let verification_task_id = verification_task.id;
+        }
 
-            if let Err(e) = self.task_repo.create(&verification_task).await {
-                tracing::warn!(
-                    task_id = %task_id,
-                    "WorkflowVerificationHandler: failed to create verification subtask: {}",
-                    e
-                );
-            }
+        // Extract goal_id from parent task context
+        let goal_id = parent_task.context.custom.get("goal_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok());
 
-            // Extract goal_id from parent task context
-            let goal_id = parent_task.context.custom.get("goal_id")
-                .and_then(|v| v.as_str())
-                .and_then(|s| uuid::Uuid::parse_str(s).ok());
+        // Spawn the LLM verification in the background so we return within
+        // the event reactor's 15s handler timeout.
+        let intent_verifier = self.intent_verifier.clone();
+        let task_repo = self.task_repo.clone();
+        let event_bus = self.event_bus.clone();
+        let verification_enabled = self.verification_enabled;
+        let phase_name_owned = phase_name.clone();
 
-            // Run intent verification on the parent task
-            let (satisfied, summary) = match self.intent_verifier.verify_convergent_intent(
+        tokio::spawn(async move {
+            let (satisfied, summary) = match intent_verifier.verify_convergent_intent(
                 &parent_task,
                 goal_id,
                 retry_count,
@@ -5344,7 +5358,7 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowVerificationHandler<T
                     let satisfied = result.satisfaction == IntentSatisfaction::Satisfied;
                     let summary = format!(
                         "Phase '{}' verification: {} (confidence: {:.2}, gaps: {})",
-                        phase_name,
+                        phase_name_owned,
                         result.satisfaction.as_str(),
                         result.confidence,
                         result.gaps.len(),
@@ -5368,37 +5382,11 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowVerificationHandler<T
                 }
             };
 
-            // Mark verification subtask as complete/failed and store results
-            let mut ver_task = verification_task;
-            ver_task.context.custom.insert(
-                "verification_result".to_string(),
-                serde_json::json!({
-                    "satisfied": satisfied,
-                    "summary": summary,
-                }),
-            );
-            if satisfied {
-                ver_task.status = TaskStatus::Complete;
-            } else {
-                ver_task.status = TaskStatus::Failed;
-                ver_task.context.custom.insert(
-                    "verification_error".to_string(),
-                    serde_json::Value::String(summary.clone()),
-                );
-            }
-            if let Err(e) = self.task_repo.update(&ver_task).await {
-                tracing::warn!(
-                    verification_task_id = %verification_task_id,
-                    "WorkflowVerificationHandler: failed to update verification subtask: {}",
-                    e
-                );
-            }
-
             // Feed result back to workflow engine
             let engine = crate::services::workflow_engine::WorkflowEngine::new(
-                self.task_repo.clone(),
-                self.event_bus.clone(),
-                self.verification_enabled,
+                task_repo,
+                event_bus,
+                verification_enabled,
             );
             if let Err(e) = engine.handle_verification_result(task_id, satisfied, &summary).await {
                 tracing::warn!(
@@ -5407,7 +5395,7 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowVerificationHandler<T
                     e
                 );
             }
-        }
+        });
 
         Ok(Reaction::None)
     }

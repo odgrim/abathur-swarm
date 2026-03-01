@@ -943,6 +943,14 @@ where
             serde_json::json!(iteration),
         );
 
+        // Propagate idempotency key from the verified task's context so that
+        // duplicate verification dispatches are deduplicated at the DB level.
+        if let Some(idem_key) = verified_task.context.custom.get("verification_idempotency_key")
+            .and_then(|v| v.as_str())
+        {
+            task.idempotency_key = Some(idem_key.to_string());
+        }
+
         // Mark as running immediately (verification is about to execute)
         task.status = TaskStatus::Running;
         task.started_at = Some(chrono::Utc::now());
