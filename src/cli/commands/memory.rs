@@ -7,7 +7,10 @@ use std::sync::Arc;
 use crate::adapters::sqlite::{SqliteMemoryRepository, initialize_default_database};
 use crate::cli::command_dispatcher::CliCommandDispatcher;
 use crate::cli::id_resolver::resolve_memory_id;
-use crate::cli::output::{output, truncate, CommandOutput};
+use crate::cli::display::{
+    action_success, colorize_memory_tier, list_table, output, render_list,
+    short_id, relative_time_str, truncate_ellipsis, CommandOutput, DetailView,
+};
 use crate::domain::models::{AccessorId, Memory, MemoryQuery, MemoryTier, MemoryType};
 use crate::services::command_bus::{CommandResult, DomainCommand, MemoryCommand};
 use crate::services::MemoryService;
@@ -104,7 +107,7 @@ impl From<&Memory> for MemoryOutput {
             memory_type: mem.memory_type.as_str().to_string(),
             access_count: mem.access_count,
             decay_factor: mem.decay_factor(),
-            content_preview: truncate(&mem.content, 50),
+            content_preview: truncate_ellipsis(&mem.content, 50),
         }
     }
 }
@@ -121,26 +124,21 @@ impl CommandOutput for MemoryListOutput {
             return "No memories found.".to_string();
         }
 
-        let mut lines = vec![format!("Found {} memory(ies):\n", self.total)];
-        lines.push(format!(
-            "{:<12} {:<15} {:<12} {:<10} {:<6} {:<30}",
-            "ID", "KEY", "NAMESPACE", "TIER", "DECAY", "CONTENT"
-        ));
-        lines.push("-".repeat(90));
+        let mut table = list_table(&["ID", "Key", "Namespace", "Tier", "Type", "Accesses", "Decay"]);
 
         for mem in &self.memories {
-            lines.push(format!(
-                "{:<12} {:<15} {:<12} {:<10} {:<6.2} {:<30}",
-                &mem.id[..8],
-                truncate(&mem.key, 13),
-                truncate(&mem.namespace, 10),
-                mem.tier,
-                mem.decay_factor,
-                mem.content_preview
-            ));
+            table.add_row(vec![
+                short_id(&mem.id).to_string(),
+                truncate_ellipsis(&mem.key, 25),
+                truncate_ellipsis(&mem.namespace, 14),
+                colorize_memory_tier(&mem.tier).to_string(),
+                mem.memory_type.clone(),
+                mem.access_count.to_string(),
+                format!("{:.2}", mem.decay_factor),
+            ]);
         }
 
-        lines.join("\n")
+        render_list("memory", table, self.total)
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -160,28 +158,27 @@ pub struct MemoryDetailOutput {
 
 impl CommandOutput for MemoryDetailOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec![
-            format!("Memory: {}", self.memory.key),
-            format!("ID: {}", self.memory.id),
-            format!("Namespace: {}", self.memory.namespace),
-            format!("Tier: {}", self.memory.tier),
-            format!("Type: {}", self.memory.memory_type),
-            format!("Access Count: {}", self.memory.access_count),
-            format!("Decay Factor: {:.2}", self.memory.decay_factor),
-            format!("\nContent:\n{}", self.content),
-            format!("\nCreated: {}", self.created_at),
-            format!("Last Accessed: {}", self.last_accessed),
-        ];
-
-        if let Some(exp) = &self.expires_at {
-            lines.push(format!("Expires: {}", exp));
-        }
+        let mut view = DetailView::new(&self.memory.key)
+            .field("ID", &self.memory.id)
+            .field("Namespace", &self.memory.namespace)
+            .field("Tier", &colorize_memory_tier(&self.memory.tier).to_string())
+            .field("Type", &self.memory.memory_type)
+            .field("Accesses", &self.memory.access_count.to_string())
+            .field("Decay", &format!("{:.2}", self.memory.decay_factor))
+            .section("Content")
+            .item(&self.content);
 
         if !self.tags.is_empty() {
-            lines.push(format!("Tags: {}", self.tags.join(", ")));
+            view = view.section("Tags")
+                .item(&self.tags.join(", "));
         }
 
-        lines.join("\n")
+        view = view.section("Timing")
+            .field("Created", &format!("{} ({})", relative_time_str(&self.created_at), &self.created_at))
+            .field("Accessed", &format!("{} ({})", relative_time_str(&self.last_accessed), &self.last_accessed))
+            .field("Expires", &self.expires_at.as_deref().map(|s| format!("{} ({})", relative_time_str(s), s)).unwrap_or_else(|| "-".to_string()));
+
+        view.render()
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -198,7 +195,11 @@ pub struct MemoryActionOutput {
 
 impl CommandOutput for MemoryActionOutput {
     fn to_human(&self) -> String {
-        self.message.clone()
+        if self.success {
+            action_success(&self.message)
+        } else {
+            crate::cli::display::action_failure(&self.message)
+        }
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -216,13 +217,13 @@ pub struct MemoryStatsOutput {
 
 impl CommandOutput for MemoryStatsOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec!["Memory Statistics:".to_string()];
-        lines.push(format!("  Working:   {}", self.working));
-        lines.push(format!("  Episodic:  {}", self.episodic));
-        lines.push(format!("  Semantic:  {}", self.semantic));
-        lines.push("  -----------".to_string());
-        lines.push(format!("  Total:     {}", self.total));
-        lines.join("\n")
+        use colored::Colorize;
+        DetailView::new("Memory Statistics")
+            .field(&colorize_memory_tier("Working").to_string(), &self.working.to_string())
+            .field(&colorize_memory_tier("Episodic").to_string(), &self.episodic.to_string())
+            .field(&colorize_memory_tier("Semantic").to_string(), &self.semantic.to_string())
+            .field("Total", &self.total.to_string().bold().to_string())
+            .render()
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -240,12 +241,10 @@ pub struct PruneOutput {
 
 impl CommandOutput for PruneOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec!["Maintenance complete:".to_string()];
-        lines.push(format!("  Expired pruned:      {}", self.expired_pruned));
-        lines.push(format!("  Decayed pruned:      {}", self.decayed_pruned));
-        lines.push(format!("  Promoted:            {}", self.promoted));
-        lines.push(format!("  Conflicts resolved:  {}", self.conflicts_resolved));
-        lines.join("\n")
+        action_success(&format!(
+            "Maintenance complete: {} expired, {} decayed, {} promoted, {} conflicts resolved",
+            self.expired_pruned, self.decayed_pruned, self.promoted, self.conflicts_resolved
+        ))
     }
 
     fn to_json(&self) -> serde_json::Value {
