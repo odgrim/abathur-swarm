@@ -372,10 +372,11 @@ pub struct GatewayStatusOutput {
 
 impl CommandOutput for GatewayStatusOutput {
     fn to_human(&self) -> String {
+        use colored::Colorize;
         let status_str = if self.running {
-            colorize_status("running").to_string()
+            "RUNNING".green().bold().to_string()
         } else {
-            colorize_status("failed").to_string()
+            "NOT RUNNING".red().bold().to_string()
         };
 
         let mut view = DetailView::new("A2A Gateway Status")
