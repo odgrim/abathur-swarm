@@ -1025,7 +1025,8 @@ where
         } else {
             // Truncate long descriptions to keep commit messages reasonable
             let short_desc = if desc.len() > 500 {
-                format!("{}...", &desc[..497])
+                let truncated: String = desc.chars().take(497).collect();
+                format!("{}...", truncated)
             } else {
                 desc.to_string()
             };
