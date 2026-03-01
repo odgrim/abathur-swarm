@@ -7,7 +7,10 @@ use std::sync::Arc;
 use crate::adapters::sqlite::{goal_repository::SqliteGoalRepository, initialize_default_database};
 use crate::cli::command_dispatcher::CliCommandDispatcher;
 use crate::cli::id_resolver::resolve_goal_id;
-use crate::cli::output::{output, truncate, CommandOutput};
+use crate::cli::display::{
+    action_success, colorize_priority, colorize_status, list_table, output, render_list,
+    short_id, relative_time_str, truncate_ellipsis, CommandOutput, DetailView,
+};
 use crate::domain::models::{Goal, GoalConstraint, GoalPriority, GoalStatus};
 use crate::domain::ports::GoalFilter;
 use crate::services::command_bus::{CommandResult, DomainCommand, GoalCommand};
@@ -81,6 +84,10 @@ pub struct GoalOutput {
     pub priority: String,
     pub parent_id: Option<String>,
     pub constraints_count: usize,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_check: Option<String>,
+    pub domains: Vec<String>,
 }
 
 impl From<&Goal> for GoalOutput {
@@ -93,6 +100,10 @@ impl From<&Goal> for GoalOutput {
             priority: goal.priority.as_str().to_string(),
             parent_id: goal.parent_id.map(|id| id.to_string()),
             constraints_count: goal.constraints.len(),
+            created_at: goal.created_at.to_rfc3339(),
+            updated_at: goal.updated_at.to_rfc3339(),
+            last_check: goal.last_convergence_check_at.map(|t| t.to_rfc3339()),
+            domains: goal.applicability_domains.clone(),
         }
     }
 }
@@ -109,21 +120,20 @@ impl CommandOutput for GoalListOutput {
             return "No goals found.".to_string();
         }
 
-        let mut lines = vec![format!("Found {} goal(s):\n", self.total)];
-        lines.push(format!("{:<36} {:<20} {:<10} {:<10}", "ID", "NAME", "STATUS", "PRIORITY"));
-        lines.push("-".repeat(76));
+        let mut table = list_table(&["ID", "Name", "Status", "Priority", "Constraints", "Last Check"]);
 
         for goal in &self.goals {
-            lines.push(format!(
-                "{:<36} {:<20} {:<10} {:<10}",
-                &goal.id[..8],
-                truncate(&goal.name, 18),
-                goal.status,
-                goal.priority
-            ));
+            table.add_row(vec![
+                short_id(&goal.id).to_string(),
+                truncate_ellipsis(&goal.name, 30),
+                colorize_status(&goal.status).to_string(),
+                colorize_priority(&goal.priority).to_string(),
+                goal.constraints_count.to_string(),
+                goal.last_check.as_deref().map(relative_time_str).unwrap_or_else(|| "-".to_string()),
+            ]);
         }
 
-        lines.join("\n")
+        render_list("goal", table, self.total)
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -134,31 +144,44 @@ impl CommandOutput for GoalListOutput {
 #[derive(Debug, serde::Serialize)]
 pub struct GoalDetailOutput {
     pub goal: GoalOutput,
-    pub constraints: Vec<String>,
+    pub constraints: Vec<ConstraintDisplay>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ConstraintDisplay {
+    pub name: String,
+    pub description: String,
+    pub constraint_type: String,
 }
 
 impl CommandOutput for GoalDetailOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec![
-            format!("Goal: {}", self.goal.name),
-            format!("ID: {}", self.goal.id),
-            format!("Status: {}", self.goal.status),
-            format!("Priority: {}", self.goal.priority),
-            format!("Description: {}", self.goal.description),
-        ];
-
-        if let Some(parent) = &self.goal.parent_id {
-            lines.push(format!("Parent: {}", parent));
-        }
+        let mut view = DetailView::new(&self.goal.name)
+            .field("ID", &self.goal.id)
+            .field("Status", &colorize_status(&self.goal.status).to_string())
+            .field("Priority", &colorize_priority(&self.goal.priority).to_string())
+            .field_opt("Parent", self.goal.parent_id.as_deref())
+            .section("Description")
+            .item(if self.goal.description.is_empty() { "(none)" } else { &self.goal.description });
 
         if !self.constraints.is_empty() {
-            lines.push("\nConstraints:".to_string());
+            view = view.section(&format!("Constraints ({})", self.constraints.len()));
             for c in &self.constraints {
-                lines.push(format!("  - {}", c));
+                view = view.item(&format!("[{}] {}: {}", c.constraint_type, c.name, c.description));
             }
         }
 
-        lines.join("\n")
+        if !self.goal.domains.is_empty() {
+            view = view.section("Domains")
+                .item(&self.goal.domains.join(", "));
+        }
+
+        view = view.section("Timing")
+            .field("Created", &format!("{} ({})", relative_time_str(&self.goal.created_at), &self.goal.created_at))
+            .field("Updated", &relative_time_str(&self.goal.updated_at))
+            .field("Last Check", &self.goal.last_check.as_deref().map(|s| format!("{} ({})", relative_time_str(s), s)).unwrap_or_else(|| "-".to_string()));
+
+        view.render()
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -175,7 +198,11 @@ pub struct GoalActionOutput {
 
 impl CommandOutput for GoalActionOutput {
     fn to_human(&self) -> String {
-        self.message.clone()
+        if self.success {
+            action_success(&self.message)
+        } else {
+            crate::cli::display::action_failure(&self.message)
+        }
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -261,7 +288,11 @@ pub async fn execute(args: GoalArgs, json_mode: bool) -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("Goal not found: {}", id))?;
 
             let constraints = goal.constraints.iter()
-                .map(|c| format!("{}: {}", c.name, c.description))
+                .map(|c| ConstraintDisplay {
+                    name: c.name.clone(),
+                    description: c.description.clone(),
+                    constraint_type: format!("{:?}", c.constraint_type),
+                })
                 .collect();
 
             let out = GoalDetailOutput {
