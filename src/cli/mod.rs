@@ -2,6 +2,7 @@
 
 pub mod command_dispatcher;
 pub mod commands;
+pub mod display;
 pub mod event_helpers;
 pub mod id_resolver;
 mod output;
