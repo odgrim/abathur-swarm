@@ -8,7 +8,10 @@ use uuid::Uuid;
 
 use crate::adapters::sqlite::{initialize_default_database, SqliteAgentRepository};
 use crate::cli::id_resolver::resolve_task_id;
-use crate::cli::output::{output, truncate, CommandOutput};
+use crate::cli::display::{
+    action_success, colorize_status, colorize_tier, list_table, output, render_list,
+    truncate_ellipsis, CommandOutput, DetailView,
+};
 use crate::domain::models::a2a::{A2AAgentCard, A2AMessage, MessageType};
 use crate::domain::models::{AgentTemplate, AgentTier, ToolCapability};
 use crate::domain::ports::AgentFilter;
@@ -176,25 +179,20 @@ impl CommandOutput for AgentListOutput {
             return "No agents found.".to_string();
         }
 
-        let mut lines = vec![format!("Found {} agent(s):\n", self.total)];
-        lines.push(format!(
-            "{:<20} {:<12} {:<4} {:<10} {:<6}",
-            "NAME", "TIER", "VER", "STATUS", "TOOLS"
-        ));
-        lines.push("-".repeat(55));
+        let mut table = list_table(&["Name", "Tier", "Status", "Ver", "Tools", "Max Turns"]);
 
         for agent in &self.agents {
-            lines.push(format!(
-                "{:<20} {:<12} {:<4} {:<10} {:<6}",
-                truncate(&agent.name, 18),
-                agent.tier,
-                agent.version,
-                agent.status,
-                agent.tools_count
-            ));
+            table.add_row(vec![
+                agent.name.clone(),
+                colorize_tier(&agent.tier).to_string(),
+                colorize_status(&agent.status).to_string(),
+                agent.version.to_string(),
+                agent.tools_count.to_string(),
+                agent.max_turns.to_string(),
+            ]);
         }
 
-        lines.join("\n")
+        render_list("agent", table, self.total)
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -210,44 +208,47 @@ pub struct AgentDetailOutput {
     pub tools: Vec<String>,
     pub constraints: Vec<String>,
     pub handoff_targets: Vec<String>,
+    pub read_only: bool,
 }
 
 impl CommandOutput for AgentDetailOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec![
-            format!("Agent: {}", self.agent.name),
-            format!("ID: {}", self.agent.id),
-            format!("Tier: {}", self.agent.tier),
-            format!("Version: {}", self.agent.version),
-            format!("Status: {}", self.agent.status),
-            format!("Max Turns: {}", self.agent.max_turns),
-        ];
+        let mut view = DetailView::new(&self.agent.name)
+            .field("ID", &self.agent.id)
+            .field("Tier", &colorize_tier(&self.agent.tier).to_string())
+            .field("Status", &colorize_status(&self.agent.status).to_string())
+            .field("Version", &self.agent.version.to_string())
+            .field("Max Turns", &self.agent.max_turns.to_string())
+            .field("Read Only", if self.read_only { "yes" } else { "no" });
 
         if !self.description.is_empty() {
-            lines.push(format!("\nDescription: {}", self.description));
+            view = view.section("Description")
+                .item(&self.description);
         }
 
-        lines.push(format!("\nPrompt:\n{}", self.prompt_preview));
+        view = view.section("System Prompt (preview)")
+            .item(&self.prompt_preview);
 
         if !self.tools.is_empty() {
-            lines.push(format!("\nTools ({}):", self.tools.len()));
+            view = view.section(&format!("Tools ({})", self.tools.len()));
             for tool in &self.tools {
-                lines.push(format!("  - {}", tool));
+                view = view.item(tool);
             }
         }
 
         if !self.constraints.is_empty() {
-            lines.push("\nConstraints:".to_string());
+            view = view.section(&format!("Constraints ({})", self.constraints.len()));
             for c in &self.constraints {
-                lines.push(format!("  - {}", c));
+                view = view.item(c);
             }
         }
 
         if !self.handoff_targets.is_empty() {
-            lines.push(format!("\nHandoff targets: {}", self.handoff_targets.join(", ")));
+            view = view.section("Handoff Targets")
+                .item(&self.handoff_targets.join(", "));
         }
 
-        lines.join("\n")
+        view.render()
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -264,7 +265,11 @@ pub struct AgentActionOutput {
 
 impl CommandOutput for AgentActionOutput {
     fn to_human(&self) -> String {
-        self.message.clone()
+        if self.success {
+            action_success(&self.message)
+        } else {
+            crate::cli::display::action_failure(&self.message)
+        }
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -291,16 +296,17 @@ impl CommandOutput for InstancesOutput {
             return "No running instances.".to_string();
         }
 
-        let mut lines = vec!["Running agent instances:\n".to_string()];
-        lines.push(format!("{:<20} {:<10} {:<10}", "TEMPLATE", "RUNNING", "MAX"));
-        lines.push("-".repeat(40));
+        let mut table = list_table(&["Template", "Running", "Max"]);
 
         for inst in &self.instances {
-            lines.push(format!("{:<20} {:<10} {:<10}", inst.template, inst.count, inst.max));
+            table.add_row(vec![
+                inst.template.clone(),
+                inst.count.to_string(),
+                inst.max.to_string(),
+            ]);
         }
 
-        lines.push(format!("\nTotal: {} running", self.total));
-        lines.join("\n")
+        render_list("instance", table, self.total)
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -319,14 +325,15 @@ pub struct StatsOutput {
 
 impl CommandOutput for StatsOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec!["Agent Statistics:".to_string()];
-        lines.push(format!("  Architects:   {}", self.architect_count));
-        lines.push(format!("  Specialists:  {}", self.specialist_count));
-        lines.push(format!("  Workers:      {}", self.worker_count));
-        lines.push("  ------------".to_string());
-        lines.push(format!("  Total:        {}", self.total));
-        lines.push(format!("\n  Running instances: {}", self.running_instances));
-        lines.join("\n")
+        use colored::Colorize;
+        DetailView::new("Agent Statistics")
+            .field(&colorize_tier("Architects").to_string(), &self.architect_count.to_string())
+            .field(&colorize_tier("Specialists").to_string(), &self.specialist_count.to_string())
+            .field("Workers", &self.worker_count.to_string())
+            .field("Total", &self.total.to_string().bold().to_string())
+            .section("Runtime")
+            .field("Running", &self.running_instances.to_string())
+            .render()
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -344,9 +351,9 @@ pub struct A2AMessageOutput {
 impl CommandOutput for A2AMessageOutput {
     fn to_human(&self) -> String {
         if self.success {
-            format!("Message sent successfully (ID: {})", self.message_id)
+            action_success(&format!("Message sent (ID: {})", self.message_id))
         } else {
-            format!("Failed to send message: {}", self.message)
+            crate::cli::display::action_failure(&format!("Send failed: {}", self.message))
         }
     }
 
@@ -365,17 +372,23 @@ pub struct GatewayStatusOutput {
 
 impl CommandOutput for GatewayStatusOutput {
     fn to_human(&self) -> String {
-        if self.running {
-            format!(
-                "A2A Gateway Status:\n  URL: {}\n  Status: RUNNING\n  Registered agents: {}",
-                self.url, self.agents
-            )
+        use colored::Colorize;
+        let status_str = if self.running {
+            "RUNNING".green().bold().to_string()
         } else {
-            format!(
-                "A2A Gateway Status:\n  URL: {}\n  Status: NOT RUNNING\n  {}",
-                self.url, self.message
-            )
+            "NOT RUNNING".red().bold().to_string()
+        };
+
+        let mut view = DetailView::new("A2A Gateway Status")
+            .field("URL", &self.url)
+            .field("Status", &status_str)
+            .field("Agents", &self.agents.to_string());
+
+        if !self.running {
+            view = view.field("Message", &self.message);
         }
+
+        view.render()
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -418,24 +431,22 @@ impl CommandOutput for CardsListOutput {
             return "No agent cards found.".to_string();
         }
 
-        let mut lines = vec![format!("Found {} agent card(s):\n", self.total)];
-        lines.push(format!(
-            "{:<25} {:<20} {:<12} {:<10}",
-            "AGENT ID", "DISPLAY NAME", "TIER", "AVAILABLE"
-        ));
-        lines.push("-".repeat(70));
+        let mut table = list_table(&["Agent ID", "Display Name", "Tier", "Available"]);
 
         for card in &self.cards {
-            lines.push(format!(
-                "{:<25} {:<20} {:<12} {:<10}",
-                truncate(&card.agent_id, 23),
-                truncate(&card.display_name, 18),
-                card.tier,
-                if card.available { "Yes" } else { "No" }
-            ));
+            table.add_row(vec![
+                truncate_ellipsis(&card.agent_id, 23),
+                truncate_ellipsis(&card.display_name, 20),
+                colorize_tier(&card.tier).to_string(),
+                if card.available {
+                    colorize_status("active").to_string()
+                } else {
+                    colorize_status("disabled").to_string()
+                },
+            ]);
         }
 
-        lines.join("\n")
+        render_list("agent card", table, self.total)
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -450,25 +461,30 @@ pub struct CardDetailOutput {
 
 impl CommandOutput for CardDetailOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec![
-            format!("Agent Card: {}", self.card.agent_id),
-            format!("Display Name: {}", self.card.display_name),
-            format!("Tier: {}", self.card.tier),
-            format!("Available: {}", if self.card.available { "Yes" } else { "No" }),
-        ];
+        let avail = if self.card.available {
+            colorize_status("active").to_string()
+        } else {
+            colorize_status("disabled").to_string()
+        };
+
+        let mut view = DetailView::new(&self.card.agent_id)
+            .field("Display Name", &self.card.display_name)
+            .field("Tier", &colorize_tier(&self.card.tier).to_string())
+            .field("Available", &avail);
 
         if !self.card.description.is_empty() {
-            lines.push(format!("\nDescription:\n  {}", self.card.description));
+            view = view.section("Description")
+                .item(&self.card.description);
         }
 
         if !self.card.capabilities.is_empty() {
-            lines.push(format!("\nCapabilities ({}):", self.card.capabilities.len()));
+            view = view.section(&format!("Capabilities ({})", self.card.capabilities.len()));
             for cap in &self.card.capabilities {
-                lines.push(format!("  - {}", cap));
+                view = view.item(cap);
             }
         }
 
-        lines.join("\n")
+        view.render()
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -485,7 +501,11 @@ pub struct ExportOutput {
 
 impl CommandOutput for ExportOutput {
     fn to_human(&self) -> String {
-        self.message.clone()
+        if self.success {
+            action_success(&self.message)
+        } else {
+            crate::cli::display::action_failure(&self.message)
+        }
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -570,10 +590,14 @@ pub async fn execute(args: AgentArgs, json_mode: bool) -> Result<()> {
                     let out = AgentDetailOutput {
                         agent: AgentOutput::from(&a),
                         description: a.description.clone(),
-                        prompt_preview: truncate(&a.system_prompt, 500),
-                        tools: a.tools.iter().map(|t| format!("{}: {}", t.name, t.description)).collect(),
+                        prompt_preview: truncate_ellipsis(&a.system_prompt, 500),
+                        tools: a.tools.iter().map(|t| {
+                            let req = if t.required { " [required]" } else { "" };
+                            format!("{}: {}{}", t.name, t.description, req)
+                        }).collect(),
                         constraints: a.constraints.iter().map(|c| format!("{}: {}", c.name, c.description)).collect(),
                         handoff_targets: a.agent_card.handoff_targets.clone(),
+                        read_only: a.read_only,
                     };
                     output(&out, json_mode);
                 }
