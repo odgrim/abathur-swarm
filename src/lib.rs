@@ -31,4 +31,7 @@ pub const ABATHUR_ALLOWED_TOOLS: &[&str] = &[
     "mcp__abathur__workflow_fan_out",
     "mcp__abathur__workflow_gate",
     "mcp__abathur__workflow_list",
+    "mcp__abathur__workflow_select",
+    "mcp__abathur__task_cancel",
+    "mcp__abathur__task_retry",
 ];

@@ -180,6 +180,10 @@ pub enum McpCommand {
         /// Task ID for parent context (subtasks auto-set parent_id)
         #[arg(long)]
         task_id: Option<String>,
+
+        /// Workflow session mode: hides task_submit, exposes workflow_select/task_cancel/task_retry
+        #[arg(long)]
+        workflow_session: bool,
     },
     /// Show MCP server status
     Status,
@@ -230,7 +234,7 @@ pub async fn execute(args: McpArgs, json_mode: bool) -> Result<()> {
             a2a_port,
             host,
         } => start_all(host, memory_port, tasks_port, agents_port, a2a_port, json_mode).await,
-        McpCommand::Stdio { db_path, task_id } => start_stdio(db_path, task_id).await,
+        McpCommand::Stdio { db_path, task_id, workflow_session } => start_stdio(db_path, task_id, workflow_session).await,
         McpCommand::Status => show_status(json_mode).await,
     }
 }
@@ -537,7 +541,7 @@ async fn start_all(
     Ok(())
 }
 
-async fn start_stdio(db_path: String, task_id: Option<String>) -> Result<()> {
+async fn start_stdio(db_path: String, task_id: Option<String>, workflow_session: bool) -> Result<()> {
     use crate::adapters::mcp::StdioServer;
     use crate::cli::id_resolver::resolve_task_id;
 
@@ -555,7 +559,8 @@ async fn start_stdio(db_path: String, task_id: Option<String>) -> Result<()> {
 
     let (task_service, memory_service, command_bus) = services.into_command_bus();
 
-    let server = StdioServer::new(task_service, agent_service, memory_service, goal_repo, command_bus, task_uuid);
+    let server = StdioServer::new(task_service, agent_service, memory_service, goal_repo, command_bus, task_uuid)
+        .with_workflow_session(workflow_session);
     server.run().await?;
 
     Ok(())

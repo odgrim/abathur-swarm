@@ -69,6 +69,9 @@ fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
                 cli_tools.push("mcp__abathur__task_assign".to_string());
                 cli_tools.push("mcp__abathur__task_wait".to_string());
                 cli_tools.push("mcp__abathur__goals_list".to_string());
+                cli_tools.push("mcp__abathur__workflow_select".to_string());
+                cli_tools.push("mcp__abathur__task_cancel".to_string());
+                cli_tools.push("mcp__abathur__task_retry".to_string());
             }
             "task_status" => {
                 cli_tools.push("mcp__abathur__task_update_status".to_string());
@@ -469,7 +472,10 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 - NotebookEdit
 
 ## How to manage work
-- Create subtasks: Use the `task_submit` tool directly
+- Advance workflow: Use `workflow_advance` or `workflow_fan_out` to create phase subtasks
+- Change spine: Use `workflow_select` before first advance (if auto-selected spine is wrong)
+- Cancel tasks: Use `task_cancel` to stop work that is no longer needed
+- Retry failed tasks: Use `task_retry` to reset a failed task to Ready
 - Create agents: Use the `agent_create` tool directly
 - Track progress: Use `task_list` and `task_get` tools
 - Store learnings: Use the `memory_store` tool directly
@@ -1247,11 +1253,20 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                     .join(".abathur")
                     .join("abathur.db");
 
+                // Build MCP args — overmind gets --workflow-session to block task_submit
+                let mut mcp_args = vec![
+                    "mcp".to_string(), "stdio".to_string(),
+                    "--db-path".to_string(), db_path.to_string_lossy().to_string(),
+                    "--task-id".to_string(), task_id.to_string(),
+                ];
+                if agent_type.to_lowercase() == "overmind" {
+                    mcp_args.push("--workflow-session".to_string());
+                }
                 let mcp_config = serde_json::json!({
                     "mcpServers": {
                         "abathur": {
                             "command": abathur_exe.to_string_lossy(),
-                            "args": ["mcp", "stdio", "--db-path", db_path.to_string_lossy(), "--task-id", task_id.to_string()]
+                            "args": mcp_args
                         }
                     }
                 });

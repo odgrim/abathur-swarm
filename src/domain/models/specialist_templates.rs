@@ -209,6 +209,8 @@ fn generate_workflow_routing_section(workflows: &[WorkflowTemplate]) -> String {
          5. Everything else → **code**\n\n\
          After selecting a spine, scroll to its `## Workflow Spine: <Name>` section below \
          and follow the phases in order. Do **not** mix phases from different spines.\n\n\
+         If the auto-selected spine is wrong for this task, call `workflow_select(task_id, workflow_name)` \
+         before calling `workflow_advance`. This only works while the workflow is in Pending state.\n\n\
          ---\n\n",
     );
 
@@ -522,7 +524,12 @@ fn generate_workflow_example(template: &WorkflowTemplate) -> String {
          # Check workflow state — starts in Pending\n\
          tool: workflow_status\n\
          arguments:\n\
-         \x20 task_id: \"<parent_task_id>\"\n",
+         \x20 task_id: \"<parent_task_id>\"\n\n\
+         # If the default spine is wrong, switch before advancing\n\
+         # tool: workflow_select\n\
+         # arguments:\n\
+         #   task_id: \"<parent_task_id>\"\n\
+         #   workflow_name: \"analysis\"\n",
     );
 
     for (i, phase) in template.phases.iter().enumerate() {
@@ -703,12 +710,13 @@ You have native MCP tools for interacting with the Abathur swarm. Use these dire
   - Use `agents` only for agents that need to create other agent templates (almost never — only the Overmind needs this).
 
 ### Task Management
-- **task_submit**: Create a subtask and delegate it to an agent. Required field: `description`. Optional: `title`, `agent_type` (name of agent template to execute this task), `depends_on` (array of task UUIDs that must complete first), `priority` (low|normal|high|critical, default: normal), `execution_mode` ("direct" or "convergent" — convergent uses iterative refinement with intent verification; recommended for implementation tasks; if omitted the system selects automatically). The parent_id is set automatically from your current task context.
 - **task_list**: List tasks, optionally filtered by `status` (pending|ready|running|complete|failed|blocked). Use this to track subtask progress.
 - **task_get**: Get full task details by `id` (UUID). Use to check subtask results and failure reasons.
 - **task_update_status**: Mark a task as `complete` or `failed`. Provide `error` message when failing a task.
 - **task_assign(task_id, agent_type)**: Assign an agent_type to a Ready task without claiming it. Use this to assign specialists to workflow phase subtasks so the scheduler picks them up. The task must be in Ready state.
 - **task_wait**: Block until a task reaches a terminal state (complete, failed, or canceled). Pass `id` for a single task or `ids` for multiple tasks. Optional `timeout_seconds` (default: 600). Returns the final status. ALWAYS use this instead of polling with task_list + sleep loops — polling wastes your turn budget. For implementation tasks that use convergent execution, set `timeout_seconds` to at least 1800 (30 minutes) since convergent tasks may run multiple iterations.
+- **task_cancel(task_id, reason)**: Cancel an active task. Use this to stop work that is no longer needed or relevant.
+- **task_retry(task_id)**: Retry a failed task — increments retry count and resets to Ready. The task must be in Failed state with retries remaining.
 
 ### Memory
 - **memory_search**: Search swarm memory by `query` string. Use before planning to find similar past tasks and known patterns.
@@ -726,14 +734,15 @@ Tasks are **auto-enrolled** in workflows at submission time. You get a **long-ru
 1. Task is submitted → system auto-enrolls in the appropriate workflow (default: "code")
 2. Your session starts → the workflow is in **Pending** state (no subtasks yet)
 3. Call `workflow_status` to see the Pending state and available phases
-4. Call `workflow_advance` to create a single subtask for the first phase, or `workflow_fan_out` to split it into parallel slices
-5. Create a specialist via `agent_create` (or reuse via `agent_list`)
-6. Call `task_assign(subtask_id, specialist_name)` — this sets agent_type so the scheduler spawns it
-7. Call `task_wait(subtask_id)` — blocks until the specialist finishes
-8. When a non-gate phase completes, the system transitions to PhaseReady.
+4. If the auto-selected spine is wrong, call `workflow_select(task_id, workflow_name)` to switch before advancing. This only works while the workflow is in Pending state.
+5. Call `workflow_advance` to create a single subtask for the first phase, or `workflow_fan_out` to split it into parallel slices
+6. Create a specialist via `agent_create` (or reuse via `agent_list`)
+7. Call `task_assign(subtask_id, specialist_name)` — this sets agent_type so the scheduler spawns it
+8. Call `task_wait(subtask_id)` — blocks until the specialist finishes
+9. When a non-gate phase completes, the system transitions to PhaseReady.
    Call `workflow_status` to confirm, then `workflow_advance` to create a single subtask, or `workflow_fan_out` for parallel slices. Then assign agents via `task_assign`.
-9. Gate phases (triage, review): evaluate the result and call `workflow_gate` with approve/reject/rework.
-10. When all phases complete, mark your parent task complete via `task_update_status`.
+10. Gate phases (triage, review): evaluate the result and call `workflow_gate` with approve/reject/rework.
+11. When all phases complete, mark your parent task complete via `task_update_status`.
 
 ### Default Phases: research → plan → implement → review
 
@@ -1054,11 +1063,14 @@ You have native MCP tools for interacting with the Abathur swarm. Use these dire
 - **task_update_status**: Mark a task as `complete` or `failed`. Provide `error` message when failing a task.
 - **task_assign(task_id, agent_type)**: Assign an agent_type to a Ready task without claiming it. Use this to assign specialists to workflow phase subtasks so the scheduler picks them up. The task must be in Ready state.
 - **task_wait**: Block until a task reaches a terminal state (complete, failed, or canceled). Pass `id` for a single task or `ids` for multiple tasks. Optional `timeout_seconds` (default: 600). Returns the final status. ALWAYS use this instead of polling with task_list + sleep loops — polling wastes your turn budget. For implementation tasks that use convergent execution, set `timeout_seconds` to at least 1800 (30 minutes) since convergent tasks may run multiple iterations.
+- **task_cancel(task_id, reason)**: Cancel an active task. Use this to stop work that is no longer needed or relevant.
+- **task_retry(task_id)**: Retry a failed task — increments retry count and resets to Ready. The task must be in Failed state with retries remaining.
 
 ### Workflow Management
 Tasks are **auto-enrolled** in workflows at submission time — you do NOT need to enroll them manually. The system selects the appropriate workflow based on task source and type. **You are the orchestrator** — your session stays alive for the entire workflow lifecycle.
 
 - **task_assign(task_id, agent_type)**: Assign an agent_type to a Ready phase subtask so the scheduler picks it up. Use this after creating a specialist via `agent_create`. Does NOT change the task's status — the scheduler claims and runs it.
+- **workflow_select(task_id, workflow_name)**: Change the workflow spine before the first phase starts. Only works while the workflow is in Pending state. Use when the auto-selected spine is wrong for the task.
 - **workflow_advance(task_id)**: Advance a workflow to the next phase, creating a new subtask. Call this for every phase, including the first one (the workflow starts in Pending state).
 - **workflow_status(task_id)**: Get the current workflow state — which phase is running, what subtasks are active, and overall progress. Use at session start to see the Pending state.
 - **workflow_gate(task_id, verdict, reason)**: Provide a verdict at a gate phase (triage or review). Verdicts: `approve` (advance to next phase), `reject` (terminate the workflow), `rework` (re-run the current phase).
@@ -1071,15 +1083,16 @@ You get a **long-running session** for each workflow parent task. The workflow s
 1. Task is submitted → system auto-enrolls in the appropriate workflow
 2. Your session starts → the workflow is in **Pending** state (no subtasks yet)
 3. Call `workflow_status` to see the Pending state and available phases
-4. Call `workflow_advance` to create a single subtask for the first phase, or `workflow_fan_out` to split it into parallel slices
-5. Create a specialist via `agent_create` (or reuse via `agent_list`)
-6. Call `task_assign(subtask_id, specialist_name)` — this sets agent_type so the scheduler spawns it
-7. Call `task_wait(subtask_id)` — blocks until the specialist finishes
-8. When a non-gate phase completes, the system transitions to PhaseReady.
-   Call `workflow_status` to confirm, then `workflow_advance` to create a single subtask, or `workflow_fan_out` for parallel slices. Then assign agents via `task_assign`. Repeat from step 5.
-9. Gate phases (triage, review): evaluate the result and call `workflow_gate` with approve/reject/rework. If approved with a next phase, the advance result includes the new subtask. Repeat from step 5.
-10. Non-gate phases with verification: The system runs intent verification on subtask completion. If it passes, the system enters PhaseReady — call `workflow_status` then `workflow_advance`. If verification fails, the system auto-reworks. If retries exhausted, escalates to a gate for your verdict.
-11. When all phases complete, mark your parent task complete via `task_update_status`.
+4. If the auto-selected spine is wrong, call `workflow_select(task_id, workflow_name)` to switch before advancing. This only works while the workflow is in Pending state.
+5. Call `workflow_advance` to create a single subtask for the first phase, or `workflow_fan_out` to split it into parallel slices
+6. Create a specialist via `agent_create` (or reuse via `agent_list`)
+7. Call `task_assign(subtask_id, specialist_name)` — this sets agent_type so the scheduler spawns it
+8. Call `task_wait(subtask_id)` — blocks until the specialist finishes
+9. When a non-gate phase completes, the system transitions to PhaseReady.
+   Call `workflow_status` to confirm, then `workflow_advance` to create a single subtask, or `workflow_fan_out` for parallel slices. Then assign agents via `task_assign`. Repeat from step 6.
+10. Gate phases (triage, review): evaluate the result and call `workflow_gate` with approve/reject/rework. If approved with a next phase, the advance result includes the new subtask. Repeat from step 6.
+11. Non-gate phases with verification: The system runs intent verification on subtask completion. If it passes, the system enters PhaseReady — call `workflow_status` then `workflow_advance`. If verification fails, the system auto-reworks. If retries exhausted, escalates to a gate for your verdict.
+12. When all phases complete, mark your parent task complete via `task_update_status`.
 
 ### Fan-Out Decision Patterns
 Use `workflow_fan_out` when a phase can benefit from parallel execution. The system handles aggregation — after all slices complete, an aggregation subtask synthesizes results before the workflow advances.

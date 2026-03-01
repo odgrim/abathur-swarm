@@ -118,6 +118,65 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
     // validation (fix C). The MCP enroll tool was also removed. Tests use
     // submit_task() or write workflow state directly.
 
+    /// Change the workflow spine for a task that is still in `Pending` state.
+    ///
+    /// This allows the overmind to override the auto-selected workflow before
+    /// the first phase starts. Validates the template exists, verifies the
+    /// task is in `Pending` state, and updates both the workflow state and
+    /// routing hints.
+    pub async fn select_workflow(
+        &self,
+        task_id: Uuid,
+        workflow_name: &str,
+    ) -> DomainResult<WorkflowStatus> {
+        // Validate the target template exists
+        let _template = self.get_template(workflow_name)?;
+
+        let mut task = self
+            .task_repo
+            .get(task_id)
+            .await?
+            .ok_or(DomainError::TaskNotFound(task_id))?;
+
+        let state = Self::read_state(&task).ok_or_else(|| {
+            DomainError::ValidationFailed(format!("Task {} has no workflow state", task_id))
+        })?;
+
+        // Only allow spine change while still in Pending
+        match &state {
+            WorkflowState::Pending { .. } => {}
+            other => {
+                return Err(DomainError::ValidationFailed(format!(
+                    "Cannot change workflow spine for task {} — must be in Pending state (current: {:?})",
+                    task_id, other
+                )));
+            }
+        }
+
+        // Overwrite workflow state with the new spine
+        let new_state = WorkflowState::Pending {
+            workflow_name: workflow_name.to_string(),
+        };
+        let value = serde_json::to_value(&new_state)
+            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
+        task.context
+            .custom
+            .insert("workflow_state".to_string(), value);
+
+        // Update routing hints
+        task.routing_hints.workflow_name = Some(workflow_name.to_string());
+        task.updated_at = chrono::Utc::now();
+        self.task_repo.update(&task).await?;
+
+        tracing::info!(
+            task_id = %task_id,
+            workflow_name = %workflow_name,
+            "Workflow spine changed via select_workflow"
+        );
+
+        self.get_state(task_id).await
+    }
+
     /// Advance to the next phase.
     ///
     /// Creates the next phase's subtask and transitions to `PhaseRunning`.

@@ -39,6 +39,9 @@ where
     task_id: Option<Uuid>,
     /// Optional adapter registry for external system integration tools.
     adapter_registry: Option<Arc<crate::services::adapter_registry::AdapterRegistry>>,
+    /// When true, task_submit is hidden from tools/list and rejected in tools/call.
+    /// Used for overmind sessions that must use workflow tools instead.
+    is_workflow_session: bool,
 }
 
 impl<T, A, M, G> StdioServer<T, A, M, G>
@@ -65,6 +68,7 @@ where
             event_bus: None,
             task_id,
             adapter_registry: None,
+            is_workflow_session: false,
         }
     }
 
@@ -80,6 +84,13 @@ where
         registry: Arc<crate::services::adapter_registry::AdapterRegistry>,
     ) -> Self {
         self.adapter_registry = Some(registry);
+        self
+    }
+
+    /// Mark this as a workflow session — hides task_submit and exposes
+    /// workflow_select, task_cancel, task_retry instead.
+    pub fn with_workflow_session(mut self, is_workflow: bool) -> Self {
+        self.is_workflow_session = is_workflow;
         self
     }
 
@@ -156,296 +167,103 @@ where
     }
 
     fn handle_tools_list(&self, id: serde_json::Value) -> String {
-        let tools = serde_json::json!({
-            "tools": [
-                {
-                    "name": "task_submit",
-                    "description": "Create a subtask and delegate it to an agent for execution. This is the primary way to delegate work in the Abathur swarm. Set agent_type to route the task to a specific agent template (create one first with agent_create if needed). The parent_id is automatically set from your current task context. Use depends_on to chain tasks that must execute in order. Returns the new task's UUID which you can use with task_get to track progress or pass to other tasks via depends_on.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "title": { "type": "string", "description": "Short human-readable title for the task (e.g., 'Implement rate limiting middleware')" },
-                            "description": { "type": "string", "description": "Detailed description of what needs to be done. This becomes the task prompt given to the executing agent — be specific about requirements, expected output, and constraints." },
-                            "agent_type": { "type": "string", "description": "Name of the agent template to execute this task (e.g., 'rust-implementer'). Must match an existing agent template — use agent_list to see available agents, or agent_create to make a new one first." },
-                            "depends_on": {
-                                "type": "array",
-                                "items": { "type": "string" },
-                                "description": "UUIDs of tasks that must complete before this one starts. Use this to create task pipelines (e.g., implement before test, test before review)."
-                            },
-                            "priority": { "type": "string", "enum": ["low", "normal", "high", "critical"], "description": "Task priority. Higher priority tasks are picked up first. Default: normal." },
-                            "task_type": { "type": "string", "enum": ["standard", "verification", "research", "review"], "description": "Type of task. Default: standard. Use 'verification' for intent verification tasks." },
-                            "execution_mode": { "type": "string", "enum": ["direct", "convergent"], "description": "Execution mode override. 'convergent' uses iterative refinement with intent verification — recommended for implementation tasks. If omitted, the system selects automatically via heuristic." }
+        let mut tool_list: Vec<serde_json::Value> = Vec::new();
+
+        // task_submit is only available in non-workflow sessions
+        if !self.is_workflow_session {
+            tool_list.push(serde_json::json!({
+                "name": "task_submit",
+                "description": "Create a subtask and delegate it to an agent for execution. This is the primary way to delegate work in the Abathur swarm. Set agent_type to route the task to a specific agent template (create one first with agent_create if needed). The parent_id is automatically set from your current task context. Use depends_on to chain tasks that must execute in order. Returns the new task's UUID which you can use with task_get to track progress or pass to other tasks via depends_on.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "Short human-readable title for the task (e.g., 'Implement rate limiting middleware')" },
+                        "description": { "type": "string", "description": "Detailed description of what needs to be done. This becomes the task prompt given to the executing agent — be specific about requirements, expected output, and constraints." },
+                        "agent_type": { "type": "string", "description": "Name of the agent template to execute this task (e.g., 'rust-implementer'). Must match an existing agent template — use agent_list to see available agents, or agent_create to make a new one first." },
+                        "depends_on": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "UUIDs of tasks that must complete before this one starts. Use this to create task pipelines (e.g., implement before test, test before review)."
                         },
-                        "required": ["description"]
-                    }
-                },
-                {
-                    "name": "workflow_advance",
-                    "description": "Advance a workflow to its next phase. Creates a subtask for the phase and returns its details so you can create an agent for it. Call after enrollment to start the first phase, and after each non-gate phase completes.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "task_id": { "type": "string", "description": "UUID of the parent task enrolled in the workflow" }
-                        },
-                        "required": ["task_id"]
-                    }
-                },
-                {
-                    "name": "workflow_status",
-                    "description": "Get the current workflow state for a task — which phase is running, what subtasks are active, and overall progress.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "task_id": { "type": "string", "description": "UUID of the task to check workflow status for" }
-                        },
-                        "required": ["task_id"]
-                    }
-                },
-                {
-                    "name": "workflow_gate",
-                    "description": "Provide a verdict at a gate phase (triage or review). Returns status: 'approved_and_advanced' (with subtask details) if approve advances to the next phase, 'approved_and_completed' if approve finishes the workflow, or 'verdict_applied' for reject/rework.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "task_id": { "type": "string", "description": "UUID of the parent task at the gate phase" },
-                            "verdict": { "type": "string", "enum": ["approve", "reject", "rework"], "description": "Gate verdict: approve (advance), reject (terminate), or rework (re-run phase)" },
-                            "reason": { "type": "string", "description": "Reason for the verdict — especially important for reject and rework decisions" }
-                        },
-                        "required": ["task_id", "verdict"]
-                    }
-                },
-                {
-                    "name": "workflow_fan_out",
-                    "description": "Split the current workflow phase into parallel subtasks. Each slice gets its own subtask. Use when a phase can be parallelized. Create an agent for each returned subtask.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "task_id": { "type": "string", "description": "UUID of the parent task to fan out" },
-                            "slices": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "description": { "type": "string", "description": "Description of this slice's work" }
-                                    },
-                                    "required": ["description"]
-                                },
-                                "description": "Array of work slices — one subtask is created per slice"
-                            }
-                        },
-                        "required": ["task_id", "slices"]
-                    }
-                },
-                {
-                    "name": "workflow_list",
-                    "description": "List all tasks that are currently enrolled in workflows, showing their workflow name, current phase, and state.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {}
-                    }
-                },
-                {
-                    "name": "task_list",
-                    "description": "List tasks in the Abathur swarm. Use this to monitor the progress of subtasks you've created. Filter by status to find running, completed, or failed tasks. Without a status filter, returns tasks that are ready to execute.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "status": { "type": "string", "enum": ["pending", "ready", "running", "complete", "failed", "blocked"], "description": "Filter by task status. 'running' shows in-progress work, 'failed' shows tasks needing attention, 'complete' shows finished work, 'blocked' shows tasks waiting on dependencies." },
-                            "task_type": { "type": "string", "enum": ["standard", "verification", "research", "review"], "description": "Filter by task type. Use 'verification' to see intent verification tasks." },
-                            "limit": { "type": "integer", "description": "Maximum number of tasks to return (default: 50)" }
-                        }
-                    }
-                },
-                {
-                    "name": "task_get",
-                    "description": "Get full details of a task by its UUID. Use this to check a subtask's result, read its description, inspect failure reasons, or verify its dependency chain. Returns title, description, status, priority, agent_type, parent_id, depends_on, retry_count, and timestamps.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string", "description": "Task UUID (returned by task_submit or task_list)" }
-                        },
-                        "required": ["id"]
-                    }
-                },
-                {
-                    "name": "task_update_status",
-                    "description": "Mark a task as complete or failed. Use 'complete' when the task's work is done successfully. Use 'failed' with an error message when the task cannot be completed — this allows the orchestrator to retry or reassign.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string", "description": "Task UUID to update" },
-                            "status": { "type": "string", "enum": ["complete", "failed"], "description": "New status: 'complete' for success, 'failed' for failure" },
-                            "error": { "type": "string", "description": "Error message explaining what went wrong. Required when status is 'failed'." }
-                        },
-                        "required": ["id", "status"]
-                    }
-                },
-                {
-                    "name": "agent_create",
-                    "description": "Create a new agent template in the Abathur swarm. Agents are specialized workers that execute tasks. Each agent has a focused system_prompt defining its role, a set of tools it can use, and optional constraints. Create agents before delegating tasks to them via task_submit. Use agent_list first to check if a suitable agent already exists. Design agents with minimal tools and focused prompts — don't create 'do everything' agents.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "name": { "type": "string", "description": "Unique agent name using kebab-case (e.g., 'rust-implementer', 'code-reviewer', 'test-writer')" },
-                            "description": { "type": "string", "description": "Short description of what this agent specializes in" },
-                            "tier": { "type": "string", "enum": ["worker", "specialist", "architect"], "description": "Agent tier. 'worker' for task execution (most common), 'specialist' for domain expertise, 'architect' for planning. Default: worker." },
-                            "system_prompt": { "type": "string", "description": "System prompt that defines the agent's behavior, expertise, and working style. Be specific about what the agent should do and how. Include instructions for validation (e.g., 'run cargo check after changes')." },
-                            "tools": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "name": { "type": "string", "description": "Tool name: read, write, edit, shell, glob, grep, memory, tasks, agents" },
-                                        "description": { "type": "string", "description": "What the agent uses this tool for" },
-                                        "required": { "type": "boolean", "description": "Whether the agent needs this tool to function" }
-                                    },
-                                    "required": ["name", "description"]
-                                },
-                                "description": "Tools this agent needs. Only grant what's necessary — read-only agents don't need write/edit/shell. Available tools: read, write, edit, shell, glob, grep, memory, tasks, agents."
-                            },
-                            "constraints": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "name": { "type": "string", "description": "Short constraint identifier" },
-                                        "description": { "type": "string", "description": "What the agent must do or avoid" }
-                                    },
-                                    "required": ["name", "description"]
-                                },
-                                "description": "Behavioral constraints to keep the agent on track (e.g., 'always run tests', 'read-only', 'no file deletion')"
-                            },
-                            "max_turns": { "type": "integer", "description": "Maximum agentic turns before the agent is stopped. Default: 25. Use higher values (30-50) for complex implementation tasks." },
-                            "read_only": { "type": "boolean", "description": "Set to true for research, analysis, and planning agents that produce findings via memory rather than code commits. Disables commit verification and enables memory verification. Default: false." }
-                        },
-                        "required": ["name", "description", "system_prompt"]
-                    }
-                },
-                {
-                    "name": "agent_list",
-                    "description": "List all available agent templates in the Abathur swarm. Call this before creating new agents to check if a suitable one already exists. Returns each agent's name, description, tier, tools, and status.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {}
-                    }
-                },
-                {
-                    "name": "agent_get",
-                    "description": "Get full details of an agent template by name, including its system prompt, tools, constraints, and version. Use this to inspect an agent's capabilities before delegating a task to it.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "name": { "type": "string", "description": "Agent template name (e.g., 'rust-implementer')" }
-                        },
-                        "required": ["name"]
-                    }
-                },
-                {
-                    "name": "memory_search",
-                    "description": "Search the Abathur swarm's shared memory by keyword query. Use this before planning to find similar past tasks, known failure patterns, architectural decisions, and reusable context. Returns matching memories with their content, type, and metadata.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "query": { "type": "string", "description": "Search query — keywords or phrases to match against stored memories" },
-                            "namespace": { "type": "string", "description": "Optional namespace filter to scope search (e.g., 'architecture', 'errors')" },
-                            "limit": { "type": "integer", "description": "Maximum results to return (default: 20)" }
-                        },
-                        "required": ["query"]
-                    }
-                },
-                {
-                    "name": "memory_store",
-                    "description": "Store a memory in the Abathur swarm for future reference by yourself and other agents. Use this to record decisions, failure patterns, architectural context, and task decomposition rationale. Stored memories are searchable via memory_search.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "key": { "type": "string", "description": "Unique key for this memory (e.g., 'rate-limiting-approach', 'auth-failure-pattern')" },
-                            "content": { "type": "string", "description": "The memory content — be descriptive enough that future agents can understand the context" },
-                            "namespace": { "type": "string", "description": "Namespace to organize memories (default: 'default'). Use namespaces like 'architecture', 'errors', 'decisions'." },
-                            "memory_type": { "type": "string", "enum": ["fact", "code", "decision", "error", "pattern", "reference", "context"], "description": "Type of memory. 'decision' for architectural choices, 'error' for failure patterns, 'pattern' for reusable approaches. Default: fact." },
-                            "tier": { "type": "string", "enum": ["working", "episodic", "semantic"], "description": "Memory tier. 'working' for short-lived task context, 'episodic' for task-specific learnings, 'semantic' for long-term knowledge. Default: working." }
-                        },
-                        "required": ["key", "content"]
-                    }
-                },
-                {
-                    "name": "memory_get",
-                    "description": "Retrieve a specific memory by its UUID. Use this to get the full content of a memory found via memory_search.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string", "description": "Memory UUID (returned by memory_search or memory_store)" }
-                        },
-                        "required": ["id"]
-                    }
-                },
-                {
-                    "name": "goals_list",
-                    "description": "List active goals in the Abathur swarm. Goals define the overall project direction and constraints that all work must align with. Check goals before planning task decomposition to ensure your approach satisfies project-level requirements.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {}
-                    }
-                },
-                {
-                    "name": "task_assign",
-                    "description": "Assign an agent_type to a Ready task without claiming it. Use this to assign a specialist agent to a workflow phase subtask so the scheduler picks it up. The task must be in Ready state. Does not change the task's status.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "task_id": { "type": "string", "description": "UUID of the task to assign" },
-                            "agent_type": { "type": "string", "description": "Name of the agent template to assign (must match an existing agent template)" }
-                        },
-                        "required": ["task_id", "agent_type"]
-                    }
-                },
-                {
-                    "name": "task_wait",
-                    "description": "Block until one or more tasks reach a terminal state (complete, failed, or canceled). Use this instead of polling with task_list + sleep. Returns the final status of each task. This is the recommended way to wait for subtask completion.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string", "description": "Single task UUID to wait for" },
-                            "ids": { "type": "array", "items": { "type": "string" }, "description": "Array of task UUIDs to wait for (all must reach terminal state)" },
-                            "timeout_seconds": { "type": "integer", "description": "Maximum seconds to wait. Default: 600 (10 minutes). Returns current status on timeout." }
-                        }
-                    }
-                },
-                {
-                    "name": "adapter_list",
-                    "description": "List all loaded external system adapters with their capabilities and direction (ingestion/egress/bidirectional). Use this to discover what external integrations are available.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {}
-                    }
-                },
-                {
-                    "name": "egress_publish",
-                    "description": "Execute an egress action on a named adapter to push results to an external system. Supports actions like update_status, post_comment, create_item, and attach_artifact.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "adapter": { "type": "string", "description": "Name of the egress adapter to use (e.g., 'jira', 'linear', 'github-issues')" },
-                            "action": {
-                                "type": "object",
-                                "description": "The egress action to execute. Must include an 'action' field with one of: update_status, post_comment, create_item, attach_artifact, custom.",
-                                "properties": {
-                                    "action": { "type": "string", "enum": ["update_status", "post_comment", "create_item", "attach_artifact", "custom"] },
-                                    "external_id": { "type": "string", "description": "External item identifier (required for update_status, post_comment, attach_artifact)" },
-                                    "new_status": { "type": "string", "description": "New status value (for update_status)" },
-                                    "body": { "type": "string", "description": "Comment body (for post_comment)" },
-                                    "title": { "type": "string", "description": "Item title (for create_item)" },
-                                    "description": { "type": "string", "description": "Item description (for create_item)" }
-                                },
-                                "required": ["action"]
-                            }
-                        },
-                        "required": ["adapter", "action"]
-                    }
+                        "priority": { "type": "string", "enum": ["low", "normal", "high", "critical"], "description": "Task priority. Higher priority tasks are picked up first. Default: normal." },
+                        "task_type": { "type": "string", "enum": ["standard", "verification", "research", "review"], "description": "Type of task. Default: standard. Use 'verification' for intent verification tasks." },
+                        "execution_mode": { "type": "string", "enum": ["direct", "convergent"], "description": "Execution mode override. 'convergent' uses iterative refinement with intent verification — recommended for implementation tasks. If omitted, the system selects automatically via heuristic." }
+                    },
+                    "required": ["description"]
                 }
-            ]
-        });
+            }));
+        }
+
+        // Workflow-session-only tools: workflow_select, task_cancel, task_retry
+        if self.is_workflow_session {
+            tool_list.push(serde_json::json!({
+                "name": "workflow_select",
+                "description": "Change the workflow spine for a task before the first phase starts. Only works while the workflow is in Pending state. Use this when the auto-selected spine is wrong for the task.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string", "description": "UUID of the task to change the workflow spine for" },
+                        "workflow_name": { "type": "string", "enum": ["code", "analysis", "docs", "review", "external"], "description": "Name of the workflow spine to switch to" }
+                    },
+                    "required": ["task_id", "workflow_name"]
+                }
+            }));
+            tool_list.push(serde_json::json!({
+                "name": "task_cancel",
+                "description": "Cancel an active task. The task must be in a non-terminal state (pending, ready, running, blocked). Use this to stop work that is no longer needed.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string", "description": "UUID of the task to cancel" },
+                        "reason": { "type": "string", "description": "Reason for canceling the task" }
+                    },
+                    "required": ["task_id", "reason"]
+                }
+            }));
+            tool_list.push(serde_json::json!({
+                "name": "task_retry",
+                "description": "Retry a failed task. Increments the retry counter and resets the task to Ready state so it can be picked up again. The task must be in Failed state with retries remaining.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string", "description": "UUID of the failed task to retry" }
+                    },
+                    "required": ["task_id"]
+                }
+            }));
+        }
+
+        // Always-available tools (workflow, task management, agents, memory, goals, adapters)
+        let always_tools = Self::always_available_tools();
+        tool_list.extend(always_tools);
+
+        let tools = serde_json::json!({ "tools": tool_list });
         self.success_response(id, tools)
+    }
+
+    /// Tool definitions that are always available regardless of session type.
+    fn always_available_tools() -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({"name":"workflow_advance","description":"Advance a workflow to its next phase. Creates a subtask for the phase and returns its details so you can create an agent for it. Call after enrollment to start the first phase, and after each non-gate phase completes.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string","description":"UUID of the parent task enrolled in the workflow"}},"required":["task_id"]}}),
+            serde_json::json!({"name":"workflow_status","description":"Get the current workflow state for a task — which phase is running, what subtasks are active, and overall progress.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string","description":"UUID of the task to check workflow status for"}},"required":["task_id"]}}),
+            serde_json::json!({"name":"workflow_gate","description":"Provide a verdict at a gate phase (triage or review). Returns status: 'approved_and_advanced' (with subtask details) if approve advances to the next phase, 'approved_and_completed' if approve finishes the workflow, or 'verdict_applied' for reject/rework.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string","description":"UUID of the parent task at the gate phase"},"verdict":{"type":"string","enum":["approve","reject","rework"],"description":"Gate verdict: approve (advance), reject (terminate), or rework (re-run phase)"},"reason":{"type":"string","description":"Reason for the verdict — especially important for reject and rework decisions"}},"required":["task_id","verdict"]}}),
+            serde_json::json!({"name":"workflow_fan_out","description":"Split the current workflow phase into parallel subtasks. Each slice gets its own subtask. Use when a phase can be parallelized. Create an agent for each returned subtask.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string","description":"UUID of the parent task to fan out"},"slices":{"type":"array","items":{"type":"object","properties":{"description":{"type":"string","description":"Description of this slice's work"}},"required":["description"]},"description":"Array of work slices — one subtask is created per slice"}},"required":["task_id","slices"]}}),
+            serde_json::json!({"name":"workflow_list","description":"List all tasks that are currently enrolled in workflows, showing their workflow name, current phase, and state.","inputSchema":{"type":"object","properties":{}}}),
+            serde_json::json!({"name":"task_list","description":"List tasks in the Abathur swarm. Use this to monitor the progress of subtasks you've created. Filter by status to find running, completed, or failed tasks. Without a status filter, returns tasks that are ready to execute.","inputSchema":{"type":"object","properties":{"status":{"type":"string","enum":["pending","ready","running","complete","failed","blocked"],"description":"Filter by task status."},"task_type":{"type":"string","enum":["standard","verification","research","review"],"description":"Filter by task type."},"limit":{"type":"integer","description":"Maximum number of tasks to return (default: 50)"}}}}),
+            serde_json::json!({"name":"task_get","description":"Get full details of a task by its UUID. Use this to check a subtask's result, read its description, inspect failure reasons, or verify its dependency chain.","inputSchema":{"type":"object","properties":{"id":{"type":"string","description":"Task UUID (returned by task_submit or task_list)"}},"required":["id"]}}),
+            serde_json::json!({"name":"task_update_status","description":"Mark a task as complete or failed. Use 'complete' when the task's work is done successfully. Use 'failed' with an error message when the task cannot be completed.","inputSchema":{"type":"object","properties":{"id":{"type":"string","description":"Task UUID to update"},"status":{"type":"string","enum":["complete","failed"],"description":"New status: 'complete' for success, 'failed' for failure"},"error":{"type":"string","description":"Error message explaining what went wrong. Required when status is 'failed'."}},"required":["id","status"]}}),
+            serde_json::json!({"name":"agent_create","description":"Create a new agent template in the Abathur swarm. Agents are specialized workers that execute tasks. Each agent has a focused system_prompt defining its role, a set of tools it can use, and optional constraints. Use agent_list first to check if a suitable agent already exists.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Unique agent name using kebab-case"},"description":{"type":"string","description":"Short description of what this agent specializes in"},"tier":{"type":"string","enum":["worker","specialist","architect"],"description":"Agent tier. Default: worker."},"system_prompt":{"type":"string","description":"System prompt that defines the agent's behavior, expertise, and working style."},"tools":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string","description":"Tool name: read, write, edit, shell, glob, grep, memory, tasks, agents"},"description":{"type":"string","description":"What the agent uses this tool for"},"required":{"type":"boolean","description":"Whether the agent needs this tool to function"}},"required":["name","description"]},"description":"Tools this agent needs."},"constraints":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string","description":"Short constraint identifier"},"description":{"type":"string","description":"What the agent must do or avoid"}},"required":["name","description"]},"description":"Behavioral constraints to keep the agent on track."},"max_turns":{"type":"integer","description":"Maximum agentic turns before the agent is stopped. Default: 25."},"read_only":{"type":"boolean","description":"Set to true for research/analysis/planning agents. Default: false."}},"required":["name","description","system_prompt"]}}),
+            serde_json::json!({"name":"agent_list","description":"List all available agent templates in the Abathur swarm. Call this before creating new agents to check if a suitable one already exists.","inputSchema":{"type":"object","properties":{}}}),
+            serde_json::json!({"name":"agent_get","description":"Get full details of an agent template by name, including its system prompt, tools, constraints, and version.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Agent template name (e.g., 'rust-implementer')"}},"required":["name"]}}),
+            serde_json::json!({"name":"memory_search","description":"Search the Abathur swarm's shared memory by keyword query. Use this before planning to find similar past tasks, known failure patterns, architectural decisions, and reusable context.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query — keywords or phrases to match against stored memories"},"namespace":{"type":"string","description":"Optional namespace filter to scope search"},"limit":{"type":"integer","description":"Maximum results to return (default: 20)"}},"required":["query"]}}),
+            serde_json::json!({"name":"memory_store","description":"Store a memory in the Abathur swarm for future reference by yourself and other agents.","inputSchema":{"type":"object","properties":{"key":{"type":"string","description":"Unique key for this memory"},"content":{"type":"string","description":"The memory content"},"namespace":{"type":"string","description":"Namespace to organize memories (default: 'default')."},"memory_type":{"type":"string","enum":["fact","code","decision","error","pattern","reference","context"],"description":"Type of memory. Default: fact."},"tier":{"type":"string","enum":["working","episodic","semantic"],"description":"Memory tier. Default: working."}},"required":["key","content"]}}),
+            serde_json::json!({"name":"memory_get","description":"Retrieve a specific memory by its UUID.","inputSchema":{"type":"object","properties":{"id":{"type":"string","description":"Memory UUID (returned by memory_search or memory_store)"}},"required":["id"]}}),
+            serde_json::json!({"name":"goals_list","description":"List active goals in the Abathur swarm.","inputSchema":{"type":"object","properties":{}}}),
+            serde_json::json!({"name":"task_assign","description":"Assign an agent_type to a Ready task without claiming it. Use this to assign a specialist agent to a workflow phase subtask so the scheduler picks it up.","inputSchema":{"type":"object","properties":{"task_id":{"type":"string","description":"UUID of the task to assign"},"agent_type":{"type":"string","description":"Name of the agent template to assign"}},"required":["task_id","agent_type"]}}),
+            serde_json::json!({"name":"task_wait","description":"Block until one or more tasks reach a terminal state (complete, failed, or canceled). Use this instead of polling with task_list + sleep.","inputSchema":{"type":"object","properties":{"id":{"type":"string","description":"Single task UUID to wait for"},"ids":{"type":"array","items":{"type":"string"},"description":"Array of task UUIDs to wait for (all must reach terminal state)"},"timeout_seconds":{"type":"integer","description":"Maximum seconds to wait. Default: 600 (10 minutes)."}}}}),
+            serde_json::json!({"name":"adapter_list","description":"List all loaded external system adapters with their capabilities and direction.","inputSchema":{"type":"object","properties":{}}}),
+            serde_json::json!({"name":"egress_publish","description":"Execute an egress action on a named adapter to push results to an external system.","inputSchema":{"type":"object","properties":{"adapter":{"type":"string","description":"Name of the egress adapter to use"},"action":{"type":"object","description":"The egress action to execute.","properties":{"action":{"type":"string","enum":["update_status","post_comment","create_item","attach_artifact","custom"]},"external_id":{"type":"string","description":"External item identifier"},"new_status":{"type":"string","description":"New status value"},"body":{"type":"string","description":"Comment body"},"title":{"type":"string","description":"Item title"},"description":{"type":"string","description":"Item description"}},"required":["action"]}},"required":["adapter","action"]}}),
+        ]
     }
 
     async fn handle_tools_call(&self, id: serde_json::Value, params: &serde_json::Value) -> String {
@@ -479,6 +297,9 @@ where
             "workflow_gate" => self.tool_workflow_gate(&arguments).await,
             "workflow_fan_out" => self.tool_workflow_fan_out(&arguments).await,
             "workflow_list" => self.tool_workflow_list(&arguments).await,
+            "workflow_select" => self.tool_workflow_select(&arguments).await,
+            "task_cancel" => self.tool_task_cancel(&arguments).await,
+            "task_retry" => self.tool_task_retry(&arguments).await,
             _ => Err(format!("Unknown tool: {}", tool_name)),
         };
 
@@ -510,6 +331,9 @@ where
     // ========================================================================
 
     async fn tool_task_submit(&self, args: &serde_json::Value) -> Result<String, String> {
+        if self.is_workflow_session {
+            return Err("task_submit is not available in workflow sessions. Use workflow_advance or workflow_fan_out to create phase subtasks.".into());
+        }
         let description = args
             .get("description")
             .and_then(|d| d.as_str())
@@ -1458,6 +1282,120 @@ where
         let response = serde_json::json!({
             "workflows": workflows,
             "count": workflows.len(),
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    // ========================================================================
+    // Workflow session tools (workflow_select, task_cancel, task_retry)
+    // ========================================================================
+
+    async fn tool_workflow_select(&self, args: &serde_json::Value) -> Result<String, String> {
+        let task_id_str = args
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing required field: task_id")?;
+        let task_id = Uuid::parse_str(task_id_str)
+            .map_err(|e| format!("Invalid task_id: {}", e))?;
+        let workflow_name = args
+            .get("workflow_name")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing required field: workflow_name")?;
+
+        let engine = crate::services::workflow_engine::WorkflowEngine::new(
+            self.task_service.repo().clone(),
+            self.event_bus.clone().unwrap_or_else(|| {
+                Arc::new(crate::services::event_bus::EventBus::new(
+                    crate::services::event_bus::EventBusConfig::default(),
+                ))
+            }),
+            false,
+        );
+        let status = engine.select_workflow(task_id, workflow_name).await
+            .map_err(|e| format!("{}", e))?;
+
+        let response = serde_json::to_value(&status).map_err(|e| e.to_string())?;
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    async fn tool_task_cancel(&self, args: &serde_json::Value) -> Result<String, String> {
+        let task_id_str = args
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing required field: task_id")?;
+        let task_id = Uuid::parse_str(task_id_str)
+            .map_err(|e| format!("Invalid task_id: {}", e))?;
+        let reason = args
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Canceled by overmind");
+
+        let mut task = self
+            .task_service
+            .get_task(task_id)
+            .await
+            .map_err(|e| format!("Failed to get task: {}", e))?
+            .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+        if task.status.is_terminal() {
+            return Err(format!(
+                "Cannot cancel task {} — already in terminal state: {}",
+                task_id,
+                task.status.as_str()
+            ));
+        }
+
+        task.transition_to(TaskStatus::Canceled)
+            .map_err(|e| format!("Cannot cancel task {}: {}", task_id, e))?;
+        self.task_service
+            .repo()
+            .update(&task)
+            .await
+            .map_err(|e| format!("Failed to update task: {}", e))?;
+
+        let response = serde_json::json!({
+            "task_id": task_id.to_string(),
+            "status": "canceled",
+            "reason": reason,
+        });
+        serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+    }
+
+    async fn tool_task_retry(&self, args: &serde_json::Value) -> Result<String, String> {
+        let task_id_str = args
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing required field: task_id")?;
+        let task_id = Uuid::parse_str(task_id_str)
+            .map_err(|e| format!("Invalid task_id: {}", e))?;
+
+        let mut task = self
+            .task_service
+            .get_task(task_id)
+            .await
+            .map_err(|e| format!("Failed to get task: {}", e))?
+            .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+        if task.status != TaskStatus::Failed {
+            return Err(format!(
+                "Cannot retry task {} — must be in Failed state (current: {})",
+                task_id,
+                task.status.as_str()
+            ));
+        }
+
+        task.retry()
+            .map_err(|e| format!("Cannot retry task {}: {}", task_id, e))?;
+        self.task_service
+            .repo()
+            .update(&task)
+            .await
+            .map_err(|e| format!("Failed to update task: {}", e))?;
+
+        let response = serde_json::json!({
+            "task_id": task_id.to_string(),
+            "status": "ready",
+            "retry_count": task.retry_count,
         });
         serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
     }
