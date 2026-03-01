@@ -7419,21 +7419,21 @@ impl<G: GoalRepository, T: TaskRepository> GoalConvergenceCheckHandler<G, T> {
 
         // Instructions
         desc.push_str("## Instructions\n\n");
-        desc.push_str("This task is enrolled in a workflow. Use your workflow tools to orchestrate the evaluation.\n\n");
+        desc.push_str("This task is enrolled in a `code` workflow. Use the `code` workflow spine — do NOT select `analysis`. This task must produce commits.\n\n");
         desc.push_str("### Research Phase\n");
         desc.push_str("1. **Search Memory**: Call `memory_search` to find prior convergence evaluations, known patterns, and recent task outcomes.\n");
         desc.push_str("2. **Review Existing Work**: Call `task_list` with each status (running, ready, pending, complete, failed) to understand what's already in flight and what has been tried.\n");
-        desc.push_str("3. **Check Failed Tasks**: For any failed tasks, call `task_get` on them to understand failure reasons. Store failure patterns via `memory_store` for future reference.\n\n");
-        desc.push_str("### Evaluation\n");
-        desc.push_str("4. **Evaluate Progress**: For each active goal, assess how the completed and running tasks contribute toward convergence. Consider the ratio of completed vs failed tasks.\n");
-        desc.push_str("5. **Identify Gaps**: Determine what work is missing or insufficient to make meaningful progress on each goal. Consider constraint satisfaction.\n");
-        desc.push_str("6. **Prioritize**: Rank the goals by urgency and impact. Focus on goals with the least progress or most failures.\n");
-        desc.push_str("7. **Avoid Redundancy**: Do not duplicate existing running or ready tasks. Focus on genuine gaps.\n\n");
-        desc.push_str("### Workflow Orchestration\n");
-        desc.push_str("8. **Reuse Agents**: Call `agent_list` to see what agent templates already exist. Reuse existing agents whenever possible.\n");
-        desc.push_str("9. **Fan Out Work**: Use `workflow_advance` and `workflow_fan_out` to create slices for the identified gaps. Each slice should represent a concrete, actionable unit of work for an under-served goal. Assign agents to slices via `task_assign`.\n");
-        desc.push_str("10. **Store Evaluation**: Call `memory_store` with your convergence evaluation summary (namespace: `convergence-checks`, memory_type: `decision`) so future checks can build on your findings.\n\n");
-        desc.push_str("Remember: Goals are convergent attractors — they are never 'completed.' Your job is to identify the highest-impact incremental work that moves the swarm closer to each goal. Use the workflow to fan out concrete work — do not simply list recommendations as text output.\n");
+        desc.push_str("3. **Scan Codebase**: Look for gaps — missing tests, incomplete implementations, known TODOs, or issues surfaced by failed tasks. Call `task_get` on failed tasks to understand failure reasons.\n\n");
+        desc.push_str("### Plan Phase\n");
+        desc.push_str("4. **Prioritize Gaps**: Identify the 2-3 highest-impact gaps across under-served goals. Focus on goals with the least progress or most failures. Avoid duplicating running or ready tasks.\n");
+        desc.push_str("5. **Design Implementation Slices**: For each gap, define a concrete implementation slice — what file(s) to change, what to add/fix, which goal it serves.\n\n");
+        desc.push_str("### Implement Phase\n");
+        desc.push_str("6. **Reuse Agents**: Call `agent_list` to see what agent templates already exist. Reuse existing agents whenever possible.\n");
+        desc.push_str("7. **Fan Out Subtasks**: Use `workflow_advance` and `workflow_fan_out` to create slices for each implementation. Each slice must target a specific goal gap and produce code changes (add tests, fix issues, close gaps). Assign agents to slices via `task_assign`.\n\n");
+        desc.push_str("### Review Phase\n");
+        desc.push_str("8. **Verify Outputs**: Confirm that subtask outputs compiled and passed tests.\n");
+        desc.push_str("9. **Store Evaluation**: Call `memory_store` with your convergence evaluation summary (namespace: `convergence-checks`, memory_type: `decision`) so future checks can build on your findings.\n\n");
+        desc.push_str("Remember: Goals are convergent attractors — they are never 'completed.' Your job is to produce the highest-impact incremental code changes, not just analysis. Use the workflow to fan out concrete implementation work — do not simply list recommendations as text output.\n");
 
         desc
     }

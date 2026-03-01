@@ -614,6 +614,7 @@ where
             try_auto_ship(
                 task_id, task_repo.clone(), worktree_repo.clone(),
                 event_tx, audit_log, repo_path, default_base_ref,
+                output_delivery.clone(),
             ).await;
 
             return Ok(()); // Skip normal per-task PR/merge flow
@@ -626,6 +627,7 @@ where
             try_auto_ship(
                 task_id, task_repo.clone(), worktree_repo.clone(),
                 event_tx, audit_log, repo_path, default_base_ref,
+                output_delivery.clone(),
             ).await;
             return Ok(());
         }
@@ -911,11 +913,20 @@ async fn try_auto_ship<T, W>(
     audit_log: &Arc<AuditLogService>,
     repo_path: &std::path::Path,
     default_base_ref: &str,
+    output_delivery: OutputDelivery,
 ) -> Option<String>
 where
     T: TaskRepository + 'static,
     W: WorktreeRepository + 'static,
 {
+    if output_delivery == OutputDelivery::MemoryOnly {
+        tracing::debug!(
+            triggering_task_id = %triggering_task_id,
+            "try_auto_ship skipped — OutputDelivery::MemoryOnly"
+        );
+        return None;
+    }
+
     let root_id = find_root_ancestor_id(triggering_task_id, &*task_repo).await;
     let root_task = task_repo.get(root_id).await.ok()??;
 
