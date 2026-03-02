@@ -1,7 +1,9 @@
 //! Schedule CLI commands for managing periodic task schedules.
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use clap::{Args, Subcommand};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::adapters::sqlite::{initialize_default_database, SqliteTaskScheduleRepository};
@@ -14,6 +16,7 @@ use crate::domain::models::task_schedule::*;
 use crate::domain::models::TaskPriority;
 use crate::domain::ports::task_schedule_repository::{TaskScheduleFilter, TaskScheduleRepository};
 use crate::services::task_schedule_service::TaskScheduleService;
+use crate::services::trigger_rules::normalize_cron_expression;
 
 #[derive(Args, Debug)]
 pub struct ScheduleArgs {
@@ -112,10 +115,28 @@ pub struct ScheduleOutput {
     pub task_title: String,
     pub fire_count: u64,
     pub last_fired_at: Option<String>,
+    pub next_fire_at: Option<String>,
+}
+
+/// Compute the next fire time for a cron expression, returning an ISO string.
+fn compute_next_fire(schedule: &TaskScheduleType) -> Option<String> {
+    if let TaskScheduleType::Cron { expression } = schedule {
+        let normalized = normalize_cron_expression(expression);
+        let sched = cron::Schedule::from_str(&normalized).ok()?;
+        let next = sched.upcoming(Utc).next()?;
+        Some(next.to_rfc3339())
+    } else {
+        None
+    }
 }
 
 impl From<&TaskSchedule> for ScheduleOutput {
     fn from(s: &TaskSchedule) -> Self {
+        let next_fire_at = if s.status == TaskScheduleStatus::Active {
+            compute_next_fire(&s.schedule)
+        } else {
+            None
+        };
         Self {
             id: s.id.to_string(),
             name: s.name.clone(),
@@ -126,6 +147,7 @@ impl From<&TaskSchedule> for ScheduleOutput {
             task_title: truncate_ellipsis(&s.task_title, 30),
             fire_count: s.fire_count,
             last_fired_at: s.last_fired_at.map(|t| t.to_rfc3339()),
+            next_fire_at,
         }
     }
 }
@@ -142,14 +164,18 @@ impl CommandOutput for ScheduleListOutput {
             return "No task schedules found.".to_string();
         }
 
-        let mut table = list_table(&["ID", "Name", "Status", "Schedule", "Fires", "Task Title"]);
+        let mut table = list_table(&["ID", "Name", "Status", "Schedule", "Next Fire", "Fires", "Task Title"]);
 
         for s in &self.schedules {
+            let next_fire = s.next_fire_at.as_deref()
+                .map(relative_time_str)
+                .unwrap_or_else(|| "-".to_string());
             table.add_row(vec![
                 short_id(&s.id).to_string(),
                 truncate_ellipsis(&s.name, 20),
                 colorize_status(&s.status).to_string(),
                 truncate_ellipsis(&s.schedule_detail, 20),
+                next_fire,
                 s.fire_count.to_string(),
                 truncate_ellipsis(&s.task_title, 30),
             ]);
@@ -180,8 +206,13 @@ impl CommandOutput for ScheduleDetailOutput {
         let mut view = DetailView::new(&self.schedule.name)
             .field("ID", &self.schedule.id)
             .field("Status", &colorize_status(&self.schedule.status).to_string())
-            .field("Schedule", &self.schedule.schedule_detail)
-            .field("Overlap", &self.overlap_policy)
+            .field("Schedule", &self.schedule.schedule_detail);
+
+        if let Some(ref next) = self.schedule.next_fire_at {
+            view = view.field("Next Fire", &relative_time_str(next));
+        }
+
+        view = view.field("Overlap", &self.overlap_policy)
             .section("Task Template")
             .field("Title", &self.schedule.task_title)
             .field("Description", &truncate_ellipsis(&self.task_description, 80))

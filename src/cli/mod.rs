@@ -59,6 +59,8 @@ pub enum Commands {
     Workflow(commands::workflow::WorkflowArgs),
     /// Manage adapter plugins
     Adapter(commands::adapter::AdapterArgs),
+    /// Quick cron schedule management
+    Cron(commands::cron::CronArgs),
 }
 
 pub fn handle_error(err: anyhow::Error, json_mode: bool) -> ! {

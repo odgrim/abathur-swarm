@@ -1,7 +1,9 @@
 //! Trigger rule CLI commands.
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use clap::{Args, Subcommand};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::adapters::sqlite::{initialize_default_database, SqliteTriggerRuleRepository};
@@ -106,6 +108,19 @@ pub struct TriggerRuleOutput {
     pub enabled: bool,
     pub fire_count: u64,
     pub last_fired: Option<String>,
+    pub next_fire_at: Option<String>,
+}
+
+/// Compute the next fire time for a cron trigger condition.
+fn compute_trigger_next_fire(condition: &TriggerCondition) -> Option<String> {
+    if let TriggerCondition::Cron { expression } = condition {
+        let normalized = normalize_cron_expression(expression);
+        let sched = cron::Schedule::from_str(&normalized).ok()?;
+        let next = sched.upcoming(Utc).next()?;
+        Some(next.to_rfc3339())
+    } else {
+        None
+    }
 }
 
 impl From<&TriggerRule> for TriggerRuleOutput {
@@ -116,6 +131,11 @@ impl From<&TriggerRule> for TriggerRuleOutput {
             TriggerCondition::Absence { .. } => "absence".to_string(),
             TriggerCondition::Cron { expression } => format!("cron({})", expression),
         };
+        let next_fire_at = if rule.enabled {
+            compute_trigger_next_fire(&rule.condition)
+        } else {
+            None
+        };
         Self {
             id: rule.id.to_string(),
             name: rule.name.clone(),
@@ -124,6 +144,7 @@ impl From<&TriggerRule> for TriggerRuleOutput {
             enabled: rule.enabled,
             fire_count: rule.fire_count,
             last_fired: rule.last_fired.map(|t| t.to_rfc3339()),
+            next_fire_at,
         }
     }
 }
@@ -140,14 +161,18 @@ impl CommandOutput for TriggerListOutput {
             return "No trigger rules found.".to_string();
         }
 
-        let mut table = list_table(&["ID", "Name", "Type", "Enabled", "Fires", "Description"]);
+        let mut table = list_table(&["ID", "Name", "Type", "Enabled", "Next Fire", "Fires", "Description"]);
 
         for rule in &self.rules {
+            let next_fire = rule.next_fire_at.as_deref()
+                .map(relative_time_str)
+                .unwrap_or_else(|| "-".to_string());
             table.add_row(vec![
                 short_id(&rule.id).to_string(),
                 truncate_ellipsis(&rule.name, 28),
                 truncate_ellipsis(&rule.condition_type, 20),
                 if rule.enabled { "yes".to_string() } else { "no".to_string() },
+                next_fire,
                 rule.fire_count.to_string(),
                 truncate_ellipsis(&rule.description, 35),
             ]);
@@ -177,6 +202,10 @@ impl CommandOutput for TriggerDetailOutput {
             .field("Description", &self.rule.description)
             .field("Enabled", if self.rule.enabled { "yes" } else { "no" })
             .field("Fires", &self.rule.fire_count.to_string());
+
+        if let Some(ref next) = self.rule.next_fire_at {
+            view = view.field("Next Fire", &relative_time_str(next));
+        }
 
         if let Some(ref last) = self.rule.last_fired {
             view = view.field("Last Fired", &relative_time_str(last));

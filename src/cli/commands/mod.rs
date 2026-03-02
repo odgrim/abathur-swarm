@@ -2,6 +2,7 @@
 
 pub mod adapter;
 pub mod agent;
+pub mod cron;
 pub mod event;
 pub mod goal;
 pub mod init;
