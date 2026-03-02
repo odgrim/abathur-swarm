@@ -169,6 +169,24 @@ struct RestructureState {
     decisions: Vec<RestructureDecision>,
 }
 
+/// Agent types that are orchestrators and should never be assigned to leaf
+/// implementation subtasks created during DAG restructuring. When these appear
+/// as the `agent_type` of a failed task, the restructured replacement should
+/// leave `agent_type` as `None` so the scheduler picks an appropriate specialist.
+const ORCHESTRATOR_AGENT_TYPES: &[&str] = &["overmind"];
+
+/// Filter out orchestrator agent types, returning `None` so the scheduler
+/// assigns an appropriate specialist instead.
+fn non_orchestrator_agent_type(agent_type: &Option<String>) -> Option<String> {
+    agent_type.as_ref().and_then(|t| {
+        if ORCHESTRATOR_AGENT_TYPES.contains(&t.as_str()) {
+            None
+        } else {
+            Some(t.clone())
+        }
+    })
+}
+
 /// DAG restructuring service.
 pub struct DagRestructureService {
     config: RestructureConfig,
@@ -318,7 +336,7 @@ impl DagRestructureService {
                     NewTaskSpec {
                         title: format!("Implement: {}", context.failed_task.title),
                         description: context.failed_task.description.clone(),
-                        agent_type: context.failed_task.agent_type.clone(),
+                        agent_type: non_orchestrator_agent_type(&context.failed_task.agent_type),
                         depends_on: vec![format!("Research: {}", context.failed_task.title)],
                         priority: TaskPriorityModifier::Same,
                     },
@@ -500,7 +518,7 @@ impl DagRestructureService {
                             NewTaskSpec {
                                 title: t.title,
                                 description: t.description,
-                                agent_type: t.agent_type,
+                                agent_type: non_orchestrator_agent_type(&t.agent_type),
                                 depends_on: t.depends_on,
                                 priority: TaskPriorityModifier::Same,
                             }
@@ -527,7 +545,7 @@ impl DagRestructureService {
                                 NewTaskSpec {
                                     title: context.failed_task.title.clone(),
                                     description: context.failed_task.description.clone(),
-                                    agent_type: context.failed_task.agent_type.clone(),
+                                    agent_type: non_orchestrator_agent_type(&context.failed_task.agent_type),
                                     depends_on: vec![format!("Research: {}", context.failed_task.title)],
                                     priority: TaskPriorityModifier::Same,
                                 },
@@ -742,6 +760,60 @@ mod tests {
 
         let _ = service.analyze_and_decide(&context).await;
         assert_eq!(service.attempt_count(task_id), 1);
+    }
+
+    #[test]
+    fn test_non_orchestrator_agent_type() {
+        // Overmind should be filtered out
+        assert_eq!(
+            non_orchestrator_agent_type(&Some("overmind".to_string())),
+            None
+        );
+
+        // Regular agents pass through
+        assert_eq!(
+            non_orchestrator_agent_type(&Some("researcher".to_string())),
+            Some("researcher".to_string())
+        );
+        assert_eq!(
+            non_orchestrator_agent_type(&Some("implementer".to_string())),
+            Some("implementer".to_string())
+        );
+
+        // None stays None
+        assert_eq!(non_orchestrator_agent_type(&None), None);
+    }
+
+    #[tokio::test]
+    async fn test_decompose_filters_overmind_agent_type() {
+        let mut service = DagRestructureService::with_defaults();
+
+        let mut failed_task = create_test_task();
+        failed_task.agent_type = Some("overmind".to_string());
+
+        let context = RestructureContext {
+            goal: Some(create_test_goal()),
+            failed_task,
+            failure_reason: "error_max_turns".to_string(),
+            previous_attempts: vec![],
+            related_failures: vec![],
+            available_approaches: vec![],
+            attempt_number: 1,
+            time_since_last: None,
+        };
+
+        let decision = service.analyze_and_decide(&context).await.unwrap();
+
+        match decision {
+            RestructureDecision::DecomposeDifferently { new_subtasks, .. } => {
+                assert_eq!(new_subtasks.len(), 2);
+                // Research subtask should be "researcher"
+                assert_eq!(new_subtasks[0].agent_type, Some("researcher".to_string()));
+                // Implementation subtask should NOT be "overmind"
+                assert_eq!(new_subtasks[1].agent_type, None);
+            }
+            _ => panic!("Expected DecomposeDifferently decision"),
+        }
     }
 
     #[test]
