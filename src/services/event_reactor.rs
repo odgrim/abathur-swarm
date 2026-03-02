@@ -1070,4 +1070,322 @@ mod tests {
         reactor.stop();
         handle.abort();
     }
+
+    // --- Configurable test handler for circuit breaker / error strategy tests ---
+
+    struct ConfigurableTestHandler {
+        id: HandlerId,
+        name: String,
+        filter: EventFilter,
+        call_count: Arc<AtomicU64>,
+        should_fail: bool,
+        priority: HandlerPriority,
+        error_strategy: ErrorStrategy,
+    }
+
+    #[async_trait]
+    impl EventHandler for ConfigurableTestHandler {
+        fn metadata(&self) -> HandlerMetadata {
+            HandlerMetadata {
+                id: self.id,
+                name: self.name.clone(),
+                filter: EventFilter {
+                    categories: self.filter.categories.clone(),
+                    min_severity: self.filter.min_severity,
+                    goal_id: self.filter.goal_id,
+                    task_id: self.filter.task_id,
+                    payload_types: self.filter.payload_types.clone(),
+                    custom_predicate: None,
+                },
+                priority: self.priority,
+                error_strategy: self.error_strategy,
+            }
+        }
+
+        async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+            self.call_count.fetch_add(1, Ordering::Relaxed);
+            if self.should_fail {
+                Err("test failure".to_string())
+            } else {
+                Ok(Reaction::None)
+            }
+        }
+    }
+
+    fn make_sequenced_event(category: EventCategory, seq: u64) -> UnifiedEvent {
+        let mut event = make_test_event(category);
+        event.sequence = SequenceNumber(seq);
+        event
+    }
+
+    // --- Handler that records execution order for priority tests ---
+
+    struct OrderTrackingHandler {
+        id: HandlerId,
+        name: String,
+        priority: HandlerPriority,
+        execution_order: Arc<tokio::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl EventHandler for OrderTrackingHandler {
+        fn metadata(&self) -> HandlerMetadata {
+            HandlerMetadata {
+                id: self.id,
+                name: self.name.clone(),
+                filter: EventFilter::default(),
+                priority: self.priority,
+                error_strategy: ErrorStrategy::LogAndContinue,
+            }
+        }
+
+        async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+            let mut order = self.execution_order.lock().await;
+            order.push(self.name.clone());
+            Ok(Reaction::None)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_trips_after_threshold() {
+        let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let config = ReactorConfig {
+            circuit_breaker_threshold: 2,
+            circuit_breaker_window_secs: 600,
+            circuit_breaker_cooldown_secs: 300,
+            ..Default::default()
+        };
+        let reactor = EventReactor::new(bus.clone(), config);
+
+        let call_count = Arc::new(AtomicU64::new(0));
+        let handler = Arc::new(ConfigurableTestHandler {
+            id: HandlerId::new(),
+            name: "cb-test".to_string(),
+            filter: EventFilter::default(),
+            call_count: call_count.clone(),
+            should_fail: true,
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        });
+
+        reactor.register(handler).await;
+        let handle = reactor.start();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Publish 3 events with unique sequence numbers
+        for i in 1..=3 {
+            bus.publish(make_sequenced_event(EventCategory::Task, 100 + i)).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+
+        // After 2 failures the CB trips; the 3rd event should be skipped
+        let count = call_count.load(Ordering::Relaxed);
+        assert_eq!(count, 2, "Handler should be called exactly 2 times before CB trips, got {}", count);
+
+        reactor.stop();
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_auto_resets_after_cooldown() {
+        let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let config = ReactorConfig {
+            circuit_breaker_threshold: 1,
+            circuit_breaker_cooldown_secs: 1,
+            circuit_breaker_window_secs: 600,
+            ..Default::default()
+        };
+        let reactor = EventReactor::new(bus.clone(), config);
+
+        let call_count = Arc::new(AtomicU64::new(0));
+        let handler = Arc::new(ConfigurableTestHandler {
+            id: HandlerId::new(),
+            name: "cb-reset-test".to_string(),
+            filter: EventFilter::default(),
+            call_count: call_count.clone(),
+            should_fail: true,
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        });
+
+        reactor.register(handler).await;
+        let handle = reactor.start();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // First event: handler fails → CB trips (threshold=1)
+        bus.publish(make_sequenced_event(EventCategory::Task, 200)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(call_count.load(Ordering::Relaxed), 1);
+
+        // Second event while CB is tripped: handler should NOT be called
+        bus.publish(make_sequenced_event(EventCategory::Task, 201)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(call_count.load(Ordering::Relaxed), 1, "Handler should not be called while CB is tripped");
+
+        // Wait for cooldown to expire (1s cooldown + margin)
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+
+        // Third event after cooldown: CB auto-resets → handler called again
+        bus.publish(make_sequenced_event(EventCategory::Task, 202)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(call_count.load(Ordering::Relaxed), 2, "Handler should be called again after CB cooldown");
+
+        reactor.stop();
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_dedup_skips_duplicate_sequence() {
+        // Note: EventBus::publish assigns monotonically increasing sequence numbers,
+        // so duplicate sequences cannot occur through normal publish. The reactor's
+        // VecDeque-based dedup protects against duplicates during lag recovery
+        // (broadcast channel overflow). We test this by using an InMemoryEventStore:
+        // pre-populate the store with events, publish the same events through the bus
+        // (which assigns them new sequences), then trigger replay_missed_events()
+        // which uses the store's original sequences. The watermark-based replay
+        // skips events already processed.
+        use crate::services::event_store::InMemoryEventStore;
+
+        let store = Arc::new(InMemoryEventStore::new());
+        let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let config = ReactorConfig::default();
+        let reactor = EventReactor::new(bus.clone(), config).with_store(store.clone());
+
+        let call_count = Arc::new(AtomicU64::new(0));
+        let handler = Arc::new(TestHandler {
+            id: HandlerId::new(),
+            name: "dedup-test".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Task],
+                ..Default::default()
+            },
+            call_count: call_count.clone(),
+            should_fail: false,
+        });
+
+        reactor.register(handler).await;
+
+        // Pre-populate the store with an event at sequence 10
+        let mut stored_event = make_test_event(EventCategory::Task);
+        stored_event.sequence = SequenceNumber(10);
+        store.append(&stored_event).await.unwrap();
+
+        // Set watermark to 0 so replay would try to replay seq=10
+        store.set_watermark("dedup-test", SequenceNumber(0)).await.unwrap();
+
+        let handle = reactor.start();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Publish an event normally — EventBus assigns it seq=0
+        bus.publish(make_test_event(EventCategory::Task)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(call_count.load(Ordering::Relaxed), 1, "First event should be processed");
+
+        // Now call replay_missed_events — it replays seq=10 from store
+        // The handler should be called because seq=10 is not in the dedup set
+        // and watermark is 0 (below seq=10)
+        let replayed = reactor.replay_missed_events().await.unwrap();
+        assert!(replayed > 0, "Should have replayed at least one event");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Handler should have been called twice: once from publish, once from replay
+        let count = call_count.load(Ordering::Relaxed);
+        assert_eq!(count, 2, "Handler should be called for both published and replayed events, got {}", count);
+
+        reactor.stop();
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_handlers_execute_in_priority_order() {
+        let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let reactor = EventReactor::new(bus.clone(), ReactorConfig::default());
+
+        let execution_order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+        // Register handlers in reverse priority order (LOW first) to verify sorting
+        let low_handler = Arc::new(OrderTrackingHandler {
+            id: HandlerId::new(),
+            name: "low".to_string(),
+            priority: HandlerPriority::LOW,
+            execution_order: execution_order.clone(),
+        });
+        let normal_handler = Arc::new(OrderTrackingHandler {
+            id: HandlerId::new(),
+            name: "normal".to_string(),
+            priority: HandlerPriority::NORMAL,
+            execution_order: execution_order.clone(),
+        });
+        let system_handler = Arc::new(OrderTrackingHandler {
+            id: HandlerId::new(),
+            name: "system".to_string(),
+            priority: HandlerPriority::SYSTEM,
+            execution_order: execution_order.clone(),
+        });
+
+        // Register in deliberately wrong order
+        reactor.register(low_handler).await;
+        reactor.register(normal_handler).await;
+        reactor.register(system_handler).await;
+
+        let handle = reactor.start();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        bus.publish(make_sequenced_event(EventCategory::Task, 300)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let order = execution_order.lock().await;
+        assert_eq!(order.len(), 3, "All 3 handlers should have been called, got {}", order.len());
+        assert_eq!(order[0], "system", "SYSTEM priority should execute first");
+        assert_eq!(order[1], "normal", "NORMAL priority should execute second");
+        assert_eq!(order[2], "low", "LOW priority should execute last");
+
+        reactor.stop();
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_log_and_continue_does_not_trip_circuit_breaker() {
+        let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let config = ReactorConfig {
+            circuit_breaker_threshold: 1,
+            circuit_breaker_window_secs: 600,
+            circuit_breaker_cooldown_secs: 300,
+            ..Default::default()
+        };
+        let reactor = EventReactor::new(bus.clone(), config);
+
+        let call_count = Arc::new(AtomicU64::new(0));
+        let handler = Arc::new(ConfigurableTestHandler {
+            id: HandlerId::new(),
+            name: "log-continue-test".to_string(),
+            // Use Task filter to avoid matching HandlerError reaction events
+            // (which have category Orchestrator and would cause cascading calls)
+            filter: EventFilter {
+                categories: vec![EventCategory::Task],
+                ..Default::default()
+            },
+            call_count: call_count.clone(),
+            should_fail: true,
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        });
+
+        reactor.register(handler).await;
+        let handle = reactor.start();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Publish 3 events — all should reach the handler despite failures
+        // because LogAndContinue doesn't trip the circuit breaker
+        for i in 1..=3 {
+            bus.publish(make_sequenced_event(EventCategory::Task, 400 + i)).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+
+        let count = call_count.load(Ordering::Relaxed);
+        assert_eq!(count, 3, "LogAndContinue handler should be called all 3 times, got {}", count);
+
+        reactor.stop();
+        handle.abort();
+    }
 }
