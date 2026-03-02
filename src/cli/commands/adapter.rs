@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 
 use crate::adapters::plugins::{find_known_adapter, KnownAdapter, KNOWN_ADAPTERS};
-use crate::cli::output::{output, CommandOutput};
+use crate::cli::display::{
+    list_table, output, render_list, truncate_ellipsis, CommandOutput, DetailView,
+};
 use crate::domain::models::adapter::AdapterManifest;
 use crate::services::adapter_loader::find_missing_env_vars;
 use crate::services::config::AdapterConfig;
@@ -77,20 +79,19 @@ impl CommandOutput for AdapterListOutput {
             return "No adapters found.".to_string();
         }
 
-        let mut lines = vec![format!(
-            "{:<16} {:<10} {:<16} {:<12} {}",
-            "NAME", "TYPE", "DIRECTION", "STATUS", "ENV VARS"
-        )];
-        lines.push("-".repeat(68));
+        let mut table = list_table(&["Name", "Type", "Direction", "Status", "Env Vars"]);
 
         for a in &self.adapters {
-            lines.push(format!(
-                "{:<16} {:<10} {:<16} {:<12} {}",
-                a.name, a.adapter_type, a.direction, a.status, a.env_status,
-            ));
+            table.add_row(vec![
+                a.name.clone(),
+                a.adapter_type.clone(),
+                a.direction.clone(),
+                a.status.clone(),
+                a.env_status.clone(),
+            ]);
         }
 
-        lines.join("\n")
+        render_list("adapter", table, self.adapters.len())
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -155,34 +156,30 @@ pub struct AdapterInfoOutput {
 
 impl CommandOutput for AdapterInfoOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec![
-            format!("Adapter: {}", self.name),
-            format!("Description: {}", self.description),
-            format!("Type: {}", self.adapter_type),
-            format!("Direction: {}", self.direction),
-            format!("Status: {}", self.status),
-        ];
+        let mut view = DetailView::new(&self.name)
+            .field("Description", &self.description)
+            .field("Type", &self.adapter_type)
+            .field("Direction", &self.direction)
+            .field("Status", &self.status);
 
         if !self.capabilities.is_empty() {
-            lines.push(format!("Capabilities: {}", self.capabilities.join(", ")));
+            view = view.field("Capabilities", &self.capabilities.join(", "));
         }
         if !self.required_env_vars.is_empty() {
-            lines.push(format!(
-                "Required env vars: {}",
-                self.required_env_vars.join(", ")
-            ));
-        }
-        if let Some(config) = &self.config {
-            lines.push(format!(
-                "\nConfig:\n{}",
-                serde_json::to_string_pretty(config).unwrap_or_default()
-            ));
-        }
-        if let Some(summary) = &self.adapter_md_summary {
-            lines.push(format!("\n--- ADAPTER.md ---\n{}", summary));
+            view = view.field("Env Vars", &self.required_env_vars.join(", "));
         }
 
-        lines.join("\n")
+        if let Some(config) = &self.config {
+            view = view.section("Config")
+                .item(&serde_json::to_string_pretty(config).unwrap_or_default());
+        }
+
+        if let Some(summary) = &self.adapter_md_summary {
+            view = view.section("ADAPTER.md")
+                .item(&truncate_ellipsis(summary, 500));
+        }
+
+        view.render()
     }
 
     fn to_json(&self) -> serde_json::Value {

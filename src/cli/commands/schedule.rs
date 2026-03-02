@@ -6,7 +6,10 @@ use std::sync::Arc;
 
 use crate::adapters::sqlite::{initialize_default_database, SqliteTaskScheduleRepository};
 use crate::cli::id_resolver::resolve_schedule_id;
-use crate::cli::output::{output, truncate, CommandOutput};
+use crate::cli::display::{
+    colorize_status, list_table, output, render_list, short_id, truncate_ellipsis,
+    CommandOutput, DetailView, relative_time_str,
+};
 use crate::domain::models::task_schedule::*;
 use crate::domain::models::TaskPriority;
 use crate::domain::ports::task_schedule_repository::{TaskScheduleFilter, TaskScheduleRepository};
@@ -116,11 +119,11 @@ impl From<&TaskSchedule> for ScheduleOutput {
         Self {
             id: s.id.to_string(),
             name: s.name.clone(),
-            description: truncate(&s.description, 40),
+            description: truncate_ellipsis(&s.description, 40),
             schedule_type: s.schedule.as_str().to_string(),
             schedule_detail: s.schedule.description(),
             status: s.status.as_str().to_string(),
-            task_title: truncate(&s.task_title, 30),
+            task_title: truncate_ellipsis(&s.task_title, 30),
             fire_count: s.fire_count,
             last_fired_at: s.last_fired_at.map(|t| t.to_rfc3339()),
         }
@@ -139,26 +142,20 @@ impl CommandOutput for ScheduleListOutput {
             return "No task schedules found.".to_string();
         }
 
-        let mut lines = vec![format!("Found {} task schedule(s):\n", self.total)];
-        lines.push(format!(
-            "{:<12} {:<20} {:<8} {:<22} {:<8} {:<25}",
-            "ID", "NAME", "STATUS", "SCHEDULE", "FIRED", "TASK TITLE"
-        ));
-        lines.push("-".repeat(97));
+        let mut table = list_table(&["ID", "Name", "Status", "Schedule", "Fires", "Task Title"]);
 
         for s in &self.schedules {
-            lines.push(format!(
-                "{:<12} {:<20} {:<8} {:<22} {:<8} {:<25}",
-                &s.id[..8],
-                truncate(&s.name, 18),
-                s.status,
-                truncate(&s.schedule_detail, 20),
-                s.fire_count,
-                truncate(&s.task_title, 23),
-            ));
+            table.add_row(vec![
+                short_id(&s.id).to_string(),
+                truncate_ellipsis(&s.name, 20),
+                colorize_status(&s.status).to_string(),
+                truncate_ellipsis(&s.schedule_detail, 20),
+                s.fire_count.to_string(),
+                truncate_ellipsis(&s.task_title, 30),
+            ]);
         }
 
-        lines.join("\n")
+        render_list("task schedule", table, self.total)
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -180,39 +177,36 @@ pub struct ScheduleDetailOutput {
 
 impl CommandOutput for ScheduleDetailOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec![
-            format!("Schedule: {}", self.schedule.name),
-            format!("ID: {}", self.schedule.id),
-            format!("Description: {}", self.schedule.description),
-            format!("Status: {}", self.schedule.status),
-            format!("Schedule: {}", self.schedule.schedule_detail),
-            format!("Overlap Policy: {}", self.overlap_policy),
-            String::new(),
-            "Task Template:".to_string(),
-            format!("  Title: {}", self.schedule.task_title),
-            format!("  Description: {}", truncate(&self.task_description, 80)),
-            format!("  Priority: {}", self.task_priority),
-        ];
+        let mut view = DetailView::new(&self.schedule.name)
+            .field("ID", &self.schedule.id)
+            .field("Status", &colorize_status(&self.schedule.status).to_string())
+            .field("Schedule", &self.schedule.schedule_detail)
+            .field("Overlap", &self.overlap_policy)
+            .section("Task Template")
+            .field("Title", &self.schedule.task_title)
+            .field("Description", &truncate_ellipsis(&self.task_description, 80))
+            .field("Priority", &self.task_priority);
 
         if let Some(ref agent) = self.task_agent_type {
-            lines.push(format!("  Agent Type: {}", agent));
+            view = view.field("Agent", agent);
         }
 
-        lines.push(String::new());
-        lines.push(format!("Fire Count: {}", self.schedule.fire_count));
+        view = view.section("History")
+            .field("Fires", &self.schedule.fire_count.to_string());
 
         if let Some(ref last) = self.schedule.last_fired_at {
-            lines.push(format!("Last Fired: {}", last));
+            view = view.field("Last Fired", &relative_time_str(last));
         }
 
         if let Some(ref task_id) = self.last_task_id {
-            lines.push(format!("Last Task ID: {}", task_id));
+            view = view.field("Last Task", &short_id(task_id).to_string());
         }
 
-        lines.push(format!("Created: {}", self.created_at));
-        lines.push(format!("Updated: {}", self.updated_at));
+        view = view.section("Timing")
+            .field("Created", &relative_time_str(&self.created_at))
+            .field("Updated", &relative_time_str(&self.updated_at));
 
-        lines.join("\n")
+        view.render()
     }
 
     fn to_json(&self) -> serde_json::Value {

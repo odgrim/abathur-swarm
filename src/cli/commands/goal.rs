@@ -120,16 +120,14 @@ impl CommandOutput for GoalListOutput {
             return "No goals found.".to_string();
         }
 
-        let mut table = list_table(&["ID", "Name", "Status", "Priority", "Constraints", "Last Check"]);
+        let mut table = list_table(&["ID", "Name", "Status", "Priority"]);
 
         for goal in &self.goals {
             table.add_row(vec![
                 short_id(&goal.id).to_string(),
-                truncate_ellipsis(&goal.name, 30),
+                truncate_ellipsis(&goal.name, 55),
                 colorize_status(&goal.status).to_string(),
                 colorize_priority(&goal.priority).to_string(),
-                goal.constraints_count.to_string(),
-                goal.last_check.as_deref().map(relative_time_str).unwrap_or_else(|| "-".to_string()),
             ]);
         }
 

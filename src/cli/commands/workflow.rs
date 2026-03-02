@@ -3,7 +3,9 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
-use crate::cli::output::{output, CommandOutput};
+use crate::cli::display::{
+    list_table, output, render_list, truncate_ellipsis, CommandOutput,
+};
 use crate::services::config::Config;
 
 #[derive(Args, Debug)]
@@ -44,15 +46,27 @@ struct WorkflowListOutput {
 
 impl CommandOutput for WorkflowListOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec!["Available workflows:".to_string()];
-        for wf in &self.workflows {
-            let default_marker = if wf.is_default { " (default)" } else { "" };
-            lines.push(format!(
-                "  {} — {} [{} phases, {}]{}",
-                wf.name, wf.description, wf.phase_count, wf.source, default_marker
-            ));
+        if self.workflows.is_empty() {
+            return "No workflows found.".to_string();
         }
-        lines.join("\n")
+
+        let mut table = list_table(&["Name", "Phases", "Source", "Description"]);
+
+        for wf in &self.workflows {
+            let name = if wf.is_default {
+                format!("{} (default)", wf.name)
+            } else {
+                wf.name.clone()
+            };
+            table.add_row(vec![
+                name,
+                wf.phase_count.to_string(),
+                wf.source.clone(),
+                truncate_ellipsis(&wf.description, 50),
+            ]);
+        }
+
+        render_list("workflow", table, self.workflows.len())
     }
 
     fn to_json(&self) -> serde_json::Value {

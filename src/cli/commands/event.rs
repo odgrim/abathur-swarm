@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use crate::adapters::sqlite::{initialize_default_database, SqliteEventRepository};
 use crate::cli::id_resolver::resolve_dlq_id;
-use crate::cli::output::{output, CommandOutput};
+use crate::cli::display::{
+    list_table, output, render_list, short_id, truncate_ellipsis, CommandOutput, DetailView,
+};
 use crate::services::event_store::{EventQuery, EventStore};
 
 #[derive(Args, Debug)]
@@ -81,21 +83,20 @@ pub struct EventStatsOutput {
 
 impl CommandOutput for EventStatsOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec!["Event Store Statistics:".to_string()];
-        lines.push(format!("  Total events:     {}", self.total_events));
-        lines.push(format!(
-            "  Latest sequence:  {}",
-            self.latest_sequence
+        let mut view = DetailView::new("Event Store Statistics")
+            .field("Total Events", &self.total_events.to_string())
+            .field("Latest Seq", &self.latest_sequence
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| "none".to_string())
-        ));
+                .unwrap_or_else(|| "-".to_string()));
+
         if let Some(ref oldest) = self.oldest_event {
-            lines.push(format!("  Oldest event:     {}", oldest));
+            view = view.field("Oldest", oldest);
         }
         if let Some(ref newest) = self.newest_event {
-            lines.push(format!("  Newest event:     {}", newest));
+            view = view.field("Newest", newest);
         }
-        lines.join("\n")
+
+        view.render()
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -127,19 +128,17 @@ impl CommandOutput for GapReport {
             );
         }
 
-        let mut lines = vec![format!(
-            "Found {} gap(s) in range [{}, {}]:\n",
-            self.total_gaps, self.scan_from, self.scan_to
-        )];
-        lines.push(format!("{:<12} {:<12} {:<10}", "START", "END", "MISSING"));
-        lines.push("-".repeat(34));
+        let mut table = list_table(&["Start", "End", "Missing"]);
+
         for gap in &self.gaps {
-            lines.push(format!(
-                "{:<12} {:<12} {:<10}",
-                gap.start, gap.end, gap.missing
-            ));
+            table.add_row(vec![
+                gap.start.to_string(),
+                gap.end.to_string(),
+                gap.missing.to_string(),
+            ]);
         }
-        lines.join("\n")
+
+        render_list("gap", table, self.total_gaps)
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -168,19 +167,19 @@ impl CommandOutput for EventListOutput {
             return "No events found.".to_string();
         }
 
-        let mut lines = vec![format!("Showing {} event(s):\n", self.total)];
-        lines.push(format!(
-            "{:<8} {:<24} {:<14} {:<10} {:<30}",
-            "SEQ", "TIMESTAMP", "CATEGORY", "SEVERITY", "PAYLOAD"
-        ));
-        lines.push("-".repeat(86));
+        let mut table = list_table(&["Seq", "Time", "Category", "Severity", "Payload"]);
+
         for e in &self.events {
-            lines.push(format!(
-                "{:<8} {:<24} {:<14} {:<10} {:<30}",
-                e.sequence, e.timestamp, e.category, e.severity, e.payload_type
-            ));
+            table.add_row(vec![
+                e.sequence.to_string(),
+                e.timestamp.clone(),
+                e.category.clone(),
+                e.severity.clone(),
+                truncate_ellipsis(&e.payload_type, 35),
+            ]);
         }
-        lines.join("\n")
+
+        render_list("event", table, self.total)
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -211,24 +210,19 @@ impl CommandOutput for DlqListOutput {
             return "No dead letter entries found.".to_string();
         }
 
-        let mut lines = vec![format!("Showing {} DLQ entry(ies):\n", self.total)];
-        lines.push(format!(
-            "{:<38} {:<8} {:<20} {:<8} {:<40}",
-            "ID", "SEQ", "HANDLER", "RETRIES", "ERROR"
-        ));
-        lines.push("-".repeat(114));
+        let mut table = list_table(&["ID", "Seq", "Handler", "Retries", "Error"]);
+
         for e in &self.entries {
-            let error_truncated = if e.error_message.len() > 40 {
-                format!("{}...", &e.error_message[..37])
-            } else {
-                e.error_message.clone()
-            };
-            lines.push(format!(
-                "{:<38} {:<8} {:<20} {}/{:<5} {:<40}",
-                e.id, e.event_sequence, e.handler_name, e.retry_count, e.max_retries, error_truncated
-            ));
+            table.add_row(vec![
+                short_id(&e.id).to_string(),
+                e.event_sequence.to_string(),
+                truncate_ellipsis(&e.handler_name, 20),
+                format!("{}/{}", e.retry_count, e.max_retries),
+                truncate_ellipsis(&e.error_message, 40),
+            ]);
         }
-        lines.join("\n")
+
+        render_list("DLQ entry", table, self.total)
     }
 
     fn to_json(&self) -> serde_json::Value {

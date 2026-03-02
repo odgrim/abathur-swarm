@@ -6,7 +6,10 @@ use std::sync::Arc;
 
 use crate::adapters::sqlite::{initialize_default_database, SqliteTriggerRuleRepository};
 use crate::cli::id_resolver::resolve_trigger_rule_id;
-use crate::cli::output::{output, truncate, CommandOutput};
+use crate::cli::display::{
+    list_table, output, render_list, short_id, truncate_ellipsis,
+    CommandOutput, DetailView, relative_time_str,
+};
 use crate::domain::ports::TriggerRuleRepository;
 use crate::services::trigger_rules::TriggerRule;
 
@@ -63,7 +66,7 @@ impl From<&TriggerRule> for TriggerRuleOutput {
         Self {
             id: rule.id.to_string(),
             name: rule.name.clone(),
-            description: truncate(&rule.description, 40),
+            description: truncate_ellipsis(&rule.description, 40),
             enabled: rule.enabled,
             fire_count: rule.fire_count,
             last_fired: rule.last_fired.map(|t| t.to_rfc3339()),
@@ -83,25 +86,19 @@ impl CommandOutput for TriggerListOutput {
             return "No trigger rules found.".to_string();
         }
 
-        let mut lines = vec![format!("Found {} trigger rule(s):\n", self.total)];
-        lines.push(format!(
-            "{:<12} {:<30} {:<8} {:<8} {:<30}",
-            "ID", "NAME", "ENABLED", "FIRED", "DESCRIPTION"
-        ));
-        lines.push("-".repeat(90));
+        let mut table = list_table(&["ID", "Name", "Enabled", "Fires", "Description"]);
 
         for rule in &self.rules {
-            lines.push(format!(
-                "{:<12} {:<30} {:<8} {:<8} {:<30}",
-                &rule.id[..8],
-                truncate(&rule.name, 28),
-                if rule.enabled { "yes" } else { "no" },
-                rule.fire_count,
-                rule.description,
-            ));
+            table.add_row(vec![
+                short_id(&rule.id).to_string(),
+                truncate_ellipsis(&rule.name, 28),
+                if rule.enabled { "yes".to_string() } else { "no".to_string() },
+                rule.fire_count.to_string(),
+                truncate_ellipsis(&rule.description, 35),
+            ]);
         }
 
-        lines.join("\n")
+        render_list("trigger rule", table, self.total)
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -120,27 +117,26 @@ pub struct TriggerDetailOutput {
 
 impl CommandOutput for TriggerDetailOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec![
-            format!("Trigger Rule: {}", self.rule.name),
-            format!("ID: {}", self.rule.id),
-            format!("Description: {}", self.rule.description),
-            format!("Enabled: {}", self.rule.enabled),
-            format!("Fire Count: {}", self.rule.fire_count),
-        ];
+        let mut view = DetailView::new(&self.rule.name)
+            .field("ID", &self.rule.id)
+            .field("Description", &self.rule.description)
+            .field("Enabled", if self.rule.enabled { "yes" } else { "no" })
+            .field("Fires", &self.rule.fire_count.to_string());
 
         if let Some(ref last) = self.rule.last_fired {
-            lines.push(format!("Last Fired: {}", last));
+            view = view.field("Last Fired", &relative_time_str(last));
         }
 
         if let Some(cooldown) = self.cooldown_secs {
-            lines.push(format!("Cooldown: {}s", cooldown));
+            view = view.field("Cooldown", &format!("{}s", cooldown));
         }
 
-        lines.push(format!("\nFilter: {}", self.filter));
-        lines.push(format!("Condition: {}", self.condition));
-        lines.push(format!("Action: {}", self.action));
+        view = view.section("Configuration")
+            .field("Filter", &self.filter)
+            .field("Condition", &self.condition)
+            .field("Action", &self.action);
 
-        lines.join("\n")
+        view.render()
     }
 
     fn to_json(&self) -> serde_json::Value {

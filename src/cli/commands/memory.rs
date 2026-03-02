@@ -124,17 +124,15 @@ impl CommandOutput for MemoryListOutput {
             return "No memories found.".to_string();
         }
 
-        let mut table = list_table(&["ID", "Key", "Namespace", "Tier", "Type", "Accesses", "Decay"]);
+        let mut table = list_table(&["ID", "Key", "Namespace", "Tier", "Type"]);
 
         for mem in &self.memories {
             table.add_row(vec![
                 short_id(&mem.id).to_string(),
-                truncate_ellipsis(&mem.key, 25),
-                truncate_ellipsis(&mem.namespace, 14),
+                truncate_ellipsis(&mem.key, 40),
+                truncate_ellipsis(&mem.namespace, 15),
                 colorize_memory_tier(&mem.tier).to_string(),
                 mem.memory_type.clone(),
-                mem.access_count.to_string(),
-                format!("{:.2}", mem.decay_factor),
             ]);
         }
 

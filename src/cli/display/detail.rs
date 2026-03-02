@@ -2,8 +2,6 @@
 
 use colored::Colorize;
 
-use super::colors::label;
-
 /// A builder for detail views (key-value display).
 pub struct DetailView {
     title: String,
@@ -80,12 +78,8 @@ impl DetailView {
                 lines.push(format!("{}", header.bold().underline()));
             }
             for (key, value) in &section.fields {
-                lines.push(format!(
-                    "  {:<width$}  {}",
-                    label(key),
-                    value,
-                    width = key_width + 1
-                ));
+                let padded_key = format!("{:<width$}", key, width = key_width);
+                lines.push(format!("  {}{}  {}", padded_key.bold(), ":".dimmed(), value));
             }
             for item in &section.items {
                 lines.push(format!("  {} {}", "\u{2022}".dimmed(), item));

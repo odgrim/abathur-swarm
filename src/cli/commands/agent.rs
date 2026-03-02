@@ -179,16 +179,13 @@ impl CommandOutput for AgentListOutput {
             return "No agents found.".to_string();
         }
 
-        let mut table = list_table(&["Name", "Tier", "Status", "Ver", "Tools", "Max Turns"]);
+        let mut table = list_table(&["Name", "Tier", "Status"]);
 
         for agent in &self.agents {
             table.add_row(vec![
                 agent.name.clone(),
                 colorize_tier(&agent.tier).to_string(),
                 colorize_status(&agent.status).to_string(),
-                agent.version.to_string(),
-                agent.tools_count.to_string(),
-                agent.max_turns.to_string(),
             ]);
         }
 

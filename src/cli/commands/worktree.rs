@@ -6,7 +6,10 @@ use std::sync::Arc;
 
 use crate::adapters::sqlite::{SqliteWorktreeRepository, initialize_default_database};
 use crate::cli::id_resolver::{resolve_task_id, resolve_worktree_id};
-use crate::cli::output::{output, truncate, CommandOutput};
+use crate::cli::display::{
+    colorize_status, list_table, output, render_list, short_id, truncate_ellipsis,
+    CommandOutput, DetailView, relative_time_str,
+};
 use crate::domain::models::WorktreeStatus;
 use crate::services::{WorktreeConfig, WorktreeService, WorktreeStats};
 
@@ -104,24 +107,18 @@ impl CommandOutput for WorktreeListOutput {
             return "No worktrees found.".to_string();
         }
 
-        let mut lines = vec![format!("Found {} worktree(s):\n", self.total)];
-        lines.push(format!(
-            "{:<12} {:<36} {:<12} {:<30}",
-            "STATUS", "TASK ID", "BRANCH", "PATH"
-        ));
-        lines.push("-".repeat(90));
+        let mut table = list_table(&["Status", "Task", "Branch", "Path"]);
 
         for wt in &self.worktrees {
-            lines.push(format!(
-                "{:<12} {:<36} {:<12} {:<30}",
-                wt.status,
-                &wt.task_id[..8],
-                truncate(&wt.branch, 12),
-                truncate(&wt.path, 30),
-            ));
+            table.add_row(vec![
+                colorize_status(&wt.status).to_string(),
+                short_id(&wt.task_id).to_string(),
+                truncate_ellipsis(&wt.branch, 20),
+                truncate_ellipsis(&wt.path, 40),
+            ]);
         }
 
-        lines.join("\n")
+        render_list("worktree", table, self.total)
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -137,25 +134,23 @@ pub struct WorktreeDetailOutput {
 impl CommandOutput for WorktreeDetailOutput {
     fn to_human(&self) -> String {
         let wt = &self.worktree;
-        let mut lines = vec![
-            format!("Worktree: {}", wt.id),
-            format!("Task ID: {}", wt.task_id),
-            format!("Status: {}", wt.status),
-            format!("Path: {}", wt.path),
-            format!("Branch: {}", wt.branch),
-            format!("Base Ref: {}", wt.base_ref),
-            format!("Created: {}", wt.created_at),
-        ];
+        let mut view = DetailView::new(&wt.id)
+            .field("Task", &short_id(&wt.task_id).to_string())
+            .field("Status", &colorize_status(&wt.status).to_string())
+            .field("Path", &wt.path)
+            .field("Branch", &wt.branch)
+            .field("Base Ref", &wt.base_ref)
+            .field("Created", &relative_time_str(&wt.created_at));
 
         if let Some(ref commit) = wt.merge_commit {
-            lines.push(format!("Merge Commit: {}", commit));
+            view = view.field("Merge Commit", commit);
         }
 
         if let Some(ref error) = wt.error_message {
-            lines.push(format!("Error: {}", error));
+            view = view.field("Error", error);
         }
 
-        lines.join("\n")
+        view.render()
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -211,18 +206,18 @@ impl From<WorktreeStats> for WorktreeStatsOutput {
 
 impl CommandOutput for WorktreeStatsOutput {
     fn to_human(&self) -> String {
-        let mut lines = vec!["Worktree Statistics:".to_string()];
-        lines.push(format!("  Creating:   {}", self.creating));
-        lines.push(format!("  Active:     {}", self.active));
-        lines.push(format!("  Completed:  {}", self.completed));
-        lines.push(format!("  Merging:    {}", self.merging));
-        lines.push(format!("  Merged:     {}", self.merged));
-        lines.push(format!("  Failed:     {}", self.failed));
-        lines.push(format!("  Removed:    {}", self.removed));
-        lines.push("  ------------".to_string());
-        lines.push(format!("  Total:      {}", self.total));
-        lines.push(format!("  Active:     {}", self.active_total));
-        lines.join("\n")
+        DetailView::new("Worktree Statistics")
+            .field("Creating", &self.creating.to_string())
+            .field("Active", &self.active.to_string())
+            .field("Completed", &self.completed.to_string())
+            .field("Merging", &self.merging.to_string())
+            .field("Merged", &self.merged.to_string())
+            .field("Failed", &self.failed.to_string())
+            .field("Removed", &self.removed.to_string())
+            .section("Totals")
+            .field("Total", &self.total.to_string())
+            .field("Active", &self.active_total.to_string())
+            .render()
     }
 
     fn to_json(&self) -> serde_json::Value {
