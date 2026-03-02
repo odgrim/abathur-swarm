@@ -47,7 +47,7 @@ fn row_to_rule(row: TriggerRuleRow) -> DomainResult<TriggerRule> {
 
     let condition = match row.condition_type.as_str() {
         "always" => TriggerCondition::Always,
-        "count_threshold" | "absence" => {
+        "count_threshold" | "absence" | "cron" => {
             let data = row.condition_data.unwrap_or_default();
             serde_json::from_str(&data)
                 .map_err(|e| DomainError::SerializationError(e.to_string()))?
@@ -218,6 +218,10 @@ fn serialize_condition(cond: &TriggerCondition) -> DomainResult<(String, Option<
         TriggerCondition::Absence { .. } => {
             let data = serde_json::to_string(cond)?;
             Ok(("absence".to_string(), Some(data)))
+        }
+        TriggerCondition::Cron { .. } => {
+            let data = serde_json::to_string(cond)?;
+            Ok(("cron".to_string(), Some(data)))
         }
     }
 }

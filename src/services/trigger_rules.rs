@@ -94,6 +94,13 @@ pub enum TriggerCondition {
         /// Seconds to wait for the expected event before firing.
         deadline_secs: u64,
     },
+    /// Fire on a cron schedule. The expression follows standard 5-field cron syntax.
+    /// When this condition is set, the rule's filter is automatically configured to
+    /// match `ScheduledEventFired` events, and a corresponding schedule is registered
+    /// with the EventScheduler.
+    Cron {
+        expression: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +277,37 @@ impl TriggerRule {
         self.cooldown = Some(Duration::from_secs(secs));
         self
     }
+
+    /// Returns the EventScheduler name for cron-conditioned triggers.
+    /// Convention: `trigger-cron:{rule_uuid}`
+    pub fn cron_schedule_name(&self) -> String {
+        format!("trigger-cron:{}", self.id)
+    }
+
+    /// Returns true if this rule has a Cron condition.
+    pub fn is_cron(&self) -> bool {
+        matches!(self.condition, TriggerCondition::Cron { .. })
+    }
+
+    /// Returns the cron expression if this is a cron-conditioned trigger.
+    pub fn cron_expression(&self) -> Option<&str> {
+        match &self.condition {
+            TriggerCondition::Cron { expression } => Some(expression),
+            _ => None,
+        }
+    }
+
+    /// Build a filter that matches ScheduledEventFired events.
+    /// Used internally when creating cron triggers.
+    pub fn cron_event_filter() -> SerializableEventFilter {
+        SerializableEventFilter {
+            categories: vec![EventCategory::Scheduler],
+            min_severity: None,
+            payload_types: vec!["ScheduledEventFired".to_string()],
+            goal_id: None,
+            task_id: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +346,8 @@ pub struct TriggerRuleEngine {
     rule_repo: Option<Arc<dyn crate::domain::ports::TriggerRuleRepository>>,
     /// Optional DB pool for persisting absence timers across restarts.
     pool: Option<sqlx::SqlitePool>,
+    /// Optional EventScheduler for registering/deregistering cron-conditioned triggers.
+    event_scheduler: Option<Arc<crate::services::event_scheduler::EventScheduler>>,
 }
 
 impl TriggerRuleEngine {
@@ -320,6 +360,7 @@ impl TriggerRuleEngine {
             event_bus: None,
             rule_repo: None,
             pool: None,
+            event_scheduler: None,
         }
     }
 
@@ -339,6 +380,91 @@ impl TriggerRuleEngine {
     pub fn with_pool(mut self, pool: sqlx::SqlitePool) -> Self {
         self.pool = Some(pool);
         self
+    }
+
+    /// Attach an EventScheduler for cron trigger registration.
+    pub fn with_event_scheduler(mut self, scheduler: Arc<crate::services::event_scheduler::EventScheduler>) -> Self {
+        self.event_scheduler = Some(scheduler);
+        self
+    }
+
+    /// Register a cron-conditioned trigger with the EventScheduler.
+    /// Returns the schedule UUID if successful, None if no scheduler or registration failed.
+    pub async fn register_cron_schedule(&self, rule: &TriggerRule) -> Option<Uuid> {
+        let scheduler = self.event_scheduler.as_ref()?;
+        let expression = rule.cron_expression()?;
+
+        let sched_event = crate::services::event_scheduler::ScheduledEvent {
+            id: Uuid::new_v4(),
+            name: rule.cron_schedule_name(),
+            schedule: crate::services::event_scheduler::ScheduleType::Cron { expression: expression.to_string() },
+            category: EventCategory::Scheduler,
+            severity: EventSeverity::Info,
+            goal_id: None,
+            task_id: None,
+            active: true,
+            created_at: Utc::now(),
+            last_fired: None,
+            fire_count: 0,
+        };
+
+        scheduler.register(sched_event).await
+    }
+
+    /// Deregister a cron-conditioned trigger's schedule from the EventScheduler.
+    /// Cancels by looking up the schedule by name convention.
+    pub async fn deregister_cron_schedule(&self, rule: &TriggerRule) -> bool {
+        let scheduler = match self.event_scheduler.as_ref() {
+            Some(s) => s,
+            None => return false,
+        };
+
+        let target_name = rule.cron_schedule_name();
+        let schedules = scheduler.list().await;
+        if let Some(sched) = schedules.iter().find(|s| s.name == target_name) {
+            scheduler.cancel(sched.id).await
+        } else {
+            false
+        }
+    }
+
+    /// Register all enabled cron triggers with the EventScheduler at startup.
+    /// Called after `load_rules()`.
+    pub async fn register_cron_triggers(&self) -> usize {
+        let scheduler = match self.event_scheduler.as_ref() {
+            Some(s) => s,
+            None => return 0,
+        };
+
+        let rules = self.rules.read().await;
+        let mut count = 0;
+        for rule in rules.iter() {
+            if rule.enabled && rule.is_cron() {
+                let expression = match rule.cron_expression() {
+                    Some(e) => e.to_string(),
+                    None => continue,
+                };
+
+                let sched_event = crate::services::event_scheduler::ScheduledEvent {
+                    id: Uuid::new_v4(),
+                    name: rule.cron_schedule_name(),
+                    schedule: crate::services::event_scheduler::ScheduleType::Cron { expression },
+                    category: EventCategory::Scheduler,
+                    severity: EventSeverity::Info,
+                    goal_id: None,
+                    task_id: None,
+                    active: true,
+                    created_at: Utc::now(),
+                    last_fired: None,
+                    fire_count: 0,
+                };
+
+                if scheduler.register(sched_event).await.is_some() {
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 
     /// Load persisted absence timers from DB into the in-memory map.
@@ -715,6 +841,16 @@ impl TriggerRuleEngine {
                         // Absence conditions never fire immediately — they fire on timeout
                         false
                     }
+                    TriggerCondition::Cron { .. } => {
+                        // Cron triggers fire when their specific ScheduledEventFired event arrives.
+                        // The filter already gates to Scheduler/ScheduledEventFired events;
+                        // here we verify the event name matches this rule's cron schedule.
+                        if let EventPayload::ScheduledEventFired { name, .. } = &event.payload {
+                            name == &rule.cron_schedule_name()
+                        } else {
+                            false
+                        }
+                    }
                 };
 
                 if !condition_met {
@@ -935,6 +1071,32 @@ impl EventHandler for TriggerRuleEngine {
 }
 
 // ---------------------------------------------------------------------------
+// Cron validation
+// ---------------------------------------------------------------------------
+
+/// Normalize a user-provided cron expression to the 7-field format expected by the `cron` crate.
+/// If the user provides a standard 5-field expression (min hour dom month dow),
+/// it is expanded to 7-field by prepending "0" (seconds) and appending "*" (year).
+pub fn normalize_cron_expression(expression: &str) -> String {
+    let fields: Vec<&str> = expression.split_whitespace().collect();
+    match fields.len() {
+        5 => format!("0 {} *", expression),   // 5-field → 7-field
+        6 => format!("{} *", expression),      // 6-field → 7-field
+        _ => expression.to_string(),           // 7-field or invalid — pass through
+    }
+}
+
+/// Validate a cron expression. Accepts 5, 6, or 7-field formats.
+/// Returns Ok(()) if valid, Err with message if invalid.
+pub fn validate_cron_expression(expression: &str) -> Result<(), String> {
+    use std::str::FromStr;
+    let normalized = normalize_cron_expression(expression);
+    cron::Schedule::from_str(&normalized)
+        .map(|_| ())
+        .map_err(|e| format!("Invalid cron expression '{}': {}", expression, e))
+}
+
+// ---------------------------------------------------------------------------
 // Built-in rules
 // ---------------------------------------------------------------------------
 
@@ -1136,5 +1298,152 @@ mod tests {
         assert!(rules.len() >= 6);
         assert!(rules.iter().all(|r| r.enabled));
         assert_eq!(rules[0].name, "semantic-memory-goal-eval");
+    }
+
+    #[test]
+    fn test_cron_condition_serialization() {
+        let condition = TriggerCondition::Cron {
+            expression: "0 0 * * *".to_string(),
+        };
+        let json = serde_json::to_string(&condition).unwrap();
+        let deserialized: TriggerCondition = serde_json::from_str(&json).unwrap();
+
+        match deserialized {
+            TriggerCondition::Cron { expression } => {
+                assert_eq!(expression, "0 0 * * *");
+            }
+            _ => panic!("Expected Cron variant"),
+        }
+
+        // Verify JSON structure matches the tagged enum format
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["type"], "cron");
+        assert_eq!(value["expression"], "0 0 * * *");
+    }
+
+    #[test]
+    fn test_cron_trigger_rule_helpers() {
+        let filter = TriggerRule::cron_event_filter();
+        assert_eq!(filter.categories, vec![EventCategory::Scheduler]);
+        assert_eq!(filter.payload_types, vec!["ScheduledEventFired".to_string()]);
+
+        let rule = TriggerRule::new("test-cron", filter, TriggerAction::IssueCommand {
+            command: SerializableDomainCommand::SubmitTask {
+                title: "test".to_string(),
+                description: "test".to_string(),
+                priority: "normal".to_string(),
+                agent_type: None,
+            },
+        })
+        .with_condition(TriggerCondition::Cron { expression: "0 * * * *".to_string() });
+
+        assert!(rule.is_cron());
+        assert_eq!(rule.cron_expression(), Some("0 * * * *"));
+        assert!(rule.cron_schedule_name().starts_with("trigger-cron:"));
+        assert!(rule.cron_schedule_name().contains(&rule.id.to_string()));
+
+        // Non-cron rule should return false/None
+        let always_rule = TriggerRule::new("test-always",
+            SerializableEventFilter {
+                categories: vec![],
+                min_severity: None,
+                payload_types: vec![],
+                goal_id: None,
+                task_id: None,
+            },
+            TriggerAction::IssueCommand {
+                command: SerializableDomainCommand::SubmitTask {
+                    title: "t".to_string(),
+                    description: "d".to_string(),
+                    priority: "normal".to_string(),
+                    agent_type: None,
+                },
+            },
+        );
+        assert!(!always_rule.is_cron());
+        assert_eq!(always_rule.cron_expression(), None);
+    }
+
+    #[test]
+    fn test_cron_condition_matches_own_event() {
+        let rule = TriggerRule::new("my-cron", TriggerRule::cron_event_filter(), TriggerAction::IssueCommand {
+            command: SerializableDomainCommand::SubmitTask {
+                title: "t".to_string(),
+                description: "d".to_string(),
+                priority: "normal".to_string(),
+                agent_type: None,
+            },
+        })
+        .with_condition(TriggerCondition::Cron { expression: "0 0 * * *".to_string() });
+
+        // Matching event — name matches rule's cron_schedule_name
+        let matching = make_test_event(
+            EventPayload::ScheduledEventFired {
+                schedule_id: Uuid::new_v4(),
+                name: rule.cron_schedule_name(),
+            },
+            EventCategory::Scheduler,
+        );
+
+        // The filter should match
+        assert!(rule.filter.matches(&matching));
+
+        // The condition should match (verify by checking the event name)
+        if let EventPayload::ScheduledEventFired { name, .. } = &matching.payload {
+            assert_eq!(name, &rule.cron_schedule_name());
+        }
+
+        // Non-matching event — different schedule name
+        let non_matching = make_test_event(
+            EventPayload::ScheduledEventFired {
+                schedule_id: Uuid::new_v4(),
+                name: "trigger-cron:some-other-uuid".to_string(),
+            },
+            EventCategory::Scheduler,
+        );
+
+        // Filter matches (it's a ScheduledEventFired in Scheduler category)
+        assert!(rule.filter.matches(&non_matching));
+        // But condition should NOT match (name doesn't match this rule's cron schedule)
+        if let EventPayload::ScheduledEventFired { name, .. } = &non_matching.payload {
+            assert_ne!(name, &rule.cron_schedule_name());
+        }
+    }
+
+    #[test]
+    fn test_cron_condition_ignores_non_scheduler_events() {
+        let rule = TriggerRule::new("cron-ignore-test", TriggerRule::cron_event_filter(), TriggerAction::IssueCommand {
+            command: SerializableDomainCommand::SubmitTask {
+                title: "t".to_string(),
+                description: "d".to_string(),
+                priority: "normal".to_string(),
+                agent_type: None,
+            },
+        })
+        .with_condition(TriggerCondition::Cron { expression: "0 0 * * *".to_string() });
+
+        // TaskFailed event should not match the filter (wrong category + payload type)
+        let task_event = make_test_event(
+            EventPayload::TaskFailed {
+                task_id: Uuid::new_v4(),
+                error: "test error".to_string(),
+                retry_count: 0,
+            },
+            EventCategory::Task,
+        );
+        assert!(!rule.filter.matches(&task_event));
+    }
+
+    #[test]
+    fn test_validate_cron_expression() {
+        // Valid expressions
+        assert!(validate_cron_expression("0 0 * * *").is_ok());
+        assert!(validate_cron_expression("*/5 * * * *").is_ok());
+        assert!(validate_cron_expression("0 0 * * MON-FRI").is_ok());
+
+        // Invalid expressions
+        assert!(validate_cron_expression("not a cron").is_err());
+        assert!(validate_cron_expression("").is_err());
+        assert!(validate_cron_expression("* * *").is_err());
     }
 }

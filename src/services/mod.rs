@@ -82,7 +82,7 @@ pub use budget_tracker::{BudgetOpportunity, BudgetState, BudgetTracker, BudgetTr
 pub use event_reactor::{EventReactor, ReactorConfig, EventHandler, EventFilter, HandlerId, HandlerPriority, Reaction, HandlerContext, HandlerMetadata, ErrorStrategy};
 pub use event_scheduler::{EventScheduler, SchedulerConfig, ScheduledEvent, ScheduleType};
 pub use event_store::{EventQuery, EventStore, EventStoreError, EventStoreStats, InMemoryEventStore};
-pub use trigger_rules::{TriggerRule, TriggerRuleEngine, TriggerCondition, TriggerAction, TriggerEventPayload, SerializableEventFilter, SerializableDomainCommand};
+pub use trigger_rules::{TriggerRule, TriggerRuleEngine, TriggerCondition, TriggerAction, TriggerEventPayload, SerializableEventFilter, SerializableDomainCommand, validate_cron_expression, normalize_cron_expression};
 
 /// Extract a JSON object from LLM text output.
 ///

@@ -354,7 +354,8 @@ where
         // TriggerRuleEngine (NORMAL) — declarative event-driven automation
         let trigger_engine = {
             let mut engine_builder = TriggerRuleEngine::new(command_bus.clone())
-                .with_event_bus(self.event_bus.clone());
+                .with_event_bus(self.event_bus.clone())
+                .with_event_scheduler(self.event_scheduler.clone());
 
             if let Some(ref repo) = self.trigger_rule_repo {
                 engine_builder = engine_builder.with_rule_repo(repo.clone());
@@ -408,6 +409,12 @@ where
 
             // Restore persisted absence timers from DB
             engine.load_pending_timers().await;
+
+            // Register cron-conditioned triggers with EventScheduler
+            let cron_count = engine.register_cron_triggers().await;
+            if cron_count > 0 {
+                tracing::info!("Registered {} cron trigger(s) with EventScheduler", cron_count);
+            }
 
             reactor.register(engine.clone()).await;
             engine
