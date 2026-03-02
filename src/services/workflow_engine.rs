@@ -1310,6 +1310,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         agg_subtask.execution_mode = ExecutionMode::Direct; // Aggregation is always read-only
         agg_subtask.worktree_path = task.worktree_path.clone();
         let _ = agg_subtask.transition_to(TaskStatus::Ready);
+        agg_subtask.agent_type = Some("aggregator".to_string());
 
         agg_subtask.context.custom.insert(
             "workflow_phase".to_string(),

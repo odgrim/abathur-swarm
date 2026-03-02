@@ -402,6 +402,7 @@ where
             let is_read_only_role = is_template_read_only || {
                 let lower = agent_type.to_lowercase();
                 lower == "overmind"
+                    || lower == "aggregator"
                     || lower.contains("researcher")
                     || lower.contains("planner")
                     || lower.contains("analyst")

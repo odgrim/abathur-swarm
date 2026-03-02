@@ -25,7 +25,7 @@ pub fn create_baseline_agents() -> Vec<AgentTemplate> {
 pub fn create_baseline_agents_with_workflow(
     workflow: Option<&WorkflowTemplate>,
 ) -> Vec<AgentTemplate> {
-    vec![create_overmind_with_workflow(workflow)]
+    vec![create_overmind_with_workflow(workflow), create_aggregator()]
 }
 
 /// Create all baseline agents with awareness of all configured workflow spines.
@@ -34,7 +34,7 @@ pub fn create_baseline_agents_with_workflow(
 /// provided workflows and teaches the Overmind to select the appropriate spine
 /// based on task content at runtime.
 pub fn create_baseline_agents_with_workflows(workflows: &[WorkflowTemplate]) -> Vec<AgentTemplate> {
-    vec![create_overmind_with_workflows(workflows)]
+    vec![create_overmind_with_workflows(workflows), create_aggregator()]
 }
 
 /// Overmind - The agentic orchestrator of the swarm.
@@ -69,6 +69,27 @@ pub fn create_overmind_with_workflows(workflows: &[WorkflowTemplate]) -> AgentTe
         .any(|w| w.phases.iter().any(|p| p.name.to_lowercase() == "triage"));
     let prompt = generate_overmind_prompt_multi(workflows);
     build_overmind_template(prompt, has_triage)
+}
+
+/// Aggregator — lightweight fan-in synthesis agent.
+///
+/// Reads completed subtask results, synthesizes a summary, stores it in memory,
+/// and advances the workflow. Read-only with minimal tools.
+pub fn create_aggregator() -> AgentTemplate {
+    AgentTemplate::new("aggregator", AgentTier::Worker)
+        .with_description(
+            "Lightweight fan-in agent that synthesizes subtask results into a single summary",
+        )
+        .with_prompt(AGGREGATOR_SYSTEM_PROMPT.to_string())
+        .with_read_only(true)
+        .with_tool(ToolCapability::new("tasks", "Read subtask results and complete own task"))
+        .with_tool(ToolCapability::new("memory", "Store aggregated summary"))
+        .with_capability("fan-in-aggregation")
+        .with_constraint(AgentConstraint::new(
+            "no-tangents",
+            "Do not review code, run git commands, explore files, spawn agents, or perform any action outside the 5-step aggregation checklist",
+        ))
+        .with_max_turns(12)
 }
 
 /// Build the Overmind `AgentTemplate` from a pre-generated prompt.
@@ -1220,6 +1241,43 @@ Use these class-specific patterns when writing system_prompts:
 4. If structural, restructure the remaining task DAG
 "#;
 
+/// System prompt for the Aggregator specialist agent.
+///
+/// The Aggregator is a lightweight Worker that synthesizes fan-out subtask results
+/// into a single coherent summary. It is read-only and tightly scoped to prevent
+/// the tangent behaviors observed when the Overmind handled aggregation.
+const AGGREGATOR_SYSTEM_PROMPT: &str = r#"# Aggregator Agent
+
+You are a **fan-in aggregation** specialist. Your sole job is to synthesize the
+results of completed subtasks into a single coherent summary and advance the
+workflow.
+
+## Execution Steps
+
+1. **Read subtask results** — use `task_get` for every subtask ID listed in the
+   parent task's context. Extract the outcome, key findings, and any artifacts.
+2. **Synthesize** — combine the individual results into a unified summary:
+   - What was accomplished across all subtasks.
+   - Any conflicts or inconsistencies between results.
+   - Overall status: all-pass, partial-failure, or all-fail.
+3. **Store summary** — use `memory_store` to persist the aggregated result so
+   downstream phases can reference it.
+4. **Advance workflow** — call `workflow_advance` to signal that aggregation is
+   complete and the next phase can begin.
+5. **Complete** — mark your own task as completed via `task_complete` with a
+   brief status message. Then STOP.
+
+## STRICT PROHIBITIONS
+
+- Do NOT read, review, or explore source code files.
+- Do NOT run shell commands, git operations, or any build/test tools.
+- Do NOT create, modify, or delete files.
+- Do NOT spawn sub-agents or create new tasks.
+- Do NOT suggest refactors, improvements, or next steps beyond the summary.
+- Do NOT perform memory housekeeping, cleanup, or reorganization.
+- Do NOT exceed the 5-step checklist above. If you are done, STOP.
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1228,8 +1286,9 @@ mod tests {
     #[test]
     fn test_create_baseline_agents() {
         let agents = create_baseline_agents();
-        assert_eq!(agents.len(), 1);
+        assert_eq!(agents.len(), 2);
         assert_eq!(agents[0].name, "overmind");
+        assert_eq!(agents[1].name, "aggregator");
     }
 
     #[test]
@@ -1272,6 +1331,34 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregator() {
+        let agg = create_aggregator();
+        assert_eq!(agg.name, "aggregator");
+        assert_eq!(agg.tier, AgentTier::Worker);
+        assert_eq!(agg.max_turns, 12);
+        assert!(agg.read_only);
+
+        // Tools: only tasks + memory
+        assert!(agg.has_tool("tasks"));
+        assert!(agg.has_tool("memory"));
+        assert!(!agg.has_tool("read"));
+        assert!(!agg.has_tool("shell"));
+        assert!(!agg.has_tool("glob"));
+        assert!(!agg.has_tool("grep"));
+        assert!(!agg.has_tool("write"));
+        assert!(!agg.has_tool("edit"));
+
+        // Capability
+        assert!(agg.has_capability("fan-in-aggregation"));
+
+        // Constraint
+        assert!(agg.constraints.iter().any(|c| c.name == "no-tangents"));
+
+        // Validation passes
+        assert!(agg.validate().is_ok());
+    }
+
+    #[test]
     fn test_create_overmind_with_no_workflow_matches_original() {
         let original = create_overmind();
         let via_workflow = create_overmind_with_workflow(None);
@@ -1289,7 +1376,11 @@ mod tests {
         let via_workflow = create_baseline_agents_with_workflow(None);
 
         assert_eq!(original.len(), via_workflow.len());
+        // Overmind prompts match
         assert_eq!(original[0].system_prompt, via_workflow[0].system_prompt);
+        // Aggregator is identical in both
+        assert_eq!(original[1].name, via_workflow[1].name);
+        assert_eq!(original[1].system_prompt, via_workflow[1].system_prompt);
     }
 
     #[test]
