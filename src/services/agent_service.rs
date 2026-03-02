@@ -47,10 +47,12 @@ impl<R: AgentRepository> AgentService<R> {
         // Check if template with same name exists
         if let Some(existing) = self.repository.get_template_by_name(&name).await? {
             // Create a new version
+            let floor = tier.max_turns();
+            let effective_turns = max_turns.map_or(floor, |t| t.max(floor));
             let mut template = AgentTemplate::new(&name, tier)
                 .with_description(description)
                 .with_prompt(system_prompt)
-                .with_max_turns(max_turns.unwrap_or(25))
+                .with_max_turns(effective_turns)
                 .with_read_only(read_only);
 
             template.version = existing.version + 1;
@@ -86,10 +88,12 @@ impl<R: AgentRepository> AgentService<R> {
         }
 
         // Create first version
+        let floor = tier.max_turns();
+        let effective_turns = max_turns.map_or(floor, |t| t.max(floor));
         let mut template = AgentTemplate::new(name, tier)
             .with_description(description)
             .with_prompt(system_prompt)
-            .with_max_turns(max_turns.unwrap_or(25))
+            .with_max_turns(effective_turns)
             .with_read_only(read_only);
 
         for tool in tools {
