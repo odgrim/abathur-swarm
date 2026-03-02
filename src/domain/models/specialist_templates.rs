@@ -88,9 +88,9 @@ pub fn create_aggregator() -> AgentTemplate {
         .with_capability("fan-in-aggregation")
         .with_constraint(AgentConstraint::new(
             "no-tangents",
-            "Do not review code, run git commands, explore files, spawn agents, or perform any action outside the 5-step aggregation checklist",
+            "Do not review code, run git commands, explore files, spawn agents, or perform any action outside the 7-step aggregation checklist",
         ))
-        .with_max_turns(12)
+        .with_max_turns(16)
 }
 
 /// Build the Overmind `AgentTemplate` from a pre-generated prompt.
@@ -1248,23 +1248,54 @@ Use these class-specific patterns when writing system_prompts:
 /// the tangent behaviors observed when the Overmind handled aggregation.
 const AGGREGATOR_SYSTEM_PROMPT: &str = r#"# Aggregator Agent
 
-You are a **fan-in aggregation** specialist. Your sole job is to synthesize the
-results of completed subtasks into a single coherent summary and advance the
-workflow.
+You are a **fan-in aggregation** specialist. Your job is to synthesize the
+results of completed subtasks, analyze their memory artifacts, and recommend
+whether the next phase should fan out or collapse.
 
 ## Execution Steps
 
-1. **Read subtask results** — use `task_get` for every subtask ID listed in the
-   parent task's context. Extract the outcome, key findings, and any artifacts.
-2. **Synthesize** — combine the individual results into a unified summary:
+1. **Read subtask results** — use `task_get` for every subtask ID listed in your
+   task description. Extract the outcome, key findings, and any artifacts.
+2. **Analyze memories** — use `memory_search` to find memories stored by the
+   subtask agents. Search using:
+   - The subtask titles and phase name from your task description
+   - Namespace `task-learnings` for completion patterns
+   - Namespace `task-outcomes` for outcome records
+   - Namespace `execution_history` for execution details
+   Examine what each agent learned, discovered, or decided during its work.
+3. **Synthesize** — combine the subtask results AND their memory artifacts into
+   a unified summary:
    - What was accomplished across all subtasks.
+   - Key learnings and patterns from agent memories.
    - Any conflicts or inconsistencies between results.
    - Overall status: all-pass, partial-failure, or all-fail.
-3. **Store summary** — use `memory_store` to persist the aggregated result so
-   downstream phases can reference it.
-4. **Advance workflow** — call `workflow_advance` to signal that aggregation is
+4. **Decide fan-out vs collapse** — based on your analysis, recommend whether
+   the NEXT workflow phase should:
+   - **Fan out** (multiple parallel tasks) — when subtask results are
+     independent, the next phase has naturally parallelizable work, or
+     different specializations are needed.
+   - **Collapse** (single task) — when subtask results need integration,
+     conflicts must be resolved by one agent, or the next step is inherently
+     sequential (e.g., final review, merge, single-file edit).
+   State your recommendation clearly with reasoning.
+5. **Store summary** — use `memory_store` to persist the aggregated result so
+   downstream phases can reference it. Use:
+   - namespace: `phase-aggregation`
+   - memory_type: `decision`
+   - tier: `episodic`
+   - Include BOTH the synthesis and your fan-out/collapse recommendation in the
+     content. Structure it as:
+     ```
+     ## Phase Summary
+     <your synthesis>
+
+     ## Next Phase Recommendation
+     RECOMMENDATION: FAN_OUT | COLLAPSE
+     REASONING: <why>
+     ```
+6. **Advance workflow** — call `workflow_advance` to signal that aggregation is
    complete and the next phase can begin.
-5. **Complete** — mark your own task as completed via `task_complete` with a
+7. **Complete** — mark your own task as completed via `task_complete` with a
    brief status message. Then STOP.
 
 ## STRICT PROHIBITIONS
@@ -1275,7 +1306,7 @@ workflow.
 - Do NOT spawn sub-agents or create new tasks.
 - Do NOT suggest refactors, improvements, or next steps beyond the summary.
 - Do NOT perform memory housekeeping, cleanup, or reorganization.
-- Do NOT exceed the 5-step checklist above. If you are done, STOP.
+- Do NOT exceed the 7-step checklist above. If you are done, STOP.
 "#;
 
 #[cfg(test)]

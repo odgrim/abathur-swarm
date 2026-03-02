@@ -1274,8 +1274,9 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                     .map(|a| a.uri.clone())
                     .collect();
                 slice_summaries.push(format!(
-                    "Slice {}: {} (status: {}, artifacts: {})",
+                    "Slice {} (id: {}): {} (status: {}, artifacts: {})",
                     i + 1,
+                    id,
                     subtask.title,
                     subtask.status.as_str(),
                     if artifact_refs.is_empty() {
@@ -1287,16 +1288,32 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             }
         }
 
+        let subtask_id_list: Vec<String> = fan_out_subtask_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+
         let aggregation_desc = format!(
             "Aggregate results from {} parallel slices of phase '{}'.\n\n\
+             ## Subtask IDs\n{}\n\n\
              ## Slice Results\n{}\n\n\
              ## Your Role\n\
-             Synthesize the results from all slices into a coherent phase output. \
-             Identify any conflicts or gaps between slices and produce a unified summary.\n\n\
+             1. Use `task_get` for each subtask ID above to read full results.\n\
+             2. Use `memory_search` to find memories stored by these subtasks \
+             (search for the subtask titles and phase name '{}').\n\
+             3. Synthesize findings into a unified summary.\n\
+             4. Decide whether the NEXT phase should fan out to multiple parallel \
+             tasks or collapse to a single task. Base this on:\n\
+                - Whether subtask results are independent or need integration\n\
+                - Whether the work ahead is naturally parallelizable\n\
+                - Whether conflicts/gaps require a single coordinating agent\n\
+             5. Store your summary AND fan-out/collapse recommendation via `memory_store`.\n\n\
              Parent task: {}",
             fan_out_subtask_ids.len(),
             phase_name,
+            subtask_id_list.join("\n"),
             slice_summaries.join("\n"),
+            phase_name,
             task.description
         );
 
