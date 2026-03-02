@@ -102,7 +102,6 @@ fn build_overmind_template(prompt: String, has_triage: bool) -> AgentTemplate {
         .with_description("Agentic orchestrator that analyzes tasks, selects the appropriate workflow spine, dynamically creates agents, and delegates work through MCP tools")
         .with_prompt(prompt)
         .with_tool(ToolCapability::new("read", "Read source files for context").required())
-        .with_tool(ToolCapability::new("shell", "Execute shell commands").required())
         .with_tool(ToolCapability::new("glob", "Find files by pattern").required())
         .with_tool(ToolCapability::new("grep", "Search for patterns in codebase").required())
         .with_tool(ToolCapability::new("memory", "Query and store swarm memory"))

@@ -70,6 +70,10 @@ fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
                 cli_tools.push("mcp__abathur__task_wait".to_string());
                 cli_tools.push("mcp__abathur__goals_list".to_string());
                 cli_tools.push("mcp__abathur__workflow_select".to_string());
+                cli_tools.push("mcp__abathur__workflow_advance".to_string());
+                cli_tools.push("mcp__abathur__workflow_fan_out".to_string());
+                cli_tools.push("mcp__abathur__workflow_gate".to_string());
+                cli_tools.push("mcp__abathur__workflow_status".to_string());
                 cli_tools.push("mcp__abathur__task_cancel".to_string());
                 cli_tools.push("mcp__abathur__task_retry".to_string());
             }
