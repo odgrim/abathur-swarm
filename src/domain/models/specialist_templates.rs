@@ -82,6 +82,7 @@ pub fn create_aggregator() -> AgentTemplate {
         )
         .with_prompt(AGGREGATOR_SYSTEM_PROMPT.to_string())
         .with_read_only(true)
+        .with_preferred_model("haiku")
         .with_tool(ToolCapability::new("tasks", "Read subtask results and complete own task"))
         .with_tool(ToolCapability::new("memory", "Store aggregated summary"))
         .with_capability("fan-in-aggregation")
@@ -1337,6 +1338,7 @@ mod tests {
         assert_eq!(agg.tier, AgentTier::Worker);
         assert_eq!(agg.max_turns, 12);
         assert!(agg.read_only);
+        assert_eq!(agg.preferred_model.as_deref(), Some("haiku"));
 
         // Tools: only tasks + memory
         assert!(agg.has_tool("tasks"));

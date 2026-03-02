@@ -327,6 +327,7 @@ impl TryFrom<TemplateRow> for AgentTemplate {
             },
             max_turns: row.max_turns as u32,
             read_only: row.read_only.unwrap_or(0) != 0,
+            preferred_model: None,
             status,
             created_at,
             updated_at,

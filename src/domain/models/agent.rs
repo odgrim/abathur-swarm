@@ -192,6 +192,10 @@ pub struct AgentTemplate {
     /// Whether this agent is read-only (produces findings via memory, not code commits).
     /// When true, commit verification is disabled and memory verification is enabled.
     pub read_only: bool,
+    /// Preferred model override (e.g. "haiku", "sonnet", "opus").
+    /// When set, the substrate will use this model instead of the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_model: Option<String>,
     /// Status
     pub status: AgentStatus,
     /// When created
@@ -216,6 +220,7 @@ impl AgentTemplate {
             agent_card: AgentCard::default(),
             max_turns: 25,
             read_only: false,
+            preferred_model: None,
             status: AgentStatus::Active,
             created_at: now,
             updated_at: now,
@@ -256,6 +261,12 @@ impl AgentTemplate {
     /// Read-only agents produce findings via memory rather than code commits.
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
+        self
+    }
+
+    /// Set preferred model (e.g. "haiku", "sonnet", "opus").
+    pub fn with_preferred_model(mut self, model: impl Into<String>) -> Self {
+        self.preferred_model = Some(model.into());
         self
     }
 

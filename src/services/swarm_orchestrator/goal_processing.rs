@@ -379,7 +379,7 @@ where
             let system_prompt = self.get_agent_system_prompt(&agent_type).await;
 
             // Get agent template for version tracking, capabilities, and tool restrictions
-            let (template_version, capabilities, cli_tools, agent_can_write, is_template_read_only, template_max_turns) = match self.agent_repo.get_template_by_name(&agent_type).await {
+            let (template_version, capabilities, cli_tools, agent_can_write, is_template_read_only, template_max_turns, template_preferred_model) = match self.agent_repo.get_template_by_name(&agent_type).await {
                 Ok(Some(template)) => {
                     let caps: Vec<String> = template.tools.iter()
                         .map(|t| t.name.clone())
@@ -389,10 +389,10 @@ where
                         let lower = c.to_lowercase();
                         lower == "write" || lower == "edit" || lower == "shell"
                     });
-                    (template.version, caps, tools, can_write, template.read_only, template.max_turns)
+                    (template.version, caps, tools, can_write, template.read_only, template.max_turns, template.preferred_model.clone())
                 }
                 // Default to true when template lookup fails (safer to require commits from unknown agents)
-                _ => (1, vec!["task-execution".to_string()], vec![], true, false, 0),
+                _ => (1, vec!["task-execution".to_string()], vec![], true, false, 0, None),
             };
 
             // Read-only agent roles never produce commits regardless of tool capabilities.
@@ -1229,6 +1229,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                 let mut config = SubstrateConfig::default().with_max_turns(max_turns);
                 if let Some(ref wt_path) = worktree_path {
                     config = config.with_working_dir(wt_path);
+                }
+
+                // Apply preferred model from template (e.g. "haiku" for aggregator)
+                if let Some(ref model) = template_preferred_model {
+                    config.model = Some(model.clone());
                 }
 
                 // Apply agent-specific tool restrictions from template
