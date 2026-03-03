@@ -134,8 +134,9 @@ pub struct WorktreeDetailOutput {
 impl CommandOutput for WorktreeDetailOutput {
     fn to_human(&self) -> String {
         let wt = &self.worktree;
-        let mut view = DetailView::new(&wt.id)
-            .field("Task", &short_id(&wt.task_id).to_string())
+        let mut view = DetailView::new("Worktree Detail")
+            .field("Worktree", &wt.id)
+            .field("Task ID", &short_id(&wt.task_id).to_string())
             .field("Status", &colorize_status(&wt.status).to_string())
             .field("Path", &wt.path)
             .field("Branch", &wt.branch)

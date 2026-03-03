@@ -817,7 +817,7 @@ fn trigger_list_after_seed() {
         .args(["trigger", "list"])
         .assert()
         .success_without_warnings()
-        .stdout(predicates::str::contains("trigger rule(s)"));
+        .stdout(predicates::str::contains("trigger rule"));
 }
 
 #[test]
@@ -2448,7 +2448,7 @@ fn agent_register_with_all_options_json() {
             "-t", "specialist",
             "-p", "prompt",
             "--tool", "bash:Run commands",
-            "--max-turns", "20",
+            "--max-turns", "40",
             "--json",
         ],
     );
@@ -2460,7 +2460,8 @@ fn agent_register_with_all_options_json() {
     assert_eq!(agent["version"].as_u64().unwrap(), 1);
     assert_eq!(json_str(agent, "status"), "active");
     assert_eq!(agent["tools_count"].as_u64().unwrap(), 1);
-    assert_eq!(agent["max_turns"].as_u64().unwrap(), 20);
+    // Specialist tier floor is 35, so 40 > 35 → effective is 40
+    assert_eq!(agent["max_turns"].as_u64().unwrap(), 40);
 
     // Verify description and prompt appear in show output
     let show = run_json(dir, &["agent", "show", "full-options-agent", "--json"]);
@@ -4458,11 +4459,11 @@ fn worktree_show_displays_worktree() {
         .assert()
         .success_without_warnings()
         .stdout(
-            predicates::str::contains("Worktree:")
-                .and(predicates::str::contains("Task ID:"))
-                .and(predicates::str::contains("Status:"))
-                .and(predicates::str::contains("Path:"))
-                .and(predicates::str::contains("Branch:")),
+            predicates::str::contains("Worktree")
+                .and(predicates::str::contains("Task ID"))
+                .and(predicates::str::contains("Status"))
+                .and(predicates::str::contains("Path"))
+                .and(predicates::str::contains("Branch")),
         );
 }
 

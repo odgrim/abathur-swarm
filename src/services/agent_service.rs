@@ -48,7 +48,7 @@ impl<R: AgentRepository> AgentService<R> {
         if let Some(existing) = self.repository.get_template_by_name(&name).await? {
             // Create a new version
             let floor = tier.max_turns();
-            let effective_turns = max_turns.map_or(floor, |t| t.max(floor));
+            let effective_turns = max_turns.unwrap_or(floor);
             let mut template = AgentTemplate::new(&name, tier)
                 .with_description(description)
                 .with_prompt(system_prompt)
@@ -89,7 +89,7 @@ impl<R: AgentRepository> AgentService<R> {
 
         // Create first version
         let floor = tier.max_turns();
-        let effective_turns = max_turns.map_or(floor, |t| t.max(floor));
+        let effective_turns = max_turns.unwrap_or(floor);
         let mut template = AgentTemplate::new(name, tier)
             .with_description(description)
             .with_prompt(system_prompt)
@@ -666,12 +666,13 @@ mod tests {
     async fn test_seed_baseline_agents_no_downgrade() {
         let service = setup_service().await;
 
-        // Insert a v99 overmind (future version)
-        let mut future = specialist_templates::create_overmind();
-        future.version = 99;
-        service.repository.create_template(&future).await.unwrap();
+        // Insert all baseline agents at v99 (future version) so nothing gets seeded
+        for mut future in specialist_templates::create_baseline_agents() {
+            future.version = 99;
+            service.repository.create_template(&future).await.unwrap();
+        }
 
-        // Seed should NOT downgrade
+        // Seed should NOT downgrade any of them
         let seeded = service.seed_baseline_agents().await.unwrap();
         assert!(seeded.is_empty());
 

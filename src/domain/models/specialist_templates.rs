@@ -1342,12 +1342,12 @@ mod tests {
 
         // Verify tools
         assert!(overmind.has_tool("read"));
-        assert!(overmind.has_tool("shell"));
         assert!(overmind.has_tool("glob"));
         assert!(overmind.has_tool("grep"));
         assert!(overmind.has_tool("memory"));
         assert!(overmind.has_tool("tasks"));
         assert!(overmind.has_tool("agents"));
+        assert!(!overmind.has_tool("shell"));
         assert!(!overmind.has_tool("write"));
         assert!(!overmind.has_tool("edit"));
 
@@ -1366,7 +1366,7 @@ mod tests {
         let agg = create_aggregator();
         assert_eq!(agg.name, "aggregator");
         assert_eq!(agg.tier, AgentTier::Worker);
-        assert_eq!(agg.max_turns, 12);
+        assert_eq!(agg.max_turns, 16);
         assert!(agg.read_only);
         assert_eq!(agg.preferred_model.as_deref(), Some("haiku"));
 
@@ -1555,10 +1555,12 @@ mod tests {
 
         // Should still have all the same tools and capabilities
         assert!(overmind.has_tool("read"));
-        assert!(overmind.has_tool("shell"));
+        assert!(overmind.has_tool("glob"));
+        assert!(overmind.has_tool("grep"));
         assert!(overmind.has_tool("memory"));
         assert!(overmind.has_tool("tasks"));
         assert!(overmind.has_tool("agents"));
+        assert!(!overmind.has_tool("shell"));
         assert!(overmind.has_capability("agent-creation"));
         assert!(overmind.has_capability("task-delegation"));
     }

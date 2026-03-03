@@ -32,6 +32,10 @@ pub struct EvolutionConfig {
     pub regression_threshold: f64,
     /// Whether to automatically revert on regression.
     pub auto_revert_enabled: bool,
+    /// Hours after which a Pending or InProgress refinement request is
+    /// considered stale and automatically expired to Failed.
+    /// Set to 0 to disable stale expiration.
+    pub stale_refinement_timeout_hours: i64,
 }
 
 impl Default for EvolutionConfig {
@@ -45,6 +49,7 @@ impl Default for EvolutionConfig {
             regression_min_tasks: 3,
             regression_threshold: 0.15, // 15% drop
             auto_revert_enabled: true,
+            stale_refinement_timeout_hours: 48,
         }
     }
 }
@@ -1232,6 +1237,7 @@ mod tests {
             refinement_threshold: 0.01,
             major_refinement_threshold: 0.01,
             major_refinement_min_tasks: 100,
+            stale_refinement_timeout_hours: 48,
         };
         let evolution = EvolutionLoop::new(config);
 
@@ -1285,6 +1291,7 @@ mod tests {
             refinement_threshold: 0.01,
             major_refinement_threshold: 0.01,
             major_refinement_min_tasks: 100,
+            stale_refinement_timeout_hours: 48,
         };
         let evolution = EvolutionLoop::new(config);
 
@@ -1340,6 +1347,7 @@ mod tests {
             refinement_threshold: 0.01,
             major_refinement_threshold: 0.01,
             major_refinement_min_tasks: 100,
+            stale_refinement_timeout_hours: 48,
         };
         let evolution = EvolutionLoop::new(config);
 
