@@ -27,3 +27,7 @@ target/
 **/*.rs.bk
 *.pdb
 .sqlx/
+
+# python used for swe benchmark
+venv
+*.pyc
