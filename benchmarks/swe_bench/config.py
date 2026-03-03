@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -11,6 +12,11 @@ class BenchmarkConfig:
     """Configuration for the SWE-bench benchmark runner."""
 
     abathur_bin: str = "abathur"
+
+    def __post_init__(self) -> None:
+        resolved = shutil.which(self.abathur_bin)
+        if resolved:
+            self.abathur_bin = resolved
     workspace_dir: Path = Path("./swe_bench_workspaces")
     predictions_path: Path = Path("./predictions.jsonl")
 
