@@ -1219,4 +1219,166 @@ mod tests {
             "exactly one RefinementRequest must be created after threshold is met"
         );
     }
+
+    #[tokio::test]
+    async fn test_regression_detection_triggers_on_rate_drop() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 3,
+            regression_min_tasks: 3,
+            regression_threshold: 0.15,
+            regression_detection_window_hours: 24,
+            auto_revert_enabled: false,
+            // Set low so LowSuccessRate/VeryLowSuccessRate don't fire before regression
+            refinement_threshold: 0.01,
+            major_refinement_threshold: 0.01,
+            major_refinement_min_tasks: 100,
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // v1: 5 successes → 100% rate
+        for _ in 0..5 {
+            evolution
+                .record_execution(make_execution("regress-agent", 1, TaskOutcome::Success))
+                .await;
+        }
+        // Evaluate to establish baseline (no trigger expected since rate is high)
+        let events = evolution.evaluate().await;
+        assert!(events.is_empty(), "v1 at 100% should not trigger anything");
+
+        // Switch to v2: 1 success + 3 failures → 25% rate (drop of 75%)
+        evolution
+            .record_execution(make_execution("regress-agent", 2, TaskOutcome::Success))
+            .await;
+        for _ in 0..3 {
+            evolution
+                .record_execution(make_execution("regress-agent", 2, TaskOutcome::Failure))
+                .await;
+        }
+
+        let events = evolution.evaluate().await;
+        let regression_event = events
+            .iter()
+            .find(|e| e.trigger == EvolutionTrigger::Regression);
+        assert!(
+            regression_event.is_some(),
+            "Should detect regression after version change with rate drop (75%) >= threshold (15%); events: {:?}",
+            events.iter().map(|e| &e.trigger).collect::<Vec<_>>()
+        );
+        // With auto_revert_enabled=false, action should be FlaggedForRefinement with Immediate severity
+        if let Some(ev) = regression_event {
+            assert!(
+                matches!(ev.action_taken, EvolutionAction::FlaggedForRefinement { severity: RefinementSeverity::Immediate }),
+                "Regression without auto-revert should flag for immediate refinement; got {:?}",
+                ev.action_taken,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auto_revert_when_regression_detected() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 3,
+            regression_min_tasks: 3,
+            regression_threshold: 0.15,
+            regression_detection_window_hours: 24,
+            auto_revert_enabled: true,
+            refinement_threshold: 0.01,
+            major_refinement_threshold: 0.01,
+            major_refinement_min_tasks: 100,
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // v1: 5 successes → 100% rate
+        for _ in 0..5 {
+            evolution
+                .record_execution(make_execution("revert-agent", 1, TaskOutcome::Success))
+                .await;
+        }
+        evolution.evaluate().await;
+
+        // Switch to v2: 1 success + 2 failures → 33% rate (drop of 67% from 100%)
+        evolution
+            .record_execution(make_execution("revert-agent", 2, TaskOutcome::Success))
+            .await;
+        for _ in 0..2 {
+            evolution
+                .record_execution(make_execution("revert-agent", 2, TaskOutcome::Failure))
+                .await;
+        }
+
+        let events = evolution.evaluate().await;
+        let revert_event = events
+            .iter()
+            .find(|e| matches!(e.action_taken, EvolutionAction::Reverted { .. }));
+        assert!(
+            revert_event.is_some(),
+            "Should auto-revert when regression detected and auto_revert_enabled=true; events: {:?}",
+            events.iter().map(|e| (&e.trigger, &e.action_taken)).collect::<Vec<_>>()
+        );
+        if let Some(ev) = revert_event {
+            match &ev.action_taken {
+                EvolutionAction::Reverted {
+                    from_version,
+                    to_version,
+                } => {
+                    assert_eq!(*from_version, 2, "Should revert FROM version 2");
+                    assert_eq!(*to_version, 1, "Should revert TO version 1");
+                }
+                other => panic!("Expected Reverted action, got {:?}", other),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_regression_window_expiry() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 3,
+            regression_min_tasks: 3,
+            regression_threshold: 0.15,
+            regression_detection_window_hours: 1, // 1-hour window (will be expired)
+            auto_revert_enabled: true,
+            refinement_threshold: 0.01,
+            major_refinement_threshold: 0.01,
+            major_refinement_min_tasks: 100,
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // v1: 5 successes
+        for _ in 0..5 {
+            evolution
+                .record_execution(make_execution("window-agent", 1, TaskOutcome::Success))
+                .await;
+        }
+        evolution.evaluate().await;
+
+        // Switch to v2 (this sets version_change_time to now)
+        evolution
+            .record_execution(make_execution("window-agent", 2, TaskOutcome::Failure))
+            .await;
+
+        // Manually backdate the version change time to >1 hour ago
+        {
+            let mut state = evolution.state.write().await;
+            if let Some(entry) = state.version_change_times.get_mut("window-agent") {
+                entry.1 = Utc::now() - Duration::hours(2);
+            }
+        }
+
+        // Record more failures to meet regression_min_tasks
+        for _ in 0..2 {
+            evolution
+                .record_execution(make_execution("window-agent", 2, TaskOutcome::Failure))
+                .await;
+        }
+
+        let events = evolution.evaluate().await;
+        let has_regression = events
+            .iter()
+            .any(|e| e.trigger == EvolutionTrigger::Regression);
+        assert!(
+            !has_regression,
+            "Should NOT detect regression outside the detection window; events: {:?}",
+            events.iter().map(|e| &e.trigger).collect::<Vec<_>>()
+        );
+    }
 }

@@ -1083,14 +1083,16 @@ async fn test_phase_failure_transitions_to_failed() {
     // Advance to first phase and fan_out to create subtask
     let subtask_id = advance_and_fan_out(&engine, task.id).await;
 
-    // Fail the subtask
+    // Fail the subtask with max_retries = 0 so it cannot be retried
     let mut sub = repo.get(subtask_id).await.unwrap().unwrap();
+    sub.max_retries = 0;
     let _ = sub.transition_to(TaskStatus::Running);
     repo.update(&sub).await.unwrap();
     let _ = sub.transition_to(TaskStatus::Failed);
     repo.update(&sub).await.unwrap();
 
-    // handle_phase_complete should transition to Failed (fan_out failure path)
+    // handle_phase_complete should transition to Failed (fan_out failure path,
+    // subtask is not retryable so retry helper returns false)
     engine
         .handle_phase_complete(task.id, subtask_id)
         .await
@@ -1104,6 +1106,11 @@ async fn test_phase_failure_transitions_to_failed() {
             assert!(
                 error.contains("research"),
                 "Error should mention the failed phase name, got: {}",
+                error
+            );
+            assert!(
+                error.contains("0 retries"),
+                "Error should mention 0 retries (non-retryable subtask), got: {}",
                 error
             );
         }

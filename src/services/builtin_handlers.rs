@@ -4647,13 +4647,15 @@ impl<M: MemoryRepository + 'static> EventHandler for DirectModeExecutionMemoryHa
 // TaskOutcomeMemoryHandler
 // ============================================================================
 
-/// When any task completes (via TaskCompleted or TaskCompletedWithResult),
-/// store an episodic memory entry so that future tasks, agents, and learning
-/// loops can reason about historical outcomes.
+/// When any task completes or fails (via TaskCompleted, TaskCompletedWithResult,
+/// or TaskFailed), store an episodic memory entry so that future tasks, agents,
+/// and learning loops can reason about historical outcomes.
 ///
 /// This fills the event-chain-integrity gap where orchestrator direct-mode
 /// task completions emit `TaskCompleted` but never store episodic memories.
 /// Convergent tasks emit `TaskCompletedWithResult`, which is also handled.
+/// Failed tasks emit `TaskFailed`, which is captured to satisfy the
+/// failure-capture constraint: every task failure must produce a memory event.
 ///
 /// Idempotent: uses `task-outcome:{task_id}` as an idempotency key. If a
 /// task somehow emits both `TaskCompleted` and `TaskCompletedWithResult`, the
@@ -4682,6 +4684,7 @@ impl<T: TaskRepository + 'static, M: MemoryRepository + 'static> EventHandler
                 .payload_types(vec![
                     "TaskCompleted".to_string(),
                     "TaskCompletedWithResult".to_string(),
+                    "TaskFailed".to_string(),
                 ]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
@@ -4692,6 +4695,7 @@ impl<T: TaskRepository + 'static, M: MemoryRepository + 'static> EventHandler
         let task_id = match &event.payload {
             EventPayload::TaskCompleted { task_id, .. } => *task_id,
             EventPayload::TaskCompletedWithResult { task_id, .. } => *task_id,
+            EventPayload::TaskFailed { task_id, .. } => *task_id,
             _ => return Ok(Reaction::None),
         };
 
@@ -4741,6 +4745,13 @@ impl<T: TaskRepository + 'static, M: MemoryRepository + 'static> EventHandler
                  - agent_type: {agent_type}",
                 title = task.title,
             )
+        };
+
+        // Enrich content with error details when the event carries them
+        let content = if let EventPayload::TaskFailed { error, retry_count, .. } = &event.payload {
+            format!("{content}\n - error: {error}\n - retry_count: {retry_count}")
+        } else {
+            content
         };
 
         // Choose memory type based on outcome
@@ -6544,9 +6555,10 @@ mod tests {
             task_id: Some(task.id),
             correlation_id: None,
             source_process_id: None,
-            payload: EventPayload::TaskCompleted {
+            payload: EventPayload::TaskFailed {
                 task_id: task.id,
-                tokens_used: 200,
+                error: "agent exhausted turns".to_string(),
+                retry_count: 0,
             },
         };
 
@@ -6573,6 +6585,60 @@ mod tests {
         assert!(stored.is_some(), "Memory should have been stored for failed task");
         let stored = stored.unwrap();
         assert!(stored.content.contains("failed"));
+    }
+
+    #[tokio::test]
+    async fn test_task_outcome_memory_handler_captures_task_failed_error_details() {
+        let (task_repo, memory_repo) = setup_task_and_memory_repos().await;
+        let handler = TaskOutcomeMemoryHandler::new(task_repo.clone(), memory_repo.clone());
+
+        let mut task = Task::new("Task with detailed failure");
+        task.agent_type = Some("implementer".to_string());
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task.transition_to(TaskStatus::Failed).unwrap();
+        task_repo.create(&task).await.unwrap();
+
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Error,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(task.id),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::TaskFailed {
+                task_id: task.id,
+                error: "compilation failed: unresolved import".to_string(),
+                retry_count: 2,
+            },
+        };
+
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                assert_eq!(events.len(), 1);
+                match &events[0].payload {
+                    EventPayload::MemoryStored { memory_type, .. } => {
+                        assert_eq!(memory_type, "error");
+                    }
+                    other => panic!("Expected MemoryStored, got {:?}", other),
+                }
+            }
+            Reaction::None => panic!("Expected EmitEvents, got Reaction::None"),
+        }
+
+        let key = format!("task-outcome:{}", task.id);
+        let stored = memory_repo.get_by_key(&key, "task-outcomes").await.unwrap();
+        assert!(stored.is_some(), "Memory should have been stored for failed task");
+        let stored = stored.unwrap();
+        assert!(stored.content.contains("failed"), "Content should indicate failure");
+        assert!(stored.content.contains("compilation failed"), "Content should include error message");
+        assert!(stored.content.contains("retry_count: 2"), "Content should include retry count");
     }
 
     #[tokio::test]
