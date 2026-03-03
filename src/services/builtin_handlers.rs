@@ -9196,3 +9196,117 @@ mod obstacle_escalation_tests {
         assert!(matches!(reaction, Reaction::None), "Should ignore non-TaskFailed events");
     }
 }
+
+#[cfg(test)]
+mod goal_stagnation_detector_tests {
+    use super::*;
+    use crate::adapters::sqlite::{
+        create_migrated_test_pool, goal_repository::SqliteGoalRepository,
+    };
+    use crate::domain::models::GoalPriority;
+    use std::sync::Arc;
+
+    async fn setup_goal_repo() -> Arc<SqliteGoalRepository> {
+        let pool = create_migrated_test_pool().await.unwrap();
+        Arc::new(SqliteGoalRepository::new(pool))
+    }
+
+    fn make_stall_check_event() -> UnifiedEvent {
+        UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "system-stall-check".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_no_goals_returns_none() {
+        let repo = setup_goal_repo().await;
+        let handler = GoalStagnationDetectorHandler::new(repo, 3600);
+        let event = make_stall_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::None), "No goals should produce Reaction::None");
+    }
+
+    #[tokio::test]
+    async fn test_ignores_non_stall_check_events() {
+        let repo = setup_goal_repo().await;
+        let handler = GoalStagnationDetectorHandler::new(repo, 3600);
+
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "some-other-schedule".to_string(),
+            },
+        };
+
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::None), "Should ignore non-stall-check events");
+    }
+
+    #[tokio::test]
+    async fn test_stagnant_goal_emits_escalation() {
+        let repo = setup_goal_repo().await;
+        // Set a very short stall threshold (1 second) so our goal is immediately stagnant
+        let handler = GoalStagnationDetectorHandler::new(repo.clone(), 1);
+
+        let mut goal = Goal::new("Stagnant Goal", "Has not been checked")
+            .with_priority(GoalPriority::High);
+        goal.created_at = chrono::Utc::now() - chrono::Duration::seconds(100);
+        repo.create(&goal).await.unwrap();
+
+        // Wait a tiny bit to ensure the threshold is exceeded
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let event = make_stall_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                assert_eq!(events.len(), 1, "Should emit exactly one escalation event");
+                assert!(matches!(events[0].payload, EventPayload::HumanEscalationRequired { .. }));
+            }
+            Reaction::None => panic!("Expected escalation event for stagnant goal"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_new_goal_within_grace_period_not_alerted() {
+        let repo = setup_goal_repo().await;
+        // Stall threshold = 1 hour. New goal just created should be in grace period.
+        let handler = GoalStagnationDetectorHandler::new(repo.clone(), 3600);
+
+        let goal = Goal::new("Fresh Goal", "Just created")
+            .with_priority(GoalPriority::Normal);
+        repo.create(&goal).await.unwrap();
+
+        let event = make_stall_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::None), "New goal within grace period should not trigger alert");
+    }
+}

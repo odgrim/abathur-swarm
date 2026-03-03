@@ -372,7 +372,8 @@ impl DagRestructureService {
                         context.failed_task.description,
                         context.failure_reason
                     ),
-                    agent_type: Some("problem-solver".to_string()),
+                    agent_type: non_orchestrator_agent_type(&context.failed_task.agent_type)
+                        .or_else(|| Some("problem-solver".to_string())),
                     depends_on: vec![],
                     priority: TaskPriorityModifier::Higher,
                 }],
@@ -834,5 +835,105 @@ mod tests {
 
         service.clear_state(task_id);
         assert_eq!(service.attempt_count(task_id), 0);
+    }
+
+    #[tokio::test]
+    async fn test_alternative_path_preserves_agent_type() {
+        let mut service = DagRestructureService::with_defaults();
+
+        // Task with a specific non-orchestrator agent type
+        let mut failed_task = create_test_task();
+        failed_task.agent_type = Some("rust-implementer".to_string());
+        let task_id = failed_task.id;
+
+        // Pre-populate state so internal attempt counter is at 1 (next call = attempt 2)
+        service.state.insert(
+            task_id,
+            RestructureState {
+                attempts: 1,
+                last_attempt: Some(Instant::now()),
+                decisions: vec![],
+            },
+        );
+
+        let context = RestructureContext {
+            goal: Some(create_test_goal()),
+            failed_task,
+            failure_reason: "Test failure".to_string(),
+            previous_attempts: vec![FailedAttempt {
+                timestamp: chrono::Utc::now(),
+                agent_type: "rust-implementer".to_string(),
+                error: "First attempt failed".to_string(),
+                turns_used: 25,
+            }],
+            related_failures: vec![],
+            available_approaches: vec![],
+            attempt_number: 2,
+            time_since_last: None,
+        };
+
+        let decision = service.analyze_and_decide(&context).await.unwrap();
+
+        match decision {
+            RestructureDecision::AlternativePath { new_tasks, .. } => {
+                assert_eq!(new_tasks.len(), 1);
+                assert_eq!(
+                    new_tasks[0].agent_type,
+                    Some("rust-implementer".to_string()),
+                    "AlternativePath should preserve the original agent type"
+                );
+            }
+            _ => panic!("Expected AlternativePath decision for attempt 2"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_alternative_path_falls_back_for_orchestrator() {
+        let mut service = DagRestructureService::with_defaults();
+
+        // Task with orchestrator agent type
+        let mut failed_task = create_test_task();
+        failed_task.agent_type = Some("overmind".to_string());
+        let task_id = failed_task.id;
+
+        // Pre-populate state so internal attempt counter is at 1 (next call = attempt 2)
+        service.state.insert(
+            task_id,
+            RestructureState {
+                attempts: 1,
+                last_attempt: Some(Instant::now()),
+                decisions: vec![],
+            },
+        );
+
+        let context = RestructureContext {
+            goal: Some(create_test_goal()),
+            failed_task,
+            failure_reason: "error_max_turns".to_string(),
+            previous_attempts: vec![FailedAttempt {
+                timestamp: chrono::Utc::now(),
+                agent_type: "overmind".to_string(),
+                error: "First attempt failed".to_string(),
+                turns_used: 50,
+            }],
+            related_failures: vec![],
+            available_approaches: vec![],
+            attempt_number: 2,
+            time_since_last: None,
+        };
+
+        let decision = service.analyze_and_decide(&context).await.unwrap();
+
+        match decision {
+            RestructureDecision::AlternativePath { new_tasks, .. } => {
+                assert_eq!(new_tasks.len(), 1);
+                assert_eq!(
+                    new_tasks[0].agent_type,
+                    Some("problem-solver".to_string()),
+                    "AlternativePath should fall back to problem-solver for orchestrator agent types"
+                );
+            }
+            _ => panic!("Expected AlternativePath decision for attempt 2"),
+        }
     }
 }

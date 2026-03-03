@@ -641,7 +641,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             // Use agent template's max_turns if explicitly set (non-zero),
             // then role-aware default, then orchestrator config default.
             let mut max_turns = if template_max_turns > 0 {
-                template_max_turns
+                template_max_turns.max(role_max_turns)
             } else {
                 role_max_turns
             };
@@ -1689,5 +1689,37 @@ mod tests {
         assert!(output.contains("Second memory content."), "Second content should appear");
         assert!(output.contains("0.90"), "First score should appear");
         assert!(output.contains("0.70"), "Second score should appear");
+    }
+
+    #[test]
+    fn test_max_turns_floor_enforcement() {
+        // When template sets max_turns lower than role default, role default should win
+        let template_max_turns: u32 = 25;
+        let role_max_turns: u32 = 50;
+
+        let max_turns = if template_max_turns > 0 {
+            template_max_turns.max(role_max_turns)
+        } else {
+            role_max_turns
+        };
+        assert_eq!(max_turns, 50, "role floor should override lower template value");
+
+        // When template is higher than role default, template should win
+        let template_high: u32 = 75;
+        let max_turns_high = if template_high > 0 {
+            template_high.max(role_max_turns)
+        } else {
+            role_max_turns
+        };
+        assert_eq!(max_turns_high, 75, "template should win when higher than role floor");
+
+        // When template is zero (unset), role default should be used
+        let template_zero: u32 = 0;
+        let max_turns_zero = if template_zero > 0 {
+            template_zero.max(role_max_turns)
+        } else {
+            role_max_turns
+        };
+        assert_eq!(max_turns_zero, 50, "role default should be used when template is zero");
     }
 }
