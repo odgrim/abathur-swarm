@@ -31,3 +31,4 @@ target/
 # python used for swe benchmark
 venv
 *.pyc
+swe_bench_workspaces/

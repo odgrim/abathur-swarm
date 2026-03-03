@@ -142,7 +142,7 @@ def _setup_worktree(
 
         # Create worktree
         safe_id = instance.instance_id.replace("/", "_")
-        worktree_path = config.workspace_dir / "instances" / safe_id
+        worktree_path = (config.workspace_dir / "instances" / safe_id).resolve()
         if worktree_path.exists():
             # Remove stale worktree
             subprocess.run(
