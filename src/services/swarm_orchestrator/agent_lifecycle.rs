@@ -398,9 +398,35 @@ where
         )
     }
 
+    /// Strip duplicate "## Refinement Notes" blocks from a system prompt,
+    /// keeping only the last one. This cleans up bloated templates that
+    /// accumulated duplicates before the `heuristic_refinement_prompt`
+    /// dedup fix was applied (e.g. convergence-gap-researcher v17 had 16
+    /// duplicate blocks in the DB).
+    pub(super) fn sanitize_refinement_notes(prompt: &str) -> String {
+        let marker = "\n\n## Refinement Notes";
+        let first = match prompt.find(marker) {
+            Some(idx) => idx,
+            None => return prompt.to_string(),
+        };
+
+        // Find the LAST occurrence of the marker
+        let last = prompt.rfind(marker).unwrap(); // safe: we know at least one exists
+
+        if first == last {
+            // Only one block — nothing to deduplicate
+            return prompt.to_string();
+        }
+
+        // Keep everything before the first marker + the last block
+        let base = &prompt[..first];
+        let last_block = &prompt[last..];
+        format!("{}{}", base, last_block)
+    }
+
     /// Get the system prompt for an agent type, including goal context and API docs.
     pub(super) async fn get_agent_system_prompt(&self, agent_type: &str) -> String {
-        let base_prompt = match self.agent_repo.get_template_by_name(agent_type).await {
+        let raw_prompt = match self.agent_repo.get_template_by_name(agent_type).await {
             Ok(Some(template)) => template.system_prompt.clone(),
             _ => {
                 // Default system prompt if agent template not found
@@ -412,6 +438,11 @@ where
                 )
             }
         };
+
+        // Sanitize any duplicate "## Refinement Notes" blocks that accumulated
+        // in the DB before the heuristic_refinement_prompt dedup fix.
+        // Keep only the LAST block to avoid wasting context window tokens.
+        let base_prompt = Self::sanitize_refinement_notes(&raw_prompt);
 
         // Append git workflow instructions
         let git_instructions = "\n\n## Git Workflow\n\
@@ -579,5 +610,54 @@ mod tests {
         assert!(result.starts_with("You are a research agent."));
         assert!(result.contains("## Refinement Notes (v2)"));
         assert!(result.contains("40% success rate"));
+    }
+
+    #[test]
+    fn test_sanitize_refinement_notes_no_notes() {
+        let prompt = "You are a helpful agent.\n\nDo good work.";
+        let result = TestOrchestrator::sanitize_refinement_notes(prompt);
+        assert_eq!(result, prompt);
+    }
+
+    #[test]
+    fn test_sanitize_refinement_notes_single_block() {
+        let prompt = "You are a helpful agent.\n\n## Refinement Notes (v2)\n\nSome notes.";
+        let result = TestOrchestrator::sanitize_refinement_notes(prompt);
+        assert_eq!(result, prompt);
+        assert_eq!(result.matches("## Refinement Notes").count(), 1);
+    }
+
+    #[test]
+    fn test_sanitize_refinement_notes_duplicate_blocks() {
+        let prompt = "You are a helpful agent.\n\n## Refinement Notes (v2)\n\nOld notes.\n\n## Refinement Notes (v3)\n\nNew notes.";
+        let result = TestOrchestrator::sanitize_refinement_notes(prompt);
+        assert_eq!(result.matches("## Refinement Notes").count(), 1);
+        assert!(result.contains("## Refinement Notes (v3)"));
+        assert!(!result.contains("Old notes."));
+        assert!(result.contains("New notes."));
+        assert!(result.starts_with("You are a helpful agent."));
+    }
+
+    #[test]
+    fn test_sanitize_refinement_notes_16_duplicate_blocks() {
+        // Simulates the convergence-gap-researcher v17 bloat scenario
+        let mut prompt = "You are a research agent.".to_string();
+        for i in 0..16 {
+            prompt.push_str(&format!(
+                "\n\n## Refinement Notes (v{})\n\nBlock {} content.",
+                i + 2,
+                i
+            ));
+        }
+        assert_eq!(prompt.matches("## Refinement Notes").count(), 16);
+
+        let result = TestOrchestrator::sanitize_refinement_notes(&prompt);
+        assert_eq!(result.matches("## Refinement Notes").count(), 1);
+        assert!(result.contains("## Refinement Notes (v17)"));
+        assert!(result.contains("Block 15 content."));
+        assert!(!result.contains("Block 0 content."));
+        assert!(result.starts_with("You are a research agent."));
+        // Verify significant size reduction
+        assert!(result.len() < prompt.len() / 2);
     }
 }

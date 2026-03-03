@@ -68,15 +68,30 @@ where
                 }
             }
 
-            // Check if we haven't already created a diagnostic task
+            // Check if we haven't already created a diagnostic task.
+            // We must check ALL statuses (including Complete and Failed) to prevent
+            // re-spawning diagnostics for the same permanently-failed task on every
+            // scheduler tick after a diagnostic finishes.
             let id_prefix = &task.id.to_string()[..8];
-            let diagnostic_exists = self.task_repo
-                .list_by_status(TaskStatus::Ready)
-                .await?
-                .iter()
-                .chain(self.task_repo.list_by_status(TaskStatus::Pending).await?.iter())
-                .chain(self.task_repo.list_by_status(TaskStatus::Running).await?.iter())
-                .any(|t| t.title.contains("Diagnostic:") && t.title.contains(id_prefix));
+            let statuses_to_check = [
+                TaskStatus::Ready,
+                TaskStatus::Pending,
+                TaskStatus::Running,
+                TaskStatus::Complete,
+                TaskStatus::Failed,
+            ];
+            let mut diagnostic_exists = false;
+            for status in &statuses_to_check {
+                if self.task_repo
+                    .list_by_status(status.clone())
+                    .await?
+                    .iter()
+                    .any(|t| t.title.contains("Diagnostic:") && t.title.contains(id_prefix))
+                {
+                    diagnostic_exists = true;
+                    break;
+                }
+            }
 
             if !diagnostic_exists
                 && let Err(e) = self.spawn_specialist_for_failure(task, event_tx).await {
@@ -411,7 +426,7 @@ where
                     agent_type: Some("diagnostic-analyst".to_string()),
                     depends_on: vec![],
                     context: Box::new(None),
-                    idempotency_key: None,
+                    idempotency_key: Some(format!("diagnostic:{}", failed_task.id)),
                     source: TaskSource::System,
                     deadline: None,
                     task_type: None,
