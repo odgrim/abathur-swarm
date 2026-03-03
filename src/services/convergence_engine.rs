@@ -879,13 +879,21 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             ),
         });
 
-        // In a real implementation, this would pause at an InterventionPoint
-        // and wait for user approval. For now, we auto-approve if the
-        // trajectory is approaching a fixed point.
-        let approved = matches!(
-            &trajectory.attractor_state.classification,
-            AttractorType::FixedPoint { .. }
-        );
+        // Auto-approve extensions for trajectories showing progress.
+        // The should_request_extension() gate already verified positive
+        // convergence delta, so we broaden beyond just FixedPoint.
+        let approved = match &trajectory.attractor_state.classification {
+            // Converging toward solution — always extend
+            AttractorType::FixedPoint { .. } => true,
+            // Not enough data for full classification but trending positive — extend
+            AttractorType::Indeterminate { tendency } => {
+                matches!(tendency, ConvergenceTendency::Improving)
+            }
+            // Positive delta triggered the request, so plateau is breaking — extend
+            AttractorType::Plateau { .. } => true,
+            // Oscillating or diverging — extension won't help
+            AttractorType::LimitCycle { .. } | AttractorType::Divergent { .. } => false,
+        };
 
         if approved {
             trajectory.budget.extend(additional_tokens, additional_iterations);
@@ -898,7 +906,10 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         } else {
             self.emit_event(ConvergenceEvent::BudgetExtensionDenied {
                 trajectory_id: trajectory.id.to_string(),
-                reason: "Trajectory is not approaching a fixed point".to_string(),
+                reason: format!(
+                    "Trajectory attractor is {} — only FixedPoint, Improving Indeterminate, or Plateau qualify for extension",
+                    self.attractor_type_name(&trajectory.attractor_state.classification),
+                ),
             });
             Ok(false)
         }
@@ -3735,6 +3746,100 @@ mod tests {
         let result = engine.request_extension(&mut trajectory).await.unwrap();
         assert!(!result, "Extension should be denied for limit cycle");
         assert_eq!(trajectory.budget.extensions_requested, 1);
+        assert_eq!(trajectory.budget.extensions_granted, 0);
+    }
+
+    #[tokio::test]
+    async fn test_request_extension_granted_for_indeterminate_improving() {
+        let engine = test_engine();
+        let mut trajectory = test_trajectory();
+
+        trajectory.attractor_state = AttractorState {
+            classification: AttractorType::Indeterminate {
+                tendency: ConvergenceTendency::Improving,
+            },
+            confidence: 0.4,
+            detected_at: None,
+            evidence: AttractorEvidence {
+                recent_deltas: vec![0.05],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        };
+
+        let result = engine.request_extension(&mut trajectory).await.unwrap();
+        assert!(result, "Extension should be granted for Indeterminate+Improving");
+        assert_eq!(trajectory.budget.extensions_granted, 1);
+    }
+
+    #[tokio::test]
+    async fn test_request_extension_denied_for_indeterminate_declining() {
+        let engine = test_engine();
+        let mut trajectory = test_trajectory();
+
+        trajectory.attractor_state = AttractorState {
+            classification: AttractorType::Indeterminate {
+                tendency: ConvergenceTendency::Declining,
+            },
+            confidence: 0.4,
+            detected_at: None,
+            evidence: AttractorEvidence {
+                recent_deltas: vec![-0.02],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        };
+
+        let result = engine.request_extension(&mut trajectory).await.unwrap();
+        assert!(!result, "Extension should be denied for Indeterminate+Declining");
+        assert_eq!(trajectory.budget.extensions_granted, 0);
+    }
+
+    #[tokio::test]
+    async fn test_request_extension_granted_for_plateau() {
+        let engine = test_engine();
+        let mut trajectory = test_trajectory();
+
+        trajectory.attractor_state = AttractorState {
+            classification: AttractorType::Plateau {
+                stall_duration: 5,
+                plateau_level: 0.6,
+            },
+            confidence: 0.7,
+            detected_at: None,
+            evidence: AttractorEvidence {
+                recent_deltas: vec![0.0, 0.0, 0.01],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        };
+
+        let result = engine.request_extension(&mut trajectory).await.unwrap();
+        assert!(result, "Extension should be granted for Plateau");
+        assert_eq!(trajectory.budget.extensions_granted, 1);
+    }
+
+    #[tokio::test]
+    async fn test_request_extension_denied_for_divergent() {
+        let engine = test_engine();
+        let mut trajectory = test_trajectory();
+
+        trajectory.attractor_state = AttractorState {
+            classification: AttractorType::Divergent {
+                divergence_rate: 0.15,
+                probable_cause: DivergenceCause::AccumulatedRegression,
+            },
+            confidence: 0.9,
+            detected_at: None,
+            evidence: AttractorEvidence {
+                recent_deltas: vec![-0.1, -0.12],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        };
+
+        let result = engine.request_extension(&mut trajectory).await.unwrap();
+        assert!(!result, "Extension should be denied for Divergent");
         assert_eq!(trajectory.budget.extensions_granted, 0);
     }
 
