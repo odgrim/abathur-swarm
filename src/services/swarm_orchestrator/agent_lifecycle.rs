@@ -368,8 +368,18 @@ where
         Ok(())
     }
 
-    /// Generate a heuristic-based refined prompt by appending failure context notes.
+    /// Generate a heuristic-based refined prompt by replacing any existing
+    /// refinement notes section with an updated one. Previous versions of this
+    /// function appended without stripping, causing unbounded prompt growth
+    /// (e.g. convergence-gap-researcher accumulated 16 duplicate blocks).
     pub(super) fn heuristic_refinement_prompt(current_prompt: &str, request: &RefinementRequest) -> String {
+        // Strip any existing "## Refinement Notes" sections before appending.
+        // This prevents unbounded prompt growth from repeated refinement cycles.
+        let base_prompt = if let Some(idx) = current_prompt.find("\n\n## Refinement Notes") {
+            &current_prompt[..idx]
+        } else {
+            current_prompt
+        };
         format!(
             "{}\n\n## Refinement Notes (v{})\n\n\
             Based on {} recent executions with {:.0}% success rate.\n\
@@ -379,7 +389,7 @@ where
             - Careful validation of inputs and outputs\n\
             - Handling edge cases gracefully\n\
             - Clear error reporting for debugging",
-            current_prompt,
+            base_prompt,
             request.template_version + 1,
             request.stats.total_tasks,
             request.stats.success_rate * 100.0,
@@ -499,5 +509,75 @@ where
 
         context.push_str("Ensure your implementation satisfies all constraints and contributes to these goals.\n");
         context
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::evolution_loop::{
+        EvolutionTrigger, RefinementRequest, RefinementSeverity, RefinementStatus,
+        TemplateStats,
+    };
+
+    type TestOrchestrator = SwarmOrchestrator<
+        crate::adapters::sqlite::SqliteGoalRepository,
+        crate::adapters::sqlite::SqliteTaskRepository,
+        crate::adapters::sqlite::SqliteWorktreeRepository,
+        crate::adapters::sqlite::SqliteAgentRepository,
+        crate::adapters::sqlite::SqliteMemoryRepository,
+    >;
+
+    fn make_refinement_request(version: u32, total_tasks: usize, success_rate: f64) -> RefinementRequest {
+        let mut stats = TemplateStats::new("test-agent".to_string(), version);
+        stats.total_tasks = total_tasks;
+        stats.success_rate = success_rate;
+
+        RefinementRequest {
+            id: Uuid::new_v4(),
+            template_name: "test-agent".to_string(),
+            template_version: version,
+            trigger: EvolutionTrigger::LowSuccessRate,
+            severity: RefinementSeverity::Minor,
+            stats,
+            failed_task_ids: vec![Uuid::new_v4()],
+            status: RefinementStatus::Pending,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_heuristic_refinement_replaces_existing_notes() {
+        let base = "You are a helpful agent.\n\nDo good work.";
+        let req1 = make_refinement_request(1, 5, 0.40);
+
+        // First refinement appends notes
+        let after_first = TestOrchestrator::heuristic_refinement_prompt(base, &req1);
+        assert!(after_first.contains("## Refinement Notes (v2)"));
+        assert!(after_first.starts_with("You are a helpful agent."));
+
+        // Second refinement should REPLACE, not append
+        let req2 = make_refinement_request(2, 10, 0.30);
+        let after_second = TestOrchestrator::heuristic_refinement_prompt(&after_first, &req2);
+
+        // Should have exactly ONE refinement notes section (v3), not two
+        let count = after_second.matches("## Refinement Notes").count();
+        assert_eq!(count, 1, "Expected exactly 1 refinement notes section, got {}", count);
+        assert!(after_second.contains("## Refinement Notes (v3)"));
+        assert!(!after_second.contains("## Refinement Notes (v2)"));
+        // Base prompt should be preserved
+        assert!(after_second.starts_with("You are a helpful agent."));
+    }
+
+    #[test]
+    fn test_heuristic_refinement_on_clean_prompt() {
+        let base = "You are a research agent.";
+        let req = make_refinement_request(1, 5, 0.40);
+
+        let result = TestOrchestrator::heuristic_refinement_prompt(base, &req);
+
+        assert!(result.starts_with("You are a research agent."));
+        assert!(result.contains("## Refinement Notes (v2)"));
+        assert!(result.contains("40% success rate"));
     }
 }
