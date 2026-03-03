@@ -17,6 +17,10 @@ class BenchmarkConfig:
         resolved = shutil.which(self.abathur_bin)
         if resolved:
             self.abathur_bin = resolved
+        elif self.abathur_bin == "abathur":
+            cargo_bin = Path.home() / ".cargo" / "bin" / "abathur"
+            if cargo_bin.is_file():
+                self.abathur_bin = str(cargo_bin)
     workspace_dir: Path = Path("./swe_bench_workspaces")
     predictions_path: Path = Path("./predictions.jsonl")
 
@@ -28,7 +32,7 @@ class BenchmarkConfig:
     instance_timeout_secs: int = 600
     poll_interval_secs: int = 5
 
-    max_agents: int = 1
+    max_agents: int = 6
     execution_mode: str = "direct"
 
     cleanup_on_success: bool = True
