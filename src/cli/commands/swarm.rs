@@ -615,6 +615,7 @@ async fn run_swarm_foreground(
         all_workflows,
         dangerously_skip_permissions,
         polling: app_config.polling,
+        use_worktrees: app_config.worktrees.enabled,
         ..Default::default()
     };
 

@@ -489,7 +489,19 @@ where
         task_id: Uuid,
         workspace_kind: WorkspaceKind,
     ) -> Option<String> {
-        match workspace_kind {
+        // When worktrees are disabled globally, downgrade Worktree requests
+        // so agents work directly in the swarm's working directory.
+        let effective_kind = if !self.config.use_worktrees && workspace_kind == WorkspaceKind::Worktree {
+            tracing::info!(
+                "Worktrees disabled — task {} will use swarm working directory",
+                task_id
+            );
+            WorkspaceKind::None
+        } else {
+            workspace_kind
+        };
+
+        match effective_kind {
             WorkspaceKind::Worktree => {
                 match self.create_worktree_for_task(task_id).await {
                     Ok(path) => Some(path),

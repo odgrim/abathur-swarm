@@ -378,7 +378,10 @@ def _capture_patch(worktree_path: Path, base_commit: str) -> str:
         capture_output=True,
     )
     result = subprocess.run(
-        ["git", "diff", "--cached", base_commit],
+        [
+            "git", "diff", "--cached", base_commit,
+            "--", ".", ":!.claude/", ":!abathur.toml", ":!abathur.db",
+        ],
         cwd=worktree_path,
         capture_output=True,
         text=True,
