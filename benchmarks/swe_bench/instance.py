@@ -48,6 +48,7 @@ def run_instance(instance: SWEBenchInstance, config: BenchmarkConfig) -> Instanc
     """Execute the full lifecycle for one SWE-bench instance."""
     start = time.monotonic()
     worktree_path: Path | None = None
+    status = "error"
 
     try:
         # 1. Repo setup: bare clone cache + worktree
@@ -84,10 +85,11 @@ def run_instance(instance: SWEBenchInstance, config: BenchmarkConfig) -> Instanc
             error=str(exc),
         )
     finally:
-        # 8. Cleanup worktree
+        # 8. Cleanup worktree (only on success, preserve failures for debugging)
         if worktree_path is not None:
             should_cleanup = (
-                config.cleanup_on_success or config.cleanup_on_failure
+                (status == "complete" and config.cleanup_on_success)
+                or (status != "complete" and config.cleanup_on_failure)
             )
             if should_cleanup:
                 _cleanup_worktree(worktree_path, instance)
@@ -180,6 +182,20 @@ def _setup_worktree(
             raise RuntimeError(
                 f"git worktree add failed (exit {result.returncode}): "
                 f"{result.stderr.strip()}"
+            )
+
+        # Verify the worktree is at the expected commit
+        verify = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=worktree_path,
+            capture_output=True,
+            text=True,
+        )
+        actual_head = verify.stdout.strip()
+        if not actual_head.startswith(instance.base_commit[:12]):
+            raise RuntimeError(
+                f"Worktree HEAD mismatch: expected {instance.base_commit[:12]}, "
+                f"got {actual_head[:12]}"
             )
 
     return worktree_path

@@ -58,8 +58,8 @@ def parse_args(argv: list[str] | None = None) -> tuple[BenchmarkConfig, bool]:
     parser.add_argument(
         "--max-agents",
         type=int,
-        default=1,
-        help="Max concurrent agents per instance (default: 1)",
+        default=6,
+        help="Max concurrent agents per instance (default: 6)",
     )
     parser.add_argument(
         "--execution-mode",
