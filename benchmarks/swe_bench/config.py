@@ -29,7 +29,7 @@ class BenchmarkConfig:
     instance_ids: list[str] = field(default_factory=list)
 
     max_workers: int = 1
-    instance_timeout_secs: int = 600
+    instance_timeout_secs: int = 1200
     poll_interval_secs: int = 5
 
     max_agents: int = 6

@@ -52,8 +52,8 @@ def parse_args(argv: list[str] | None = None) -> tuple[BenchmarkConfig, bool]:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=600,
-        help="Per-instance timeout in seconds (default: 600)",
+        default=1200,
+        help="Per-instance timeout in seconds (default: 1200)",
     )
     parser.add_argument(
         "--max-agents",
@@ -130,6 +130,16 @@ def _process_instance(
     instance_data: dict, config: BenchmarkConfig
 ) -> InstanceResult:
     """Wrapper for ProcessPoolExecutor — reconstructs the instance from dict."""
+    import logging as _logging
+
+    # Re-init logging in the child process (ProcessPoolExecutor forks)
+    _logging.basicConfig(
+        level=_logging.DEBUG if config.verbose else _logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+        force=True,
+    )
+
     from .dataset import SWEBenchInstance
 
     instance = SWEBenchInstance(**instance_data)

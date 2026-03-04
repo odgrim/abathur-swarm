@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
 import subprocess
@@ -9,23 +11,25 @@ import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
 
 from .config import BenchmarkConfig
 from .dataset import SWEBenchInstance
 
 log = logging.getLogger(__name__)
 
-# Per-repo locks to serialize git worktree operations (not concurrent-safe).
-_repo_locks: dict[str, Lock] = {}
-_repo_locks_lock = Lock()
 
-
-def _get_repo_lock(repo: str) -> Lock:
-    with _repo_locks_lock:
-        if repo not in _repo_locks:
-            _repo_locks[repo] = Lock()
-        return _repo_locks[repo]
+@contextlib.contextmanager
+def _repo_filelock(repo: str, workspace_dir: Path):
+    """Cross-process file lock for serializing git operations per repo."""
+    lock_dir = workspace_dir / ".locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = lock_dir / f"{repo.replace('/', '__')}.lock"
+    with open(lock_file, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 @dataclass
@@ -97,9 +101,7 @@ def _setup_worktree(
     cache_dir.mkdir(parents=True, exist_ok=True)
     bare_path = cache_dir / f"{repo_slug}.git"
 
-    repo_lock = _get_repo_lock(instance.repo)
-
-    with repo_lock:
+    with _repo_filelock(instance.repo, config.workspace_dir):
         # Mirror clone if not cached (gets all refs/objects unlike --bare)
         if not bare_path.exists():
             log.info("Cloning %s (mirror) ...", instance.repo)
@@ -234,6 +236,12 @@ def _run_swarm(
     config: BenchmarkConfig,
 ) -> str:
     """Start the swarm, poll until the task completes, then shut down."""
+    # Log swarm output to per-instance files for debuggability
+    log_dir = worktree_path / ".abathur_bench_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    swarm_stdout = open(log_dir / "swarm_stdout.log", "w")
+    swarm_stderr = open(log_dir / "swarm_stderr.log", "w")
+
     # Start swarm as a background process
     swarm_proc = subprocess.Popen(
         [
@@ -244,22 +252,28 @@ def _run_swarm(
             "--dangerously-skip-permissions",
         ],
         cwd=worktree_path,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=swarm_stdout,
+        stderr=swarm_stderr,
     )
+
+    log.info("Swarm started (pid=%d) for task %s", swarm_proc.pid, task_id)
 
     try:
         deadline = time.monotonic() + config.instance_timeout_secs
         status = "timeout"
+        last_status = ""
+        poll_count = 0
 
         while time.monotonic() < deadline:
             time.sleep(config.poll_interval_secs)
+            poll_count += 1
 
             # Check if swarm process died unexpectedly
             if swarm_proc.poll() is not None:
                 log.warning(
-                    "Swarm process exited early with code %d",
+                    "Swarm process exited early with code %d for task %s",
                     swarm_proc.returncode,
+                    task_id,
                 )
                 status = "error"
                 break
@@ -276,6 +290,12 @@ def _run_swarm(
                     timeout=30,
                 )
                 if result.returncode != 0:
+                    log.debug(
+                        "task show returned %d (poll %d): %s",
+                        result.returncode,
+                        poll_count,
+                        result.stderr[:200] if result.stderr else "(no stderr)",
+                    )
                     continue
 
                 output = json.loads(result.stdout)
@@ -284,6 +304,13 @@ def _run_swarm(
                     or output.get("status", "")
                 )
 
+                if task_status != last_status:
+                    log.info(
+                        "Task %s status: %s (poll %d)",
+                        task_id, task_status, poll_count,
+                    )
+                    last_status = task_status
+
                 if task_status in ("complete", "completed"):
                     status = "complete"
                     break
@@ -291,13 +318,28 @@ def _run_swarm(
                     status = "failed"
                     break
 
-            except (subprocess.TimeoutExpired, json.JSONDecodeError):
+            except subprocess.TimeoutExpired:
+                log.debug("task show timed out (poll %d)", poll_count)
                 continue
+            except json.JSONDecodeError as e:
+                log.debug(
+                    "task show JSON parse error (poll %d): %s — raw: %s",
+                    poll_count, e, result.stdout[:200],
+                )
+                continue
+
+        if status == "timeout":
+            log.warning(
+                "Task %s timed out after %ds (%d polls)",
+                task_id, config.instance_timeout_secs, poll_count,
+            )
 
         return status
 
     finally:
         _stop_swarm(worktree_path, swarm_proc, config)
+        swarm_stdout.close()
+        swarm_stderr.close()
 
 
 def _stop_swarm(
@@ -328,9 +370,15 @@ def _stop_swarm(
 
 
 def _capture_patch(worktree_path: Path, base_commit: str) -> str:
-    """Generate the diff from base_commit to current HEAD."""
+    """Generate the diff from base_commit to current working tree."""
+    # Stage all changes (including new untracked files) so they appear in the diff
+    subprocess.run(
+        ["git", "add", "-A"],
+        cwd=worktree_path,
+        capture_output=True,
+    )
     result = subprocess.run(
-        ["git", "diff", base_commit, "HEAD"],
+        ["git", "diff", "--cached", base_commit],
         cwd=worktree_path,
         capture_output=True,
         text=True,
