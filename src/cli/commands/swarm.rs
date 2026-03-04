@@ -150,6 +150,10 @@ pub enum SwarmCommand {
         /// directly into the default branch.
         #[arg(long)]
         dangerously_skip_permissions: bool,
+
+        /// Disable git worktree isolation for agents (overrides abathur.toml)
+        #[arg(long)]
+        no_worktrees: bool,
     },
     /// Stop the running swarm orchestrator
     Stop,
@@ -192,6 +196,7 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
             default_execution_mode,
             workflow,
             dangerously_skip_permissions,
+            no_worktrees,
         } => {
             start_swarm(
                 max_agents,
@@ -207,6 +212,7 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
                 default_execution_mode,
                 workflow,
                 dangerously_skip_permissions,
+                no_worktrees,
             ).await
         }
         SwarmCommand::Stop => stop_swarm(json_mode).await,
@@ -309,6 +315,7 @@ async fn start_swarm(
     default_execution_mode: String,
     workflow: Option<String>,
     dangerously_skip_permissions: bool,
+    no_worktrees: bool,
 ) -> Result<()> {
     // Check if swarm is already running
     if let Some(pid) = check_existing_swarm() {
@@ -345,10 +352,10 @@ async fn start_swarm(
 
     if foreground {
         // Run in foreground (original behavior)
-        run_swarm_foreground(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref(), dangerously_skip_permissions).await
+        run_swarm_foreground(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref(), dangerously_skip_permissions, no_worktrees).await
     } else {
         // Background the swarm
-        start_swarm_background(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref(), dangerously_skip_permissions)
+        start_swarm_background(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref(), dangerously_skip_permissions, no_worktrees)
     }
 }
 
@@ -361,6 +368,7 @@ fn start_swarm_background(
     default_execution_mode: &str,
     workflow: Option<&str>,
     dangerously_skip_permissions: bool,
+    no_worktrees: bool,
 ) -> Result<()> {
     use std::process::{Command, Stdio};
 
@@ -399,6 +407,9 @@ fn start_swarm_background(
     }
     if dangerously_skip_permissions {
         cmd.arg("--dangerously-skip-permissions");
+    }
+    if no_worktrees {
+        cmd.arg("--no-worktrees");
     }
 
     // Ensure .abathur directory exists for log file
@@ -522,6 +533,7 @@ async fn run_swarm_foreground(
     default_execution_mode: &str,
     workflow: Option<&str>,
     dangerously_skip_permissions: bool,
+    no_worktrees: bool,
 ) -> Result<()> {
     use crate::adapters::sqlite::{
         create_pool, Migrator, all_embedded_migrations,
@@ -588,8 +600,13 @@ async fn run_swarm_foreground(
     };
 
     // Load application config (abathur.toml) for workflow and polling settings
-    let app_config = crate::services::config::Config::load()
-        .unwrap_or_default();
+    let app_config = match crate::services::config::Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Failed to load abathur.toml, using defaults: {}", e);
+            crate::services::config::Config::default()
+        }
+    };
 
     // Resolve workflow template from config file
     let workflow_template = if let Some(wf_name) = workflow {
@@ -615,9 +632,11 @@ async fn run_swarm_foreground(
         all_workflows,
         dangerously_skip_permissions,
         polling: app_config.polling,
-        use_worktrees: app_config.worktrees.enabled,
+        use_worktrees: if no_worktrees { false } else { app_config.worktrees.enabled },
         ..Default::default()
     };
+
+    tracing::info!(use_worktrees = config.use_worktrees, "Swarm config: worktrees");
 
     // Create shared EventBus with persistence for reactive event system
     let event_store: Arc<dyn crate::services::event_store::EventStore> =

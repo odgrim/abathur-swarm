@@ -267,6 +267,7 @@ def _run_swarm(
             "--max-agents", str(config.max_agents),
             "--default-execution-mode", config.execution_mode,
             "--dangerously-skip-permissions",
+            "--no-worktrees",
         ],
         cwd=worktree_path,
         stdout=swarm_stdout,
@@ -397,7 +398,7 @@ def _capture_patch(worktree_path: Path, base_commit: str) -> str:
     result = subprocess.run(
         [
             "git", "diff", "--cached", base_commit,
-            "--", ".", ":!.claude/", ":!abathur.toml", ":!abathur.db",
+            "--", ".", ":!.claude/", ":!abathur.toml", ":!abathur.db", ":!.abathur_bench_logs/",
         ],
         cwd=worktree_path,
         capture_output=True,
