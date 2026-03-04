@@ -145,6 +145,14 @@ def _setup_worktree(
         # Create worktree
         safe_id = instance.instance_id.replace("/", "_")
         worktree_path = (config.workspace_dir / "instances" / safe_id).resolve()
+
+        # Prune stale worktree entries (e.g. from previous crashed runs)
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=bare_path,
+            capture_output=True,
+        )
+
         if worktree_path.exists():
             # Remove stale worktree
             subprocess.run(
@@ -154,16 +162,21 @@ def _setup_worktree(
             )
 
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
+        result = subprocess.run(
             [
-                "git", "worktree", "add",
+                "git", "worktree", "add", "--detach",
                 str(worktree_path),
                 instance.base_commit,
             ],
             cwd=bare_path,
-            check=True,
             capture_output=True,
+            text=True,
         )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"git worktree add failed (exit {result.returncode}): "
+                f"{result.stderr.strip()}"
+            )
 
     return worktree_path
 
