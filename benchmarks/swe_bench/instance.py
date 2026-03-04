@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import json
 import logging
+import shutil
 import subprocess
 import textwrap
 import time
@@ -154,12 +155,15 @@ def _setup_worktree(
         )
 
         if worktree_path.exists():
-            # Remove stale worktree
+            # Remove stale worktree via git first, then fall back to rmtree
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(worktree_path)],
                 cwd=bare_path,
                 capture_output=True,
             )
+            if worktree_path.exists():
+                log.info("git worktree remove didn't clear %s, falling back to rmtree", worktree_path)
+                shutil.rmtree(worktree_path)
 
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(
