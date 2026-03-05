@@ -29,11 +29,12 @@ class BenchmarkConfig:
     instance_ids: list[str] = field(default_factory=list)
 
     max_workers: int = 1
-    instance_timeout_secs: int = 1200
+    instance_timeout_secs: int = 2400
     poll_interval_secs: int = 5
 
     max_agents: int = 6
-    execution_mode: str = "direct"
+    max_retries: int = 2
+    execution_mode: str = "convergent"
 
     cleanup_on_success: bool = True
     cleanup_on_failure: bool = False

@@ -52,8 +52,8 @@ def parse_args(argv: list[str] | None = None) -> tuple[BenchmarkConfig, bool]:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=1200,
-        help="Per-instance timeout in seconds (default: 1200)",
+        default=2400,
+        help="Per-instance timeout in seconds (default: 2400)",
     )
     parser.add_argument(
         "--max-agents",
@@ -63,8 +63,14 @@ def parse_args(argv: list[str] | None = None) -> tuple[BenchmarkConfig, bool]:
     )
     parser.add_argument(
         "--execution-mode",
-        default="direct",
-        help="Abathur execution mode (default: direct)",
+        default="convergent",
+        help="Abathur execution mode (default: convergent)",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=2,
+        help="Max retries per task (default: 2)",
     )
     parser.add_argument(
         "--abathur-bin",
@@ -117,6 +123,7 @@ def parse_args(argv: list[str] | None = None) -> tuple[BenchmarkConfig, bool]:
         max_workers=args.max_workers,
         instance_timeout_secs=args.timeout,
         max_agents=args.max_agents,
+        max_retries=args.max_retries,
         execution_mode=args.execution_mode,
         cleanup_on_success=args.cleanup,
         cleanup_on_failure=False,

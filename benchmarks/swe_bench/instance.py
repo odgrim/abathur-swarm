@@ -209,7 +209,7 @@ def _init_abathur(worktree_path: Path, config: BenchmarkConfig) -> None:
         max_subtasks = 5
         max_descendants = 20
         max_concurrent_tasks = 6
-        max_retries = 0
+        max_retries = {config.max_retries}
         task_timeout_secs = {config.instance_timeout_secs}
 
         [spawn_limits]
