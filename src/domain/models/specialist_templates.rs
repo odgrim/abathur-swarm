@@ -1031,6 +1031,8 @@ Use these class-specific patterns when writing system_prompts:
 - Store findings incrementally via memory_store as you go, not all at the end.
 - Output is memory entries, not files. Never use Write/Edit.
 - At the halfway point, assess progress and begin wrapping up. Report partial findings rather than exhausting turns.
+- When investigating a bug or feature, trace ALL code paths that touch the affected functionality — not just the entry point. If the issue involves a read/write feature, map both directions. If it involves string matching, grep for every occurrence of the matched value.
+- Report every location that encodes the assumption being changed, so implementers don't miss secondary fix sites.
 
 **Planner agents** (read_only: true, typical ~10 turns, ceiling 30):
 - First action: memory_search for existing plans or research findings.
@@ -1039,6 +1041,8 @@ Use these class-specific patterns when writing system_prompts:
 
 **Implementer agents** (read_only: false, typical ~25 turns, ceiling 75):
 - First action: memory_search for the plan and research findings.
+- After identifying the primary fix, grep the codebase for other locations that make the same assumption (e.g., hardcoded values, case-sensitive comparisons, missing parameter forwarding). Fix all of them, not just the first one found.
+- Before committing, trace through the affected code paths end-to-end to verify the fix is complete. If the feature has both a read and write path, verify both.
 - Commit early and often — small atomic commits, not one big commit at the end.
 - Run tests after each significant change. Fix failures before moving on.
 - If tests pass and implementation matches the plan, stop immediately.
@@ -1210,6 +1214,8 @@ Use these class-specific patterns when writing system_prompts:
 - Store findings incrementally via memory_store as you go, not all at the end.
 - Output is memory entries, not files. Never use Write/Edit.
 - At the halfway point, assess progress and begin wrapping up. Report partial findings rather than exhausting turns.
+- When investigating a bug or feature, trace ALL code paths that touch the affected functionality — not just the entry point. If the issue involves a read/write feature, map both directions. If it involves string matching, grep for every occurrence of the matched value.
+- Report every location that encodes the assumption being changed, so implementers don't miss secondary fix sites.
 
 **Planner agents** (read_only: true, typical ~10 turns, ceiling 30):
 - First action: memory_search for existing plans or research findings.
@@ -1218,6 +1224,8 @@ Use these class-specific patterns when writing system_prompts:
 
 **Implementer agents** (read_only: false, typical ~25 turns, ceiling 75):
 - First action: memory_search for the plan and research findings.
+- After identifying the primary fix, grep the codebase for other locations that make the same assumption (e.g., hardcoded values, case-sensitive comparisons, missing parameter forwarding). Fix all of them, not just the first one found.
+- Before committing, trace through the affected code paths end-to-end to verify the fix is complete. If the feature has both a read and write path, verify both.
 - Commit early and often — small atomic commits, not one big commit at the end.
 - Run tests after each significant change. Fix failures before moving on.
 - If tests pass and implementation matches the plan, stop immediately.

@@ -478,12 +478,25 @@ where
 
         let with_apis = format!("{}{}", with_restrictions, api_docs);
 
+        // Append fix-completeness guidance to all agents
+        let fix_completeness = "\n\n## Fix Completeness\n\n\
+            When fixing bugs or adding features:\n\
+            1. After identifying the primary change site, grep for other locations that encode \
+            the same assumption. A case-sensitivity fix likely needs changes everywhere the \
+            value is compared. A new parameter likely needs forwarding through every code path.\n\
+            2. Trace the full code path exercised by the feature — read path AND write path, \
+            serialization AND deserialization, parsing AND rendering.\n\
+            3. After writing your fix, mentally step through a round-trip scenario to verify \
+            nothing was missed.";
+
+        let with_completeness = format!("{}{}", with_apis, fix_completeness);
+
         // Append goal context to the system prompt
         let goal_context = self.build_goal_context().await;
         let with_goals = if goal_context.is_empty() {
-            with_apis
+            with_completeness
         } else {
-            format!("{}\n\n{}", with_apis, goal_context)
+            format!("{}\n\n{}", with_completeness, goal_context)
         };
 
         // Append adapter egress prompt section (if adapters are loaded)
