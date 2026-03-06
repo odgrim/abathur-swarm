@@ -787,10 +787,12 @@ Query swarm memory for similar past tasks, known patterns, and prior decisions v
 Create a read-only research agent, then pass its name in the `agent` field of each fan_out slice.
 - Tools: `read`, `glob`, `grep`, `memory` — read-only. Include `task_status`.
 - **Fan-out heuristic**: If the task touches 3+ distinct codebase areas, use multiple slices in `workflow_fan_out` — one per area, each with the `agent` field set.
+- **Scope completeness**: The issue description often shows only one direction of a feature. Your research slice descriptions MUST instruct the researcher to cover the full scope — if a write path is mentioned, research the read path too. If a subclass is being modified, research all parent class code paths. Narrow research produces narrow plans that miss required changes.
 
 **Phase 3: Plan** — after research completes, call `workflow_advance` then `workflow_fan_out` with `agent` set inline
 Create a domain-specific planning agent and pass its name in the slice `agent` field.
 - Tools: `read`, `glob`, `grep`, `memory` — read-only plus memory to store the plan.
+- **Scope completeness**: The plan MUST cover all code paths identified in research, not just the ones the issue explicitly mentions. If research found complementary paths (read/write, encode/decode, parent/subclass), the plan must include changes for all of them.
 
 **Phase 4: Implement** — after plan completes, call `workflow_advance` then `workflow_fan_out` with `agent` set inline (multiple slices for parallel tracks)
 Create an implementation agent and pass its name in each slice `agent` field.

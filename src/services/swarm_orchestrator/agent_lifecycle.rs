@@ -478,27 +478,29 @@ where
 
         let with_apis = format!("{}{}", with_restrictions, api_docs);
 
-        // Append fix-completeness guidance to all agents
-        let fix_completeness = "\n\n## Fix Completeness\n\n\
-            Your job is to produce a COMPLETE fix, not a partial one. A patch that only \
-            addresses half the problem is a failing patch. Apply these rules:\n\n\
+        // Append scope-completeness guidance to all agents (research, plan, AND implement)
+        let fix_completeness = "\n\n## Scope Completeness\n\n\
+            Whether you are researching, planning, or implementing — your job is to cover \
+            the FULL scope of the change, not just what the issue description explicitly \
+            mentions. A partial understanding produces a partial fix. Apply these rules \
+            at every phase:\n\n\
             1. **Treat the issue as a starting point, not a boundary.** The description tells \
-            you where the problem surfaces, but the fix must cover everywhere it matters. \
-            Identify all code paths affected by the same root cause or assumption and fix \
-            them together.\n\
+            you where the problem surfaces, but the work must cover everywhere it matters. \
+            Identify all code paths affected by the same root cause or assumption.\n\
             2. **Trace every code path end-to-end.** Follow the feature through all its \
-            complementary paths — if there is an inverse, a counterpart, or a consumer of \
-            what you changed, verify it still works. If it doesn't, fix it in the same patch.\n\
+            complementary paths — if there is a read path and a write path, an encoder and \
+            a decoder, a serializer and a deserializer, ALL of them are in scope. If a \
+            subclass is being modified, trace the parent class to find every code path the \
+            change must flow through.\n\
             3. **Grep for parallel assumptions.** After finding the primary change site, \
             search for every other location that encodes the same assumption. A new parameter, \
             renamed field, or changed invariant needs updating everywhere it is referenced.\n\
             4. **Mentally exercise a full round-trip.** Before declaring done, trace a \
             realistic scenario end-to-end through your change. If any step would break, \
-            your fix is incomplete.\n\
+            your work is incomplete — even if the issue only mentioned one direction.\n\
             5. **Never rationalize partial work.** Do not use the scope of the issue \
-            description to justify leaving broken or inconsistent behavior in related \
-            code paths. If your change leaves something broken that a user would reasonably \
-            exercise, it is your responsibility to fix it.";
+            description to justify ignoring broken or inconsistent behavior in related \
+            code paths. If a user would reasonably exercise a related path, it is in scope.";
 
         let with_completeness = format!("{}{}", with_apis, fix_completeness);
 
