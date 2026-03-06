@@ -573,11 +573,10 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
             // Runtime upgrade: if the stored mode is Direct but the agent is
             // write-capable and non-read-only, upgrade to Convergent when
-            // convergence is enabled. Skip for workflow subtasks — the workflow
-            // engine already chose the right mode (Step 2.2).
-            let is_workflow_subtask = task.context.custom.contains_key("workflow_phase");
-            let effective_mode = if !is_workflow_subtask
-                && task.execution_mode.is_direct()
+            // convergence is enabled. This applies to both standalone tasks
+            // and workflow subtasks — read-only phases are already protected
+            // by the is_read_only_role and agent_can_write checks.
+            let effective_mode = if task.execution_mode.is_direct()
                 && self.config.convergence_enabled
                 && !is_read_only_role
                 && agent_can_write
