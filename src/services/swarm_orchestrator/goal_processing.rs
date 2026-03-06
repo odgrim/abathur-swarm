@@ -885,30 +885,57 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     super::convergent_execution::ConvergentOutcome::IndeterminateAccepted
                                 );
 
-                                let target_status = if verify_on_completion {
-                                    TaskStatus::Validating
-                                } else {
-                                    TaskStatus::Complete
-                                };
+                                // Check if the agent already completed the task via MCP
+                                // (e.g. task_update_status tool). If so, the TaskCompleted
+                                // event was already published and downstream handlers
+                                // (WorkflowSubtaskCompletionHandler) have already reacted.
+                                let current_task = task_repo.get(task_id).await.ok().flatten();
+                                let already_terminal = current_task.as_ref()
+                                    .is_some_and(|t| t.status.is_terminal());
 
-                                if let Some(ref cb) = command_bus {
-                                    let envelope = CommandEnvelope::new(
-                                        CommandSource::System,
-                                        DomainCommand::Task(TaskCommand::Transition {
-                                            task_id,
-                                            new_status: target_status,
-                                        }),
-                                    );
-                                    if let Err(e) = cb.dispatch(envelope).await {
-                                        tracing::warn!(
-                                            "Failed to complete convergent task {} via CommandBus: {}",
-                                            task_id, e
+                                if !already_terminal {
+                                    let target_status = if verify_on_completion {
+                                        TaskStatus::Validating
+                                    } else {
+                                        TaskStatus::Complete
+                                    };
+
+                                    if let Some(ref cb) = command_bus {
+                                        let envelope = CommandEnvelope::new(
+                                            CommandSource::System,
+                                            DomainCommand::Task(TaskCommand::Transition {
+                                                task_id,
+                                                new_status: target_status,
+                                            }),
                                         );
-                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                        if let Err(e) = cb.dispatch(envelope).await {
+                                            tracing::warn!(
+                                                "Failed to complete convergent task {} via CommandBus: {}",
+                                                task_id, e
+                                            );
+                                            if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                                if !t.status.is_terminal() {
+                                                    let _ = t.transition_to(target_status);
+                                                    let _ = task_repo.update(&t).await;
+                                                }
+                                            }
+                                            // Fallback: emit event manually since CommandBus didn't
+                                            event_bus.publish(crate::services::event_factory::task_event(
+                                                crate::services::event_bus::EventSeverity::Info,
+                                                None,
+                                                task_id,
+                                                crate::services::event_bus::EventPayload::TaskCompleted {
+                                                    task_id,
+                                                    tokens_used: 0,
+                                                },
+                                            )).await;
+                                        }
+                                    } else if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                        if !t.status.is_terminal() {
                                             let _ = t.transition_to(target_status);
                                             let _ = task_repo.update(&t).await;
                                         }
-                                        // Fallback: emit event manually since CommandBus didn't
+                                        // No CommandBus: emit event manually
                                         event_bus.publish(crate::services::event_factory::task_event(
                                             crate::services::event_bus::EventSeverity::Info,
                                             None,
@@ -919,19 +946,12 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                             },
                                         )).await;
                                     }
-                                } else if let Ok(Some(mut t)) = task_repo.get(task_id).await {
-                                    let _ = t.transition_to(target_status);
-                                    let _ = task_repo.update(&t).await;
-                                    // No CommandBus: emit event manually
-                                    event_bus.publish(crate::services::event_factory::task_event(
-                                        crate::services::event_bus::EventSeverity::Info,
-                                        None,
-                                        task_id,
-                                        crate::services::event_bus::EventPayload::TaskCompleted {
-                                            task_id,
-                                            tokens_used: 0,
-                                        },
-                                    )).await;
+                                } else {
+                                    tracing::debug!(
+                                        task_id = %task_id,
+                                        status = ?current_task.as_ref().map(|t| t.status),
+                                        "Skipping convergent task transition — already terminal (completed via MCP)"
+                                    );
                                 }
 
                                 circuit_breaker.record_success(circuit_scope.clone()).await;
@@ -1296,25 +1316,49 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             let turns = session.turns_completed;
                             total_tokens.fetch_add(tokens, Ordering::Relaxed);
 
-                            // Transition task via CommandBus (journals event)
-                            let target_status = if verify_on_completion {
-                                TaskStatus::Validating
-                            } else {
-                                TaskStatus::Complete
-                            };
-                            if let Some(ref cb) = command_bus {
-                                let envelope = CommandEnvelope::new(
-                                    CommandSource::System,
-                                    DomainCommand::Task(TaskCommand::Transition {
-                                        task_id,
-                                        new_status: target_status,
-                                    }),
-                                );
-                                if let Err(e) = cb.dispatch(envelope).await {
-                                    tracing::warn!("Failed to complete task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
+                            // Check if the agent already completed the task via MCP
+                            // (e.g. task_update_status tool during execution). If so,
+                            // the TaskCompleted event was already published and
+                            // downstream handlers have already reacted.
+                            if !completed_task.status.is_terminal() {
+                                // Transition task via CommandBus (journals event)
+                                let target_status = if verify_on_completion {
+                                    TaskStatus::Validating
+                                } else {
+                                    TaskStatus::Complete
+                                };
+                                if let Some(ref cb) = command_bus {
+                                    let envelope = CommandEnvelope::new(
+                                        CommandSource::System,
+                                        DomainCommand::Task(TaskCommand::Transition {
+                                            task_id,
+                                            new_status: target_status,
+                                        }),
+                                    );
+                                    if let Err(e) = cb.dispatch(envelope).await {
+                                        tracing::warn!("Failed to complete task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
+                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                            if !t.status.is_terminal() {
+                                                let _ = t.transition_to(target_status);
+                                                let _ = task_repo.update(&t).await;
+                                            }
+                                        }
+                                        // Fallback: emit event manually since CommandBus didn't
+                                        event_bus.publish(crate::services::event_factory::task_event(
+                                            crate::services::event_bus::EventSeverity::Info,
+                                            None,
+                                            task_id,
+                                            crate::services::event_bus::EventPayload::TaskCompleted {
+                                                task_id,
+                                                tokens_used: tokens,
+                                            },
+                                        )).await;
+                                    }
+                                } else {
+                                    tracing::warn!("CommandBus not available for task {} completion, using non-atomic fallback", task_id);
                                     let _ = completed_task.transition_to(target_status);
                                     let _ = task_repo.update(&completed_task).await;
-                                    // Fallback: emit event manually since CommandBus didn't
+                                    // No CommandBus: emit event manually
                                     event_bus.publish(crate::services::event_factory::task_event(
                                         crate::services::event_bus::EventSeverity::Info,
                                         None,
@@ -1326,19 +1370,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     )).await;
                                 }
                             } else {
-                                tracing::warn!("CommandBus not available for task {} completion, using non-atomic fallback", task_id);
-                                let _ = completed_task.transition_to(target_status);
-                                let _ = task_repo.update(&completed_task).await;
-                                // No CommandBus: emit event manually
-                                event_bus.publish(crate::services::event_factory::task_event(
-                                    crate::services::event_bus::EventSeverity::Info,
-                                    None,
-                                    task_id,
-                                    crate::services::event_bus::EventPayload::TaskCompleted {
-                                        task_id,
-                                        tokens_used: tokens,
-                                    },
-                                )).await;
+                                tracing::debug!(
+                                    task_id = %task_id,
+                                    status = ?completed_task.status,
+                                    "Skipping task transition — already terminal (completed via MCP)"
+                                );
                             }
 
                             // Record success with circuit breaker
