@@ -1077,41 +1077,60 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             }
 
                             Ok(super::convergent_execution::ConvergentOutcome::Failed(msg)) => {
-                                if let Some(ref cb) = command_bus {
-                                    let envelope = CommandEnvelope::new(
-                                        CommandSource::System,
-                                        DomainCommand::Task(TaskCommand::Fail {
-                                            task_id,
-                                            error: Some(msg.clone()),
-                                        }),
+                                // Check if the agent already completed the task via MCP
+                                // before attempting failure transition.
+                                let current_task = task_repo.get(task_id).await.ok().flatten();
+                                let already_terminal = current_task.as_ref()
+                                    .is_some_and(|t| t.status.is_terminal());
+
+                                if already_terminal {
+                                    tracing::warn!(
+                                        task_id = %task_id,
+                                        status = ?current_task.as_ref().map(|t| t.status),
+                                        error = %msg,
+                                        "Skipping convergent task failure — already terminal (completed via MCP)"
                                     );
-                                    if let Err(e) = cb.dispatch(envelope).await {
-                                        tracing::warn!(
-                                            "Failed to fail convergent task {} via CommandBus: {}",
-                                            task_id, e
+                                } else {
+                                    if let Some(ref cb) = command_bus {
+                                        let envelope = CommandEnvelope::new(
+                                            CommandSource::System,
+                                            DomainCommand::Task(TaskCommand::Fail {
+                                                task_id,
+                                                error: Some(msg.clone()),
+                                            }),
                                         );
-                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                        if let Err(e) = cb.dispatch(envelope).await {
+                                            tracing::warn!(
+                                                "Failed to fail convergent task {} via CommandBus: {}",
+                                                task_id, e
+                                            );
+                                            if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                                if !t.status.is_terminal() {
+                                                    let _ = t.transition_to(TaskStatus::Failed);
+                                                    let _ = task_repo.update(&t).await;
+                                                }
+                                            }
+                                        }
+                                    } else if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                        if !t.status.is_terminal() {
                                             let _ = t.transition_to(TaskStatus::Failed);
                                             let _ = task_repo.update(&t).await;
                                         }
                                     }
-                                } else if let Ok(Some(mut t)) = task_repo.get(task_id).await {
-                                    let _ = t.transition_to(TaskStatus::Failed);
-                                    let _ = task_repo.update(&t).await;
-                                }
 
-                                let current_retry_count = task_repo.get(task_id).await
-                                    .ok().flatten().map(|t| t.retry_count).unwrap_or(0);
-                                event_bus.publish(crate::services::event_factory::task_event(
-                                    crate::services::event_bus::EventSeverity::Warning,
-                                    None,
-                                    task_id,
-                                    crate::services::event_bus::EventPayload::TaskFailed {
+                                    let current_retry_count = task_repo.get(task_id).await
+                                        .ok().flatten().map(|t| t.retry_count).unwrap_or(0);
+                                    event_bus.publish(crate::services::event_factory::task_event(
+                                        crate::services::event_bus::EventSeverity::Warning,
+                                        None,
                                         task_id,
-                                        error: msg.clone(),
-                                        retry_count: current_retry_count,
-                                    },
-                                )).await;
+                                        crate::services::event_bus::EventPayload::TaskFailed {
+                                            task_id,
+                                            error: msg.clone(),
+                                            retry_count: current_retry_count,
+                                        },
+                                    )).await;
+                                }
 
                                 circuit_breaker.record_failure(circuit_scope.clone(), &msg).await;
 
@@ -1482,17 +1501,46 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
                             let error_msg = session.error.clone().unwrap_or_else(|| "Unknown error".to_string());
 
-                            // Fail task via CommandBus (transitions + journals event)
-                            if let Some(ref cb) = command_bus {
-                                let envelope = CommandEnvelope::new(
-                                    CommandSource::System,
-                                    DomainCommand::Task(TaskCommand::Fail {
-                                        task_id,
-                                        error: Some(error_msg.clone()),
-                                    }),
+                            // Check if the agent already completed the task via MCP
+                            // before attempting failure transition.
+                            if completed_task.status.is_terminal() {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    status = ?completed_task.status,
+                                    error = %error_msg,
+                                    "Skipping task failure — already terminal (completed via MCP)"
                                 );
-                                if let Err(e) = cb.dispatch(envelope).await {
-                                    tracing::warn!("Failed to fail task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
+                            } else {
+                                // Fail task via CommandBus (transitions + journals event)
+                                if let Some(ref cb) = command_bus {
+                                    let envelope = CommandEnvelope::new(
+                                        CommandSource::System,
+                                        DomainCommand::Task(TaskCommand::Fail {
+                                            task_id,
+                                            error: Some(error_msg.clone()),
+                                        }),
+                                    );
+                                    if let Err(e) = cb.dispatch(envelope).await {
+                                        tracing::warn!("Failed to fail task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
+                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                            if !t.status.is_terminal() {
+                                                let _ = t.transition_to(TaskStatus::Failed);
+                                                let _ = task_repo.update(&t).await;
+                                            }
+                                        }
+                                        event_bus.publish(crate::services::event_factory::task_event(
+                                            crate::services::event_bus::EventSeverity::Warning,
+                                            None,
+                                            task_id,
+                                            crate::services::event_bus::EventPayload::TaskFailed {
+                                                task_id,
+                                                error: error_msg.clone(),
+                                                retry_count: completed_task.retry_count,
+                                            },
+                                        )).await;
+                                    }
+                                } else {
+                                    tracing::warn!("CommandBus not available for task {} failure, using non-atomic fallback", task_id);
                                     let _ = completed_task.transition_to(TaskStatus::Failed);
                                     let _ = task_repo.update(&completed_task).await;
                                     event_bus.publish(crate::services::event_factory::task_event(
@@ -1506,20 +1554,6 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         },
                                     )).await;
                                 }
-                            } else {
-                                tracing::warn!("CommandBus not available for task {} failure, using non-atomic fallback", task_id);
-                                let _ = completed_task.transition_to(TaskStatus::Failed);
-                                let _ = task_repo.update(&completed_task).await;
-                                event_bus.publish(crate::services::event_factory::task_event(
-                                    crate::services::event_bus::EventSeverity::Warning,
-                                    None,
-                                    task_id,
-                                    crate::services::event_bus::EventPayload::TaskFailed {
-                                        task_id,
-                                        error: error_msg.clone(),
-                                        retry_count: completed_task.retry_count,
-                                    },
-                                )).await;
                             }
 
                             // Record failure with circuit breaker
@@ -1577,17 +1611,46 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                         Err(e) => {
                             let error_msg = e.to_string();
 
-                            // Fail task via CommandBus (transitions + journals event)
-                            if let Some(ref cb) = command_bus {
-                                let envelope = CommandEnvelope::new(
-                                    CommandSource::System,
-                                    DomainCommand::Task(TaskCommand::Fail {
-                                        task_id,
-                                        error: Some(error_msg.clone()),
-                                    }),
+                            // Check if the agent already completed the task via MCP
+                            // before attempting failure transition.
+                            if completed_task.status.is_terminal() {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    status = ?completed_task.status,
+                                    error = %error_msg,
+                                    "Skipping task failure — already terminal (completed via MCP)"
                                 );
-                                if let Err(e) = cb.dispatch(envelope).await {
-                                    tracing::warn!("Failed to fail task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
+                            } else {
+                                // Fail task via CommandBus (transitions + journals event)
+                                if let Some(ref cb) = command_bus {
+                                    let envelope = CommandEnvelope::new(
+                                        CommandSource::System,
+                                        DomainCommand::Task(TaskCommand::Fail {
+                                            task_id,
+                                            error: Some(error_msg.clone()),
+                                        }),
+                                    );
+                                    if let Err(e) = cb.dispatch(envelope).await {
+                                        tracing::warn!("Failed to fail task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
+                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                            if !t.status.is_terminal() {
+                                                let _ = t.transition_to(TaskStatus::Failed);
+                                                let _ = task_repo.update(&t).await;
+                                            }
+                                        }
+                                        event_bus.publish(crate::services::event_factory::task_event(
+                                            crate::services::event_bus::EventSeverity::Warning,
+                                            None,
+                                            task_id,
+                                            crate::services::event_bus::EventPayload::TaskFailed {
+                                                task_id,
+                                                error: error_msg.clone(),
+                                                retry_count: completed_task.retry_count,
+                                            },
+                                        )).await;
+                                    }
+                                } else {
+                                    tracing::warn!("CommandBus not available for task {} failure, using non-atomic fallback", task_id);
                                     let _ = completed_task.transition_to(TaskStatus::Failed);
                                     let _ = task_repo.update(&completed_task).await;
                                     event_bus.publish(crate::services::event_factory::task_event(
@@ -1601,20 +1664,6 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         },
                                     )).await;
                                 }
-                            } else {
-                                tracing::warn!("CommandBus not available for task {} failure, using non-atomic fallback", task_id);
-                                let _ = completed_task.transition_to(TaskStatus::Failed);
-                                let _ = task_repo.update(&completed_task).await;
-                                event_bus.publish(crate::services::event_factory::task_event(
-                                    crate::services::event_bus::EventSeverity::Warning,
-                                    None,
-                                    task_id,
-                                    crate::services::event_bus::EventPayload::TaskFailed {
-                                        task_id,
-                                        error: error_msg.clone(),
-                                        retry_count: completed_task.retry_count,
-                                    },
-                                )).await;
                             }
 
                             // Record failure with circuit breaker

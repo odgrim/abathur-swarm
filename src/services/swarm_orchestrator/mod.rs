@@ -637,6 +637,7 @@ where
             2880
         };
         let mut tick_counter: u64 = 0;
+        let mut idle_terminal_ticks: u64 = 0; // consecutive ticks where all goals/tasks are terminal
         let command_retention = std::time::Duration::from_secs(7 * 24 * 3600); // 7 days
 
         // Main orchestration loop
@@ -667,6 +668,34 @@ where
 
             if self.config.track_evolution {
                 self.process_evolution_refinements(&event_tx).await?;
+            }
+
+            // Auto-shutdown: if all goals and tasks have reached terminal state
+            // for 2 consecutive ticks, initiate graceful shutdown.
+            {
+                use crate::domain::ports::GoalFilter;
+                let all_goals = self.goal_repo.list(GoalFilter::default()).await.unwrap_or_default();
+                if !all_goals.is_empty() && all_goals.iter().all(|g| g.is_terminal()) {
+                    use crate::domain::ports::TaskFilter;
+                    let all_tasks = self.task_repo.list(TaskFilter::default()).await.unwrap_or_default();
+                    let has_active = all_tasks.iter().any(|t| t.status.is_active());
+                    if !has_active {
+                        idle_terminal_ticks += 1;
+                        if idle_terminal_ticks >= 2 {
+                            tracing::info!(
+                                goal_count = all_goals.len(),
+                                task_count = all_tasks.len(),
+                                "All goals and tasks are terminal — initiating auto-shutdown"
+                            );
+                            self.stop().await;
+                            continue;
+                        }
+                    } else {
+                        idle_terminal_ticks = 0;
+                    }
+                } else {
+                    idle_terminal_ticks = 0;
+                }
             }
 
             // Periodic maintenance: prune stale processed_commands entries

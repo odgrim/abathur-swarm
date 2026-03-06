@@ -6,6 +6,8 @@ import contextlib
 import fcntl
 import json
 import logging
+import os
+import signal
 import shutil
 import subprocess
 import textwrap
@@ -275,7 +277,8 @@ def _run_swarm(
     swarm_stdout = open(log_dir / "swarm_stdout.log", "w")
     swarm_stderr = open(log_dir / "swarm_stderr.log", "w")
 
-    # Start swarm as a background process
+    # Start swarm as a background process in its own process group
+    # so we can kill the entire group on cleanup.
     swarm_proc = subprocess.Popen(
         [
             config.abathur_bin, "swarm", "start",
@@ -288,6 +291,7 @@ def _run_swarm(
         cwd=worktree_path,
         stdout=swarm_stdout,
         stderr=swarm_stderr,
+        start_new_session=True,
     )
 
     log.info("Swarm started (pid=%d) for task %s", swarm_proc.pid, task_id)
@@ -381,7 +385,7 @@ def _stop_swarm(
     swarm_proc: subprocess.Popen,
     config: BenchmarkConfig,
 ) -> None:
-    """Gracefully stop the swarm process."""
+    """Gracefully stop the swarm process and its entire process group."""
     # Try graceful stop command
     try:
         subprocess.run(
@@ -393,13 +397,21 @@ def _stop_swarm(
     except (subprocess.TimeoutExpired, OSError):
         pass
 
-    # Terminate the process
+    # Kill the entire process group (SIGTERM first, then SIGKILL)
     if swarm_proc.poll() is None:
-        swarm_proc.terminate()
+        try:
+            pgid = os.getpgid(swarm_proc.pid)
+            os.killpg(pgid, signal.SIGTERM)
+        except OSError:
+            swarm_proc.terminate()
         try:
             swarm_proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            swarm_proc.kill()
+            try:
+                pgid = os.getpgid(swarm_proc.pid)
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                swarm_proc.kill()
             swarm_proc.wait(timeout=5)
 
 
