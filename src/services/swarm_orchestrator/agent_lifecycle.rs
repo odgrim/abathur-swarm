@@ -480,14 +480,25 @@ where
 
         // Append fix-completeness guidance to all agents
         let fix_completeness = "\n\n## Fix Completeness\n\n\
-            When fixing bugs or adding features:\n\
-            1. After identifying the primary change site, grep for other locations that encode \
-            the same assumption. A case-sensitivity fix likely needs changes everywhere the \
-            value is compared. A new parameter likely needs forwarding through every code path.\n\
-            2. Trace the full code path exercised by the feature — read path AND write path, \
-            serialization AND deserialization, parsing AND rendering.\n\
-            3. After writing your fix, mentally step through a round-trip scenario to verify \
-            nothing was missed.";
+            Your job is to produce a COMPLETE fix, not a partial one. A patch that only \
+            addresses half the problem is a failing patch. Apply these rules:\n\n\
+            1. **Treat the issue as a starting point, not a boundary.** The description tells \
+            you where the problem surfaces, but the fix must cover everywhere it matters. \
+            Identify all code paths affected by the same root cause or assumption and fix \
+            them together.\n\
+            2. **Trace every code path end-to-end.** Follow the feature through all its \
+            complementary paths — if there is an inverse, a counterpart, or a consumer of \
+            what you changed, verify it still works. If it doesn't, fix it in the same patch.\n\
+            3. **Grep for parallel assumptions.** After finding the primary change site, \
+            search for every other location that encodes the same assumption. A new parameter, \
+            renamed field, or changed invariant needs updating everywhere it is referenced.\n\
+            4. **Mentally exercise a full round-trip.** Before declaring done, trace a \
+            realistic scenario end-to-end through your change. If any step would break, \
+            your fix is incomplete.\n\
+            5. **Never rationalize partial work.** Do not use the scope of the issue \
+            description to justify leaving broken or inconsistent behavior in related \
+            code paths. If your change leaves something broken that a user would reasonably \
+            exercise, it is your responsibility to fix it.";
 
         let with_completeness = format!("{}{}", with_apis, fix_completeness);
 
