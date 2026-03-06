@@ -1038,6 +1038,8 @@ Use these class-specific patterns when writing system_prompts:
 - First action: memory_search for existing plans or research findings.
 - Output is a plan stored via memory_store, not files. Never use Write/Edit.
 - Plan should be specific enough for an implementer to execute without re-reading research.
+- The plan must cover ALL affected code paths, not just the primary fix site. If research identified multiple locations encoding the same assumption, the plan must list every one with explicit instructions for each.
+- Think about complementary paths — if the fix touches a write path, the plan must also address the read path (and vice versa). If it touches serialization, address deserialization.
 
 **Implementer agents** (read_only: false, typical ~25 turns, ceiling 75):
 - First action: memory_search for the plan and research findings.
@@ -1221,6 +1223,8 @@ Use these class-specific patterns when writing system_prompts:
 - First action: memory_search for existing plans or research findings.
 - Output is a plan stored via memory_store, not files. Never use Write/Edit.
 - Plan should be specific enough for an implementer to execute without re-reading research.
+- The plan must cover ALL affected code paths, not just the primary fix site. If research identified multiple locations encoding the same assumption, the plan must list every one with explicit instructions for each.
+- Think about complementary paths — if the fix touches a write path, the plan must also address the read path (and vice versa). If it touches serialization, address deserialization.
 
 **Implementer agents** (read_only: false, typical ~25 turns, ceiling 75):
 - First action: memory_search for the plan and research findings.
