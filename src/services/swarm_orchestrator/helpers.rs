@@ -16,6 +16,8 @@ use crate::services::{
     IntegrationVerifierService, MergeQueue, MergeQueueConfig, VerifierConfig,
 };
 
+use crate::services::event_bus::EventBus;
+
 use super::types::SwarmEvent;
 
 /// Auto-commit any uncommitted changes in a worktree as a safety net.
@@ -286,6 +288,7 @@ pub async fn run_post_completion_workflow<G, T, W>(
     goal_repo: Arc<G>,
     worktree_repo: Arc<W>,
     event_tx: &mpsc::Sender<SwarmEvent>,
+    event_bus: &Arc<EventBus>,
     audit_log: &Arc<AuditLogService>,
     verify_on_completion: bool,
     use_merge_queue: bool,
@@ -362,11 +365,22 @@ where
                         && task.status == TaskStatus::Validating {
                             let _ = task.transition_to(TaskStatus::Complete);
                             let _ = task_repo.update(&task).await;
-                            // Emit TaskCompleted now that the task is actually Complete
+                            // Emit TaskCompleted to both channels so workflow
+                            // handlers (WorkflowSubtaskCompletionHandler) can
+                            // advance the parent workflow.
                             let _ = event_tx.send(SwarmEvent::TaskCompleted {
                                 task_id,
                                 tokens_used: 0,
                             }).await;
+                            event_bus.publish(crate::services::event_factory::task_event(
+                                crate::services::event_bus::EventSeverity::Info,
+                                None,
+                                task_id,
+                                crate::services::event_bus::EventPayload::TaskCompleted {
+                                    task_id,
+                                    tokens_used: 0,
+                                },
+                            )).await;
                         }
 
                     audit_log.info(
@@ -392,11 +406,19 @@ where
                         && task.status == TaskStatus::Validating {
                             let _ = task.transition_to(TaskStatus::Complete);
                             let _ = task_repo.update(&task).await;
-                            // Emit TaskCompleted now that the task is actually Complete
                             let _ = event_tx.send(SwarmEvent::TaskCompleted {
                                 task_id,
                                 tokens_used: 0,
                             }).await;
+                            event_bus.publish(crate::services::event_factory::task_event(
+                                crate::services::event_bus::EventSeverity::Info,
+                                None,
+                                task_id,
+                                crate::services::event_bus::EventPayload::TaskCompleted {
+                                    task_id,
+                                    tokens_used: 0,
+                                },
+                            )).await;
                         }
 
                     audit_log.log(
@@ -477,11 +499,19 @@ where
                         && task.status == TaskStatus::Validating {
                             let _ = task.transition_to(TaskStatus::Complete);
                             let _ = task_repo.update(&task).await;
-                            // Emit TaskCompleted now that the task is actually Complete
                             let _ = event_tx.send(SwarmEvent::TaskCompleted {
                                 task_id,
                                 tokens_used: 0,
                             }).await;
+                            event_bus.publish(crate::services::event_factory::task_event(
+                                crate::services::event_bus::EventSeverity::Info,
+                                None,
+                                task_id,
+                                crate::services::event_bus::EventPayload::TaskCompleted {
+                                    task_id,
+                                    tokens_used: 0,
+                                },
+                            )).await;
                         }
 
                     audit_log.log(

@@ -894,7 +894,14 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     .is_some_and(|t| t.status.is_terminal());
 
                                 if !already_terminal {
-                                    let target_status = if verify_on_completion {
+                                    // When convergent execution has already verified intent
+                                    // satisfaction, skip the Validating intermediate state
+                                    // and go directly to Complete. The Validating→Complete
+                                    // transition in run_post_completion_workflow only sends
+                                    // SwarmEvent (CLI display), not EventPayload::TaskCompleted
+                                    // to the EventBus, so WorkflowSubtaskCompletionHandler
+                                    // never fires and the workflow stalls.
+                                    let target_status = if verify_on_completion && !intent_satisfied {
                                         TaskStatus::Validating
                                     } else {
                                         TaskStatus::Complete
@@ -981,6 +988,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         goal_repo.clone(),
                                         worktree_repo.clone(),
                                         &event_tx,
+                                        &event_bus,
                                         &audit_log,
                                         verify_on_completion,
                                         use_merge_queue,
@@ -1457,6 +1465,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     goal_repo.clone(),
                                     worktree_repo.clone(),
                                     &event_tx,
+                                    &event_bus,
                                     &audit_log,
                                     verify_on_completion,
                                     use_merge_queue,
