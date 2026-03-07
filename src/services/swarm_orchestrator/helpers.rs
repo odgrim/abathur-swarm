@@ -362,6 +362,11 @@ where
                         && task.status == TaskStatus::Validating {
                             let _ = task.transition_to(TaskStatus::Complete);
                             let _ = task_repo.update(&task).await;
+                            // Emit TaskCompleted now that the task is actually Complete
+                            let _ = event_tx.send(SwarmEvent::TaskCompleted {
+                                task_id,
+                                tokens_used: 0,
+                            }).await;
                         }
 
                     audit_log.info(
@@ -387,6 +392,11 @@ where
                         && task.status == TaskStatus::Validating {
                             let _ = task.transition_to(TaskStatus::Complete);
                             let _ = task_repo.update(&task).await;
+                            // Emit TaskCompleted now that the task is actually Complete
+                            let _ = event_tx.send(SwarmEvent::TaskCompleted {
+                                task_id,
+                                tokens_used: 0,
+                            }).await;
                         }
 
                     audit_log.log(
@@ -467,6 +477,11 @@ where
                         && task.status == TaskStatus::Validating {
                             let _ = task.transition_to(TaskStatus::Complete);
                             let _ = task_repo.update(&task).await;
+                            // Emit TaskCompleted now that the task is actually Complete
+                            let _ = event_tx.send(SwarmEvent::TaskCompleted {
+                                task_id,
+                                tokens_used: 0,
+                            }).await;
                         }
 
                     audit_log.log(

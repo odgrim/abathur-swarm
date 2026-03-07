@@ -426,16 +426,16 @@ where
 
     /// Get the system prompt for an agent type, including goal context and API docs.
     pub(super) async fn get_agent_system_prompt(&self, agent_type: &str) -> String {
-        let raw_prompt = match self.agent_repo.get_template_by_name(agent_type).await {
-            Ok(Some(template)) => template.system_prompt.clone(),
+        let (raw_prompt, is_read_only) = match self.agent_repo.get_template_by_name(agent_type).await {
+            Ok(Some(template)) => (template.system_prompt.clone(), template.read_only),
             _ => {
                 // Default system prompt if agent template not found
-                format!(
+                (format!(
                     "You are a specialized agent for executing tasks.\n\
                     Follow the task description carefully and complete the work.\n\
                     Agent type: {}",
                     agent_type
-                )
+                ), false)
             }
         };
 
@@ -478,29 +478,91 @@ where
 
         let with_apis = format!("{}{}", with_restrictions, api_docs);
 
-        // Append scope-completeness guidance to all agents (research, plan, AND implement)
-        let fix_completeness = "\n\n## Scope Completeness\n\n\
-            Whether you are researching, planning, or implementing — your job is to cover \
-            the FULL scope of the change, not just what the issue description explicitly \
-            mentions. A partial understanding produces a partial fix. Apply these rules \
-            at every phase:\n\n\
-            1. **Treat the issue as a starting point, not a boundary.** The description tells \
-            you where the problem surfaces, but the work must cover everywhere it matters. \
-            Identify all code paths affected by the same root cause or assumption.\n\
+        // Append scope-completeness guidance, differentiated by role.
+        //
+        // Read-only agents (researchers, planners) get structured output requirements
+        // that force them to explicitly account for every direction they investigated
+        // or chose not to investigate. This prevents narrow scoping where an agent
+        // silently ignores complementary paths (e.g., only researching write when
+        // read also needs changes).
+        //
+        // Write-capable agents (implementers) get verification-oriented guidance
+        // requiring them to confirm coverage before committing.
+        let fix_completeness = if is_read_only {
+            "\n\n## Scope Completeness\n\n\
+            Your job is to cover the FULL scope of the change, not just what the issue \
+            description explicitly mentions. A partial understanding produces a partial \
+            fix.\n\n\
+            1. **Treat the issue as a starting point, not a boundary.** The description \
+            tells you where the problem surfaces, but the work must cover everywhere it \
+            matters. Identify all code paths affected by the same root cause or assumption.\n\
             2. **Trace every code path end-to-end.** Follow the feature through all its \
-            complementary paths — if there is a read path and a write path, an encoder and \
-            a decoder, a serializer and a deserializer, ALL of them are in scope. If a \
-            subclass is being modified, trace the parent class to find every code path the \
-            change must flow through.\n\
+            complementary paths — if there is a read path and a write path, an encoder \
+            and a decoder, a serializer and a deserializer, ALL of them are in scope. If \
+            a subclass is being modified, trace the parent class to find every code path \
+            the change must flow through.\n\
             3. **Grep for parallel assumptions.** After finding the primary change site, \
-            search for every other location that encodes the same assumption. A new parameter, \
-            renamed field, or changed invariant needs updating everywhere it is referenced.\n\
-            4. **Mentally exercise a full round-trip.** Before declaring done, trace a \
-            realistic scenario end-to-end through your change. If any step would break, \
-            your work is incomplete — even if the issue only mentioned one direction.\n\
+            search for every other location that encodes the same assumption. A new \
+            parameter, renamed field, or changed invariant needs updating everywhere it \
+            is referenced.\n\n\
+            ## Required: Coverage Audit\n\n\
+            Your final memory_store output MUST end with a **Coverage Audit** section \
+            using EXACTLY this structure. Omitting it or leaving placeholders means your \
+            work is incomplete.\n\n\
+            ```\n\
+            ### Coverage Audit\n\
+            \n\
+            **Public API entry points that exercise this feature:**\n\
+            - <method_or_function_1>: [investigated | not investigated] — <one-line finding>\n\
+            - <method_or_function_2>: [investigated | not investigated] — <one-line finding>\n\
+            - ...\n\
+            \n\
+            **Complementary paths:**\n\
+            - Read path: [investigated | not investigated | N/A] — <one-line finding or why N/A>\n\
+            - Write path: [investigated | not investigated | N/A] — <one-line finding or why N/A>\n\
+            - Serialization/deserialization: [investigated | not investigated | N/A] — <finding>\n\
+            - Parent/subclass interactions: [investigated | not investigated | N/A] — <finding>\n\
+            \n\
+            **Input variations that could exercise different code paths:**\n\
+            - <variation_1>: <what happens>\n\
+            - <variation_2>: <what happens>\n\
+            - ...\n\
+            \n\
+            **Locations encoding the same assumption being changed:**\n\
+            - <file:line> — <description>\n\
+            - ...\n\
+            ```\n\n\
+            Fill in every row. Mark paths \"not investigated\" honestly rather than \
+            omitting them — an explicit gap is more useful than a silent one. If you \
+            mark something \"not investigated\" and it is clearly relevant, continue \
+            investigating before storing your findings."
+        } else {
+            "\n\n## Scope Completeness\n\n\
+            Your job is to cover the FULL scope of the change, not just what the issue \
+            description explicitly mentions. A partial fix is a wrong fix.\n\n\
+            1. **Treat the issue as a starting point, not a boundary.** The description \
+            tells you where the problem surfaces, but the work must cover everywhere it \
+            matters. Identify all code paths affected by the same root cause or assumption.\n\
+            2. **Trace every code path end-to-end.** Follow the feature through all its \
+            complementary paths — if there is a read path and a write path, an encoder \
+            and a decoder, a serializer and a deserializer, ALL of them are in scope. If \
+            a subclass is being modified, trace the parent class to find every code path \
+            the change must flow through.\n\
+            3. **Grep for parallel assumptions.** After finding the primary change site, \
+            search for every other location that encodes the same assumption. A new \
+            parameter, renamed field, or changed invariant needs updating everywhere it \
+            is referenced.\n\
+            4. **Exercise a full round-trip before committing.** Trace a realistic \
+            scenario end-to-end through your change. If any step would break, your work \
+            is incomplete — even if the issue only mentioned one direction.\n\
             5. **Never rationalize partial work.** Do not use the scope of the issue \
             description to justify ignoring broken or inconsistent behavior in related \
-            code paths. If a user would reasonably exercise a related path, it is in scope.";
+            code paths. If a user would reasonably exercise a related path, it is in scope.\n\
+            6. **Check the research and plan coverage audits.** If the research or plan \
+            stored in memory includes a Coverage Audit section, review it before starting. \
+            If any complementary paths or API entry points are marked as needing changes, \
+            your implementation must address them."
+        };
 
         let with_completeness = format!("{}{}", with_apis, fix_completeness);
 

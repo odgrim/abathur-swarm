@@ -919,7 +919,32 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                                     let _ = task_repo.update(&t).await;
                                                 }
                                             }
-                                            // Fallback: emit event manually since CommandBus didn't
+                                            // Only emit TaskCompleted when actually completing.
+                                            // When target is Validating, the verification workflow
+                                            // in run_post_completion_workflow will emit the event
+                                            // after transitioning Validating -> Complete.
+                                            if target_status == TaskStatus::Complete {
+                                                event_bus.publish(crate::services::event_factory::task_event(
+                                                    crate::services::event_bus::EventSeverity::Info,
+                                                    None,
+                                                    task_id,
+                                                    crate::services::event_bus::EventPayload::TaskCompleted {
+                                                        task_id,
+                                                        tokens_used: 0,
+                                                    },
+                                                )).await;
+                                            }
+                                        }
+                                    } else if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                        if !t.status.is_terminal() {
+                                            let _ = t.transition_to(target_status);
+                                            let _ = task_repo.update(&t).await;
+                                        }
+                                        // Only emit TaskCompleted when actually completing.
+                                        // When target is Validating, the verification workflow
+                                        // in run_post_completion_workflow will emit the event
+                                        // after transitioning Validating -> Complete.
+                                        if target_status == TaskStatus::Complete {
                                             event_bus.publish(crate::services::event_factory::task_event(
                                                 crate::services::event_bus::EventSeverity::Info,
                                                 None,
@@ -930,21 +955,6 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                                 },
                                             )).await;
                                         }
-                                    } else if let Ok(Some(mut t)) = task_repo.get(task_id).await {
-                                        if !t.status.is_terminal() {
-                                            let _ = t.transition_to(target_status);
-                                            let _ = task_repo.update(&t).await;
-                                        }
-                                        // No CommandBus: emit event manually
-                                        event_bus.publish(crate::services::event_factory::task_event(
-                                            crate::services::event_bus::EventSeverity::Info,
-                                            None,
-                                            task_id,
-                                            crate::services::event_bus::EventPayload::TaskCompleted {
-                                                task_id,
-                                                tokens_used: 0,
-                                            },
-                                        )).await;
                                     }
                                 } else {
                                     tracing::debug!(
@@ -1362,7 +1372,29 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                                 let _ = task_repo.update(&t).await;
                                             }
                                         }
-                                        // Fallback: emit event manually since CommandBus didn't
+                                        // Only emit TaskCompleted when actually completing.
+                                        // When target is Validating, the verification workflow
+                                        // will emit the event after Validating -> Complete.
+                                        if target_status == TaskStatus::Complete {
+                                            event_bus.publish(crate::services::event_factory::task_event(
+                                                crate::services::event_bus::EventSeverity::Info,
+                                                None,
+                                                task_id,
+                                                crate::services::event_bus::EventPayload::TaskCompleted {
+                                                    task_id,
+                                                    tokens_used: tokens,
+                                                },
+                                            )).await;
+                                        }
+                                    }
+                                } else {
+                                    tracing::warn!("CommandBus not available for task {} completion, using non-atomic fallback", task_id);
+                                    let _ = completed_task.transition_to(target_status);
+                                    let _ = task_repo.update(&completed_task).await;
+                                    // Only emit TaskCompleted when actually completing.
+                                    // When target is Validating, the verification workflow
+                                    // will emit the event after Validating -> Complete.
+                                    if target_status == TaskStatus::Complete {
                                         event_bus.publish(crate::services::event_factory::task_event(
                                             crate::services::event_bus::EventSeverity::Info,
                                             None,
@@ -1373,20 +1405,6 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                             },
                                         )).await;
                                     }
-                                } else {
-                                    tracing::warn!("CommandBus not available for task {} completion, using non-atomic fallback", task_id);
-                                    let _ = completed_task.transition_to(target_status);
-                                    let _ = task_repo.update(&completed_task).await;
-                                    // No CommandBus: emit event manually
-                                    event_bus.publish(crate::services::event_factory::task_event(
-                                        crate::services::event_bus::EventSeverity::Info,
-                                        None,
-                                        task_id,
-                                        crate::services::event_bus::EventPayload::TaskCompleted {
-                                            task_id,
-                                            tokens_used: tokens,
-                                        },
-                                    )).await;
                                 }
                             } else {
                                 tracing::debug!(
