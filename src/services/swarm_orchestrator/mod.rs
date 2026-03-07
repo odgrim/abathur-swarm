@@ -501,6 +501,33 @@ where
             }
         }
 
+        // Run startup codebase triage if memory repo is available
+        if self.memory_repo.is_some() {
+            match self.run_startup_triage().await {
+                Ok(true) => {
+                    self.audit_log.info(
+                        AuditCategory::Memory,
+                        AuditAction::MemoryStored,
+                        "Startup codebase triage completed — profile stored in memory",
+                    ).await;
+                }
+                Ok(false) => {
+                    // Codebase profile already exists, skip triage
+                }
+                Err(e) => {
+                    self.audit_log.log(
+                        AuditEntry::new(
+                            AuditLevel::Warning,
+                            AuditCategory::System,
+                            AuditAction::SwarmStarted,
+                            AuditActor::System,
+                            format!("Startup triage failed (non-fatal): {}", e),
+                        ),
+                    ).await;
+                }
+            }
+        }
+
         // Register existing agent templates with A2A gateway for discovery
         if self.config.mcp_servers.a2a_gateway.is_some()
             && let Err(e) = self.register_all_agent_templates().await {

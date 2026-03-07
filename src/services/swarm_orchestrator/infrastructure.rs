@@ -233,6 +233,90 @@ where
         Ok(Some(report))
     }
 
+    /// Run startup codebase triage if no codebase profile exists in memory.
+    ///
+    /// Returns `Ok(true)` if triage ran and stored a profile, `Ok(false)` if
+    /// a profile already existed (idempotency check), or an error on failure.
+    /// This is a blocking startup step — the swarm should not accept user tasks
+    /// until triage completes.
+    ///
+    /// Creates a real task in the task repository so the triage is visible in
+    /// the task queue alongside user tasks.
+    pub async fn run_startup_triage(&self) -> DomainResult<bool>
+    where
+        M: MemoryRepository + Send + Sync + 'static,
+    {
+        use crate::domain::models::task::{Task, TaskSource, TaskStatus, TaskType};
+
+        let Some(ref memory_repo) = self.memory_repo else {
+            return Ok(false);
+        };
+
+        // Idempotency check: skip if codebase-profile already exists
+        if let Ok(Some(_)) = memory_repo.get_by_key("codebase-profile", "triage").await {
+            self.audit_log.info(
+                AuditCategory::System,
+                AuditAction::SwarmStarted,
+                "Skipping startup triage — codebase-profile already exists in memory",
+            ).await;
+            return Ok(false);
+        }
+
+        self.audit_log.info(
+            AuditCategory::System,
+            AuditAction::SwarmStarted,
+            "Running startup codebase triage...",
+        ).await;
+
+        // Create a real task in the task repository
+        let mut task = Task::with_title(
+            "Startup codebase triage",
+            "Profile this workspace and store a codebase-profile in memory. \
+             Follow the steps in your system prompt exactly.",
+        )
+        .with_source(TaskSource::System)
+        .with_task_type(TaskType::Research);
+
+        let _ = task.transition_to(TaskStatus::Ready);
+        let _ = task.transition_to(TaskStatus::Running);
+
+        self.task_repo.create(&task).await?;
+
+        // Build and execute the triage agent via substrate
+        let triage_template = crate::domain::models::specialist_templates::create_triage_agent();
+        let request = crate::domain::models::SubstrateRequest::new(
+            task.id,
+            &triage_template.name,
+            &triage_template.system_prompt,
+            &task.description,
+        ).with_config(crate::domain::models::SubstrateConfig {
+            max_turns: 10,
+            working_dir: Some(self.config.repo_path.to_string_lossy().to_string()),
+            model: triage_template.preferred_model.clone(),
+            ..Default::default()
+        });
+
+        match self.substrate.execute(request).await {
+            Ok(session) => {
+                tracing::info!(
+                    session_id = %session.id,
+                    turns = session.turns_completed,
+                    task_id = %task.id,
+                    "Startup codebase triage completed"
+                );
+                let _ = task.transition_to(TaskStatus::Complete);
+                let _ = self.task_repo.update(&task).await;
+                Ok(true)
+            }
+            Err(e) => {
+                tracing::warn!("Startup codebase triage failed: {}", e);
+                let _ = task.transition_to(TaskStatus::Failed);
+                let _ = self.task_repo.update(&task).await;
+                Err(e)
+            }
+        }
+    }
+
     /// Store MCP server shutdown handle for external management.
     pub async fn set_mcp_shutdown_handle(&self, tx: tokio::sync::broadcast::Sender<()>) {
         let mut handle = self.mcp_shutdown_tx.write().await;

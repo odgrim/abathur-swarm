@@ -25,7 +25,7 @@ pub fn create_baseline_agents() -> Vec<AgentTemplate> {
 pub fn create_baseline_agents_with_workflow(
     workflow: Option<&WorkflowTemplate>,
 ) -> Vec<AgentTemplate> {
-    vec![create_overmind_with_workflow(workflow), create_aggregator()]
+    vec![create_overmind_with_workflow(workflow), create_aggregator(), create_triage_agent()]
 }
 
 /// Create all baseline agents with awareness of all configured workflow spines.
@@ -34,7 +34,7 @@ pub fn create_baseline_agents_with_workflow(
 /// provided workflows and teaches the Overmind to select the appropriate spine
 /// based on task content at runtime.
 pub fn create_baseline_agents_with_workflows(workflows: &[WorkflowTemplate]) -> Vec<AgentTemplate> {
-    vec![create_overmind_with_workflows(workflows), create_aggregator()]
+    vec![create_overmind_with_workflows(workflows), create_aggregator(), create_triage_agent()]
 }
 
 /// Overmind - The agentic orchestrator of the swarm.
@@ -93,6 +93,29 @@ pub fn create_aggregator() -> AgentTemplate {
         .with_max_turns(16)
 }
 
+/// Codebase triage agent — lightweight startup profiler.
+///
+/// Runs once at swarm initialization to classify and profile the workspace.
+/// Stores a structured codebase profile in memory for the Overmind and all
+/// downstream agents to reference. Uses Haiku for speed and cost efficiency.
+pub fn create_triage_agent() -> AgentTemplate {
+    AgentTemplate::new("codebase-triage", AgentTier::Worker)
+        .with_description("Lightweight codebase profiler that identifies language, framework, and structure")
+        .with_prompt(TRIAGE_SYSTEM_PROMPT.to_string())
+        .with_read_only(true)
+        .with_preferred_model("haiku")
+        .with_tool(ToolCapability::new("read", "Read key config files"))
+        .with_tool(ToolCapability::new("glob", "Discover file types and structure"))
+        .with_tool(ToolCapability::new("grep", "Search for framework markers"))
+        .with_tool(ToolCapability::new("memory", "Store codebase profile"))
+        .with_tool(ToolCapability::new("task_status", "Report completion"))
+        .with_constraint(AgentConstraint::new(
+            "breadth-over-depth",
+            "Quick scan only — map the codebase, do not analyze specific code logic",
+        ))
+        .with_max_turns(10)
+}
+
 /// Build the Overmind `AgentTemplate` from a pre-generated prompt.
 ///
 /// Shared by `create_overmind_with_workflow` and `create_overmind_with_workflows`
@@ -101,9 +124,6 @@ fn build_overmind_template(prompt: String, has_triage: bool) -> AgentTemplate {
     let mut template = AgentTemplate::new("overmind", AgentTier::Architect)
         .with_description("Agentic orchestrator that analyzes tasks, selects the appropriate workflow spine, dynamically creates agents, and delegates work through MCP tools")
         .with_prompt(prompt)
-        .with_tool(ToolCapability::new("read", "Read source files for context").required())
-        .with_tool(ToolCapability::new("glob", "Find files by pattern").required())
-        .with_tool(ToolCapability::new("grep", "Search for patterns in codebase").required())
         .with_tool(ToolCapability::new("memory", "Query and store swarm memory"))
         .with_tool(ToolCapability::new("tasks", "Interact with task queue"))
         .with_tool(ToolCapability::new("agents", "Create and manage agent templates"));
@@ -199,12 +219,12 @@ fn generate_workflow_routing_section(workflows: &[WorkflowTemplate]) -> String {
         "## Workflow Selection\n\n\
          Before starting any task, inspect the task description and select the \
          appropriate workflow spine. Each spine defines a mandatory phase sequence — \
-         follow it completely from Phase 1 (Memory Search).\n\n\
+         follow it completely from Phase 1 (Consume Codebase Profile + Memory Search).\n\n\
          ### Available Spines\n\n",
     );
 
     for wf in workflows {
-        let phases = std::iter::once("Memory Search".to_string())
+        let phases = std::iter::once("Codebase Profile + Memory Search".to_string())
             .chain(wf.phases.iter().map(|p| capitalize(&p.name)))
             .collect::<Vec<_>>()
             .join(" → ");
@@ -240,7 +260,7 @@ fn generate_workflow_routing_section(workflows: &[WorkflowTemplate]) -> String {
 
 /// Generate the workflow spine section of the Overmind prompt.
 fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
-    let total_phases = template.phases.len() + 1; // +1 for implicit Memory Search phase
+    let total_phases = template.phases.len() + 1; // +1 for implicit Codebase Profile + Memory Search phase
     let mut section = format!(
         "## Workflow Spine: {}\n\n{}\n\nEvery task MUST follow this {}-phase spine. Do NOT skip phases or jump straight to implementation.\n",
         capitalize(&template.name),
@@ -252,9 +272,13 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
         total_phases,
     );
 
-    // Phase 1 is always Memory Search (implicit)
+    // Phase 1 is always Codebase Profile + Memory Search (implicit)
     section.push_str(
-        "\n### Phase 1: Memory Search\nQuery swarm memory for similar past tasks, known patterns, and prior decisions via `memory_search`.\n",
+        "\n### Phase 1: Consume Codebase Profile + Memory Search\n\
+         First, retrieve the startup codebase profile via `memory_search` with query `\"codebase-profile\"`. \
+         This was generated once at swarm startup — no per-task cost. Use it to decide what kind of \
+         specialist agents to create (e.g., \"rust-researcher\" vs \"python-researcher\").\n\
+         Then query swarm memory for similar past tasks, known patterns, and prior decisions via `memory_search`.\n",
     );
 
     // Each template phase becomes Phase N+1
@@ -573,9 +597,14 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
 fn generate_workflow_example(template: &WorkflowTemplate) -> String {
     let mut example = String::from("## Example: Overmind-Driven Workflow\n\n```\n");
 
-    // Phase 1: Memory Search (Overmind does directly)
+    // Phase 1: Codebase Profile + Memory Search (Overmind does directly)
     example.push_str(
-        "# Phase 1: Memory Search (you do directly)\n\
+        "# Phase 1: Consume Codebase Profile + Memory Search (you do directly)\n\
+         tool: memory_search\n\
+         arguments:\n\
+         \x20 query: \"codebase-profile\"\n\
+         # -> Returns structured profile: language=Rust, framework=Cargo, modules=[src/domain, src/services, ...]\n\
+         # This was generated once at swarm startup — no per-task cost.\n\n\
          tool: memory_search\n\
          arguments:\n\
          \x20 query: \"<relevant search terms>\"\n\n\
@@ -763,6 +792,8 @@ You are the agentic orchestrator. When a task arrives, you analyze it, create wh
 
 You MUST delegate work by creating agents and submitting subtasks. Do NOT attempt to do implementation work yourself.
 
+**You do NOT have file-reading tools.** The codebase profile was generated during swarm startup and is available in memory under namespace `triage`, key `codebase-profile`. All additional codebase information comes from specialist agents you delegate to. NEVER attempt to use Read, Grep, or Glob — they are not available to you.
+
 ## Your MCP Tools
 
 You have native MCP tools for interacting with the Abathur swarm. Use these directly — they are available in your tool list. Do NOT use WebFetch or HTTP requests.
@@ -813,8 +844,9 @@ Tasks are **auto-enrolled** in workflows at submission time. You get a **long-ru
 
 ### Default Phases: research → plan → implement → review
 
-**Phase 1: Memory Search** (you do directly)
-Query swarm memory for similar past tasks, known patterns, and prior decisions via `memory_search`.
+**Phase 1: Consume Codebase Profile + Memory Search** (you do directly)
+First, retrieve the startup codebase profile via `memory_search` with query `"codebase-profile"`. This was generated once at swarm startup — no per-task cost. Use it to decide what kind of specialist agents to create (e.g., "rust-researcher" vs "python-researcher").
+Then query swarm memory for similar past tasks, known patterns, and prior decisions via `memory_search`.
 
 **Phase 2: Research** — call `workflow_advance` then `workflow_fan_out` with `agent` set inline
 Create a read-only research agent, then pass its name in the `agent` field of each fan_out slice.
@@ -863,7 +895,13 @@ ALWAYS call `agent_list` before `agent_create`. Reuse an existing agent if one i
 ## Example: Overmind-Driven Workflow
 
 ```
-# Phase 1: Memory Search (you do directly)
+# Phase 1: Consume Codebase Profile + Memory Search (you do directly)
+tool: memory_search
+arguments:
+  query: "codebase-profile"
+# -> Returns structured profile: language=Rust, framework=Cargo, modules=[src/domain, src/services, ...]
+# This was generated once at swarm startup — no per-task cost.
+
 tool: memory_search
 arguments:
   query: "rate limiting middleware tower"
@@ -1120,6 +1158,8 @@ You are the agentic orchestrator. When a task arrives, you analyze it, create wh
 
 You MUST delegate work by creating agents and submitting subtasks. Do NOT attempt to do implementation work yourself.
 
+**You do NOT have file-reading tools.** The codebase profile was generated during swarm startup and is available in memory under namespace `triage`, key `codebase-profile`. All additional codebase information comes from specialist agents you delegate to. NEVER attempt to use Read, Grep, or Glob — they are not available to you.
+
 ## Your MCP Tools
 
 You have native MCP tools for interacting with the Abathur swarm. Use these directly — they are available in your tool list. Do NOT use WebFetch or HTTP requests.
@@ -1366,6 +1406,95 @@ whether the next phase should fan out or collapse.
 - Do NOT exceed the 7-step checklist above. If you are done, STOP.
 "#;
 
+/// System prompt for the codebase triage agent.
+///
+/// Runs once at startup to classify and profile the workspace. Stores a structured
+/// codebase profile in memory under namespace "triage", key "codebase-profile".
+const TRIAGE_SYSTEM_PROMPT: &str = r#"# Codebase Triage Agent
+
+You are a lightweight codebase profiler. Your job is to quickly classify and profile
+the workspace, then store a structured profile in swarm memory. This runs once at
+swarm startup — be fast and efficient.
+
+## Step 1: Classify the Workspace
+
+Run `glob` with pattern `*` (top-level only) to see what exists. Based on the results,
+classify the workspace into one of these categories:
+
+| Classification | Signal |
+|---|---|
+| `empty` | No files or only dotfiles (`.gitignore`, `.git/`) |
+| `scaffold` | Only config/boilerplate, no substantive source files |
+| `project` | Has source files, config, and structure |
+| `monorepo` | Multiple independent projects or workspace members |
+| `non-code` | Documentation, data, configs, but no programming language source |
+
+## Step 2: Profile (only if classification warrants it)
+
+- For `empty` or `non-code`: store the classification and stop. No further scanning needed.
+- For `scaffold`: note the language/framework from config files and stop. Minimal profiling.
+- For `project` or `monorepo`: perform the full profile:
+  1. Run `glob` with patterns like `**/*.rs`, `**/*.py`, `**/*.ts`, `**/*.go`, `**/*.java`,
+     `**/*.rb`, `**/*.c`, `**/*.cpp` to identify primary languages.
+  2. Check for framework markers: `Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`,
+     `pom.xml`, `Gemfile`, `CMakeLists.txt`, etc.
+  3. Read 1-2 key config files (Cargo.toml, package.json, etc.) to identify dependencies
+     and project structure.
+  4. Run `glob` on `src/**` or equivalent to map top-level module structure.
+  5. Check for test infrastructure: `tests/`, `*_test.*`, `*.spec.*`, CI configs
+     (`.github/workflows/`, `.gitlab-ci.yml`), etc.
+
+## Step 3: Store the Profile
+
+Store a structured profile in memory using `memory_store` with:
+- namespace: `triage`
+- key: `codebase-profile`
+- memory_type: `pattern`
+
+The profile content MUST be a JSON object containing:
+- **workspace_class**: one of `empty`, `scaffold`, `project`, `monorepo`, `non-code`
+- **primary_languages**: language(s) and approximate file counts (empty list for `empty`/`non-code`)
+- **framework**: framework/build system if detected (e.g., "Rust/Cargo", "Python/Django")
+- **key_dependencies**: from manifest files (empty for `empty`/`scaffold`)
+- **module_structure**: top-level module/directory layout
+- **repo_type**: library, application, CLI tool, web service, etc. (if discernible)
+- **test_infrastructure**: what testing exists — test directories, test frameworks, CI configuration
+- **notable_patterns**: e.g., "uses workspace members", "has benchmarks/", "has migrations/"
+
+For an empty workspace, the stored profile is simply:
+```json
+{"workspace_class": "empty", "primary_languages": [], "framework": null, "key_dependencies": [], "module_structure": [], "repo_type": null, "test_infrastructure": null, "notable_patterns": []}
+```
+
+## Step 4: Complete
+
+Call `task_update_status` with "completed".
+
+## Turn Economy
+- NEVER re-read a file you already read this session — cache key facts in working memory.
+- NEVER self-verify by re-reading output you just stored (memory_store, Write, Edit).
+- Use Glob to find files by pattern — never shell ls/find.
+- Use Grep to search code — never Read an entire file looking for a pattern.
+- Stop and finalize immediately when you have enough information to complete the task.
+- If running low on turns, store partial results via memory_store rather than losing them.
+
+## Recovery Protocol
+- FIRST ACTION on any task: call memory_search with the task description to find prior work.
+- If prior results exist, build on them — do NOT restart from scratch.
+- Check task description for "retry" or "attempt" language indicating previous failure.
+
+## Completion Protocol
+- When done: memory_store results → task_update_status "completed" → STOP.
+- Do NOT re-read memories you just stored to verify them.
+- Do NOT continue working after calling task_update_status.
+
+## IMPORTANT
+- This is a quick scan — breadth over depth, 10 turns max.
+- Early exit for simple classifications (empty, scaffold, non-code).
+- Do NOT analyze specific code logic, review code quality, or read implementation files.
+- Do NOT create subtasks or spawn other agents.
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1374,9 +1503,10 @@ mod tests {
     #[test]
     fn test_create_baseline_agents() {
         let agents = create_baseline_agents();
-        assert_eq!(agents.len(), 2);
+        assert_eq!(agents.len(), 3);
         assert_eq!(agents[0].name, "overmind");
         assert_eq!(agents[1].name, "aggregator");
+        assert_eq!(agents[2].name, "codebase-triage");
     }
 
     #[test]
@@ -1397,10 +1527,10 @@ mod tests {
         assert!(overmind.has_capability("stuck-recovery"));
         assert!(overmind.has_capability("escalation-evaluation"));
 
-        // Verify tools
-        assert!(overmind.has_tool("read"));
-        assert!(overmind.has_tool("glob"));
-        assert!(overmind.has_tool("grep"));
+        // Verify tools — overmind does NOT have file-reading tools
+        assert!(!overmind.has_tool("read"));
+        assert!(!overmind.has_tool("glob"));
+        assert!(!overmind.has_tool("grep"));
         assert!(overmind.has_tool("memory"));
         assert!(overmind.has_tool("tasks"));
         assert!(overmind.has_tool("agents"));
@@ -1448,6 +1578,58 @@ mod tests {
     }
 
     #[test]
+    fn test_triage_agent() {
+        let triage = create_triage_agent();
+        assert_eq!(triage.name, "codebase-triage");
+        assert_eq!(triage.tier, AgentTier::Worker);
+        assert_eq!(triage.max_turns, 10);
+        assert!(triage.read_only);
+        assert_eq!(triage.preferred_model.as_deref(), Some("haiku"));
+
+        // Tools: read, glob, grep, memory, task_status
+        assert!(triage.has_tool("read"));
+        assert!(triage.has_tool("glob"));
+        assert!(triage.has_tool("grep"));
+        assert!(triage.has_tool("memory"));
+        assert!(triage.has_tool("task_status"));
+        assert!(!triage.has_tool("write"));
+        assert!(!triage.has_tool("edit"));
+        assert!(!triage.has_tool("shell"));
+
+        // Constraint
+        assert!(triage.constraints.iter().any(|c| c.name == "breadth-over-depth"));
+
+        // System prompt references codebase-profile storage
+        assert!(triage.system_prompt.contains("codebase-profile"));
+        assert!(triage.system_prompt.contains("triage"));
+
+        // Validation passes
+        assert!(triage.validate().is_ok());
+    }
+
+    #[test]
+    fn test_overmind_does_not_have_file_reading_tools() {
+        let overmind = create_overmind();
+        assert!(!overmind.has_tool("read"), "overmind should not have read tool");
+        assert!(!overmind.has_tool("glob"), "overmind should not have glob tool");
+        assert!(!overmind.has_tool("grep"), "overmind should not have grep tool");
+
+        // Also verify with workflow-generated overmind
+        let wf = WorkflowTemplate::default_code_workflow();
+        let wf_overmind = create_overmind_with_workflow(Some(&wf));
+        assert!(!wf_overmind.has_tool("read"), "workflow overmind should not have read tool");
+        assert!(!wf_overmind.has_tool("glob"), "workflow overmind should not have glob tool");
+        assert!(!wf_overmind.has_tool("grep"), "workflow overmind should not have grep tool");
+    }
+
+    #[test]
+    fn test_overmind_prompt_references_codebase_profile() {
+        let overmind = create_overmind();
+        assert!(overmind.system_prompt.contains("codebase-profile"));
+        assert!(overmind.system_prompt.contains("do NOT have file-reading tools"));
+    }
+
+    #[test]
     fn test_create_overmind_with_no_workflow_matches_original() {
         let original = create_overmind();
         let via_workflow = create_overmind_with_workflow(None);
@@ -1484,7 +1666,7 @@ mod tests {
 
         // Should contain workflow spine
         assert!(prompt.contains("Workflow Spine: Code"));
-        assert!(prompt.contains("Phase 1: Memory Search"));
+        assert!(prompt.contains("Phase 1: Consume Codebase Profile + Memory Search"));
         assert!(prompt.contains("Phase 2: Research"));
         assert!(prompt.contains("Phase 3: Plan"));
         assert!(prompt.contains("Phase 4: Implement"));
@@ -1543,7 +1725,7 @@ mod tests {
 
         // Should have the correct phase count
         assert!(prompt.contains("3-phase spine")); // 2 template phases + 1 memory search
-        assert!(prompt.contains("Phase 1: Memory Search"));
+        assert!(prompt.contains("Phase 1: Consume Codebase Profile + Memory Search"));
         assert!(prompt.contains("Phase 2: Research"));
         assert!(prompt.contains("Phase 3: Write-docs"));
 
@@ -1604,16 +1786,16 @@ mod tests {
         // Dynamic prompt should differ from static prompt (different formatting)
         // but should contain the same key sections
         assert!(overmind.system_prompt.contains("You are the Overmind"));
-        assert!(overmind.system_prompt.contains("Phase 1: Memory Search"));
+        assert!(overmind.system_prompt.contains("Phase 1: Consume Codebase Profile + Memory Search"));
         assert!(overmind.system_prompt.contains("Research"));
         assert!(overmind.system_prompt.contains("Plan"));
         assert!(overmind.system_prompt.contains("Implement"));
         assert!(overmind.system_prompt.contains("Review"));
 
-        // Should still have all the same tools and capabilities
-        assert!(overmind.has_tool("read"));
-        assert!(overmind.has_tool("glob"));
-        assert!(overmind.has_tool("grep"));
+        // Should still have all the same tools and capabilities (no file-reading tools)
+        assert!(!overmind.has_tool("read"));
+        assert!(!overmind.has_tool("glob"));
+        assert!(!overmind.has_tool("grep"));
         assert!(overmind.has_tool("memory"));
         assert!(overmind.has_tool("tasks"));
         assert!(overmind.has_tool("agents"));
@@ -1637,6 +1819,9 @@ mod tests {
         assert!(OVERMIND_SYSTEM_PROMPT.contains("## Core Identity"));
         assert!(OVERMIND_SYSTEM_PROMPT.contains("## Your MCP Tools"));
         assert!(OVERMIND_SYSTEM_PROMPT.contains("### Goals"));
+        // Both should reference codebase-profile
+        assert!(OVERMIND_SYSTEM_PROMPT.contains("codebase-profile"));
+        assert!(OVERMIND_PROMPT_PREFIX.contains("codebase-profile"));
     }
 
     #[test]
