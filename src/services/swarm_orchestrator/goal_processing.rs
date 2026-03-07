@@ -103,10 +103,17 @@ fn map_template_tools_to_cli(template_tool_names: &[String]) -> Vec<String> {
         }
     }
 
-    // Ensure baseline read-only tools are always present (agents must be able to explore code)
-    for baseline in &["Read", "Glob", "Grep"] {
-        if !cli_tools.contains(&baseline.to_string()) {
-            cli_tools.push(baseline.to_string());
+    // Inject baseline read-only tools for agents that interact with code.
+    // Orchestration-only agents (overmind, aggregator) should NOT get these —
+    // they delegate to workers instead of exploring the codebase themselves.
+    let is_orchestration_only = template_tool_names.iter().all(|t| {
+        matches!(t.as_str(), "memory" | "tasks" | "agents" | "task_status" | "egress_publish")
+    });
+    if !is_orchestration_only {
+        for baseline in &["Read", "Glob", "Grep"] {
+            if !cli_tools.contains(&baseline.to_string()) {
+                cli_tools.push(baseline.to_string());
+            }
         }
     }
 
