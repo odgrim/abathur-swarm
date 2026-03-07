@@ -519,6 +519,16 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
                 "\n## Review Strategy\n\
                  - Use shell with git diff to see exactly what changed — don't read entire files.\n\
                  - Focus on correctness, not style. Only flag issues that affect functionality.\n\
+                 - **Trace complementary paths**: If the change touches a write path, verify the \
+                 read path was also updated (and vice versa). If it touches encoding, check \
+                 decoding. Any feature with a round-trip MUST work in both directions — flag \
+                 incomplete round-trips as needs-changes.\n\
+                 - **Adversarial edge cases**: Consider what happens with empty inputs, mismatched \
+                 lengths, and realistic configurations. If the agent's tests use a simpler setup \
+                 than production code would exercise, flag insufficient test realism.\n\
+                 - **Test coverage quality**: Do the tests exercise the actual code paths that \
+                 matter, or only trivial happy-path cases? Would the tests catch a regression \
+                 in a complementary path?\n\
                  - Output a structured verdict via memory_store: approved/needs-changes with specific issues.\n\
                  - Do NOT re-implement or suggest refactors beyond the task scope.\n",
             );

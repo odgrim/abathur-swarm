@@ -235,21 +235,31 @@ where
         let prompt = self.build_verification_prompt(intent, completed_tasks).await?;
 
         // Create substrate request for the verifier agent
+        // Use the first task's worktree so the verifier can read actual code/diffs.
+        let worktree_dir = completed_tasks
+            .iter()
+            .filter_map(|t| t.worktree_path.as_deref())
+            .next();
+
+        let mut config = SubstrateConfig::default()
+            .with_max_turns(self.config.max_turns)
+            .with_allowed_tools(vec![
+                "read".to_string(),
+                "glob".to_string(),
+                "grep".to_string(),
+                "shell".to_string(),
+            ]);
+        if let Some(dir) = worktree_dir {
+            config = config.with_working_dir(dir);
+        }
+
         let request = SubstrateRequest::new(
             Uuid::new_v4(),
             &self.config.verifier_agent_type,
             INTENT_VERIFIER_SYSTEM_PROMPT,
             &prompt,
         )
-        .with_config(
-            SubstrateConfig::default()
-                .with_max_turns(self.config.max_turns)
-                .with_allowed_tools(vec![
-                    "read".to_string(),
-                    "glob".to_string(),
-                    "grep".to_string(),
-                ]),
-        );
+        .with_config(config);
 
         // Execute verification
         let session = self.substrate.execute(request).await?;
@@ -421,11 +431,16 @@ where
         prompt.push_str("## Evaluation Request\n\n");
         prompt.push_str(
             "Please evaluate whether the completed work satisfies the original intent.\n\n\
-            Consider:\n\
+            Use `git diff` in the worktree to inspect the actual changes, then consider:\n\
             1. Does the work address all key requirements?\n\
             2. Are the success criteria met?\n\
             3. Is there any work that was implied but not explicitly stated that's missing?\n\
-            4. If someone submitted this exact prompt again, would there be additional work done?\n\n\
+            4. If someone submitted this exact prompt again, would there be additional work done?\n\
+            5. **Round-trip completeness**: If the change involves a feature with complementary \
+            paths (read/write, encode/decode, serialize/deserialize), were ALL directions \
+            modified and tested? A write-only fix for a read+write feature is incomplete.\n\
+            6. **Test realism**: Do the tests use realistic configurations and inputs, or only \
+            trivial setups that wouldn't catch real-world failures?\n\n\
             Provide your evaluation in the following format:\n\n\
             ```\n\
             SATISFACTION: <satisfied|partial|unsatisfied>\n\
@@ -1342,6 +1357,8 @@ Consider multiple viewpoints:
 - [ ] Common error cases handled
 - [ ] Edge cases addressed (empty inputs, large inputs, concurrent access)
 - [ ] Failure modes graceful
+- [ ] Complementary paths complete (if feature has read/write, encode/decode, or similar pairs, ALL directions work)
+- [ ] Tests use realistic configurations, not just minimal toy setups
 
 ### Integration Quality
 - [ ] Works with existing code/systems
@@ -1374,6 +1391,12 @@ Consider multiple viewpoints:
 - Started but didn't finish a logical unit
 - Implemented the easy parts, skipped the hard parts
 - Left TODOs or FIXMEs for critical functionality
+- Fixed only one direction of a round-trip (e.g. write but not read, encode but not decode)
+
+**Incomplete Round-Trip**:
+- Feature has complementary paths (read/write, serialize/deserialize, import/export) but only one direction was changed
+- Tests only exercise one direction, leaving the other untested
+- Tests use trivial/toy configurations that don't match realistic usage (e.g. simple constructor instead of loading from real data files)
 
 **Wrong Abstraction Level**:
 - Solved a different problem than asked
@@ -1392,6 +1415,9 @@ Consider multiple viewpoints:
 4. "What if the input is malicious?" (security)
 5. "How would a new developer understand this?" (clarity)
 6. "How would we know if this broke in production?" (observability)
+7. "Does this feature have a complementary path (read/write, encode/decode, serialize/deserialize, import/export)? Were ALL complementary paths modified and tested?" (round-trip completeness)
+8. "Do the tests exercise the same code paths and configurations a realistic caller would use, or only trivial/toy setups?" (test realism)
+9. "Are there edge-case inputs (empty, mismatched lengths, boundary values) that the tests don't cover but a user could plausibly provide?" (edge-case coverage)
 
 ## Goal Constraint Evaluation
 
