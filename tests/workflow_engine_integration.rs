@@ -1116,6 +1116,14 @@ async fn test_phase_failure_transitions_to_failed() {
         }
         other => panic!("Expected Failed, got {:?}", other),
     }
+
+    // Parent task should also be transitioned to Failed (not stuck Running)
+    assert_eq!(
+        reloaded.status,
+        TaskStatus::Failed,
+        "Parent task should be Failed when workflow fails, got: {:?}",
+        reloaded.status
+    );
 }
 
 // ============================================================================

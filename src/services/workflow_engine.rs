@@ -406,14 +406,34 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                         .get(&phase_retry_key)
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
+                    let error_msg = format!(
+                        "Phase '{}' fan-out subtask failed after {} retries",
+                        phase_name, phase_retry_count,
+                    );
                     let failed_state = WorkflowState::Failed {
                         workflow_name: workflow_name.clone(),
-                        error: format!(
-                            "Phase '{}' fan-out subtask failed after {} retries",
-                            phase_name, phase_retry_count,
-                        ),
+                        error: error_msg.clone(),
                     };
                     self.write_state(parent_task_id, &failed_state).await?;
+
+                    // Transition parent task to Failed so it doesn't stay Running forever
+                    let mut parent = self.task_repo.get(parent_task_id).await?
+                        .ok_or(DomainError::TaskNotFound(parent_task_id))?;
+                    if !parent.status.is_terminal() {
+                        let _ = parent.transition_to(TaskStatus::Failed);
+                        self.task_repo.update(&parent).await?;
+                        self.event_bus.publish(event_factory::make_event(
+                            EventSeverity::Error,
+                            EventCategory::Task,
+                            None,
+                            Some(parent_task_id),
+                            EventPayload::TaskFailed {
+                                task_id: parent_task_id,
+                                error: error_msg,
+                                retry_count: parent.retry_count,
+                            },
+                        )).await;
+                    }
                     return Ok(());
                 }
                 // All fan-out subtasks done → handle fan-in
@@ -485,14 +505,34 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 .get(&phase_retry_key)
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
+            let error_msg = format!(
+                "Phase '{}' subtask failed after {} retries",
+                phase_name, phase_retry_count
+            );
             let failed_state = WorkflowState::Failed {
                 workflow_name,
-                error: format!(
-                    "Phase '{}' subtask failed after {} retries",
-                    phase_name, phase_retry_count
-                ),
+                error: error_msg.clone(),
             };
             self.write_state(parent_task_id, &failed_state).await?;
+
+            // Transition parent task to Failed so it doesn't stay Running forever
+            let mut parent = self.task_repo.get(parent_task_id).await?
+                .ok_or(DomainError::TaskNotFound(parent_task_id))?;
+            if !parent.status.is_terminal() {
+                let _ = parent.transition_to(TaskStatus::Failed);
+                self.task_repo.update(&parent).await?;
+                self.event_bus.publish(event_factory::make_event(
+                    EventSeverity::Error,
+                    EventCategory::Task,
+                    None,
+                    Some(parent_task_id),
+                    EventPayload::TaskFailed {
+                        task_id: parent_task_id,
+                        error: error_msg,
+                        retry_count: parent.retry_count,
+                    },
+                )).await;
+            }
             return Ok(());
         }
 
@@ -1486,10 +1526,10 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Workflow engine tests require a real TaskRepository (SQLite) due to
-    // the persist-on-every-transition design. Integration tests should
-    // be added in the integration test suite.
+    use crate::adapters::sqlite::{
+        create_migrated_test_pool, task_repository::SqliteTaskRepository,
+    };
+    use crate::services::event_bus::{EventBus, EventBusConfig};
 
     #[test]
     fn test_is_gate_phase() {
@@ -1497,5 +1537,80 @@ mod tests {
         assert!(is_gate_phase("review"));
         assert!(!is_gate_phase("implement"));
         assert!(!is_gate_phase("research"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_phase_complete_fails_parent_task() {
+        // Setup
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+
+        let engine = WorkflowEngine::new(task_repo.clone(), event_bus.clone(), false);
+
+        // Create a parent task enrolled in a workflow, in Running state
+        let mut parent = Task::with_title("Parent workflow task", "Do work");
+        parent.transition_to(TaskStatus::Ready).unwrap();
+        parent.transition_to(TaskStatus::Running).unwrap();
+
+        // Set workflow state to PhaseRunning with a subtask
+        let mut subtask = Task::with_title("Phase subtask", "Subtask work");
+        subtask.parent_id = Some(parent.id);
+        subtask.source = TaskSource::SubtaskOf(parent.id);
+        subtask.transition_to(TaskStatus::Ready).unwrap();
+        subtask.transition_to(TaskStatus::Running).unwrap();
+        subtask.transition_to(TaskStatus::Failed).unwrap();
+        subtask.max_retries = 0; // No retries allowed
+
+        task_repo.create(&parent).await.unwrap();
+        task_repo.create(&subtask).await.unwrap();
+
+        // Write PhaseRunning workflow state on parent
+        let ws = WorkflowState::PhaseRunning {
+            workflow_name: "code".to_string(),
+            phase_index: 0,
+            phase_name: "implement".to_string(),
+            subtask_ids: vec![subtask.id],
+        };
+        engine.write_state(parent.id, &ws).await.unwrap();
+
+        // Now call handle_phase_complete — the subtask has failed and has no retries
+        let result = engine.handle_phase_complete(parent.id, subtask.id).await;
+        assert!(result.is_ok(), "handle_phase_complete should succeed: {:?}", result.err());
+
+        // Verify parent task is now Failed
+        let updated_parent = task_repo.get(parent.id).await.unwrap().unwrap();
+        assert_eq!(
+            updated_parent.status,
+            TaskStatus::Failed,
+            "Parent task should be Failed after phase failure"
+        );
+
+        // Verify workflow state is Failed
+        let ws_val = updated_parent.context.custom.get("workflow_state").unwrap();
+        let ws: WorkflowState = serde_json::from_value(ws_val.clone()).unwrap();
+        assert!(
+            matches!(ws, WorkflowState::Failed { .. }),
+            "workflow_state should be Failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validating_to_canceled_transition_allowed() {
+        // This tests Fix 1: Validating → Canceled is a valid state transition
+        let mut task = Task::new("Test validating cancel");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task.transition_to(TaskStatus::Validating).unwrap();
+
+        // Validating → Canceled should succeed
+        assert!(
+            task.can_transition_to(TaskStatus::Canceled),
+            "Validating → Canceled should be a valid transition"
+        );
+        task.transition_to(TaskStatus::Canceled).unwrap();
+        assert_eq!(task.status, TaskStatus::Canceled);
+        assert!(task.is_terminal());
+        assert!(task.completed_at.is_some());
     }
 }

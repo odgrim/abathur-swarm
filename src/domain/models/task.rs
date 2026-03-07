@@ -81,7 +81,7 @@ impl TaskStatus {
             Self::Ready => vec![Self::Running, Self::Blocked, Self::Canceled],
             Self::Blocked => vec![Self::Ready, Self::Canceled],
             Self::Running => vec![Self::Validating, Self::Complete, Self::Failed, Self::Canceled],
-            Self::Validating => vec![Self::Running, Self::Complete, Self::Failed],
+            Self::Validating => vec![Self::Running, Self::Complete, Self::Failed, Self::Canceled],
             Self::Complete => vec![],
             Self::Failed => vec![Self::Ready], // Can retry
             Self::Canceled => vec![],
@@ -777,6 +777,15 @@ mod tests {
         task2.transition_to(TaskStatus::Failed).unwrap();
         assert!(task2.is_terminal());
         assert!(task2.completed_at.is_some());
+
+        // Running -> Validating -> Canceled
+        let mut task3 = Task::new("Test validating canceled");
+        task3.transition_to(TaskStatus::Ready).unwrap();
+        task3.transition_to(TaskStatus::Running).unwrap();
+        task3.transition_to(TaskStatus::Validating).unwrap();
+        task3.transition_to(TaskStatus::Canceled).unwrap();
+        assert!(task3.is_terminal());
+        assert!(task3.completed_at.is_some());
     }
 
     #[test]
@@ -890,7 +899,7 @@ mod tests {
     #[test]
     fn test_valid_transitions_validating() {
         let valid = TaskStatus::Validating.valid_transitions();
-        assert_eq!(valid, vec![TaskStatus::Running, TaskStatus::Complete, TaskStatus::Failed]);
+        assert_eq!(valid, vec![TaskStatus::Running, TaskStatus::Complete, TaskStatus::Failed, TaskStatus::Canceled]);
     }
 
     #[test]
@@ -975,6 +984,7 @@ mod tests {
             (TaskStatus::Validating, TaskStatus::Running),
             (TaskStatus::Validating, TaskStatus::Complete),
             (TaskStatus::Validating, TaskStatus::Failed),
+            (TaskStatus::Validating, TaskStatus::Canceled),
             (TaskStatus::Failed, TaskStatus::Ready),
         ];
 

@@ -12,6 +12,7 @@ use tokio::sync::{RwLock, Semaphore};
 use crate::domain::models::{Goal, HumanEscalationEvent, Task, TaskSource, TaskStatus};
 use crate::domain::models::convergence::{AmendmentSource, SpecificationAmendment};
 use crate::domain::models::task_schedule::*;
+use crate::domain::models::workflow_state::WorkflowState;
 use crate::domain::ports::{GoalRepository, MemoryRepository, TaskRepository, TaskScheduleRepository, TrajectoryRepository, WorktreeRepository};
 use crate::services::event_store::EventStore;
 use crate::services::goal_context_service::GoalContextService;
@@ -1294,6 +1295,179 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
                             runtime_secs,
                         },
                     });
+                }
+            }
+        }
+
+        // Stale-task detection: tasks stuck in Validating for > stale_task_timeout_secs
+        // Uses the same tiered warning pattern as Running staleness above.
+        let validating = self.task_repo.list_by_status(TaskStatus::Validating).await
+            .map_err(|e| format!("Failed to list validating tasks: {}", e))?;
+
+        for task in &validating {
+            if let Some(started_at) = task.started_at {
+                let elapsed = now - started_at;
+                let runtime_secs = elapsed.num_seconds().max(0) as u64;
+
+                if elapsed > timeout {
+                    // 100% — fail the task
+                    let mut updated = task.clone();
+                    updated.retry_count += 1;
+                    if updated.transition_to(TaskStatus::Failed).is_ok() {
+                        self.task_repo.update(&updated).await
+                            .map_err(|e| format!("Failed to update stale validating task: {}", e))?;
+                        corrections += 1;
+
+                        new_events.push(UnifiedEvent {
+                            id: EventId::new(),
+                            sequence: SequenceNumber(0),
+                            timestamp: chrono::Utc::now(),
+                            severity: EventSeverity::Warning,
+                            category: EventCategory::Task,
+                            goal_id: None,
+                            task_id: Some(task.id),
+                            correlation_id: event.correlation_id,
+                            source_process_id: None,
+                            payload: EventPayload::TaskFailed {
+                                task_id: task.id,
+                                error: format!("stale-timeout: task validating for > {}s", self.stale_task_timeout_secs),
+                                retry_count: updated.retry_count,
+                            },
+                        });
+
+                        tracing::warn!(
+                            "ReconciliationHandler: stale validating task {} failed after {}s (started: {})",
+                            task.id, self.stale_task_timeout_secs, started_at
+                        );
+                    }
+                } else if elapsed > critical_threshold {
+                    // 80% — critical warning + escalation
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: now,
+                        severity: EventSeverity::Warning,
+                        category: EventCategory::Task,
+                        goal_id: None,
+                        task_id: Some(task.id),
+                        correlation_id: event.correlation_id,
+                        source_process_id: None,
+                        payload: EventPayload::TaskRunningCritical {
+                            task_id: task.id,
+                            runtime_secs,
+                        },
+                    });
+
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: now,
+                        severity: EventSeverity::Warning,
+                        category: EventCategory::Escalation,
+                        goal_id: None,
+                        task_id: Some(task.id),
+                        correlation_id: event.correlation_id,
+                        source_process_id: None,
+                        payload: EventPayload::HumanEscalationNeeded {
+                            goal_id: None,
+                            task_id: Some(task.id),
+                            reason: format!(
+                                "Task '{}' validating for {}s (80% of {}s timeout)",
+                                task.title, runtime_secs, self.stale_task_timeout_secs
+                            ),
+                            urgency: "high".to_string(),
+                            is_blocking: false,
+                        },
+                    });
+                } else if elapsed > warning_threshold {
+                    // 50% — early warning
+                    new_events.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: now,
+                        severity: EventSeverity::Info,
+                        category: EventCategory::Task,
+                        goal_id: None,
+                        task_id: Some(task.id),
+                        correlation_id: event.correlation_id,
+                        source_process_id: None,
+                        payload: EventPayload::TaskRunningLong {
+                            task_id: task.id,
+                            runtime_secs,
+                        },
+                    });
+                }
+            }
+        }
+
+        // Workflow parking state timeout detection: Running tasks whose workflow_state
+        // is PhaseReady, PhaseGate, or Verifying indicate the overmind has stalled.
+        // Use half the stale timeout to catch these before the full Running staleness fires.
+        let parking_timeout = chrono::Duration::seconds((self.stale_task_timeout_secs / 2) as i64);
+        for task in &running {
+            if let Some(started_at) = task.started_at {
+                let elapsed = now - started_at;
+                if elapsed > parking_timeout {
+                    // Check if this task has a workflow state that indicates parking
+                    let ws = task.context.custom.get("workflow_state")
+                        .and_then(|v| serde_json::from_value::<WorkflowState>(v.clone()).ok());
+                    if let Some(ws) = ws {
+                        let is_parked = matches!(
+                            ws,
+                            WorkflowState::PhaseReady { .. }
+                                | WorkflowState::PhaseGate { .. }
+                                | WorkflowState::Verifying { .. }
+                        );
+                        if is_parked {
+                            let runtime_secs = elapsed.num_seconds().max(0) as u64;
+                            let workflow_name = ws.workflow_name().to_string();
+                            let error_msg = format!(
+                                "workflow-parking-timeout: task parked in {:?} for {}s (limit: {}s)",
+                                std::mem::discriminant(&ws),
+                                runtime_secs,
+                                self.stale_task_timeout_secs / 2,
+                            );
+
+                            // Write WorkflowState::Failed
+                            let failed_ws = WorkflowState::Failed {
+                                workflow_name,
+                                error: error_msg.clone(),
+                            };
+                            let mut updated = task.clone();
+                            updated.context.custom.insert(
+                                "workflow_state".to_string(),
+                                serde_json::to_value(&failed_ws).unwrap_or_default(),
+                            );
+                            updated.retry_count += 1;
+                            if updated.transition_to(TaskStatus::Failed).is_ok() {
+                                self.task_repo.update(&updated).await
+                                    .map_err(|e| format!("Failed to update parked workflow task: {}", e))?;
+                                corrections += 1;
+
+                                new_events.push(UnifiedEvent {
+                                    id: EventId::new(),
+                                    sequence: SequenceNumber(0),
+                                    timestamp: chrono::Utc::now(),
+                                    severity: EventSeverity::Warning,
+                                    category: EventCategory::Task,
+                                    goal_id: None,
+                                    task_id: Some(task.id),
+                                    correlation_id: event.correlation_id,
+                                    source_process_id: None,
+                                    payload: EventPayload::TaskFailed {
+                                        task_id: task.id,
+                                        error: error_msg.clone(),
+                                        retry_count: updated.retry_count,
+                                    },
+                                });
+
+                                tracing::warn!(
+                                    "ReconciliationHandler: workflow-parked task {} failed after {}s",
+                                    task.id, runtime_secs
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -9308,5 +9482,121 @@ mod goal_stagnation_detector_tests {
 
         let reaction = handler.handle(&event, &ctx).await.unwrap();
         assert!(matches!(reaction, Reaction::None), "New goal within grace period should not trigger alert");
+    }
+}
+
+#[cfg(test)]
+mod reconciliation_handler_tests {
+    use super::*;
+    use crate::adapters::sqlite::{
+        create_migrated_test_pool, task_repository::SqliteTaskRepository,
+    };
+    use crate::domain::models::{Task, TaskStatus};
+    use crate::domain::models::workflow_state::WorkflowState;
+    use std::sync::Arc;
+
+    async fn setup_task_repo() -> Arc<SqliteTaskRepository> {
+        let pool = create_migrated_test_pool().await.unwrap();
+        Arc::new(SqliteTaskRepository::new(pool))
+    }
+
+    fn make_reconciliation_event() -> UnifiedEvent {
+        UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Debug,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "reconciliation".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reconciliation_stale_validating_task_fails() {
+        let repo = setup_task_repo().await;
+        // Use a 100s timeout so anything older than 100s gets failed
+        let handler = ReconciliationHandler::new(repo.clone()).with_stale_timeout(100);
+
+        // Create a task stuck in Validating for longer than the timeout
+        let mut task = Task::new("Stuck validating task");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task.transition_to(TaskStatus::Validating).unwrap();
+        // Set started_at to 200 seconds ago (well past 100s timeout)
+        task.started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(200));
+        repo.create(&task).await.unwrap();
+
+        let event = make_reconciliation_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Verify the task was failed
+        let updated = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Failed, "Stale validating task should be failed");
+
+        // Verify a TaskFailed event was emitted
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                let has_task_failed = events.iter().any(|e| matches!(&e.payload, EventPayload::TaskFailed { task_id, .. } if *task_id == task.id));
+                assert!(has_task_failed, "Should emit TaskFailed event for stale validating task");
+            }
+            Reaction::None => panic!("Expected EmitEvents reaction"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reconciliation_workflow_parking_timeout() {
+        let repo = setup_task_repo().await;
+        // Use a 100s timeout; parking timeout is half = 50s
+        let handler = ReconciliationHandler::new(repo.clone()).with_stale_timeout(100);
+
+        // Create a Running task with a workflow_state of PhaseReady (parked)
+        let mut task = Task::new("Parked workflow task");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        // Set started_at to 60 seconds ago (past the 50s parking timeout but under 100s stale timeout)
+        task.started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(60));
+        // Set workflow_state to PhaseReady (a parking state)
+        let parked_state = WorkflowState::PhaseReady {
+            workflow_name: "code".to_string(),
+            phase_index: 1,
+            phase_name: "implement".to_string(),
+        };
+        task.context.custom.insert(
+            "workflow_state".to_string(),
+            serde_json::to_value(&parked_state).unwrap(),
+        );
+        repo.create(&task).await.unwrap();
+
+        let event = make_reconciliation_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Verify the task was failed
+        let updated = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Failed, "Workflow-parked task should be failed");
+
+        // Verify workflow_state was set to Failed
+        let ws_val = updated.context.custom.get("workflow_state").unwrap();
+        let ws: WorkflowState = serde_json::from_value(ws_val.clone()).unwrap();
+        assert!(matches!(ws, WorkflowState::Failed { .. }), "workflow_state should be Failed");
+
+        // Verify a TaskFailed event was emitted
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                let has_task_failed = events.iter().any(|e| matches!(&e.payload, EventPayload::TaskFailed { task_id, .. } if *task_id == task.id));
+                assert!(has_task_failed, "Should emit TaskFailed event for parked workflow task");
+            }
+            Reaction::None => panic!("Expected EmitEvents reaction"),
+        }
     }
 }
