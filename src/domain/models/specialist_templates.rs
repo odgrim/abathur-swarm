@@ -488,6 +488,17 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
                  - Only Read files that Glob/Grep identified as relevant — never read files speculatively.\n\
                  - Store findings incrementally via memory_store as you discover them, not all at the end.\n\
                  \n\
+                 ## Complementary Paths\n\
+                 - When the issue involves one direction of a feature (write, encode, serialize, create), \
+                 ALWAYS investigate the complementary direction (read, decode, deserialize, parse) too.\n\
+                 - Report whether the complementary path already handles the change, needs modification, \
+                 or will break. Never dismiss it as \"out of scope\" — that decision belongs to the planner.\n\
+                 \n\
+                 ## Edge Case Enumeration\n\
+                 - For input-handling bugs, enumerate input combinations systematically. Think combinatorially: \
+                 if the fix handles empty input X, what happens when X is empty but Y is not? \
+                 Store these as explicit test scenarios in your findings.\n\
+                 \n\
                  ## Turn Budget Awareness\n\
                  - You have a limited turn budget. At the halfway point, assess what you have and begin wrapping up.\n\
                  - Prefer breadth over depth — cover all assigned scope areas before diving deep into any one.\n\
@@ -501,7 +512,19 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
                  - First action: memory_search for existing plans and research findings.\n\
                  - Read research findings from memory before reading any code files.\n\
                  - Output is a plan stored via memory_store, not files. Never use Write/Edit.\n\
-                 - Plan should be specific enough for an implementer to execute without re-reading research.\n",
+                 - Plan should be specific enough for an implementer to execute without re-reading research.\n\
+                 \n\
+                 ## Scope Derivation\n\
+                 - Derive the fix scope from what a complete solution requires, not from the issue description alone. \
+                 The issue may show only one failing direction — independently verify whether complementary paths \
+                 (read/write, encode/decode) also need changes.\n\
+                 - Do not inherit scope narrowing from the researcher. If the researcher flagged a complementary path \
+                 as \"out of scope\" or \"separate enhancement\", evaluate that claim yourself.\n\
+                 \n\
+                 ## Edge Case Planning\n\
+                 - When listing edge cases, think combinatorially across parameters. If the fix handles a condition \
+                 on input X, include test cases where X has that condition but other inputs do not \
+                 (e.g., one parameter empty, another non-empty; one parameter None, another set).\n",
             );
         }
         "implementer" => {
@@ -1045,6 +1068,8 @@ Use these class-specific patterns when writing system_prompts:
 - At the halfway point, assess progress and begin wrapping up. Report partial findings rather than exhausting turns.
 - When investigating a bug or feature, trace ALL code paths that touch the affected functionality — not just the entry point. If the issue involves a read/write feature, map both directions. If it involves string matching, grep for every occurrence of the matched value.
 - Report every location that encodes the assumption being changed, so implementers don't miss secondary fix sites.
+- **Complementary path mandate**: When the issue mentions one direction of a feature (e.g., write), the researcher MUST also investigate the complementary direction (e.g., read) and report whether it already works, needs changes, or will break. Do NOT dismiss complementary paths as "out of scope" — report the full picture and let the planner decide scope.
+- **Edge case enumeration**: For input-handling bugs, enumerate input combinations systematically — not just the reported case. If the fix handles empty inputs, also consider: mixed empty/non-empty across parameters, single-element inputs, boundary shapes. Store these as explicit test scenarios in findings.
 
 **Planner agents** (read_only: true, typical ~10 turns, ceiling 30):
 - First action: memory_search for existing plans or research findings.
@@ -1052,6 +1077,8 @@ Use these class-specific patterns when writing system_prompts:
 - Plan should be specific enough for an implementer to execute without re-reading research.
 - The plan must cover ALL affected code paths, not just the primary fix site. If research identified multiple locations encoding the same assumption, the plan must list every one with explicit instructions for each.
 - Think about complementary paths — if the fix touches a write path, the plan must also address the read path (and vice versa). If it touches serialization, address deserialization.
+- **Derive scope from requirements, not the issue description**: The issue description often shows only one failing example. The planner must independently determine what a complete fix requires — if adding a parameter to a writer, ask "will the reader also need to handle this parameter?" Don't accept the researcher's or issue author's scope framing without verifying it.
+- **Combinatorial edge cases**: When listing edge cases, think combinatorially across parameters. If the fix handles a condition on input X, consider what happens when X has that condition but Y does not (e.g., one array empty, another non-empty). Include these mixed-state scenarios as explicit test cases in the plan.
 
 **Implementer agents** (read_only: false, typical ~25 turns, ceiling 75):
 - First action: memory_search for the plan and research findings.
@@ -1230,6 +1257,8 @@ Use these class-specific patterns when writing system_prompts:
 - At the halfway point, assess progress and begin wrapping up. Report partial findings rather than exhausting turns.
 - When investigating a bug or feature, trace ALL code paths that touch the affected functionality — not just the entry point. If the issue involves a read/write feature, map both directions. If it involves string matching, grep for every occurrence of the matched value.
 - Report every location that encodes the assumption being changed, so implementers don't miss secondary fix sites.
+- **Complementary path mandate**: When the issue mentions one direction of a feature (e.g., write), the researcher MUST also investigate the complementary direction (e.g., read) and report whether it already works, needs changes, or will break. Do NOT dismiss complementary paths as "out of scope" — report the full picture and let the planner decide scope.
+- **Edge case enumeration**: For input-handling bugs, enumerate input combinations systematically — not just the reported case. If the fix handles empty inputs, also consider: mixed empty/non-empty across parameters, single-element inputs, boundary shapes. Store these as explicit test scenarios in findings.
 
 **Planner agents** (read_only: true, typical ~10 turns, ceiling 30):
 - First action: memory_search for existing plans or research findings.
@@ -1237,6 +1266,8 @@ Use these class-specific patterns when writing system_prompts:
 - Plan should be specific enough for an implementer to execute without re-reading research.
 - The plan must cover ALL affected code paths, not just the primary fix site. If research identified multiple locations encoding the same assumption, the plan must list every one with explicit instructions for each.
 - Think about complementary paths — if the fix touches a write path, the plan must also address the read path (and vice versa). If it touches serialization, address deserialization.
+- **Derive scope from requirements, not the issue description**: The issue description often shows only one failing example. The planner must independently determine what a complete fix requires — if adding a parameter to a writer, ask "will the reader also need to handle this parameter?" Don't accept the researcher's or issue author's scope framing without verifying it.
+- **Combinatorial edge cases**: When listing edge cases, think combinatorially across parameters. If the fix handles a condition on input X, consider what happens when X has that condition but Y does not (e.g., one array empty, another non-empty). Include these mixed-state scenarios as explicit test cases in the plan.
 
 **Implementer agents** (read_only: false, typical ~25 turns, ceiling 75):
 - First action: memory_search for the plan and research findings.
