@@ -27,7 +27,16 @@ use crate::services::swarm_orchestrator::types::SwarmConfig;
 /// (dependencies, priority, parent), and TaskSubmission has fields Task doesn't
 /// have (discovered infrastructure, anti-patterns). The bridge fills the gap.
 pub fn task_to_submission(task: &Task, goal_id: Option<Uuid>) -> TaskSubmission {
-    let mut submission = TaskSubmission::new(task.description.clone());
+    // If a previous attempt stored intent verification gaps, append them
+    // to the description so the convergence loop addresses them.
+    let description = if let Some(gap_ctx) = task.context.custom.get("intent_gap_context")
+        .and_then(|v| v.as_str())
+    {
+        format!("{}\n\n{}", task.description, gap_ctx)
+    } else {
+        task.description.clone()
+    };
+    let mut submission = TaskSubmission::new(description);
 
     // Propagate goal linkage for memory queries and event correlation
     submission.goal_id = goal_id;

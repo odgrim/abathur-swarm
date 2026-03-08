@@ -568,6 +568,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                 let mut parts: Vec<&str> = Vec::new();
                 if let Some(ref ctx) = goal_context { parts.push(ctx.as_str()); }
                 if let Some(ref ctx) = memory_context { parts.push(ctx.as_str()); }
+                // Include intent gap context from a previous attempt if present.
+                let intent_gap_ctx = task.context.custom.get("intent_gap_context")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Some(ref gap_ctx) = intent_gap_ctx { parts.push(gap_ctx.as_str()); }
                 if parts.is_empty() {
                     task.description.clone()
                 } else {
@@ -868,6 +873,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 Ok(super::convergent_execution::ConvergentOutcome::Converged) => "converged",
                                 Ok(super::convergent_execution::ConvergentOutcome::IndeterminateAccepted) => "indeterminate_accepted",
                                 Ok(super::convergent_execution::ConvergentOutcome::PartialAccepted) => "partial_accepted",
+                                Ok(super::convergent_execution::ConvergentOutcome::IntentGapsFound(_)) => "intent_gaps_found",
                                 Ok(super::convergent_execution::ConvergentOutcome::Decomposed(_)) => "decomposed",
                                 Ok(super::convergent_execution::ConvergentOutcome::Failed(_)) => "failed",
                                 Ok(super::convergent_execution::ConvergentOutcome::Cancelled) => "cancelled",
@@ -1033,6 +1039,160 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     )
                                     .with_entity(task_id, "task"),
                                 ).await;
+                            }
+
+                            Ok(super::convergent_execution::ConvergentOutcome::IntentGapsFound(ivr)) => {
+                                // Overseers confirmed the code compiles/passes tests,
+                                // but intent verification found semantic gaps. Store
+                                // gap context on the task and fail it so the workflow
+                                // engine (or standalone retry) can re-enqueue with the
+                                // gap information available to the next attempt.
+                                let total_gaps = ivr.gaps.len() + ivr.implicit_gaps.len();
+                                let gap_descriptions: Vec<String> = ivr.all_gaps()
+                                    .map(|g| {
+                                        let action = g.suggested_action.as_deref().unwrap_or("(no suggestion)");
+                                        format!("- [{}] {}: {}", g.severity.as_str(), g.description, action)
+                                    })
+                                    .collect();
+                                let gap_context = format!(
+                                    "## Intent Verification Gaps (from previous attempt)\n\
+                                     Satisfaction: {} (confidence: {:.2})\n\
+                                     Accomplishment: {}\n\n\
+                                     ### Gaps to address:\n{}",
+                                    ivr.satisfaction.as_str(),
+                                    ivr.confidence,
+                                    ivr.accomplishment_summary,
+                                    gap_descriptions.join("\n"),
+                                );
+
+                                audit_log.log(
+                                    crate::services::AuditEntry::new(
+                                        AuditLevel::Warning,
+                                        AuditCategory::Task,
+                                        AuditAction::TaskFailed,
+                                        AuditActor::System,
+                                        format!(
+                                            "Task {} overseer-converged but intent unsatisfied ({}, {} gaps). Failing with gap context for retry.",
+                                            task_id, ivr.satisfaction.as_str(), total_gaps,
+                                        ),
+                                    )
+                                    .with_entity(task_id, "task"),
+                                ).await;
+
+                                // Store structured gap context on the task so that
+                                // when the workflow engine retries it (or a standalone
+                                // retry task is created), the agent gets the gaps.
+                                if let Ok(Some(mut t)) = task_repo.get(task_id).await {
+                                    t.context.custom.insert(
+                                        "intent_gaps".to_string(),
+                                        serde_json::json!({
+                                            "satisfaction": ivr.satisfaction.as_str(),
+                                            "confidence": ivr.confidence,
+                                            "accomplishment": ivr.accomplishment_summary,
+                                            "gaps": ivr.gaps.iter().map(|g| serde_json::json!({
+                                                "description": g.description,
+                                                "severity": g.severity.as_str(),
+                                                "category": g.category.as_str(),
+                                                "suggested_action": g.suggested_action,
+                                            })).collect::<Vec<_>>(),
+                                            "implicit_gaps": ivr.implicit_gaps.iter().map(|g| serde_json::json!({
+                                                "description": g.description,
+                                                "severity": g.severity.as_str(),
+                                                "category": g.category.as_str(),
+                                                "suggested_action": g.suggested_action,
+                                            })).collect::<Vec<_>>(),
+                                        }),
+                                    );
+                                    t.context.custom.insert(
+                                        "intent_gap_context".to_string(),
+                                        serde_json::json!(gap_context),
+                                    );
+
+                                    let is_workflow_subtask = t.context.custom.contains_key("workflow_phase");
+
+                                    if !t.status.is_terminal() {
+                                        let _ = t.transition_to(TaskStatus::Failed);
+                                    }
+                                    let retry_count = t.retry_count;
+                                    let _ = task_repo.update(&t).await;
+
+                                    event_bus.publish(crate::services::event_factory::task_event(
+                                        crate::services::event_bus::EventSeverity::Warning,
+                                        None,
+                                        task_id,
+                                        crate::services::event_bus::EventPayload::TaskFailed {
+                                            task_id,
+                                            error: format!(
+                                                "Intent verification found {} gap(s); {}",
+                                                total_gaps,
+                                                if is_workflow_subtask {
+                                                    "workflow engine will retry with gap context"
+                                                } else {
+                                                    "creating retry task with gap context"
+                                                },
+                                            ),
+                                            retry_count,
+                                        },
+                                    )).await;
+
+                                    // For standalone tasks (not workflow subtasks),
+                                    // create an explicit retry task since there is no
+                                    // workflow engine to manage the retry lifecycle.
+                                    if !is_workflow_subtask {
+                                        let new_description = format!(
+                                            "{}\n\n{}", t.description, gap_context,
+                                        );
+                                        let mut retry_task = Task::with_title(
+                                            &format!("[retry] {}", t.title),
+                                            &new_description,
+                                        );
+                                        retry_task.parent_id = t.parent_id;
+                                        retry_task.task_type = t.task_type;
+                                        retry_task.priority = t.priority;
+                                        retry_task.source = t.source;
+                                        retry_task.context.custom.insert(
+                                            "intent_gaps".to_string(),
+                                            t.context.custom.get("intent_gaps").cloned()
+                                                .unwrap_or_default(),
+                                        );
+                                        retry_task.context.custom.insert(
+                                            "retry_reason".to_string(),
+                                            serde_json::json!("intent_gaps_found"),
+                                        );
+                                        retry_task.context.custom.insert(
+                                            "previous_task_id".to_string(),
+                                            serde_json::json!(task_id.to_string()),
+                                        );
+                                        let _ = retry_task.transition_to(TaskStatus::Ready);
+
+                                        match task_repo.create(&retry_task).await {
+                                            Ok(_) => {
+                                                tracing::info!(
+                                                    original_task_id = %task_id,
+                                                    retry_task_id = %retry_task.id,
+                                                    gaps = total_gaps,
+                                                    "Created standalone retry task with intent gap context"
+                                                );
+                                                event_bus.publish(crate::services::event_factory::task_event(
+                                                    crate::services::event_bus::EventSeverity::Info,
+                                                    None,
+                                                    retry_task.id,
+                                                    crate::services::event_bus::EventPayload::TaskReady {
+                                                        task_id: retry_task.id,
+                                                        task_title: retry_task.title.clone(),
+                                                    },
+                                                )).await;
+                                            }
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    task_id = %task_id,
+                                                    error = %e,
+                                                    "Failed to create retry task for intent gaps"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             Ok(super::convergent_execution::ConvergentOutcome::Decomposed(trajectory)) => {
