@@ -164,14 +164,14 @@ impl CommandOutput for TaskListOutput {
             return "No tasks found.".to_string();
         }
 
-        let mut table = list_table(&["ID", "Title", "Status", "Priority", "Age"]);
+        let mut table = list_table(&["ID", "Title", "Status", "Agent", "Age"]);
 
         for task in &self.tasks {
             table.add_row(vec![
                 short_id(&task.id).to_string(),
                 truncate_ellipsis(&task.title, 60),
                 colorize_status(&task.status).to_string(),
-                colorize_priority(&task.priority).to_string(),
+                task.agent_type.as_deref().unwrap_or("-").to_string(),
                 relative_time_str(&task.created_at),
             ]);
         }
