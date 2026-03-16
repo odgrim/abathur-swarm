@@ -7697,6 +7697,8 @@ pub struct GoalConvergenceCheckHandler<G: GoalRepository, T: TaskRepository> {
     task_repo: Arc<T>,
     command_bus: Arc<crate::services::command_bus::CommandBus>,
     budget_tracker: Option<Arc<crate::services::budget_tracker::BudgetTracker>>,
+    /// Configured convergence check interval in seconds, used for idempotency bucketing.
+    check_interval_secs: u64,
 }
 
 impl<G: GoalRepository, T: TaskRepository> GoalConvergenceCheckHandler<G, T> {
@@ -7704,8 +7706,9 @@ impl<G: GoalRepository, T: TaskRepository> GoalConvergenceCheckHandler<G, T> {
         goal_repo: Arc<G>,
         task_repo: Arc<T>,
         command_bus: Arc<crate::services::command_bus::CommandBus>,
+        check_interval_secs: u64,
     ) -> Self {
-        Self { goal_repo, task_repo, command_bus, budget_tracker: None }
+        Self { goal_repo, task_repo, command_bus, budget_tracker: None, check_interval_secs }
     }
 
     /// Attach a budget tracker to enable budget-pressure gating of convergence checks.
@@ -7863,8 +7866,8 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
         let idem_key = if is_budget_trigger {
             format!("goal-convergence-check:budget:{}", now.timestamp())
         } else {
-            // Standard 4-hour bucket idempotency key
-            let bucket = now.timestamp() / 14400;
+            // Bucket idempotency key by the configured check interval
+            let bucket = now.timestamp() / self.check_interval_secs as i64;
             format!("goal-convergence-check:{}", bucket)
         };
 

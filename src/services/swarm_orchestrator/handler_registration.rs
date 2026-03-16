@@ -567,6 +567,7 @@ where
                 self.goal_repo.clone(),
                 self.task_repo.clone(),
                 command_bus.clone(),
+                p.goal_convergence_check_interval_secs,
             );
             if let Some(ref bt) = self.budget_tracker {
                 convergence_handler = convergence_handler.with_budget_tracker(bt.clone());
