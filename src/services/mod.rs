@@ -43,6 +43,7 @@ pub mod convergence_bridge;
 pub mod convergence_engine;
 pub mod overseers;
 pub mod workflow_engine;
+pub mod federation;
 pub mod worktree_service;
 
 pub use adapter_registry::AdapterRegistry;
@@ -82,6 +83,7 @@ pub use budget_tracker::{BudgetOpportunity, BudgetState, BudgetTracker, BudgetTr
 pub use event_reactor::{EventReactor, ReactorConfig, EventHandler, EventFilter, HandlerId, HandlerPriority, Reaction, HandlerContext, HandlerMetadata, ErrorStrategy};
 pub use event_scheduler::{EventScheduler, SchedulerConfig, ScheduledEvent, ScheduleType};
 pub use event_store::{EventQuery, EventStore, EventStoreError, EventStoreStats, InMemoryEventStore};
+pub use federation::{FederationConfig, FederationService};
 pub use trigger_rules::{TriggerRule, TriggerRuleEngine, TriggerCondition, TriggerAction, TriggerEventPayload, SerializableEventFilter, SerializableDomainCommand, validate_cron_expression, normalize_cron_expression};
 
 /// Extract a JSON object from LLM text output.

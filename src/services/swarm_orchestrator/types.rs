@@ -504,6 +504,28 @@ pub enum SwarmEvent {
     Stopped,
     /// Status update.
     StatusUpdate(SwarmStats),
+
+    // Federation events
+    /// A cerebrate connected to the federation.
+    FederationCerebrateConnected { cerebrate_id: String, capabilities: Vec<String> },
+    /// A cerebrate disconnected from the federation.
+    FederationCerebrateDisconnected { cerebrate_id: String, reason: String },
+    /// A task was delegated to a cerebrate.
+    FederationTaskDelegated { task_id: Uuid, cerebrate_id: String },
+    /// A cerebrate accepted a delegated task.
+    FederationTaskAccepted { task_id: Uuid, cerebrate_id: String },
+    /// A cerebrate rejected a delegated task.
+    FederationTaskRejected { task_id: Uuid, cerebrate_id: String, reason: String },
+    /// Progress received from a cerebrate.
+    FederationProgressReceived { task_id: Uuid, cerebrate_id: String, phase: String, progress_pct: f64, summary: String },
+    /// Result received from a cerebrate.
+    FederationResultReceived { task_id: Uuid, cerebrate_id: String, status: String, summary: String },
+    /// A cerebrate missed heartbeats.
+    FederationHeartbeatMissed { cerebrate_id: String, missed_count: u32 },
+    /// A cerebrate became unreachable.
+    FederationCerebrateUnreachable { cerebrate_id: String, in_flight_tasks: Vec<Uuid> },
+    /// Stall detected: no progress from cerebrate within threshold.
+    FederationStallDetected { task_id: Uuid, cerebrate_id: String, stall_duration_secs: u64 },
 }
 
 /// Statistics about the swarm.
@@ -688,6 +710,54 @@ impl SwarmEvent {
                 branch_satisfied: *branch_satisfied,
                 dependents_can_proceed: *dependents_can_proceed,
                 gaps_count: *gaps_count,
+            }),
+            // Federation events
+            EventPayload::FederationCerebrateConnected { cerebrate_id, capabilities } => Some(SwarmEvent::FederationCerebrateConnected {
+                cerebrate_id: cerebrate_id.clone(),
+                capabilities: capabilities.clone(),
+            }),
+            EventPayload::FederationCerebrateDisconnected { cerebrate_id, reason } => Some(SwarmEvent::FederationCerebrateDisconnected {
+                cerebrate_id: cerebrate_id.clone(),
+                reason: reason.clone(),
+            }),
+            EventPayload::FederationTaskDelegated { task_id, cerebrate_id } => Some(SwarmEvent::FederationTaskDelegated {
+                task_id: *task_id,
+                cerebrate_id: cerebrate_id.clone(),
+            }),
+            EventPayload::FederationTaskAccepted { task_id, cerebrate_id } => Some(SwarmEvent::FederationTaskAccepted {
+                task_id: *task_id,
+                cerebrate_id: cerebrate_id.clone(),
+            }),
+            EventPayload::FederationTaskRejected { task_id, cerebrate_id, reason } => Some(SwarmEvent::FederationTaskRejected {
+                task_id: *task_id,
+                cerebrate_id: cerebrate_id.clone(),
+                reason: reason.clone(),
+            }),
+            EventPayload::FederationProgressReceived { task_id, cerebrate_id, phase, progress_pct, summary } => Some(SwarmEvent::FederationProgressReceived {
+                task_id: *task_id,
+                cerebrate_id: cerebrate_id.clone(),
+                phase: phase.clone(),
+                progress_pct: *progress_pct,
+                summary: summary.clone(),
+            }),
+            EventPayload::FederationResultReceived { task_id, cerebrate_id, status, summary, .. } => Some(SwarmEvent::FederationResultReceived {
+                task_id: *task_id,
+                cerebrate_id: cerebrate_id.clone(),
+                status: status.clone(),
+                summary: summary.clone(),
+            }),
+            EventPayload::FederationHeartbeatMissed { cerebrate_id, missed_count } => Some(SwarmEvent::FederationHeartbeatMissed {
+                cerebrate_id: cerebrate_id.clone(),
+                missed_count: *missed_count,
+            }),
+            EventPayload::FederationCerebrateUnreachable { cerebrate_id, in_flight_tasks } => Some(SwarmEvent::FederationCerebrateUnreachable {
+                cerebrate_id: cerebrate_id.clone(),
+                in_flight_tasks: in_flight_tasks.clone(),
+            }),
+            EventPayload::FederationStallDetected { task_id, cerebrate_id, stall_duration_secs } => Some(SwarmEvent::FederationStallDetected {
+                task_id: *task_id,
+                cerebrate_id: cerebrate_id.clone(),
+                stall_duration_secs: *stall_duration_secs,
             }),
             // EventPayload variants with no SwarmEvent counterpart
             _ => None,

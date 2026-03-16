@@ -154,6 +154,7 @@ pub enum EventCategory {
     Workflow,
     Adapter,
     Budget,
+    Federation,
 }
 
 impl std::fmt::Display for EventCategory {
@@ -172,6 +173,7 @@ impl std::fmt::Display for EventCategory {
             Self::Workflow => write!(f, "workflow"),
             Self::Adapter => write!(f, "adapter"),
             Self::Budget => write!(f, "budget"),
+            Self::Federation => write!(f, "federation"),
         }
     }
 }
@@ -910,6 +912,76 @@ pub enum EventPayload {
         retry_count: u32,
         summary: String,
     },
+
+    // Federation events
+
+    /// A cerebrate connected to the federation.
+    FederationCerebrateConnected {
+        cerebrate_id: String,
+        capabilities: Vec<String>,
+    },
+
+    /// A cerebrate disconnected from the federation.
+    FederationCerebrateDisconnected {
+        cerebrate_id: String,
+        reason: String,
+    },
+
+    /// A task was delegated to a cerebrate.
+    FederationTaskDelegated {
+        task_id: Uuid,
+        cerebrate_id: String,
+    },
+
+    /// A cerebrate accepted a delegated task.
+    FederationTaskAccepted {
+        task_id: Uuid,
+        cerebrate_id: String,
+    },
+
+    /// A cerebrate rejected a delegated task.
+    FederationTaskRejected {
+        task_id: Uuid,
+        cerebrate_id: String,
+        reason: String,
+    },
+
+    /// Progress received from a cerebrate on a delegated task.
+    FederationProgressReceived {
+        task_id: Uuid,
+        cerebrate_id: String,
+        phase: String,
+        progress_pct: f64,
+        summary: String,
+    },
+
+    /// Final result received from a cerebrate.
+    FederationResultReceived {
+        task_id: Uuid,
+        cerebrate_id: String,
+        status: String,
+        summary: String,
+        artifacts: Vec<crate::domain::models::a2a::Artifact>,
+    },
+
+    /// A cerebrate missed heartbeats.
+    FederationHeartbeatMissed {
+        cerebrate_id: String,
+        missed_count: u32,
+    },
+
+    /// A cerebrate became unreachable after too many missed heartbeats.
+    FederationCerebrateUnreachable {
+        cerebrate_id: String,
+        in_flight_tasks: Vec<Uuid>,
+    },
+
+    /// Stall detected: no progress from cerebrate within threshold.
+    FederationStallDetected {
+        task_id: Uuid,
+        cerebrate_id: String,
+        stall_duration_secs: u64,
+    },
 }
 
 impl EventPayload {
@@ -1036,6 +1108,16 @@ impl EventPayload {
             Self::WorkflowCompleted { .. } => "WorkflowCompleted",
             Self::WorkflowVerificationRequested { .. } => "WorkflowVerificationRequested",
             Self::WorkflowVerificationCompleted { .. } => "WorkflowVerificationCompleted",
+            Self::FederationCerebrateConnected { .. } => "FederationCerebrateConnected",
+            Self::FederationCerebrateDisconnected { .. } => "FederationCerebrateDisconnected",
+            Self::FederationTaskDelegated { .. } => "FederationTaskDelegated",
+            Self::FederationTaskAccepted { .. } => "FederationTaskAccepted",
+            Self::FederationTaskRejected { .. } => "FederationTaskRejected",
+            Self::FederationProgressReceived { .. } => "FederationProgressReceived",
+            Self::FederationResultReceived { .. } => "FederationResultReceived",
+            Self::FederationHeartbeatMissed { .. } => "FederationHeartbeatMissed",
+            Self::FederationCerebrateUnreachable { .. } => "FederationCerebrateUnreachable",
+            Self::FederationStallDetected { .. } => "FederationStallDetected",
         }
     }
 }
@@ -1412,6 +1494,77 @@ impl From<SwarmEvent> for UnifiedEvent {
                 None,
                 Some(task_id),
                 EventPayload::SubtaskMergedToFeature { task_id, feature_branch },
+            ),
+            // Federation events
+            SwarmEvent::FederationCerebrateConnected { cerebrate_id, capabilities } => (
+                EventSeverity::Info,
+                EventCategory::Federation,
+                None,
+                None,
+                EventPayload::FederationCerebrateConnected { cerebrate_id, capabilities },
+            ),
+            SwarmEvent::FederationCerebrateDisconnected { cerebrate_id, reason } => (
+                EventSeverity::Warning,
+                EventCategory::Federation,
+                None,
+                None,
+                EventPayload::FederationCerebrateDisconnected { cerebrate_id, reason },
+            ),
+            SwarmEvent::FederationTaskDelegated { task_id, cerebrate_id } => (
+                EventSeverity::Info,
+                EventCategory::Federation,
+                None,
+                Some(task_id),
+                EventPayload::FederationTaskDelegated { task_id, cerebrate_id },
+            ),
+            SwarmEvent::FederationTaskAccepted { task_id, cerebrate_id } => (
+                EventSeverity::Info,
+                EventCategory::Federation,
+                None,
+                Some(task_id),
+                EventPayload::FederationTaskAccepted { task_id, cerebrate_id },
+            ),
+            SwarmEvent::FederationTaskRejected { task_id, cerebrate_id, reason } => (
+                EventSeverity::Warning,
+                EventCategory::Federation,
+                None,
+                Some(task_id),
+                EventPayload::FederationTaskRejected { task_id, cerebrate_id, reason },
+            ),
+            SwarmEvent::FederationProgressReceived { task_id, cerebrate_id, phase, progress_pct, summary } => (
+                EventSeverity::Debug,
+                EventCategory::Federation,
+                None,
+                Some(task_id),
+                EventPayload::FederationProgressReceived { task_id, cerebrate_id, phase, progress_pct, summary },
+            ),
+            SwarmEvent::FederationResultReceived { task_id, cerebrate_id, status, summary } => (
+                EventSeverity::Info,
+                EventCategory::Federation,
+                None,
+                Some(task_id),
+                EventPayload::FederationResultReceived { task_id, cerebrate_id, status, summary, artifacts: Vec::new() },
+            ),
+            SwarmEvent::FederationHeartbeatMissed { cerebrate_id, missed_count } => (
+                EventSeverity::Warning,
+                EventCategory::Federation,
+                None,
+                None,
+                EventPayload::FederationHeartbeatMissed { cerebrate_id, missed_count },
+            ),
+            SwarmEvent::FederationCerebrateUnreachable { cerebrate_id, in_flight_tasks } => (
+                EventSeverity::Error,
+                EventCategory::Federation,
+                None,
+                None,
+                EventPayload::FederationCerebrateUnreachable { cerebrate_id, in_flight_tasks },
+            ),
+            SwarmEvent::FederationStallDetected { task_id, cerebrate_id, stall_duration_secs } => (
+                EventSeverity::Warning,
+                EventCategory::Federation,
+                None,
+                Some(task_id),
+                EventPayload::FederationStallDetected { task_id, cerebrate_id, stall_duration_secs },
             ),
         };
 

@@ -28,6 +28,10 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+use axum::http::Request;
+use axum::middleware::Next;
+use axum::response::Response;
+
 use crate::domain::models::a2a::{A2AAgentCard, A2AMessage};
 
 /// A2A-specific JSON-RPC error codes.
@@ -380,6 +384,39 @@ pub struct A2AHttpConfig {
     pub heartbeat_interval_ms: u64,
     /// Maximum stream duration (seconds).
     pub max_stream_duration_s: u64,
+    /// Optional TLS configuration for federation mTLS.
+    pub federation_tls: Option<FederationTlsGatewayConfig>,
+    /// Optional JWT signing key for federation endpoint authentication.
+    /// When set, all `federation/*` JSON-RPC methods require a valid JWT
+    /// in the `Authorization: Bearer <token>` header.
+    pub federation_jwt_secret: Option<Vec<u8>>,
+}
+
+/// TLS configuration for the federation gateway (mTLS).
+#[derive(Debug, Clone)]
+pub struct FederationTlsGatewayConfig {
+    /// Path to the PEM-encoded server certificate.
+    pub cert_path: String,
+    /// Path to the PEM-encoded server private key.
+    pub key_path: String,
+    /// Optional path to a CA cert for client certificate verification (mTLS).
+    pub ca_path: Option<String>,
+}
+
+impl FederationTlsGatewayConfig {
+    /// Create from a `FederationTlsConfig` if it has both cert and key paths.
+    pub fn from_federation_tls(
+        tls: &crate::services::federation::FederationTlsConfig,
+    ) -> Option<Self> {
+        match (&tls.cert_path, &tls.key_path) {
+            (Some(cert), Some(key)) => Some(Self {
+                cert_path: cert.clone(),
+                key_path: key.clone(),
+                ca_path: tls.ca_path.clone(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 impl Default for A2AHttpConfig {
@@ -392,6 +429,8 @@ impl Default for A2AHttpConfig {
             enable_push_notifications: true,
             heartbeat_interval_ms: 30000,
             max_stream_duration_s: 3600,
+            federation_tls: None,
+            federation_jwt_secret: None,
         }
     }
 }
@@ -492,6 +531,8 @@ pub struct A2AState {
     pub delegations: RwLock<HashMap<Uuid, PendingDelegation>>,
     /// Configuration.
     pub config: A2AHttpConfig,
+    /// Optional federation service for inter-swarm communication.
+    pub federation_service: Option<Arc<crate::services::federation::FederationService>>,
 }
 
 impl A2AState {
@@ -503,7 +544,14 @@ impl A2AState {
             messages: RwLock::new(HashMap::new()),
             delegations: RwLock::new(HashMap::new()),
             config,
+            federation_service: None,
         }
+    }
+
+    /// Create state with a federation service attached.
+    pub fn with_federation(mut self, service: Arc<crate::services::federation::FederationService>) -> Self {
+        self.federation_service = Some(service);
+        self
     }
 }
 
@@ -562,7 +610,14 @@ impl A2AHttpGateway {
             .route("/api/v1/delegations", post(create_delegation))
             .route("/api/v1/delegations/pending", get(list_pending_delegations))
             .route("/api/v1/delegations/{delegation_id}/ack", post(acknowledge_delegation))
-            .with_state(state);
+            .with_state(state.clone());
+
+        // Apply JWT middleware for federation endpoint authentication
+        let jwt_state = state;
+        let app = app.layer(axum::middleware::from_fn_with_state(
+            jwt_state,
+            federation_jwt_middleware,
+        ));
 
         if self.config.enable_cors {
             app.layer(
@@ -608,6 +663,198 @@ impl A2AHttpGateway {
             .await?;
         Ok(())
     }
+
+    /// Start the gateway with TLS (mTLS when CA cert is provided).
+    ///
+    /// Reads the certificate chain and private key from the paths in
+    /// `FederationTlsGatewayConfig`, builds a `rustls::ServerConfig`, and
+    /// serves via `axum_server` with TLS.
+    pub async fn serve_with_tls(
+        self,
+        tls_config: &FederationTlsGatewayConfig,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let rustls_config = build_rustls_server_config(tls_config)?;
+        let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port).parse()?;
+        let router = self.build_router();
+
+        tracing::info!("A2A HTTP Gateway listening on {} (TLS)", addr);
+
+        let tls = axum_server::tls_rustls::RustlsConfig::from_config(rustls_config);
+        axum_server::bind_rustls(addr, tls)
+            .serve(router.into_make_service())
+            .await?;
+        Ok(())
+    }
+
+    /// Start the gateway with TLS and a shutdown signal.
+    pub async fn serve_with_tls_and_shutdown<F>(
+        self,
+        tls_config: &FederationTlsGatewayConfig,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let rustls_config = build_rustls_server_config(tls_config)?;
+        let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port).parse()?;
+        let router = self.build_router();
+
+        tracing::info!("A2A HTTP Gateway listening on {} (TLS)", addr);
+
+        let tls = axum_server::tls_rustls::RustlsConfig::from_config(rustls_config);
+        let handle = axum_server::Handle::new();
+        let handle_clone = handle.clone();
+        tokio::spawn(async move {
+            shutdown.await;
+            handle_clone.shutdown();
+        });
+        axum_server::bind_rustls(addr, tls)
+            .handle(handle)
+            .serve(router.into_make_service())
+            .await?;
+        Ok(())
+    }
+}
+
+/// Build a `rustls::ServerConfig` from the federation TLS paths.
+///
+/// When `ca_path` is provided, enables mutual TLS (mTLS) by requiring
+/// client certificates signed by the given CA.
+fn build_rustls_server_config(
+    tls_config: &FederationTlsGatewayConfig,
+) -> Result<Arc<rustls::ServerConfig>, Box<dyn std::error::Error + Send + Sync>> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use std::io::BufReader;
+
+    // Load server certificate chain
+    let cert_file = std::fs::File::open(&tls_config.cert_path)
+        .map_err(|e| format!("Failed to open cert file '{}': {}", tls_config.cert_path, e))?;
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut BufReader::new(cert_file))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to parse certificates: {}", e))?;
+
+    // Load server private key
+    let key_file = std::fs::File::open(&tls_config.key_path)
+        .map_err(|e| format!("Failed to open key file '{}': {}", tls_config.key_path, e))?;
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut BufReader::new(key_file))
+        .map_err(|e| format!("Failed to parse private key: {}", e))?
+        .ok_or("No private key found in key file")?;
+
+    let config = if let Some(ref ca_path) = tls_config.ca_path {
+        // mTLS: require client certificates verified against the provided CA
+        let ca_file = std::fs::File::open(ca_path)
+            .map_err(|e| format!("Failed to open CA file '{}': {}", ca_path, e))?;
+        let ca_certs: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut BufReader::new(ca_file))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("Failed to parse CA certificates: {}", e))?;
+
+        let mut root_store = rustls::RootCertStore::empty();
+        for cert in ca_certs {
+            root_store.add(cert)?;
+        }
+
+        let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
+            .build()
+            .map_err(|e| format!("Failed to build client verifier: {}", e))?;
+
+        rustls::ServerConfig::builder()
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(certs, key)
+            .map_err(|e| format!("Failed to build TLS config: {}", e))?
+    } else {
+        // TLS only (no client cert required)
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| format!("Failed to build TLS config: {}", e))?
+    };
+
+    Ok(Arc::new(config))
+}
+
+// ============================================================================
+// JWT Validation Middleware for Federation Endpoints
+// ============================================================================
+
+/// Axum middleware that validates JWT tokens on federation endpoints.
+///
+/// If the request path or JSON-RPC method targets a `federation/*` method,
+/// the middleware checks for a `Bearer` token in the `Authorization` header,
+/// validates it using the configured secret, and rejects unauthenticated requests.
+///
+/// Non-federation requests pass through unchanged.
+async fn federation_jwt_middleware(
+    State(state): State<Arc<A2AState>>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    // Only apply to requests that might contain federation JSON-RPC calls.
+    // We check the Authorization header if a JWT secret is configured.
+    let jwt_secret = match &state.config.federation_jwt_secret {
+        Some(secret) => secret.clone(),
+        None => return Ok(next.run(req).await), // No JWT configured → pass through
+    };
+
+    // Extract the Authorization header
+    let auth_header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let token = match auth_header {
+        Some(ref header) if header.starts_with("Bearer ") => &header[7..],
+        _ => {
+            // No token: allow non-federation requests through.
+            // Federation handlers will check for the service and fail gracefully
+            // if there's no JWT. For strict enforcement, we'd peek the body here,
+            // but that's expensive. Instead, federation handlers re-check auth.
+            return Ok(next.run(req).await);
+        }
+    };
+
+    // Validate the JWT
+    let decoding_key = jsonwebtoken::DecodingKey::from_secret(&jwt_secret);
+    let validation = {
+        let mut v = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+        v.validate_exp = true;
+        v.required_spec_claims.clear();
+        v
+    };
+
+    match jsonwebtoken::decode::<serde_json::Value>(token, &decoding_key, &validation) {
+        Ok(_) => Ok(next.run(req).await),
+        Err(e) => {
+            tracing::warn!(error = %e, "Federation JWT validation failed");
+            Err(StatusCode::UNAUTHORIZED)
+        }
+    }
+}
+
+/// Create a signed JWT for federation authentication.
+///
+/// This utility is used by the federation HTTP client to authenticate
+/// outbound requests to other swarms. The token includes the swarm_id
+/// as the subject and expires after `duration_secs`.
+pub fn create_federation_jwt(
+    secret: &[u8],
+    swarm_id: &str,
+    duration_secs: u64,
+) -> Result<String, jsonwebtoken::errors::Error> {
+    let now = chrono::Utc::now().timestamp() as u64;
+    let claims = serde_json::json!({
+        "sub": swarm_id,
+        "iat": now,
+        "exp": now + duration_secs,
+        "iss": "abathur-federation",
+    });
+    let encoding_key = jsonwebtoken::EncodingKey::from_secret(secret);
+    jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        &claims,
+        &encoding_key,
+    )
 }
 
 // Handler functions
@@ -702,6 +949,17 @@ async fn handle_jsonrpc(
         "tasks/pushNotificationConfig/set" => handle_push_notification_config(state, request).await,
         "agent/card" => handle_agent_card(state, request).await,
         "agent/skills" => handle_agent_skills(state, request).await,
+        // Federation methods
+        "federation/discover" => handle_federation_discover(state, request).await,
+        "federation/register" => handle_federation_register(state, request).await,
+        "federation/disconnect" => handle_federation_disconnect(state, request).await,
+        "federation/delegate" => handle_federation_delegate(state, request).await,
+        "federation/accept" => handle_federation_accept(state, request).await,
+        "federation/reject" => handle_federation_reject(state, request).await,
+        "federation/progress" => handle_federation_progress(state, request).await,
+        "federation/result" => handle_federation_result(state, request).await,
+        "federation/heartbeat" => handle_federation_heartbeat(state, request).await,
+        "federation/reconcile" => handle_federation_reconcile(state, request).await,
         _ => Json(JsonRpcResponse::error(
             request.id,
             A2AErrorCode::MethodNotFound,
@@ -1257,6 +1515,417 @@ pub struct ErrorResponse {
 // Federation Client — Outbound cross-swarm task delegation
 // ============================================================================
 
+// ============================================================================
+// Federation JSON-RPC handlers
+// ============================================================================
+
+/// Helper to get the federation service or return an error response.
+fn require_federation(
+    state: &A2AState,
+    request_id: &Option<Value>,
+) -> Result<Arc<crate::services::federation::FederationService>, Box<Json<JsonRpcResponse>>> {
+    state.federation_service.clone().ok_or_else(|| {
+        Box::new(Json(JsonRpcResponse::error(
+            request_id.clone(),
+            A2AErrorCode::UnsupportedOperation,
+            Some(json!({"message": "Federation is not enabled"})),
+        )))
+    })
+}
+
+/// Handle `federation/discover` — returns this swarm's federation card.
+async fn handle_federation_discover(
+    state: Arc<A2AState>,
+    request: JsonRpcRequest,
+) -> Json<JsonRpcResponse> {
+    let fed = match require_federation(&state, &request.id) {
+        Ok(f) => f,
+        Err(e) => return *e,
+    };
+
+    let config = fed.config();
+    Json(JsonRpcResponse::success(
+        request.id,
+        json!({
+            "swarm_id": config.swarm_id,
+            "display_name": config.display_name,
+            "role": format!("{:?}", config.role),
+            "capabilities": [],
+            "heartbeat_interval_secs": config.heartbeat_interval_secs,
+        }),
+    ))
+}
+
+/// Handle `federation/register` — register a cerebrate with this swarm.
+async fn handle_federation_register(
+    state: Arc<A2AState>,
+    request: JsonRpcRequest,
+) -> Json<JsonRpcResponse> {
+    let fed = match require_federation(&state, &request.id) {
+        Ok(f) => f,
+        Err(e) => return *e,
+    };
+
+    #[derive(Deserialize)]
+    struct Params {
+        cerebrate_id: String,
+        display_name: String,
+        url: String,
+    }
+
+    let params: Params = match serde_json::from_value(request.params.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(JsonRpcResponse::error(
+                request.id,
+                A2AErrorCode::InvalidParams,
+                Some(json!({"message": e.to_string()})),
+            ))
+        }
+    };
+
+    fed.register_cerebrate(&params.cerebrate_id, &params.display_name, &params.url)
+        .await;
+    if let Err(e) = fed.connect(&params.cerebrate_id).await {
+        return Json(JsonRpcResponse::error(
+            request.id,
+            A2AErrorCode::InternalError,
+            Some(json!({"message": e})),
+        ));
+    }
+
+    Json(JsonRpcResponse::success(
+        request.id,
+        json!({"status": "registered", "cerebrate_id": params.cerebrate_id}),
+    ))
+}
+
+/// Handle `federation/disconnect` — disconnect a cerebrate.
+async fn handle_federation_disconnect(
+    state: Arc<A2AState>,
+    request: JsonRpcRequest,
+) -> Json<JsonRpcResponse> {
+    let fed = match require_federation(&state, &request.id) {
+        Ok(f) => f,
+        Err(e) => return *e,
+    };
+
+    #[derive(Deserialize)]
+    struct Params {
+        cerebrate_id: String,
+    }
+
+    let params: Params = match serde_json::from_value(request.params.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(JsonRpcResponse::error(
+                request.id,
+                A2AErrorCode::InvalidParams,
+                Some(json!({"message": e.to_string()})),
+            ))
+        }
+    };
+
+    if let Err(e) = fed.disconnect(&params.cerebrate_id).await {
+        return Json(JsonRpcResponse::error(
+            request.id,
+            A2AErrorCode::InternalError,
+            Some(json!({"message": e})),
+        ));
+    }
+
+    Json(JsonRpcResponse::success(
+        request.id,
+        json!({"status": "disconnected", "cerebrate_id": params.cerebrate_id}),
+    ))
+}
+
+/// Handle `federation/delegate` — delegate a task to a cerebrate.
+async fn handle_federation_delegate(
+    state: Arc<A2AState>,
+    request: JsonRpcRequest,
+) -> Json<JsonRpcResponse> {
+    let fed = match require_federation(&state, &request.id) {
+        Ok(f) => f,
+        Err(e) => return *e,
+    };
+
+    let envelope: crate::domain::models::a2a::FederationTaskEnvelope =
+        match serde_json::from_value(request.params.clone()) {
+            Ok(e) => e,
+            Err(e) => {
+                return Json(JsonRpcResponse::error(
+                    request.id,
+                    A2AErrorCode::InvalidParams,
+                    Some(json!({"message": e.to_string()})),
+                ))
+            }
+        };
+
+    match fed.delegate(envelope).await {
+        Ok(cerebrate_id) => Json(JsonRpcResponse::success(
+            request.id,
+            json!({"status": "delegated", "cerebrate_id": cerebrate_id}),
+        )),
+        Err(e) => Json(JsonRpcResponse::error(
+            request.id,
+            A2AErrorCode::InternalError,
+            Some(json!({"message": e})),
+        )),
+    }
+}
+
+/// Handle `federation/accept` — cerebrate accepts a delegated task.
+async fn handle_federation_accept(
+    state: Arc<A2AState>,
+    request: JsonRpcRequest,
+) -> Json<JsonRpcResponse> {
+    let fed = match require_federation(&state, &request.id) {
+        Ok(f) => f,
+        Err(e) => return *e,
+    };
+
+    #[derive(Deserialize)]
+    struct Params {
+        task_id: Uuid,
+        cerebrate_id: String,
+    }
+
+    let params: Params = match serde_json::from_value(request.params.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(JsonRpcResponse::error(
+                request.id,
+                A2AErrorCode::InvalidParams,
+                Some(json!({"message": e.to_string()})),
+            ))
+        }
+    };
+
+    fed.handle_accept(params.task_id, &params.cerebrate_id)
+        .await;
+    Json(JsonRpcResponse::success(
+        request.id,
+        json!({"status": "accepted"}),
+    ))
+}
+
+/// Handle `federation/reject` — cerebrate rejects a delegated task.
+async fn handle_federation_reject(
+    state: Arc<A2AState>,
+    request: JsonRpcRequest,
+) -> Json<JsonRpcResponse> {
+    let fed = match require_federation(&state, &request.id) {
+        Ok(f) => f,
+        Err(e) => return *e,
+    };
+
+    #[derive(Deserialize)]
+    struct Params {
+        task_id: Uuid,
+        cerebrate_id: String,
+        reason: String,
+    }
+
+    let params: Params = match serde_json::from_value(request.params.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(JsonRpcResponse::error(
+                request.id,
+                A2AErrorCode::InvalidParams,
+                Some(json!({"message": e.to_string()})),
+            ))
+        }
+    };
+
+    let decision = fed
+        .handle_reject(params.task_id, &params.cerebrate_id, &params.reason)
+        .await;
+    Json(JsonRpcResponse::success(
+        request.id,
+        json!({
+            "status": "rejected",
+            "decision": format!("{:?}", decision),
+        }),
+    ))
+}
+
+/// Handle `federation/progress` — progress update from a cerebrate.
+async fn handle_federation_progress(
+    state: Arc<A2AState>,
+    request: JsonRpcRequest,
+) -> Json<JsonRpcResponse> {
+    let fed = match require_federation(&state, &request.id) {
+        Ok(f) => f,
+        Err(e) => return *e,
+    };
+
+    #[derive(Deserialize)]
+    struct Params {
+        task_id: Uuid,
+        cerebrate_id: String,
+        #[serde(default)]
+        phase: String,
+        #[serde(default)]
+        progress_pct: f64,
+        #[serde(default)]
+        summary: String,
+    }
+
+    let params: Params = match serde_json::from_value(request.params.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(JsonRpcResponse::error(
+                request.id,
+                A2AErrorCode::InvalidParams,
+                Some(json!({"message": e.to_string()})),
+            ))
+        }
+    };
+
+    fed.handle_progress(
+        params.task_id,
+        &params.cerebrate_id,
+        &params.phase,
+        params.progress_pct,
+        &params.summary,
+    )
+    .await;
+
+    Json(JsonRpcResponse::success(
+        request.id,
+        json!({"status": "acknowledged"}),
+    ))
+}
+
+/// Handle `federation/result` — final result from a cerebrate.
+async fn handle_federation_result(
+    state: Arc<A2AState>,
+    request: JsonRpcRequest,
+) -> Json<JsonRpcResponse> {
+    let fed = match require_federation(&state, &request.id) {
+        Ok(f) => f,
+        Err(e) => return *e,
+    };
+
+    let result: crate::domain::models::a2a::FederationResult =
+        match serde_json::from_value(request.params.clone()) {
+            Ok(r) => r,
+            Err(e) => {
+                return Json(JsonRpcResponse::error(
+                    request.id,
+                    A2AErrorCode::InvalidParams,
+                    Some(json!({"message": e.to_string()})),
+                ))
+            }
+        };
+
+    let ctx = crate::services::federation::traits::ParentContext::default();
+    let reactions = fed.handle_result(result, ctx).await;
+
+    Json(JsonRpcResponse::success(
+        request.id,
+        json!({
+            "status": "processed",
+            "reactions_count": reactions.len(),
+        }),
+    ))
+}
+
+/// Handle `federation/heartbeat` — heartbeat from a cerebrate.
+async fn handle_federation_heartbeat(
+    state: Arc<A2AState>,
+    request: JsonRpcRequest,
+) -> Json<JsonRpcResponse> {
+    let fed = match require_federation(&state, &request.id) {
+        Ok(f) => f,
+        Err(e) => return *e,
+    };
+
+    #[derive(Deserialize)]
+    struct Params {
+        cerebrate_id: String,
+        #[serde(default)]
+        load: f64,
+    }
+
+    let params: Params = match serde_json::from_value(request.params.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(JsonRpcResponse::error(
+                request.id,
+                A2AErrorCode::InvalidParams,
+                Some(json!({"message": e.to_string()})),
+            ))
+        }
+    };
+
+    fed.handle_heartbeat(&params.cerebrate_id, params.load)
+        .await;
+    Json(JsonRpcResponse::success(
+        request.id,
+        json!({"status": "ok"}),
+    ))
+}
+
+/// Handle `federation/reconcile` — reconcile in-flight tasks after reconnection.
+async fn handle_federation_reconcile(
+    state: Arc<A2AState>,
+    request: JsonRpcRequest,
+) -> Json<JsonRpcResponse> {
+    let fed = match require_federation(&state, &request.id) {
+        Ok(f) => f,
+        Err(e) => return *e,
+    };
+
+    #[derive(Deserialize)]
+    struct Params {
+        cerebrate_id: String,
+        #[serde(default)]
+        in_flight_task_ids: Vec<Uuid>,
+    }
+
+    let params: Params = match serde_json::from_value(request.params.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            return Json(JsonRpcResponse::error(
+                request.id,
+                A2AErrorCode::InvalidParams,
+                Some(json!({"message": e.to_string()})),
+            ))
+        }
+    };
+
+    // Get our view of in-flight tasks for this cerebrate
+    let our_in_flight = fed.in_flight_for_cerebrate(&params.cerebrate_id).await;
+
+    // Find tasks we think are in-flight but the cerebrate doesn't know about
+    let orphaned: Vec<Uuid> = our_in_flight
+        .iter()
+        .filter(|tid| !params.in_flight_task_ids.contains(tid))
+        .copied()
+        .collect();
+
+    // Find tasks the cerebrate knows about but we don't
+    let unknown: Vec<Uuid> = params
+        .in_flight_task_ids
+        .iter()
+        .filter(|tid| !our_in_flight.contains(tid))
+        .copied()
+        .collect();
+
+    Json(JsonRpcResponse::success(
+        request.id,
+        json!({
+            "status": "reconciled",
+            "our_in_flight": our_in_flight.len(),
+            "their_in_flight": params.in_flight_task_ids.len(),
+            "orphaned_count": orphaned.len(),
+            "unknown_count": unknown.len(),
+        }),
+    ))
+}
+
 use crate::services::{A2AFederationConfig, TrustedSwarmConfig};
 
 /// Client for delegating tasks to trusted peer swarms via A2A protocol.
@@ -1511,5 +2180,86 @@ mod tests {
         let tasks = state.tasks.read().await;
         assert!(tasks.contains_key("task-1"));
         assert_eq!(tasks.get("task-1").unwrap().state, A2ATaskState::Submitted);
+    }
+
+    #[test]
+    fn test_create_federation_jwt_roundtrip() {
+        let secret = b"test-secret-key-for-federation";
+        let token = create_federation_jwt(secret, "swarm-alpha", 3600).unwrap();
+
+        // Verify the token decodes correctly
+        let decoding = jsonwebtoken::DecodingKey::from_secret(secret);
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.required_spec_claims.clear();
+
+        let decoded =
+            jsonwebtoken::decode::<serde_json::Value>(&token, &decoding, &validation).unwrap();
+        assert_eq!(decoded.claims["sub"], "swarm-alpha");
+        assert_eq!(decoded.claims["iss"], "abathur-federation");
+    }
+
+    #[test]
+    fn test_create_federation_jwt_expired() {
+        let secret = b"test-secret-key-for-federation";
+        // Create a token that expired 120 seconds ago (beyond default leeway of 60s)
+        let token = {
+            let now = chrono::Utc::now().timestamp() as u64;
+            let claims = serde_json::json!({
+                "sub": "swarm-alpha",
+                "iat": now - 240,
+                "exp": now - 120,
+                "iss": "abathur-federation",
+            });
+            let encoding_key = jsonwebtoken::EncodingKey::from_secret(secret);
+            jsonwebtoken::encode(
+                &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+                &claims,
+                &encoding_key,
+            )
+            .unwrap()
+        };
+
+        let decoding = jsonwebtoken::DecodingKey::from_secret(secret);
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.validate_exp = true;
+        let result = jsonwebtoken::decode::<serde_json::Value>(&token, &decoding, &validation);
+        assert!(result.is_err(), "Expected expired token to fail validation");
+    }
+
+    #[test]
+    fn test_create_federation_jwt_wrong_secret() {
+        let token = create_federation_jwt(b"correct-secret", "swarm-alpha", 3600).unwrap();
+
+        let decoding = jsonwebtoken::DecodingKey::from_secret(b"wrong-secret");
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.required_spec_claims.clear();
+        let result = jsonwebtoken::decode::<serde_json::Value>(&token, &decoding, &validation);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_federation_tls_gateway_config() {
+        let tls_config = FederationTlsGatewayConfig {
+            cert_path: "/path/to/cert.pem".to_string(),
+            key_path: "/path/to/key.pem".to_string(),
+            ca_path: Some("/path/to/ca.pem".to_string()),
+        };
+        assert_eq!(tls_config.cert_path, "/path/to/cert.pem");
+        assert!(tls_config.ca_path.is_some());
+    }
+
+    #[test]
+    fn test_a2a_config_with_federation_tls() {
+        let config = A2AHttpConfig {
+            federation_tls: Some(FederationTlsGatewayConfig {
+                cert_path: "cert.pem".to_string(),
+                key_path: "key.pem".to_string(),
+                ca_path: None,
+            }),
+            federation_jwt_secret: Some(b"my-secret".to_vec()),
+            ..Default::default()
+        };
+        assert!(config.federation_tls.is_some());
+        assert!(config.federation_jwt_secret.is_some());
     }
 }

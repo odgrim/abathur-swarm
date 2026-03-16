@@ -13,7 +13,10 @@ pub mod memory_http;
 pub mod stdio_server;
 pub mod tasks_http;
 
-pub use a2a_http::{A2AHttpConfig, A2AHttpGateway, A2AState, A2ATaskState, FederationClient};
+pub use a2a_http::{
+    A2AHttpConfig, A2AHttpGateway, A2AState, A2ATaskState, FederationClient,
+    FederationTlsGatewayConfig, create_federation_jwt,
+};
 pub use agents_http::{AgentsHttpConfig, AgentsHttpServer};
 pub use events_http::{EventsHttpConfig, EventsHttpServer, EventsState};
 pub use memory_http::{MemoryHttpConfig, MemoryHttpServer};

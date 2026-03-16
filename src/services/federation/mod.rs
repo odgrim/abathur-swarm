@@ -1,0 +1,31 @@
+//! Federation module for cross-swarm task delegation.
+//!
+//! Federation enables a parent swarm (Overmind) to delegate tasks to child swarms
+//! (Cerebrates) over the network, receive structured results back, and reactively
+//! create follow-up work. The topology is a recursive tree — cerebrates can have
+//! their own cerebrates.
+//!
+//! This module provides:
+//! - Extension traits with pluggable strategies for delegation, result processing,
+//!   task transformation, and result schema validation.
+//! - Default implementations for each trait.
+//! - The `FederationService` that manages cerebrate connections, heartbeats,
+//!   task delegation, and result ingestion.
+//! - Configuration types for the `[federation]` TOML section.
+
+pub mod config;
+pub mod handler;
+pub mod service;
+pub mod traits;
+
+pub use config::{
+    CerebrateConfig, FederationConfig, FederationParentConfig, FederationRole as FederationConfigRole,
+    FederationTlsConfig,
+};
+pub use handler::FederationResultHandler;
+pub use service::{FederationHttpClient, FederationService};
+pub use traits::{
+    DefaultDelegationStrategy, DefaultResultProcessor, DefaultTaskTransformer,
+    DelegationDecision, FederationDelegationStrategy, FederationReaction,
+    FederationResultProcessor, FederationTaskTransformer, ResultSchema, StandardV1Schema,
+};

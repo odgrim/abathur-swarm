@@ -179,6 +179,32 @@ pub enum SwarmCommand {
         #[arg(long)]
         message: Option<String>,
     },
+    /// Connect to a cerebrate (child swarm) for federation
+    Connect {
+        /// URL of the cerebrate's federation endpoint
+        url: String,
+        /// Automatically connect on startup
+        #[arg(long)]
+        auto_connect: bool,
+        /// Maximum concurrent delegations
+        #[arg(long, default_value = "10")]
+        max_concurrent: u32,
+        /// Skip confirmation prompt
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Disconnect from a cerebrate
+    Disconnect {
+        /// ID of the cerebrate to disconnect
+        id: String,
+    },
+    /// List connected cerebrates
+    Cerebrates {
+        /// Show details for a specific cerebrate
+        id: Option<String>,
+    },
+    /// Show the federation tree (hive topology)
+    Hive,
 }
 
 pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
@@ -223,6 +249,18 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
         SwarmCommand::Escalations => show_escalations(json_mode).await,
         SwarmCommand::Respond { id, decision, message } => {
             respond_to_escalation(&id, &decision, message.as_deref(), json_mode).await
+        }
+        SwarmCommand::Connect { url, auto_connect, max_concurrent, yes } => {
+            federation_connect(&url, auto_connect, max_concurrent, yes, json_mode).await
+        }
+        SwarmCommand::Disconnect { id } => {
+            federation_disconnect(&id, json_mode).await
+        }
+        SwarmCommand::Cerebrates { id } => {
+            federation_cerebrates(id.as_deref(), json_mode).await
+        }
+        SwarmCommand::Hive => {
+            federation_hive(json_mode).await
         }
     }
 }
@@ -1048,6 +1086,57 @@ async fn run_swarm_foreground(
                         println!("  Subtask merged to feature: {} → {}", task_id, feature_branch);
                     }
                 }
+                // Federation events
+                SwarmEvent::FederationCerebrateConnected { cerebrate_id, capabilities } => {
+                    if !json_mode {
+                        println!("  🌐 Cerebrate connected: {} (capabilities: {})", cerebrate_id, capabilities.join(", "));
+                    }
+                }
+                SwarmEvent::FederationCerebrateDisconnected { cerebrate_id, reason } => {
+                    if !json_mode {
+                        println!("  🌐 Cerebrate disconnected: {} ({})", cerebrate_id, reason);
+                    }
+                }
+                SwarmEvent::FederationTaskDelegated { task_id, cerebrate_id } => {
+                    if !json_mode {
+                        println!("  🌐 Task delegated: {} → {}", task_id, cerebrate_id);
+                    }
+                }
+                SwarmEvent::FederationTaskAccepted { task_id, cerebrate_id } => {
+                    if !json_mode {
+                        println!("  🌐 Task accepted: {} by {}", task_id, cerebrate_id);
+                    }
+                }
+                SwarmEvent::FederationTaskRejected { task_id, cerebrate_id, reason } => {
+                    if !json_mode {
+                        println!("  🌐 Task rejected: {} by {} ({})", task_id, cerebrate_id, reason);
+                    }
+                }
+                SwarmEvent::FederationProgressReceived { task_id, cerebrate_id, phase, progress_pct, summary } => {
+                    if !json_mode {
+                        println!("  🌐 Progress: {} from {} — {} ({:.0}%): {}", task_id, cerebrate_id, phase, progress_pct * 100.0, summary);
+                    }
+                }
+                SwarmEvent::FederationResultReceived { task_id, cerebrate_id, status, summary } => {
+                    if !json_mode {
+                        println!("  🌐 Result: {} from {} — {}: {}", task_id, cerebrate_id, status, summary);
+                    }
+                }
+                SwarmEvent::FederationHeartbeatMissed { cerebrate_id, missed_count } => {
+                    if !json_mode {
+                        println!("  ⚠️ Heartbeat missed: {} (count: {})", cerebrate_id, missed_count);
+                    }
+                }
+                SwarmEvent::FederationCerebrateUnreachable { cerebrate_id, in_flight_tasks } => {
+                    if !json_mode {
+                        println!("  ❌ Cerebrate unreachable: {} ({} in-flight tasks)", cerebrate_id, in_flight_tasks.len());
+                    }
+                }
+                SwarmEvent::FederationStallDetected { task_id, cerebrate_id, stall_duration_secs } => {
+                    if !json_mode {
+                        println!("  ⚠️ Stall detected: task {} on {} ({}s with no progress)", task_id, cerebrate_id, stall_duration_secs);
+                    }
+                }
             }
         }
     });
@@ -1257,6 +1346,32 @@ async fn show_status(json_mode: bool) -> Result<()> {
 
     let status = if swarm_running { "running" } else { "stopped" };
 
+    // Load federation config if available
+    let federation_info = {
+        let config_path = std::path::Path::new("abathur.toml");
+        if config_path.exists() {
+            if let Ok(contents) = tokio::fs::read_to_string(config_path).await {
+                if let Ok(toml_val) = contents.parse::<toml::Value>() {
+                    toml_val.get("federation").and_then(|f| {
+                        let enabled = f.get("enabled")?.as_bool()?;
+                        if !enabled {
+                            return None;
+                        }
+                        let role = f.get("role").and_then(|r| r.as_str()).unwrap_or("unknown");
+                        let cerebrates_count = f.get("cerebrates").and_then(|c| c.as_array()).map(|a| a.len()).unwrap_or(0);
+                        Some((role.to_string(), cerebrates_count))
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
     if json_mode {
         let mut output = serde_json::json!({
             "status": status,
@@ -1267,6 +1382,12 @@ async fn show_status(json_mode: bool) -> Result<()> {
         });
         if let Some(pid) = swarm_pid {
             output["pid"] = serde_json::json!(pid);
+        }
+        if let Some((ref role, cerebrate_count)) = federation_info {
+            output["federation"] = serde_json::json!({
+                "role": role,
+                "cerebrates": cerebrate_count,
+            });
         }
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -1281,6 +1402,9 @@ async fn show_status(json_mode: bool) -> Result<()> {
         println!("Pending tasks:    {}", pending_tasks);
         println!("Running tasks:    {}", running_tasks);
         println!("Active worktrees: {}", active_worktrees);
+        if let Some((role, cerebrate_count)) = federation_info {
+            println!("Federation:       {} ({} cerebrates)", role, cerebrate_count);
+        }
     }
 
     Ok(())
@@ -1497,6 +1621,233 @@ async fn run_tick(json_mode: bool) -> Result<()> {
         println!("  Completed tasks: {}", stats.completed_tasks);
         println!("  Failed tasks:    {}", stats.failed_tasks);
         println!("  Active agents:   {}", stats.active_agents);
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// Federation CLI Commands
+// ============================================================================
+
+async fn federation_connect(
+    url: &str,
+    auto_connect: bool,
+    max_concurrent: u32,
+    yes: bool,
+    json_mode: bool,
+) -> Result<()> {
+    use crate::services::federation::FederationService;
+    use crate::services::event_bus::{EventBus, EventBusConfig};
+
+    let config = crate::services::config::Config::load().unwrap_or_default();
+    let fed_config = config.federation;
+
+    if !fed_config.enabled {
+        if json_mode {
+            println!("{}", serde_json::json!({"error": "Federation is not enabled in abathur.toml"}));
+        } else {
+            println!("Federation is not enabled. Add [federation] enabled = true to abathur.toml");
+        }
+        return Ok(());
+    }
+
+    let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    let svc = FederationService::new(fed_config, event_bus);
+
+    // Generate an ID from the URL
+    let cerebrate_id = url
+        .replace("https://", "")
+        .replace("http://", "")
+        .replace(':', "-")
+        .replace('/', "");
+
+    svc.register_cerebrate(&cerebrate_id, &cerebrate_id, url).await;
+
+    if !yes && !json_mode {
+        println!("Connecting to cerebrate at {}...", url);
+        println!("  ID: {}", cerebrate_id);
+        println!("  Max concurrent: {}", max_concurrent);
+        println!("  Auto-connect: {}", auto_connect);
+    }
+
+    match svc.connect(&cerebrate_id).await {
+        Ok(()) => {
+            if json_mode {
+                println!("{}", serde_json::json!({
+                    "status": "connected",
+                    "cerebrate_id": cerebrate_id,
+                    "url": url,
+                }));
+            } else {
+                println!("Connected to cerebrate: {}", cerebrate_id);
+            }
+        }
+        Err(e) => {
+            if json_mode {
+                println!("{}", serde_json::json!({"error": e}));
+            } else {
+                println!("Failed to connect: {}", e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn federation_disconnect(id: &str, json_mode: bool) -> Result<()> {
+    use crate::services::federation::FederationService;
+    use crate::services::event_bus::{EventBus, EventBusConfig};
+
+    let config = crate::services::config::Config::load().unwrap_or_default();
+    let fed_config = config.federation;
+
+    let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    let svc = FederationService::new(fed_config, event_bus);
+
+    // Load existing connections
+    let base_path = std::path::Path::new(".abathur");
+    let _ = svc.load_connections(base_path).await;
+
+    match svc.disconnect(id).await {
+        Ok(()) => {
+            let _ = svc.save_connections(base_path).await;
+            if json_mode {
+                println!("{}", serde_json::json!({"status": "disconnected", "cerebrate_id": id}));
+            } else {
+                println!("Disconnected from cerebrate: {}", id);
+            }
+        }
+        Err(e) => {
+            if json_mode {
+                println!("{}", serde_json::json!({"error": e}));
+            } else {
+                println!("Failed to disconnect: {}", e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn federation_cerebrates(id: Option<&str>, json_mode: bool) -> Result<()> {
+    use crate::services::federation::FederationService;
+    use crate::services::event_bus::{EventBus, EventBusConfig};
+
+    let config = crate::services::config::Config::load().unwrap_or_default();
+    let fed_config = config.federation;
+
+    let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    let svc = FederationService::new(fed_config, event_bus);
+
+    // Load connections
+    let base_path = std::path::Path::new(".abathur");
+    let _ = svc.load_connections(base_path).await;
+
+    if let Some(cerebrate_id) = id {
+        // Show detail for one cerebrate
+        match svc.get_cerebrate(cerebrate_id).await {
+            Some(status) => {
+                if json_mode {
+                    println!("{}", serde_json::to_string_pretty(&status)?);
+                } else {
+                    println!("Cerebrate: {}", status.id);
+                    println!("  Display name:  {}", status.display_name);
+                    println!("  State:         {}", status.connection_state);
+                    println!("  Load:          {:.1}%", status.load * 100.0);
+                    println!("  Delegations:   {}/{}", status.active_delegations, status.max_concurrent_delegations);
+                    println!("  Capabilities:  {}", if status.capabilities.is_empty() { "(none)".to_string() } else { status.capabilities.join(", ") });
+                    if let Some(url) = &status.url {
+                        println!("  URL:           {}", url);
+                    }
+                    if let Some(hb) = status.last_heartbeat_at {
+                        println!("  Last heartbeat: {}", hb);
+                    }
+                }
+            }
+            None => {
+                if json_mode {
+                    println!("{}", serde_json::json!({"error": format!("Cerebrate not found: {}", cerebrate_id)}));
+                } else {
+                    println!("Cerebrate not found: {}", cerebrate_id);
+                }
+            }
+        }
+    } else {
+        // List all cerebrates
+        let cerebrates = svc.list_cerebrates().await;
+        if cerebrates.is_empty() {
+            if json_mode {
+                println!("[]");
+            } else {
+                println!("No cerebrates registered.");
+            }
+            return Ok(());
+        }
+
+        if json_mode {
+            println!("{}", serde_json::to_string_pretty(&cerebrates)?);
+        } else {
+            println!("{:<20} {:<15} {:<8} {:<12} CAPABILITIES", "ID", "STATE", "LOAD", "ACTIVE/MAX");
+            println!("{}", "-".repeat(70));
+            for c in &cerebrates {
+                println!(
+                    "{:<20} {:<15} {:<8.1}% {}/{:<10} {}",
+                    c.id,
+                    c.connection_state.to_string(),
+                    c.load * 100.0,
+                    c.active_delegations,
+                    c.max_concurrent_delegations,
+                    if c.capabilities.is_empty() { "-".to_string() } else { c.capabilities.join(", ") }
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn federation_hive(json_mode: bool) -> Result<()> {
+    use crate::services::federation::FederationService;
+    use crate::services::event_bus::{EventBus, EventBusConfig};
+
+    let config = crate::services::config::Config::load().unwrap_or_default();
+    let fed_config = config.federation.clone();
+
+    let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+    let svc = FederationService::new(fed_config.clone(), event_bus);
+
+    // Load connections
+    let base_path = std::path::Path::new(".abathur");
+    let _ = svc.load_connections(base_path).await;
+
+    let cerebrates = svc.list_cerebrates().await;
+
+    if json_mode {
+        let tree = serde_json::json!({
+            "swarm_id": fed_config.swarm_id,
+            "display_name": fed_config.display_name,
+            "role": fed_config.role.to_string(),
+            "cerebrates": cerebrates,
+        });
+        println!("{}", serde_json::to_string_pretty(&tree)?);
+    } else {
+        println!("Federation Hive:");
+        println!("  {} ({}) [{}]", fed_config.display_name, fed_config.swarm_id, fed_config.role);
+        if cerebrates.is_empty() {
+            println!("    (no cerebrates)");
+        } else {
+            for (i, c) in cerebrates.iter().enumerate() {
+                let prefix = if i == cerebrates.len() - 1 { "└─" } else { "├─" };
+                let state_icon = match c.connection_state {
+                    crate::domain::models::a2a::ConnectionState::Connected => "●",
+                    crate::domain::models::a2a::ConnectionState::Disconnected => "○",
+                    crate::domain::models::a2a::ConnectionState::Unreachable => "✗",
+                    _ => "◐",
+                };
+                println!("    {} {} {} [{}] ({}/{})", prefix, state_icon, c.display_name, c.connection_state, c.active_delegations, c.max_concurrent_delegations);
+            }
+        }
     }
 
     Ok(())

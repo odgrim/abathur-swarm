@@ -632,6 +632,30 @@ where
             )).await;
         }
 
+        // FederationResultHandler (NORMAL) — process federation events
+        if let Some(ref federation_service) = self.federation_service {
+            use crate::services::federation::FederationResultHandler;
+            reactor
+                .register(Arc::new(FederationResultHandler::new(federation_service.clone())))
+                .await;
+        }
+
+        // Federation heartbeat schedule — if federation is enabled, schedule periodic heartbeat checks
+        if self.federation_service.is_some() {
+            let fed_config = self.federation_service.as_ref()
+                .map(|s| s.config())
+                .filter(|c| c.enabled);
+            if let Some(config) = fed_config {
+                // Schedule heartbeat, orphan, and stall checks are handled by
+                // FederationService::start() which spawns its own tokio tasks.
+                // We only need to register the event handler here.
+                tracing::info!(
+                    heartbeat_interval = config.heartbeat_interval_secs,
+                    "Federation event handler registered"
+                );
+            }
+        }
+
         // Adapter handlers — register only when an adapter registry is present
         if let Some(ref adapter_registry) = self.adapter_registry {
             // IngestionPollHandler (NORMAL) — poll external systems for new work items

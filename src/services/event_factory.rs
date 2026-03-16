@@ -84,3 +84,12 @@ pub fn workflow_event(
     make_event(severity, EventCategory::Workflow, None, Some(task_id), payload)
 }
 
+/// Build a federation-category event.
+pub fn federation_event(
+    severity: EventSeverity,
+    task_id: Option<Uuid>,
+    payload: EventPayload,
+) -> UnifiedEvent {
+    make_event(severity, EventCategory::Federation, None, task_id, payload)
+}
+

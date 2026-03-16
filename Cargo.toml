@@ -43,8 +43,14 @@ async-trait = "0.1"
 
 # HTTP server
 axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# TLS & JWT for federation
+rustls = "0.23"
+rustls-pemfile = "2"
+jsonwebtoken = "9"
 
 # Process management
 scopeguard = "1"

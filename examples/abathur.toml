@@ -147,6 +147,63 @@ max_agents_critical = 1
 # Override with ABATHUR_DEFAULT_WORKFLOW env var
 default_workflow = "code"
 
+# ─── Federation (cross-swarm delegation) ─────────────────────────────────────
+# Federation enables this swarm to delegate tasks to child swarms (cerebrates)
+# and/or accept work from a parent swarm (overmind). The topology is a
+# recursive tree — cerebrates can have their own cerebrates.
+
+[federation]
+# Master enable switch — federation features are completely off when false
+enabled = false
+# Role in the federation: "overmind" (parent, delegates) or "cerebrate" (child, accepts)
+role = "overmind"
+# Unique identifier for this swarm in the federation
+swarm_id = "my-swarm-001"
+# Human-readable name shown to other swarms
+display_name = "My Primary Swarm"
+# Heartbeat interval (seconds) — cerebrates must respond within this window
+heartbeat_interval_secs = 30
+# Number of missed heartbeats before marking a cerebrate as Unreachable
+missed_heartbeat_threshold = 3
+# Seconds before tasks on unreachable cerebrates are failed with cerebrate_unreachable
+task_orphan_timeout_secs = 3600
+# Seconds with no progress before emitting a stall-detected event
+stall_timeout_secs = 1800
+# Port for the federation listener (separate from A2A gateway)
+port = 8443
+
+# TLS configuration for federation connections
+[federation.tls]
+# cert_path = "/path/to/cert.pem"
+# key_path = "/path/to/key.pem"
+# ca_path = "/path/to/ca.pem"
+allow_self_signed = false
+
+# Parent configuration — only used when role = "cerebrate"
+# [federation.parent]
+# expected_id = "parent-swarm-001"
+# max_accepted_tasks = 10
+
+# Cerebrate definitions — only used when role = "overmind"
+# Each cerebrate is a child swarm that can receive delegated work.
+#
+# [[federation.cerebrates]]
+# id = "cerebrate-rust"
+# display_name = "Rust Specialist"
+# url = "https://rust-swarm.internal:8443"
+# capabilities = ["rust", "systems"]
+# max_concurrent_delegations = 5
+# auto_connect = true
+# permissions = ["read", "write"]
+#
+# [[federation.cerebrates]]
+# id = "cerebrate-docs"
+# display_name = "Documentation Team"
+# url = "https://docs-swarm.internal:8443"
+# capabilities = ["docs", "markdown"]
+# max_concurrent_delegations = 3
+# auto_connect = false
+
 # ─── Custom workflow templates ────────────────────────────────────────────────
 # Uncomment and customize to define additional workflows.
 #

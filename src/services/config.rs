@@ -41,6 +41,9 @@ pub struct Config {
     /// Budget-aware scheduling configuration.
     #[serde(default)]
     pub budget: BudgetConfig,
+    /// Federation configuration for cross-swarm delegation.
+    #[serde(default)]
+    pub federation: crate::services::federation::config::FederationConfig,
     /// Name of the default workflow to use.
     #[serde(default = "default_workflow_name")]
     pub default_workflow: String,
@@ -64,6 +67,7 @@ impl Default for Config {
             polling: PollingConfig::default(),
             adapters: AdapterConfig::default(),
             budget: BudgetConfig::default(),
+            federation: crate::services::federation::config::FederationConfig::default(),
             default_workflow: default_workflow_name(),
             workflows: Vec::new(),
         }

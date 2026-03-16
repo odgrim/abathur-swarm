@@ -57,6 +57,7 @@ impl SqliteEventRepository {
             EventCategory::Workflow => "workflow",
             EventCategory::Adapter => "adapter",
             EventCategory::Budget => "budget",
+            EventCategory::Federation => "federation",
         }
     }
 
@@ -75,6 +76,7 @@ impl SqliteEventRepository {
             "workflow" => EventCategory::Workflow,
             "adapter" => EventCategory::Adapter,
             "budget" => EventCategory::Budget,
+            "federation" => EventCategory::Federation,
             _ => EventCategory::Task,
         }
     }

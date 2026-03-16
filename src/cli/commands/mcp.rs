@@ -358,6 +358,8 @@ async fn start_a2a_http(
         enable_push_notifications: enable_push,
         heartbeat_interval_ms: heartbeat_ms,
         max_stream_duration_s: max_stream_secs,
+        federation_tls: None,
+        federation_jwt_secret: None,
     };
 
     if json_mode {
@@ -465,6 +467,8 @@ async fn start_all(
         enable_push_notifications: true,
         heartbeat_interval_ms: 30000,
         max_stream_duration_s: 3600,
+        federation_tls: None,
+        federation_jwt_secret: None,
     };
     let a2a_gateway = A2AHttpGateway::new(a2a_config);
     register_default_agents(&a2a_gateway).await;

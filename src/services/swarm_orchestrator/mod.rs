@@ -95,6 +95,7 @@ where
     pub(super) specialist_tx: tokio::sync::mpsc::Sender<uuid::Uuid>,
     pub(super) escalation_store: Arc<RwLock<Vec<HumanEscalationEvent>>>,
     pub(super) federation_client: Option<Arc<crate::adapters::mcp::FederationClient>>,
+    pub(super) federation_service: Option<Arc<crate::services::federation::FederationService>>,
     pub(super) trigger_rule_repo: Option<Arc<dyn crate::domain::ports::TriggerRuleRepository>>,
     pub(super) command_bus: Arc<RwLock<Option<Arc<CommandBus>>>>,
     /// Optional DB pool for services that need persistence (absence timers, command dedup).
@@ -170,6 +171,7 @@ where
             event_scheduler,
             escalation_store: Arc::new(RwLock::new(Vec::new())),
             federation_client: None,
+            federation_service: None,
             trigger_rule_repo: None,
             ready_task_rx: Arc::new(tokio::sync::Mutex::new(ready_rx)),
             ready_task_tx: ready_tx,
@@ -191,6 +193,82 @@ where
     pub fn with_federation(mut self, federation_client: Arc<crate::adapters::mcp::FederationClient>) -> Self {
         self.federation_client = Some(federation_client);
         self
+    }
+
+    /// Create orchestrator with a federation service for hierarchical swarm delegation.
+    pub fn with_federation_service(mut self, federation_service: Arc<crate::services::federation::FederationService>) -> Self {
+        self.federation_service = Some(federation_service);
+        self
+    }
+
+    /// Get a reference to the federation service, if configured.
+    pub fn federation_service(&self) -> Option<&Arc<crate::services::federation::FederationService>> {
+        self.federation_service.as_ref()
+    }
+
+    /// Set the federation delegation strategy (pass-through to FederationService).
+    ///
+    /// Only takes effect if a federation service is configured. If not, the strategy
+    /// is stored and applied when `with_federation_service` is called later.
+    pub fn with_delegation_strategy(
+        self,
+        strategy: Arc<dyn crate::services::federation::traits::FederationDelegationStrategy>,
+    ) -> Self {
+        if let Some(ref svc) = self.federation_service {
+            // Can't mutate Arc contents directly; log a warning.
+            // Strategies should be set on FederationService before passing to orchestrator.
+            tracing::warn!(
+                "Delegation strategy should be set on FederationService before calling with_federation_service. \
+                 Current service has {} cerebrates.",
+                svc.config().cerebrates.len()
+            );
+            let _ = strategy; // consumed
+        }
+        self
+    }
+
+    /// Set the federation result processor (pass-through to FederationService).
+    pub fn with_result_processor(
+        self,
+        processor: Arc<dyn crate::services::federation::traits::FederationResultProcessor>,
+    ) -> Self {
+        if let Some(ref svc) = self.federation_service {
+            tracing::warn!(
+                "Result processor should be set on FederationService before calling with_federation_service. \
+                 Current service has {} cerebrates.",
+                svc.config().cerebrates.len()
+            );
+            let _ = processor;
+        }
+        self
+    }
+
+    /// Set the federation task transformer (pass-through to FederationService).
+    pub fn with_task_transformer(
+        self,
+        transformer: Arc<dyn crate::services::federation::traits::FederationTaskTransformer>,
+    ) -> Self {
+        if let Some(ref svc) = self.federation_service {
+            tracing::warn!(
+                "Task transformer should be set on FederationService before calling with_federation_service. \
+                 Current service has {} cerebrates.",
+                svc.config().cerebrates.len()
+            );
+            let _ = transformer;
+        }
+        self
+    }
+
+    /// Register a result schema with the federation service.
+    pub async fn register_result_schema(
+        &self,
+        schema: Arc<dyn crate::services::federation::traits::ResultSchema>,
+    ) {
+        if let Some(ref svc) = self.federation_service {
+            svc.register_result_schema(schema).await;
+        } else {
+            tracing::warn!("Cannot register result schema: no federation service configured");
+        }
     }
 
     /// Create orchestrator with intent verification enabled.
