@@ -556,6 +556,10 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
                  (read/write, encode/decode) also need changes.\n\
                  - Do not inherit scope narrowing from the researcher. If the researcher flagged a complementary path \
                  as \"out of scope\" or \"separate enhancement\", evaluate that claim yourself.\n\
+                 - Plan the smallest change that fixes the issue. Prefer adding a targeted guard or \
+                 conditional over rewriting or restructuring existing logic. Never plan an algorithm \
+                 rewrite when a surgical fix is possible — broad rewrites risk breaking existing callers \
+                 and tests that depend on the current behavior.\n\
                  \n\
                  ## Existing Test Awareness\n\
                  - The plan MUST account for existing tests discovered during research. List them \
@@ -580,6 +584,17 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
                  - First action: memory_search for the plan and research findings.\n\
                  - Follow the plan step by step — do not redesign or re-research.\n\
                  - Commit early and often — small atomic commits, not one big commit at the end.\n\
+                 \n\
+                 ## Minimal Change Principle\n\
+                 - Make the smallest, most surgical change that fixes the issue. Do not refactor, \
+                 rewrite, or restructure code beyond what is strictly required.\n\
+                 - Prefer adding a targeted conditional or guard over rewriting an algorithm. \
+                 A 3-line fix that preserves existing behavior is better than a 50-line rewrite \
+                 that reimplements the logic \"more correctly.\"\n\
+                 - Never change a function signature, remove a code path, or alter return types \
+                 unless the plan explicitly requires it AND accounts for all callers.\n\
+                 - If you feel tempted to rewrite a function from scratch, STOP — that is almost \
+                 always wrong. Find the narrowest insertion point that fixes the specific bug.\n\
                  \n\
                  ## Test-Driven Verification\n\
                  - Before making changes, run the existing tests for the affected module to establish \
