@@ -1398,13 +1398,85 @@ fn goal_missing_subcommand_fails() {
 fn task_submit_missing_prompt_fails() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path();
-    // No init needed - clap rejects the command before db access
+    init_project(dir);
 
     abathur_cmd(dir)
         .args(["task", "submit"])
         .assert()
         .failure()
-        .stderr(predicates::str::is_match("required|Usage").unwrap());
+        .stderr(predicates::str::contains("provide either a prompt or --file"));
+}
+
+#[test]
+fn task_submit_file_flag_reads_prompt() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_project(dir);
+
+    let prompt_file = dir.join("prompt.txt");
+    std::fs::write(&prompt_file, "Task from file").unwrap();
+
+    let json = run_json(dir, &["task", "submit", "-f", prompt_file.to_str().unwrap(), "--json"]);
+    assert_eq!(json["success"], true);
+    assert!(json["task"]["id"].as_str().is_some());
+}
+
+#[test]
+fn task_submit_file_flag_nonexistent_file_fails() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_project(dir);
+
+    abathur_cmd(dir)
+        .args(["task", "submit", "-f", "nonexistent.txt"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("failed to read file"));
+}
+
+#[test]
+fn task_submit_file_flag_conflicts_with_prompt() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_project(dir);
+
+    let prompt_file = dir.join("prompt.txt");
+    std::fs::write(&prompt_file, "Task from file").unwrap();
+
+    abathur_cmd(dir)
+        .args(["task", "submit", "inline prompt", "-f", prompt_file.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be used with"));
+}
+
+#[test]
+fn task_submit_file_flag_empty_file_fails() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_project(dir);
+
+    let prompt_file = dir.join("empty.txt");
+    std::fs::write(&prompt_file, "   ").unwrap();
+
+    abathur_cmd(dir)
+        .args(["task", "submit", "-f", prompt_file.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("task description cannot be empty"));
+}
+
+#[test]
+fn task_submit_no_prompt_no_file_fails() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_project(dir);
+
+    abathur_cmd(dir)
+        .args(["task", "submit"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("provide either a prompt or --file"));
 }
 
 #[test]

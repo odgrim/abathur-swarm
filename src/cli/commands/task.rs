@@ -51,10 +51,14 @@ Examples:
   abathur task submit \"Review PR #42\" --priority high
   abathur task submit \"Implement feature X\" --goal abc123 --agent rust-impl
   abathur task submit \"Subtask\" --parent def456 --depends-on ghi789
+  abathur task submit -f prompt.md --priority high
 ")]
     Submit {
-        /// The prompt to send to the agent
-        prompt: String,
+        /// The prompt to send to the agent (provide this or --file, not both)
+        prompt: Option<String>,
+        /// Read prompt from a file instead of inline
+        #[arg(short = 'f', long = "file", conflicts_with = "prompt")]
+        file: Option<std::path::PathBuf>,
         /// Optional custom title (auto-generated from prompt if omitted)
         #[arg(short, long)]
         title: Option<String>,
@@ -369,6 +373,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
     match args.command {
         TaskCommands::Submit {
             prompt,
+            file,
             title,
             priority,
             parent,
@@ -379,6 +384,16 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
             deadline,
             goal,
         } => {
+            let prompt = match (prompt, file) {
+                (Some(p), None) => p,
+                (None, Some(path)) => {
+                    std::fs::read_to_string(&path)
+                        .map_err(|e| anyhow::anyhow!("failed to read file '{}': {}", path.display(), e))?
+                }
+                (None, None) => anyhow::bail!("provide either a prompt or --file"),
+                (Some(_), Some(_)) => anyhow::bail!("provide either a prompt or --file, not both"),
+            };
+
             if prompt.trim().is_empty() {
                 anyhow::bail!("task description cannot be empty");
             }
