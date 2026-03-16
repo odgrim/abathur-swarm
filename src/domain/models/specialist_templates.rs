@@ -518,6 +518,18 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
                  - Report whether the complementary path already handles the change, needs modification, \
                  or will break. Never dismiss it as \"out of scope\" — that decision belongs to the planner.\n\
                  \n\
+                 ## Existing Test Discovery\n\
+                 - Find the project's existing tests for the affected module/class. Use Glob for test file \
+                 structure (e.g., tests/, test_*.py, *_test.go) and Grep for test functions that reference \
+                 the code being changed.\n\
+                 - Read the relevant test files. Note the exact test names, what they assert, and what \
+                 inputs they exercise. These tests are the ground truth for what the fix must not break.\n\
+                 - If a test already exists for the reported bug, note it explicitly — the implementer \
+                 may only need to make it pass, not write a new one.\n\
+                 - Identify tests that depend on the current function signature, return type, or behavior. \
+                 If the fix changes a public API, list every test that calls it.\n\
+                 - Store discovered test names and their locations in your findings.\n\
+                 \n\
                  ## Edge Case Enumeration\n\
                  - For input-handling bugs, enumerate input combinations systematically. Think combinatorially: \
                  if the fix handles empty input X, what happens when X is empty but Y is not? \
@@ -545,6 +557,17 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
                  - Do not inherit scope narrowing from the researcher. If the researcher flagged a complementary path \
                  as \"out of scope\" or \"separate enhancement\", evaluate that claim yourself.\n\
                  \n\
+                 ## Existing Test Awareness\n\
+                 - The plan MUST account for existing tests discovered during research. List them \
+                 by name and state whether each should pass as-is, needs updating, or will break.\n\
+                 - If the fix changes a function signature, return type, or observable behavior, \
+                 the plan must include steps to update every caller and every test that depends on \
+                 the old contract. A fix that passes new tests but breaks existing ones is not complete.\n\
+                 - Prefer fixes that preserve backward compatibility. If a signature change is \
+                 unavoidable, explicitly plan the migration of all call sites and tests.\n\
+                 - If an existing test already covers the reported bug, instruct the implementer to \
+                 make that test pass — do not plan a duplicate test.\n\
+                 \n\
                  ## Edge Case Planning\n\
                  - When listing edge cases, think combinatorially across parameters. If the fix handles a condition \
                  on input X, include test cases where X has that condition but other inputs do not \
@@ -557,7 +580,14 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
                  - First action: memory_search for the plan and research findings.\n\
                  - Follow the plan step by step — do not redesign or re-research.\n\
                  - Commit early and often — small atomic commits, not one big commit at the end.\n\
-                 - Run tests after each significant change. Fix failures before moving on.\n\
+                 \n\
+                 ## Test-Driven Verification\n\
+                 - Before making changes, run the existing tests for the affected module to establish \
+                 the baseline. Note which tests pass and which fail.\n\
+                 - Run tests after each significant change. If a previously-passing test now fails, \
+                 treat it as a regression — fix it before moving on. Do not leave regressions for later.\n\
+                 - When the plan references specific existing tests that should pass after the fix, \
+                 verify those exact tests by name. Do not assume your own new test is a substitute.\n\
                  - If tests pass and implementation matches the plan, stop immediately.\n",
             );
         }
@@ -573,6 +603,9 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
                  - **Adversarial edge cases**: Consider what happens with empty inputs, mismatched \
                  lengths, and realistic configurations. If the agent's tests use a simpler setup \
                  than production code would exercise, flag insufficient test realism.\n\
+                 - **Existing test regression check**: Verify that no previously-passing tests are now \
+                 failing. If the diff changes a function signature or public API, confirm that all \
+                 callers and tests were updated. A fix that introduces regressions is needs-changes.\n\
                  - **Test coverage quality**: Do the tests exercise the actual code paths that \
                  matter, or only trivial happy-path cases? Would the tests catch a regression \
                  in a complementary path?\n\
