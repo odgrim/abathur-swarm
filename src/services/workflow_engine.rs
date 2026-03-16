@@ -91,6 +91,11 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
 
+    /// Public accessor for reading workflow state from a task (used by handlers).
+    pub fn read_state_from_task(task: &Task) -> Option<WorkflowState> {
+        Self::read_state(task)
+    }
+
     /// Write workflow state to task context and persist.
     async fn write_state(&self, task_id: Uuid, state: &WorkflowState) -> DomainResult<()> {
         let mut task = self

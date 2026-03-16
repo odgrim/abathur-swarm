@@ -5593,6 +5593,118 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowVerificationHandler<T
 // with `spawn_task_agent()` and the `workflow_advance` MCP tool.
 // The Overmind now owns the first advance — no system-side auto-advance from Pending.
 
+// ============================================================================
+// WorkflowPhaseReadyHandler — auto fan-out when a phase becomes ready
+// ============================================================================
+// After the overmind session ends, subsequent phases emit WorkflowPhaseReady
+// but nothing picks them up. This handler fans out for subsequent phases.
+
+pub struct WorkflowPhaseReadyHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+    event_bus: Arc<EventBus>,
+    verification_enabled: bool,
+}
+
+impl<T: TaskRepository> WorkflowPhaseReadyHandler<T> {
+    pub fn new(task_repo: Arc<T>, event_bus: Arc<EventBus>, verification_enabled: bool) -> Self {
+        Self { task_repo, event_bus, verification_enabled }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for WorkflowPhaseReadyHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "WorkflowPhaseReadyHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Workflow])
+                .payload_types(vec!["WorkflowPhaseReady".to_string()]),
+            priority: HandlerPriority::HIGH,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let (task_id, phase_index, phase_name) = match &event.payload {
+            EventPayload::WorkflowPhaseReady { task_id, phase_index, phase_name } => {
+                (*task_id, *phase_index, phase_name.clone())
+            }
+            _ => return Ok(Reaction::None),
+        };
+
+        // Load parent task and verify state is PhaseReady (idempotency guard)
+        let task = match self.task_repo.get(task_id).await {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                tracing::warn!(task_id = %task_id, "WorkflowPhaseReadyHandler: task not found");
+                return Ok(Reaction::None);
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "WorkflowPhaseReadyHandler: failed to load task");
+                return Ok(Reaction::None);
+            }
+        };
+
+        let state = crate::services::workflow_engine::WorkflowEngine::<T>::read_state_from_task(&task);
+        match &state {
+            Some(crate::domain::models::workflow_state::WorkflowState::PhaseReady { .. }) => {
+                // Expected — proceed with fan-out
+            }
+            other => {
+                tracing::debug!(
+                    task_id = %task_id,
+                    phase_index,
+                    state = ?other,
+                    "WorkflowPhaseReadyHandler: state is not PhaseReady, skipping (idempotency guard)"
+                );
+                return Ok(Reaction::None);
+            }
+        }
+
+        // Build workflow engine and fan out with a single slice using the parent task's description
+        let description = task.description.clone();
+        let task_repo = self.task_repo.clone();
+        let event_bus = self.event_bus.clone();
+        let verification_enabled = self.verification_enabled;
+
+        let engine = crate::services::workflow_engine::WorkflowEngine::new(
+            task_repo,
+            event_bus,
+            verification_enabled,
+        );
+
+        let slice = crate::domain::models::workflow_state::FanOutSlice {
+            description,
+            agent: None,
+            context: std::collections::HashMap::new(),
+        };
+
+        match engine.fan_out(task_id, vec![slice]).await {
+            Ok(result) => {
+                tracing::info!(
+                    task_id = %task_id,
+                    phase_index,
+                    phase_name = %phase_name,
+                    subtask_count = result.subtask_ids.len(),
+                    "WorkflowPhaseReadyHandler: fan-out succeeded for phase"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    phase_index,
+                    phase_name = %phase_name,
+                    error = %e,
+                    "WorkflowPhaseReadyHandler: fan-out failed"
+                );
+            }
+        }
+
+        Ok(Reaction::None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

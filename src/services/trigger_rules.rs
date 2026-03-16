@@ -201,6 +201,12 @@ pub enum SerializableDomainCommand {
         task_id: Uuid,
         reason: String,
     },
+    /// Fail a task. If `task_id` is None, resolve from source event's task_id
+    /// (used by absence-based rules where the task_id is dynamic).
+    FailTask {
+        task_id: Option<Uuid>,
+        error: String,
+    },
     /// Retry a failed task.
     RetryTask {
         task_id: Uuid,
@@ -765,11 +771,11 @@ impl TriggerRuleEngine {
                                 reactions.push(self.build_event(payload, *category, *severity, &synthetic));
                             }
                             TriggerAction::IssueCommand { command } => {
-                                self.dispatch_command(command, &rule.name).await;
+                                self.dispatch_command(command, &rule.name, Some(&synthetic)).await;
                             }
                             TriggerAction::EmitAndCommand { payload, category, severity, command } => {
                                 reactions.push(self.build_event(payload, *category, *severity, &synthetic));
-                                self.dispatch_command(command, &rule.name).await;
+                                self.dispatch_command(command, &rule.name, Some(&synthetic)).await;
                             }
                         }
 
@@ -881,7 +887,7 @@ impl TriggerRuleEngine {
                         reactions.push(self.build_event(payload, *category, *severity, event));
                     }
                     TriggerAction::IssueCommand { command } => {
-                        self.dispatch_command(command, &rule.name).await;
+                        self.dispatch_command(command, &rule.name, Some(event)).await;
                     }
                     TriggerAction::EmitAndCommand {
                         payload,
@@ -890,7 +896,7 @@ impl TriggerRuleEngine {
                         command,
                     } => {
                         reactions.push(self.build_event(payload, *category, *severity, event));
-                        self.dispatch_command(command, &rule.name).await;
+                        self.dispatch_command(command, &rule.name, Some(event)).await;
                     }
                 }
 
@@ -947,7 +953,7 @@ impl TriggerRuleEngine {
         }
     }
 
-    async fn dispatch_command(&self, cmd: &SerializableDomainCommand, rule_name: &str) {
+    async fn dispatch_command(&self, cmd: &SerializableDomainCommand, rule_name: &str, source: Option<&UnifiedEvent>) {
         use crate::domain::models::{AccessorId, GoalStatus, MemoryTier, MemoryType, TaskPriority, TaskSource};
         use crate::services::command_bus::{GoalCommand, MemoryCommand, TaskCommand};
 
@@ -989,6 +995,19 @@ impl TriggerRuleEngine {
                     task_id: *task_id,
                     reason: reason.clone(),
                 })
+            }
+            SerializableDomainCommand::FailTask { task_id, error } => {
+                let resolved_id = task_id.or_else(|| source.and_then(|e| e.task_id));
+                match resolved_id {
+                    Some(id) => DomainCommand::Task(TaskCommand::Fail {
+                        task_id: id,
+                        error: Some(error.clone()),
+                    }),
+                    None => {
+                        tracing::warn!(rule_name, "FailTask: no task_id available — cannot resolve from source event");
+                        return;
+                    }
+                }
             }
             SerializableDomainCommand::RetryTask { task_id } => {
                 DomainCommand::Task(TaskCommand::Retry { task_id: *task_id })
@@ -1193,7 +1212,7 @@ pub fn builtin_trigger_rules() -> Vec<TriggerRule> {
         .with_description("Escalate memory conflicts for human review")
         .with_cooldown(300),
 
-        // task-completion-timeout: escalate if a claimed task doesn't complete within 30min
+        // task-completion-timeout: fail task if claimed but not completed within 30min
         TriggerRule::new(
             "task-completion-timeout",
             SerializableEventFilter {
@@ -1203,15 +1222,14 @@ pub fn builtin_trigger_rules() -> Vec<TriggerRule> {
                 goal_id: None,
                 task_id: None,
             },
-            TriggerAction::EmitEvent {
-                payload: TriggerEventPayload::HumanEscalation {
-                    reason: "Task claimed but not completed within 30 minutes — may be stuck".to_string(),
+            TriggerAction::IssueCommand {
+                command: SerializableDomainCommand::FailTask {
+                    task_id: None, // resolved from absence timer's source event
+                    error: "Task claimed but not completed within 30 minutes — timed out".to_string(),
                 },
-                category: EventCategory::Escalation,
-                severity: EventSeverity::Warning,
             },
         )
-        .with_description("Escalate when a claimed task does not complete within 30 minutes")
+        .with_description("Fail task when claimed but not completed within 30 minutes so retry handlers kick in")
         .with_condition(TriggerCondition::Absence {
             trigger_type: "TaskClaimed".to_string(),
             expected_type: "TaskCompleted".to_string(),
