@@ -32,7 +32,6 @@ use crate::services::builtin_handlers::{
     TaskOutcomeMemoryHandler,
     TaskReadySpawnHandler, TaskScheduleHandler, TaskSLAEnforcementHandler,
     TriggerCatchupHandler, WatermarkAuditHandler,
-    WorkflowPhaseReadyHandler,
     WorkflowSubtaskCompletionHandler, WorkflowVerificationHandler,
     WorktreeReconciliationHandler,
 };
@@ -93,15 +92,7 @@ where
         }
 
         // WorkflowAutoAdvanceHandler — REMOVED (Overmind owns first advance via MCP tools)
-
-        // WorkflowPhaseReadyHandler (HIGH) — auto fan-out for subsequent phases after overmind ends
-        reactor
-            .register(Arc::new(WorkflowPhaseReadyHandler::new(
-                self.task_repo.clone(),
-                self.event_bus.clone(),
-                true,
-            )))
-            .await;
+        // WorkflowPhaseReadyHandler — REMOVED (raced with Overmind, created agentless subtasks)
 
         // TaskFailedBlockHandler (SYSTEM) — block dependents on failure/cancel
         reactor

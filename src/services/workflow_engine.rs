@@ -1058,6 +1058,20 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             ));
         }
 
+        // Every slice must specify an agent — the Overmind is responsible for
+        // creating/selecting the right specialist before fanning out.
+        for (i, slice) in slices.iter().enumerate() {
+            if slice.agent.is_none() {
+                return Err(DomainError::ValidationFailed(
+                    format!(
+                        "fan_out slice {} is missing required `agent` field — \
+                         create or select an agent template and set `agent` on every slice",
+                        i
+                    ),
+                ));
+            }
+        }
+
         let task = self
             .task_repo
             .get(task_id)

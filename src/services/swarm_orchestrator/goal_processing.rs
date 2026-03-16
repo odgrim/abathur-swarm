@@ -206,15 +206,16 @@ where
                 return matched;
             }
 
-        // 4. For subtasks created by the overmind, don't recurse back into overmind.
-        //    If a parent task was assigned to overmind and created this subtask without
-        //    an explicit agent, route back to overmind for further routing. (Subtasks
-        //    should have agent_type set by the overmind, but this is a safety net.)
+        // 4. Default: route to overmind for analysis and decomposition.
+        //    Subtasks must have agent_type set by the Overmind via workflow_fan_out;
+        //    if they reach here it means the Overmind forgot to assign an agent.
         if task.parent_id.is_some() {
-            return "overmind".to_string();
+            tracing::warn!(
+                task_id = %task.id,
+                parent_id = ?task.parent_id,
+                "route_task: subtask has no agent — Overmind should set `agent` in workflow_fan_out slices"
+            );
         }
-
-        // 5. Default: route to overmind for analysis and decomposition
         "overmind".to_string()
     }
 
