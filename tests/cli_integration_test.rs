@@ -5487,3 +5487,251 @@ fn mcp_stdio_missing_db_path_fails() {
         .failure()
         .stderr(predicates::str::is_match("required|--db-path").unwrap());
 }
+
+// ============================================================
+// Task list --limit flag tests (non-ready path)
+// ============================================================
+
+#[test]
+fn task_list_limit_without_ready_flag() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_project(dir);
+
+    // Submit 5 tasks
+    for i in 1..=5 {
+        abathur_cmd(dir)
+            .args(["task", "submit", &format!("Limit test {}", i)])
+            .assert()
+            .success_without_warnings();
+    }
+
+    // List with -l 3 (short flag, no --ready)
+    let list = run_json(dir, &["task", "list", "-l", "3", "--json"]);
+    let tasks = list["tasks"].as_array().expect("tasks should be an array");
+    assert_eq!(
+        tasks.len(),
+        3,
+        "Should return exactly 3 tasks, got {}",
+        tasks.len()
+    );
+
+    // Verify total reflects the limited count
+    assert_eq!(list["total"].as_u64().unwrap(), 3);
+}
+
+#[test]
+fn task_list_limit_with_status_filter() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_project(dir);
+
+    // Submit 4 tasks, cancel 2 of them
+    let mut ids = Vec::new();
+    for i in 1..=4 {
+        let create = run_json(
+            dir,
+            &["task", "submit", &format!("Status limit {}", i), "--json"],
+        );
+        ids.push(json_str(&create["task"], "id"));
+    }
+    // Cancel first two
+    run_json(dir, &["task", "cancel", &ids[0], "--json"]);
+    run_json(dir, &["task", "cancel", &ids[1], "--json"]);
+
+    // List canceled tasks with limit 1
+    let list = run_json(
+        dir,
+        &["task", "list", "--status", "canceled", "-l", "1", "--json"],
+    );
+    let tasks = list["tasks"].as_array().expect("tasks should be an array");
+    assert_eq!(tasks.len(), 1, "Should return exactly 1 canceled task");
+    assert_eq!(json_str(&tasks[0], "status"), "canceled");
+}
+
+#[test]
+fn task_list_limit_larger_than_result_set() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_project(dir);
+
+    // Submit 2 tasks
+    for i in 1..=2 {
+        abathur_cmd(dir)
+            .args(["task", "submit", &format!("Few tasks {}", i)])
+            .assert()
+            .success_without_warnings();
+    }
+
+    // List with limit 100 — should return all 2
+    let list = run_json(dir, &["task", "list", "-l", "100", "--json"]);
+    let tasks = list["tasks"].as_array().expect("tasks should be an array");
+    assert_eq!(
+        tasks.len(),
+        2,
+        "Should return all 2 tasks when limit exceeds count"
+    );
+}
+
+#[test]
+fn task_list_filter_by_type_json() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_project(dir);
+
+    // Submit tasks (they default to "standard" type)
+    abathur_cmd(dir)
+        .args(["task", "submit", "Standard task one"])
+        .assert()
+        .success_without_warnings();
+    abathur_cmd(dir)
+        .args(["task", "submit", "Standard task two"])
+        .assert()
+        .success_without_warnings();
+
+    // Filter by --type standard
+    let list = run_json(dir, &["task", "list", "--type", "standard", "--json"]);
+    let tasks = list["tasks"].as_array().expect("tasks should be an array");
+    assert!(
+        tasks.len() >= 2,
+        "Should find at least 2 standard-type tasks"
+    );
+    for task in tasks {
+        assert_eq!(json_str(task, "task_type"), "standard");
+    }
+}
+
+#[test]
+fn task_list_filter_by_type_no_match() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_project(dir);
+
+    abathur_cmd(dir)
+        .args(["task", "submit", "A normal task"])
+        .assert()
+        .success_without_warnings();
+
+    // Filter by type "verification" — should return none (submitted tasks are "standard")
+    let list = run_json(dir, &["task", "list", "--type", "verification", "--json"]);
+    let tasks = list["tasks"].as_array().expect("tasks should be an array");
+    assert_eq!(tasks.len(), 0, "Should find no verification tasks");
+}
+
+#[test]
+fn task_list_combined_status_limit_json() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_project(dir);
+
+    // Submit 4 tasks — all will be "ready" (no deps)
+    for i in 1..=4 {
+        abathur_cmd(dir)
+            .args(["task", "submit", &format!("Combo task {}", i)])
+            .assert()
+            .success_without_warnings();
+    }
+
+    // Combine --status ready --limit 2 --json
+    let list = run_json(
+        dir,
+        &["task", "list", "--status", "ready", "-l", "2", "--json"],
+    );
+    let tasks = list["tasks"].as_array().expect("tasks should be an array");
+    assert_eq!(tasks.len(), 2, "Should return exactly 2 tasks");
+    for task in tasks {
+        assert_eq!(json_str(task, "status"), "ready");
+    }
+}
+
+#[test]
+fn task_list_combined_priority_limit_json() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_project(dir);
+
+    // Submit tasks with different priorities
+    for i in 1..=3 {
+        abathur_cmd(dir)
+            .args(["task", "submit", &format!("High task {}", i), "--priority", "high"])
+            .assert()
+            .success_without_warnings();
+    }
+    abathur_cmd(dir)
+        .args(["task", "submit", "Low task", "--priority", "low"])
+        .assert()
+        .success_without_warnings();
+
+    // Filter by priority high + limit 2
+    let list = run_json(
+        dir,
+        &["task", "list", "--priority", "high", "-l", "2", "--json"],
+    );
+    let tasks = list["tasks"].as_array().expect("tasks should be an array");
+    assert_eq!(tasks.len(), 2, "Should return exactly 2 high-priority tasks");
+    for task in tasks {
+        assert_eq!(json_str(task, "priority"), "high");
+    }
+}
+
+#[test]
+fn task_list_combined_agent_limit_json() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_project(dir);
+
+    // Submit tasks with a specific agent
+    for i in 1..=3 {
+        abathur_cmd(dir)
+            .args(["task", "submit", &format!("Agent task {}", i), "--agent", "test-agent"])
+            .assert()
+            .success_without_warnings();
+    }
+    // And one without agent
+    abathur_cmd(dir)
+        .args(["task", "submit", "No agent task"])
+        .assert()
+        .success_without_warnings();
+
+    // Filter by agent + limit
+    let list = run_json(
+        dir,
+        &["task", "list", "--agent", "test-agent", "-l", "2", "--json"],
+    );
+    let tasks = list["tasks"].as_array().expect("tasks should be an array");
+    assert_eq!(tasks.len(), 2, "Should return exactly 2 agent-filtered tasks");
+    for task in tasks {
+        assert_eq!(json_str(task, "agent_type"), "test-agent");
+    }
+}
+
+#[test]
+fn task_list_human_output_with_limit() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_project(dir);
+
+    for i in 1..=5 {
+        abathur_cmd(dir)
+            .args(["task", "submit", &format!("Human output {}", i)])
+            .assert()
+            .success_without_warnings();
+    }
+
+    // Non-JSON output with limit — verify it succeeds and shows limited results
+    let output = abathur_cmd(dir)
+        .args(["task", "list", "-l", "2"])
+        .assert()
+        .success_without_warnings()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).unwrap();
+    // The table header says "Showing X of Y" — verify we see "2"
+    assert!(
+        stdout.contains("2 tasks"),
+        "Human output should reflect the limit; got: {}",
+        stdout
+    );
+}

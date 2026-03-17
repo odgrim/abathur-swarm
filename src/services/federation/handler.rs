@@ -40,8 +40,8 @@ impl FederationResultHandler {
     fn reactions_to_events(
         &self,
         reactions: &[FederationReaction],
-        origin_task_id: Uuid,
-        origin_cerebrate_id: &str,
+        _origin_task_id: Uuid,
+        _origin_cerebrate_id: &str,
     ) -> Vec<UnifiedEvent> {
         let mut events = Vec::new();
         for reaction in reactions {
@@ -50,12 +50,11 @@ impl FederationResultHandler {
                     events.push(event_factory::federation_event(
                         EventSeverity::Info,
                         None,
-                        EventPayload::FederationProgressReceived {
-                            task_id: origin_task_id,
-                            cerebrate_id: origin_cerebrate_id.to_string(),
-                            phase: "reaction".to_string(),
-                            progress_pct: 0.0,
-                            summary: description.clone(),
+                        EventPayload::FederationReactionEmitted {
+                            reaction_type: "emit_event".to_string(),
+                            description: description.clone(),
+                            goal_id: None,
+                            task_id: None,
                         },
                     ));
                 }
@@ -68,12 +67,11 @@ impl FederationResultHandler {
                     events.push(event_factory::federation_event(
                         EventSeverity::Warning,
                         None,
-                        EventPayload::FederationProgressReceived {
-                            task_id: origin_task_id,
-                            cerebrate_id: origin_cerebrate_id.to_string(),
-                            phase: "escalation".to_string(),
-                            progress_pct: 0.0,
-                            summary: format!("Escalation: {reason}"),
+                        EventPayload::FederationReactionEmitted {
+                            reaction_type: "escalate".to_string(),
+                            description: format!("Escalation: {reason}"),
+                            goal_id: *goal_id,
+                            task_id: None,
                         },
                     ));
                 }
@@ -86,12 +84,11 @@ impl FederationResultHandler {
                     events.push(event_factory::federation_event(
                         EventSeverity::Info,
                         None,
-                        EventPayload::FederationProgressReceived {
-                            task_id: origin_task_id,
-                            cerebrate_id: origin_cerebrate_id.to_string(),
-                            phase: "goal_progress".to_string(),
-                            progress_pct: 0.0,
-                            summary: format!("Goal {goal_id}: {summary}"),
+                        EventPayload::FederationReactionEmitted {
+                            reaction_type: "update_goal_progress".to_string(),
+                            description: format!("Goal {goal_id}: {summary}"),
+                            goal_id: Some(*goal_id),
+                            task_id: None,
                         },
                     ));
                 }
@@ -105,16 +102,14 @@ impl FederationResultHandler {
                         parent_goal_id = ?parent_goal_id,
                         "Federation reaction: create task"
                     );
-                    // Emit an event so other handlers (e.g. goal processing) can pick it up
                     events.push(event_factory::federation_event(
                         EventSeverity::Info,
                         None,
-                        EventPayload::FederationProgressReceived {
-                            task_id: origin_task_id,
-                            cerebrate_id: origin_cerebrate_id.to_string(),
-                            phase: "create_task".to_string(),
-                            progress_pct: 0.0,
-                            summary: format!("Create task: {title} — {description}"),
+                        EventPayload::FederationReactionEmitted {
+                            reaction_type: "create_task".to_string(),
+                            description: format!("Create task: {title} — {description}"),
+                            goal_id: *parent_goal_id,
+                            task_id: None,
                         },
                     ));
                 }
@@ -498,24 +493,98 @@ mod tests {
     fn test_reactions_to_events_escalate() {
         let handler = make_handler();
         let task_id = Uuid::new_v4();
+        let goal = Uuid::new_v4();
         let reactions = vec![FederationReaction::Escalate {
             reason: "test".to_string(),
-            goal_id: Some(Uuid::new_v4()),
+            goal_id: Some(goal),
         }];
         let events = handler.reactions_to_events(&reactions, task_id, "c1");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].severity, EventSeverity::Warning);
-        // Verify that the origin context is preserved in the emitted event
+        // Verify it uses the distinct FederationReactionEmitted payload
         match &events[0].payload {
-            EventPayload::FederationProgressReceived {
-                task_id: emitted_task_id,
-                cerebrate_id,
+            EventPayload::FederationReactionEmitted {
+                reaction_type,
+                goal_id,
                 ..
             } => {
-                assert_eq!(*emitted_task_id, task_id);
-                assert_eq!(cerebrate_id, "c1");
+                assert_eq!(reaction_type, "escalate");
+                assert_eq!(*goal_id, Some(goal));
             }
-            _ => panic!("Expected FederationProgressReceived payload"),
+            other => panic!("Expected FederationReactionEmitted, got {:?}", other.variant_name()),
+        }
+    }
+
+    #[test]
+    fn test_reactions_to_events_create_task() {
+        let handler = make_handler();
+        let task_id = Uuid::new_v4();
+        let goal = Uuid::new_v4();
+        let reactions = vec![FederationReaction::CreateTask {
+            title: "Fix the thing".to_string(),
+            description: "Something needs fixing".to_string(),
+            parent_goal_id: Some(goal),
+        }];
+        let events = handler.reactions_to_events(&reactions, task_id, "c1");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            EventPayload::FederationReactionEmitted {
+                reaction_type,
+                description,
+                goal_id,
+                ..
+            } => {
+                assert_eq!(reaction_type, "create_task");
+                assert!(description.contains("Fix the thing"));
+                assert_eq!(*goal_id, Some(goal));
+            }
+            other => panic!("Expected FederationReactionEmitted, got {:?}", other.variant_name()),
+        }
+    }
+
+    #[test]
+    fn test_reactions_to_events_update_goal_progress() {
+        let handler = make_handler();
+        let task_id = Uuid::new_v4();
+        let goal = Uuid::new_v4();
+        let reactions = vec![FederationReaction::UpdateGoalProgress {
+            goal_id: goal,
+            summary: "50% complete".to_string(),
+        }];
+        let events = handler.reactions_to_events(&reactions, task_id, "c1");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            EventPayload::FederationReactionEmitted {
+                reaction_type,
+                goal_id,
+                ..
+            } => {
+                assert_eq!(reaction_type, "update_goal_progress");
+                assert_eq!(*goal_id, Some(goal));
+            }
+            other => panic!("Expected FederationReactionEmitted, got {:?}", other.variant_name()),
+        }
+    }
+
+    #[test]
+    fn test_reactions_to_events_emit_event() {
+        let handler = make_handler();
+        let task_id = Uuid::new_v4();
+        let reactions = vec![FederationReaction::EmitEvent {
+            description: "Something happened".to_string(),
+        }];
+        let events = handler.reactions_to_events(&reactions, task_id, "c1");
+        assert_eq!(events.len(), 1);
+        match &events[0].payload {
+            EventPayload::FederationReactionEmitted {
+                reaction_type,
+                description,
+                ..
+            } => {
+                assert_eq!(reaction_type, "emit_event");
+                assert_eq!(description, "Something happened");
+            }
+            other => panic!("Expected FederationReactionEmitted, got {:?}", other.variant_name()),
         }
     }
 }

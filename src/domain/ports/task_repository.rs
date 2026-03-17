@@ -14,6 +14,7 @@ pub struct TaskFilter {
     pub parent_id: Option<Uuid>,
     pub agent_type: Option<String>,
     pub task_type: Option<TaskType>,
+    pub limit: Option<usize>,
 }
 
 /// Repository interface for Task persistence.

@@ -478,6 +478,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                     agent_type: agent,
                     parent_id: None,
                     task_type: task_type.as_ref().and_then(|t| TaskType::from_str(t)),
+                    limit: Some(limit),
                 };
                 service.list_tasks(filter).await?
             };

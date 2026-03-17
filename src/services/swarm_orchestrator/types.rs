@@ -526,6 +526,8 @@ pub enum SwarmEvent {
     FederationCerebrateUnreachable { cerebrate_id: String, in_flight_tasks: Vec<Uuid> },
     /// Stall detected: no progress from cerebrate within threshold.
     FederationStallDetected { task_id: Uuid, cerebrate_id: String, stall_duration_secs: u64 },
+    /// A federation reaction was emitted by the result processor.
+    FederationReactionEmitted { reaction_type: String, description: String, goal_id: Option<Uuid>, task_id: Option<Uuid> },
 }
 
 /// Statistics about the swarm.
@@ -758,6 +760,12 @@ impl SwarmEvent {
                 task_id: *task_id,
                 cerebrate_id: cerebrate_id.clone(),
                 stall_duration_secs: *stall_duration_secs,
+            }),
+            EventPayload::FederationReactionEmitted { reaction_type, description, goal_id, task_id } => Some(SwarmEvent::FederationReactionEmitted {
+                reaction_type: reaction_type.clone(),
+                description: description.clone(),
+                goal_id: *goal_id,
+                task_id: *task_id,
             }),
             // EventPayload variants with no SwarmEvent counterpart
             _ => None,

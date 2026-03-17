@@ -982,6 +982,16 @@ pub enum EventPayload {
         cerebrate_id: String,
         stall_duration_secs: u64,
     },
+
+    /// A federation reaction was emitted by the result processor.
+    /// Distinct from protocol-level events — these represent the system's
+    /// reactive decisions in response to federation results.
+    FederationReactionEmitted {
+        reaction_type: String,
+        description: String,
+        goal_id: Option<Uuid>,
+        task_id: Option<Uuid>,
+    },
 }
 
 impl EventPayload {
@@ -1118,6 +1128,7 @@ impl EventPayload {
             Self::FederationHeartbeatMissed { .. } => "FederationHeartbeatMissed",
             Self::FederationCerebrateUnreachable { .. } => "FederationCerebrateUnreachable",
             Self::FederationStallDetected { .. } => "FederationStallDetected",
+            Self::FederationReactionEmitted { .. } => "FederationReactionEmitted",
         }
     }
 }
@@ -1565,6 +1576,13 @@ impl From<SwarmEvent> for UnifiedEvent {
                 None,
                 Some(task_id),
                 EventPayload::FederationStallDetected { task_id, cerebrate_id, stall_duration_secs },
+            ),
+            SwarmEvent::FederationReactionEmitted { reaction_type, description, goal_id, task_id } => (
+                EventSeverity::Info,
+                EventCategory::Federation,
+                goal_id,
+                task_id,
+                EventPayload::FederationReactionEmitted { reaction_type, description, goal_id, task_id },
             ),
         };
 

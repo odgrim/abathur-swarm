@@ -1140,6 +1140,11 @@ async fn run_swarm_foreground(
                         println!("  ⚠️ Stall detected: task {} on {} ({}s with no progress)", task_id, cerebrate_id, stall_duration_secs);
                     }
                 }
+                SwarmEvent::FederationReactionEmitted { reaction_type, description, .. } => {
+                    if !json_mode {
+                        println!("  🌐 Reaction [{}]: {}", reaction_type, description);
+                    }
+                }
             }
         }
     });

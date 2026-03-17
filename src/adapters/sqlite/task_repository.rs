@@ -200,6 +200,10 @@ impl TaskRepository for SqliteTaskRepository {
 
         query.push_str(" ORDER BY created_at DESC");
 
+        if let Some(n) = filter.limit {
+            query.push_str(&format!(" LIMIT {}", n));
+        }
+
         let mut q = sqlx::query_as::<_, TaskRow>(&query);
         for binding in &bindings {
             q = q.bind(binding);
