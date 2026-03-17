@@ -26,6 +26,7 @@ pub struct TriggerArgs {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum TriggerCommands {
     /// Create a new trigger rule
     Create {

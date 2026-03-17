@@ -339,6 +339,7 @@ struct McpServerUrls {
     events_server: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_swarm(
     max_agents: usize,
     dry_run: bool,
@@ -397,6 +398,7 @@ async fn start_swarm(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_swarm_background(
     max_agents: usize,
     dry_run: bool,
@@ -562,6 +564,7 @@ async fn stop_swarm(json_mode: bool) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_swarm_foreground(
     max_agents: usize,
     dry_run: bool,

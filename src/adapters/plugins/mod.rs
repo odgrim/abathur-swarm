@@ -99,6 +99,7 @@ pub fn find_known_adapter(name: &str) -> Option<&'static KnownAdapter> {
 ///
 /// Returns `Err` if the adapter name is unknown or if required
 /// environment variables (e.g., `CLICKUP_API_KEY`) are not set.
+#[allow(clippy::type_complexity)]
 pub fn create_native_adapter(
     manifest: &AdapterManifest,
     _prompt_content: &str,

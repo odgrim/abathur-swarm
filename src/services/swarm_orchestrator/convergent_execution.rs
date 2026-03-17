@@ -77,6 +77,7 @@ pub trait ConvergentIntentVerifier: Send + Sync {
 /// Outcome of convergent execution, consumed by the orchestrator to decide
 /// the task's terminal status.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum ConvergentOutcome {
     /// The trajectory converged to a satisfactory result.
     Converged,
@@ -134,6 +135,7 @@ pub enum ConvergentOutcome {
 ///   when cancelled, the trajectory is persisted and `Cancelled` is returned.
 /// * `deadline` - Optional SLA deadline; caps the trajectory budget's
 ///   `max_wall_time` so convergent tasks never breach the SLA.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_convergent_execution<T, Tr, M, O>(
     task: &Task,
     goal_id: Option<Uuid>,
@@ -262,6 +264,7 @@ where
 /// * `parallel_samples` - Number of parallel trajectories to spawn in Phase 1.
 /// * `base_branch` - The git branch to create worktrees from.
 /// * `worktree_base_dir` - Base directory under which parallel worktrees are created.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub async fn run_parallel_convergent_execution<T, Tr, M, O>(
     task: &Task,
     goal_id: Option<Uuid>,
@@ -597,6 +600,7 @@ where
 ///
 /// This function takes an already-prepared trajectory and bandit and runs the
 /// convergence loop until a terminal condition is reached.
+#[allow(clippy::too_many_arguments)]
 async fn run_convergent_execution_inner<T2, Tr, M, O>(
     task: &Task,
     goal_id: Option<Uuid>,

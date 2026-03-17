@@ -33,7 +33,16 @@ impl FederationResultHandler {
 
     /// Convert `FederationReaction`s into `UnifiedEvent`s that the EventReactor
     /// can propagate through the rest of the system.
-    fn reactions_to_events(&self, reactions: &[FederationReaction]) -> Vec<UnifiedEvent> {
+    ///
+    /// `origin_task_id` and `origin_cerebrate_id` carry context from the
+    /// originating event so that downstream consumers can correlate reactions
+    /// back to the federation task and cerebrate that triggered them.
+    fn reactions_to_events(
+        &self,
+        reactions: &[FederationReaction],
+        origin_task_id: Uuid,
+        origin_cerebrate_id: &str,
+    ) -> Vec<UnifiedEvent> {
         let mut events = Vec::new();
         for reaction in reactions {
             match reaction {
@@ -42,8 +51,8 @@ impl FederationResultHandler {
                         EventSeverity::Info,
                         None,
                         EventPayload::FederationProgressReceived {
-                            task_id: Uuid::nil(),
-                            cerebrate_id: String::new(),
+                            task_id: origin_task_id,
+                            cerebrate_id: origin_cerebrate_id.to_string(),
                             phase: "reaction".to_string(),
                             progress_pct: 0.0,
                             summary: description.clone(),
@@ -60,8 +69,8 @@ impl FederationResultHandler {
                         EventSeverity::Warning,
                         None,
                         EventPayload::FederationProgressReceived {
-                            task_id: Uuid::nil(),
-                            cerebrate_id: String::new(),
+                            task_id: origin_task_id,
+                            cerebrate_id: origin_cerebrate_id.to_string(),
                             phase: "escalation".to_string(),
                             progress_pct: 0.0,
                             summary: format!("Escalation: {reason}"),
@@ -78,8 +87,8 @@ impl FederationResultHandler {
                         EventSeverity::Info,
                         None,
                         EventPayload::FederationProgressReceived {
-                            task_id: Uuid::nil(),
-                            cerebrate_id: String::new(),
+                            task_id: origin_task_id,
+                            cerebrate_id: origin_cerebrate_id.to_string(),
                             phase: "goal_progress".to_string(),
                             progress_pct: 0.0,
                             summary: format!("Goal {goal_id}: {summary}"),
@@ -101,8 +110,8 @@ impl FederationResultHandler {
                         EventSeverity::Info,
                         None,
                         EventPayload::FederationProgressReceived {
-                            task_id: Uuid::nil(),
-                            cerebrate_id: String::new(),
+                            task_id: origin_task_id,
+                            cerebrate_id: origin_cerebrate_id.to_string(),
                             phase: "create_task".to_string(),
                             progress_pct: 0.0,
                             summary: format!("Create task: {title} — {description}"),
@@ -180,7 +189,7 @@ impl EventHandler for FederationResultHandler {
                 // Build a FederationResult from the event payload to run through the processor
                 let result = crate::domain::models::a2a::FederationResult {
                     task_id: *task_id,
-                    correlation_id: Uuid::nil(),
+                    correlation_id: event.correlation_id.unwrap_or(Uuid::nil()),
                     status: match status.as_str() {
                         "completed" => crate::domain::models::a2a::FederationTaskStatus::Completed,
                         "partial" => crate::domain::models::a2a::FederationTaskStatus::Partial,
@@ -211,7 +220,7 @@ impl EventHandler for FederationResultHandler {
                     }
                 };
 
-                let events = self.reactions_to_events(&reactions);
+                let events = self.reactions_to_events(&reactions, *task_id, cerebrate_id);
                 if events.is_empty() {
                     Ok(Reaction::None)
                 } else {
@@ -238,7 +247,7 @@ impl EventHandler for FederationResultHandler {
                 for task_id in in_flight_tasks {
                     let result = crate::domain::models::a2a::FederationResult {
                         task_id: *task_id,
-                        correlation_id: Uuid::nil(),
+                        correlation_id: event.correlation_id.unwrap_or(Uuid::nil()),
                         status: crate::domain::models::a2a::FederationTaskStatus::Failed,
                         summary: format!(
                             "Cerebrate {cerebrate_id} became unreachable"
@@ -255,7 +264,7 @@ impl EventHandler for FederationResultHandler {
                         task_title: None,
                     };
                     let reactions = processor.process_failure(&result, &parent_context);
-                    all_events.extend(self.reactions_to_events(&reactions));
+                    all_events.extend(self.reactions_to_events(&reactions, *task_id, cerebrate_id));
                 }
 
                 if all_events.is_empty() {
@@ -281,7 +290,7 @@ impl EventHandler for FederationResultHandler {
                     ),
                     goal_id: event.goal_id,
                 }];
-                let events = self.reactions_to_events(&reactions);
+                let events = self.reactions_to_events(&reactions, *task_id, cerebrate_id);
                 if events.is_empty() {
                     Ok(Reaction::None)
                 } else {
@@ -480,19 +489,33 @@ mod tests {
     #[test]
     fn test_reactions_to_events_none() {
         let handler = make_handler();
-        let events = handler.reactions_to_events(&[FederationReaction::None]);
+        let events =
+            handler.reactions_to_events(&[FederationReaction::None], Uuid::new_v4(), "c1");
         assert!(events.is_empty());
     }
 
     #[test]
     fn test_reactions_to_events_escalate() {
         let handler = make_handler();
+        let task_id = Uuid::new_v4();
         let reactions = vec![FederationReaction::Escalate {
             reason: "test".to_string(),
             goal_id: Some(Uuid::new_v4()),
         }];
-        let events = handler.reactions_to_events(&reactions);
+        let events = handler.reactions_to_events(&reactions, task_id, "c1");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].severity, EventSeverity::Warning);
+        // Verify that the origin context is preserved in the emitted event
+        match &events[0].payload {
+            EventPayload::FederationProgressReceived {
+                task_id: emitted_task_id,
+                cerebrate_id,
+                ..
+            } => {
+                assert_eq!(*emitted_task_id, task_id);
+                assert_eq!(cerebrate_id, "c1");
+            }
+            _ => panic!("Expected FederationProgressReceived payload"),
+        }
     }
 }

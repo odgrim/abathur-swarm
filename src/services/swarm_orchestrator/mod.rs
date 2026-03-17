@@ -130,6 +130,7 @@ where
     A: AgentRepository + 'static,
     M: MemoryRepository + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         goal_repo: Arc<G>,
         task_repo: Arc<T>,

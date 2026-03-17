@@ -546,6 +546,7 @@ impl AuditLogService {
     }
 
     /// Log a state change.
+    #[allow(clippy::too_many_arguments)]
     pub async fn log_state_change(
         &self,
         category: AuditCategory,

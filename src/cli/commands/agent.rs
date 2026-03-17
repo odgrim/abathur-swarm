@@ -718,6 +718,7 @@ fn parse_message_type(s: &str) -> Option<MessageType> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_a2a_message(
     pool: &SqlitePool,
     to: String,

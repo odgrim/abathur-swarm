@@ -692,6 +692,7 @@ async fn build_upstream_artifacts_context<T: TaskRepository>(
 }
 
 /// Execute a single task with retry logic and timeout.
+#[allow(clippy::too_many_arguments)]
 async fn execute_single_task<T, A>(
     task_id: Uuid,
     goal_id: Option<Uuid>,

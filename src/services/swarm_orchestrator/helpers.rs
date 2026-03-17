@@ -282,6 +282,7 @@ pub async fn find_root_ancestor_id<T: TaskRepository>(task_id: Uuid, task_repo: 
 ///   persisted findings to memory).
 /// - `OutputDelivery::PullRequest` → existing PR-first flow (default).
 /// - `OutputDelivery::DirectMerge` → merge without creating a PR.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_post_completion_workflow<G, T, W>(
     task_id: Uuid,
     task_repo: Arc<T>,
@@ -830,6 +831,7 @@ where
 }
 
 /// Merge a subtask's branch into the root ancestor's feature branch.
+#[allow(clippy::too_many_arguments)]
 async fn merge_subtask_into_feature_branch<G, T, W>(
     task_id: Uuid,
     task_repo: Arc<T>,
@@ -950,6 +952,7 @@ where
 }
 
 /// Check if all tasks in a tree are terminal and, if so, create a single PR.
+#[allow(clippy::too_many_arguments)]
 async fn try_auto_ship<T, W>(
     triggering_task_id: Uuid,
     task_repo: Arc<T>,
