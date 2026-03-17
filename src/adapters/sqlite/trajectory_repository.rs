@@ -515,6 +515,7 @@ impl TryFrom<TrajectoryRow> for Trajectory {
             prev_intent_confidence: None,
             last_intent_confidence: None,
             lint_baseline: 0,
+            complexity: None,
             created_at,
             updated_at,
         })

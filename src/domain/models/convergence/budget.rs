@@ -28,6 +28,7 @@
 //! - **[`estimate_convergence_heuristic`]** (spec 5.4) -- a simplified
 //!   convergence cost estimator that does not require historical trajectory data.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -462,6 +463,107 @@ pub fn compute_parent_convergence(child_outcomes: &[ConvergenceOutcome]) -> f64 
     converged_count as f64 / child_outcomes.len() as f64
 }
 
+// ---------------------------------------------------------------------------
+// BudgetCalibrationTracker (budget-calibration constraint)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of token-usage samples retained per complexity tier.
+const MAX_SAMPLES_PER_TIER: usize = 100;
+
+/// Minimum sample count required before P95 is considered meaningful.
+const MIN_SAMPLES_FOR_P95: usize = 5;
+
+/// Overshoot threshold (20 %) -- if P95 exceeds the tier budget by more than
+/// this fraction, a [`CalibrationAlert`] is emitted.
+const OVERSHOOT_THRESHOLD: f64 = 0.20;
+
+/// Tracks actual token usage per complexity tier so that the system can
+/// detect when P95 usage exceeds the allocated budget by more than 20 %.
+///
+/// This implements the **budget-calibration** constraint from the
+/// "Convergence loop reliability" goal.
+///
+/// Usage:
+/// ```ignore
+/// tracker.record_completion(Complexity::Moderate, 380_000);
+/// if let Some(p95) = tracker.p95_for_tier(Complexity::Moderate) { … }
+/// let alerts = tracker.calibration_alerts();
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BudgetCalibrationTracker {
+    /// Per-tier sliding window of actual token counts.
+    samples: HashMap<Complexity, Vec<u64>>,
+}
+
+impl BudgetCalibrationTracker {
+    /// Record a completed trajectory's token usage for the given tier.
+    ///
+    /// Old samples are evicted once the window exceeds [`MAX_SAMPLES_PER_TIER`].
+    pub fn record_completion(&mut self, tier: Complexity, actual_tokens: u64) {
+        let window = self.samples.entry(tier).or_default();
+        if window.len() >= MAX_SAMPLES_PER_TIER {
+            window.remove(0);
+        }
+        window.push(actual_tokens);
+    }
+
+    /// Compute the P95 token usage for a tier, or `None` if fewer than
+    /// [`MIN_SAMPLES_FOR_P95`] samples have been recorded.
+    pub fn p95_for_tier(&self, tier: Complexity) -> Option<u64> {
+        let window = self.samples.get(&tier)?;
+        if window.len() < MIN_SAMPLES_FOR_P95 {
+            return None;
+        }
+        let mut sorted: Vec<u64> = window.clone();
+        sorted.sort_unstable();
+        // P95 index: ceil(0.95 * n) - 1, clamped to valid range.
+        let idx = ((sorted.len() as f64 * 0.95).ceil() as usize).saturating_sub(1);
+        let idx = idx.min(sorted.len() - 1);
+        Some(sorted[idx])
+    }
+
+    /// Number of samples recorded for the given tier.
+    pub fn sample_count(&self, tier: Complexity) -> usize {
+        self.samples.get(&tier).map_or(0, |v| v.len())
+    }
+
+    /// Check all tiers and return alerts for any whose P95 exceeds the
+    /// allocated budget by more than [`OVERSHOOT_THRESHOLD`] (20 %).
+    pub fn calibration_alerts(&self) -> Vec<CalibrationAlert> {
+        let mut alerts = Vec::new();
+        for &tier in self.samples.keys() {
+            if let Some(p95) = self.p95_for_tier(tier) {
+                let budget = allocate_budget(tier);
+                let max_allowed =
+                    (budget.max_tokens as f64 * (1.0 + OVERSHOOT_THRESHOLD)).round() as u64;
+                if p95 > max_allowed {
+                    alerts.push(CalibrationAlert {
+                        tier,
+                        p95_tokens: p95,
+                        allocated_tokens: budget.max_tokens,
+                        overshoot_pct: (p95 as f64 / budget.max_tokens as f64 - 1.0) * 100.0,
+                    });
+                }
+            }
+        }
+        alerts
+    }
+}
+
+/// Alert emitted when a tier's P95 token usage exceeds its allocated budget
+/// by more than the configured threshold.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalibrationAlert {
+    /// The complexity tier that exceeded its budget.
+    pub tier: Complexity,
+    /// The observed P95 token usage.
+    pub p95_tokens: u64,
+    /// The allocated budget for this tier.
+    pub allocated_tokens: u64,
+    /// How far above the budget the P95 is, as a percentage.
+    pub overshoot_pct: f64,
+}
+
 // =========================================================================
 // Tests
 // =========================================================================
@@ -841,5 +943,80 @@ mod tests {
         b.tokens_used = 90_000;
         b.extensions_requested = b.max_extensions;
         assert!(!b.should_request_extension(true));
+    }
+
+    // -- BudgetCalibrationTracker -------------------------------------------
+
+    #[test]
+    fn test_record_and_p95_basic() {
+        let mut tracker = BudgetCalibrationTracker::default();
+        // Record 20 samples: 1..=20 (in thousands)
+        for i in 1..=20u64 {
+            tracker.record_completion(Complexity::Simple, i * 1_000);
+        }
+        let p95 = tracker.p95_for_tier(Complexity::Simple).unwrap();
+        // Sorted: [1k..20k]. P95 index = ceil(20 * 0.95) - 1 = 19 - 1 = 18 => 19_000
+        assert_eq!(p95, 19_000);
+    }
+
+    #[test]
+    fn test_p95_insufficient_samples() {
+        let mut tracker = BudgetCalibrationTracker::default();
+        // Only 4 samples — below the minimum of 5
+        for i in 1..=4u64 {
+            tracker.record_completion(Complexity::Trivial, i * 1_000);
+        }
+        assert!(tracker.p95_for_tier(Complexity::Trivial).is_none());
+        assert_eq!(tracker.sample_count(Complexity::Trivial), 4);
+    }
+
+    #[test]
+    fn test_calibration_alert_emitted() {
+        let mut tracker = BudgetCalibrationTracker::default();
+        // Simple tier budget = 150_000. Alert threshold = 150_000 * 1.2 = 180_000.
+        // Record 10 samples all at 200_000 (well over 20% overshoot).
+        for _ in 0..10 {
+            tracker.record_completion(Complexity::Simple, 200_000);
+        }
+        let alerts = tracker.calibration_alerts();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].tier, Complexity::Simple);
+        assert_eq!(alerts[0].p95_tokens, 200_000);
+        assert_eq!(alerts[0].allocated_tokens, 150_000);
+        // Overshoot: (200_000 / 150_000 - 1) * 100 ≈ 33.33%
+        assert!(alerts[0].overshoot_pct > 33.0);
+    }
+
+    #[test]
+    fn test_calibration_no_alert_within_threshold() {
+        let mut tracker = BudgetCalibrationTracker::default();
+        // Simple tier budget = 150_000. 20% overshoot = 180_000.
+        // All samples at 170_000 — within the 20% threshold.
+        for _ in 0..10 {
+            tracker.record_completion(Complexity::Simple, 170_000);
+        }
+        let alerts = tracker.calibration_alerts();
+        assert!(alerts.is_empty());
+    }
+
+    #[test]
+    fn test_sliding_window() {
+        let mut tracker = BudgetCalibrationTracker::default();
+        // Fill window to max (100), then add one more
+        for i in 0..100u64 {
+            tracker.record_completion(Complexity::Moderate, i * 1_000);
+        }
+        assert_eq!(tracker.sample_count(Complexity::Moderate), 100);
+
+        // Add one more — should evict the oldest (0)
+        tracker.record_completion(Complexity::Moderate, 500_000);
+        assert_eq!(tracker.sample_count(Complexity::Moderate), 100);
+
+        // P95 should reflect the new window (1k..99k, 500k)
+        let p95 = tracker.p95_for_tier(Complexity::Moderate).unwrap();
+        // The new window sorted includes 500_000 at the end.
+        // P95 index = ceil(100 * 0.95) - 1 = 95 - 1 = 94
+        // Values: [1k, 2k, ..., 99k, 500k] — index 94 = 95_000
+        assert_eq!(p95, 95_000);
     }
 }

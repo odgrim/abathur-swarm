@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::models::intent_verification::{IntentGap, IntentVerificationResult};
+use crate::domain::models::task::Complexity;
 
 use super::*;
 
@@ -106,6 +107,11 @@ pub struct Trajectory {
     #[serde(default)]
     pub lint_baseline: u32,
 
+    /// The complexity tier for this trajectory's task, used for budget
+    /// calibration tracking. Set during `prepare` from the task's complexity.
+    #[serde(default)]
+    pub complexity: Option<Complexity>,
+
     /// When this trajectory was created.
     pub created_at: DateTime<Utc>,
 
@@ -146,6 +152,7 @@ impl Trajectory {
             prev_intent_confidence: None,
             last_intent_confidence: None,
             lint_baseline: 0,
+            complexity: None,
             created_at: now,
             updated_at: now,
         }

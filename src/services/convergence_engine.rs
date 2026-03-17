@@ -10,7 +10,7 @@
 //!   classification, bandit update, loop control.
 //! - **RESOLVE** -- Memory persistence, bandit state persistence, terminal events.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -85,6 +85,8 @@ pub struct ConvergenceEngine<T: TrajectoryRepository, M: MemoryRepository, O: Ov
     memory_repository: Arc<M>,
     overseer_measurer: Arc<O>,
     config: ConvergenceEngineConfig,
+    /// Tracks actual token usage per complexity tier for budget calibration.
+    calibration_tracker: Mutex<BudgetCalibrationTracker>,
 }
 
 impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
@@ -106,7 +108,17 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             memory_repository,
             overseer_measurer,
             config,
+            calibration_tracker: Mutex::new(BudgetCalibrationTracker::default()),
         }
+    }
+
+    /// Returns any calibration alerts where P95 token usage exceeds the
+    /// allocated budget by more than 20 % for a complexity tier.
+    pub fn calibration_alerts(&self) -> Vec<CalibrationAlert> {
+        self.calibration_tracker
+            .lock()
+            .map(|t| t.calibration_alerts())
+            .unwrap_or_default()
     }
 
     // -----------------------------------------------------------------------
@@ -178,13 +190,14 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         }
 
         let task_id = Uuid::new_v4(); // In production, this comes from the task service
-        let trajectory = Trajectory::new(
+        let mut trajectory = Trajectory::new(
             task_id,
             submission.goal_id,
             spec_evolution,
             budget,
             policy,
         );
+        trajectory.complexity = Some(submission.inferred_complexity);
 
         // 8. Persist the trajectory
         self.trajectory_store.save(&trajectory).await?;
@@ -1275,7 +1288,14 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             self.persist_bandit_state(bandit, trajectory).await?;
         }
 
-        // 5. Save final trajectory state
+        // 5. Record token usage for budget calibration tracking
+        if let (Some(tier), Ok(mut tracker)) =
+            (trajectory.complexity, self.calibration_tracker.lock())
+        {
+            tracker.record_completion(tier, trajectory.budget.tokens_used);
+        }
+
+        // 6. Save final trajectory state
         trajectory.updated_at = Utc::now();
         self.trajectory_store.save(trajectory).await?;
 

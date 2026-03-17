@@ -216,6 +216,23 @@ where
         },
     )).await;
 
+    // -----------------------------------------------------------------------
+    // 1c. ALREADY-DONE DETECTION -- Skip convergence if prior work satisfies
+    //     the intent (prevents cascade failures on retry). Only for sequential
+    //     execution; parallel mode creates fresh worktrees.
+    // -----------------------------------------------------------------------
+    if let Some(wt) = worktree_path
+        && let Some(outcome) = check_work_already_done(
+            wt,
+            task,
+            goal_id,
+            &intent_verifier,
+            event_bus,
+        ).await
+    {
+        return Ok(outcome);
+    }
+
     // Transition to iterating phase
     trajectory.phase = ConvergencePhase::Iterating;
 
@@ -1672,6 +1689,143 @@ async fn reset_worktree(worktree_path: &str) -> DomainResult<()> {
     Ok(())
 }
 
+/// Check whether a worktree already contains committed or staged work that
+/// satisfies the task's intent.
+///
+/// This prevents federation-type cascade failures where a retry agent enters
+/// a convergence loop on a worktree that already has committed changes from a
+/// prior (possibly timed-out) execution. Instead of burning the entire
+/// convergence budget redoing work that's already done, this function detects
+/// the existing work and runs intent verification against the current state.
+///
+/// Returns `Some(ConvergentOutcome::Converged)` if the existing work fully
+/// satisfies the intent, or `None` to proceed with normal convergent iteration.
+async fn check_work_already_done(
+    worktree_path: &str,
+    task: &Task,
+    goal_id: Option<Uuid>,
+    intent_verifier: &Arc<dyn ConvergentIntentVerifier>,
+    event_bus: &Arc<EventBus>,
+) -> Option<ConvergentOutcome> {
+    // Check for already-committed changes that are NEW on this branch
+    // (ahead of the upstream tracking branch or origin/main).
+    // We first try @{upstream}..HEAD (works when upstream is set), then
+    // fall back to origin/main..HEAD. If both fail we assume no new commits.
+    let has_commits = {
+        let upstream_log = tokio::process::Command::new("git")
+            .args(["log", "--oneline", "@{u}..HEAD", "-5"])
+            .current_dir(worktree_path)
+            .output()
+            .await
+            .ok();
+
+        let log_output = match &upstream_log {
+            Some(o) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout).trim().to_string()
+            }
+            _ => {
+                // No upstream tracking branch — fall back to origin/main
+                let fallback = tokio::process::Command::new("git")
+                    .args(["log", "--oneline", "origin/main..HEAD", "-5"])
+                    .current_dir(worktree_path)
+                    .output()
+                    .await
+                    .ok();
+                match &fallback {
+                    Some(o) if o.status.success() => {
+                        String::from_utf8_lossy(&o.stdout).trim().to_string()
+                    }
+                    _ => String::new(),
+                }
+            }
+        };
+        !log_output.is_empty()
+    };
+
+    // Check for staged (but uncommitted) changes
+    let git_diff = tokio::process::Command::new("git")
+        .args(["diff", "--cached", "--stat"])
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .ok()?;
+
+    let diff_output = String::from_utf8_lossy(&git_diff.stdout);
+    let has_staged = git_diff.status.success() && !diff_output.trim().is_empty();
+
+    if !has_commits && !has_staged {
+        return None;
+    }
+
+    tracing::info!(
+        task_id = %task.id,
+        has_commits = has_commits,
+        has_staged = has_staged,
+        "Worktree has existing work; running pre-iteration intent verification"
+    );
+
+    // Run intent verification against current worktree state
+    // Use iteration 0 to indicate this is a pre-iteration check
+    match intent_verifier
+        .verify_convergent_intent(task, goal_id, 0, None)
+        .await
+    {
+        Ok(Some(ivr)) => {
+            if ivr.satisfaction == IntentSatisfaction::Satisfied {
+                tracing::info!(
+                    task_id = %task.id,
+                    confidence = ivr.confidence,
+                    "Already-done detection: existing work satisfies intent — skipping convergence"
+                );
+
+                emit_intent_verification_event(event_bus, task, goal_id, &ivr).await;
+
+                // Emit a lightweight convergence event (no trajectory available
+                // at this stage since we short-circuit before iteration begins).
+                event_bus.publish(event_factory::make_event(
+                    EventSeverity::Info,
+                    crate::services::event_bus::EventCategory::Convergence,
+                    goal_id,
+                    Some(task.id),
+                    EventPayload::ConvergenceTerminated {
+                        task_id: task.id,
+                        trajectory_id: Uuid::nil(),
+                        outcome: "already_done".to_string(),
+                        total_iterations: 0,
+                        total_tokens: 0,
+                        final_convergence_level: 1.0,
+                    },
+                )).await;
+
+                Some(ConvergentOutcome::Converged)
+            } else {
+                tracing::info!(
+                    task_id = %task.id,
+                    satisfaction = %ivr.satisfaction.as_str(),
+                    gaps = ivr.gaps.len() + ivr.implicit_gaps.len(),
+                    "Already-done detection: existing work does not fully satisfy intent — proceeding with convergence"
+                );
+                None
+            }
+        }
+        Ok(None) => {
+            tracing::debug!(
+                task_id = %task.id,
+                "Already-done detection: no intent extractable — proceeding normally"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task.id,
+                error = %e,
+                "Already-done detection: intent verification failed — proceeding normally"
+            );
+            None
+        }
+    }
+}
+
 /// Create a git worktree at the specified path from the given branch.
 ///
 /// Used by parallel mode (Part 11.2) to create N independent worktrees
@@ -1794,5 +1948,284 @@ fn apply_sla_pressure(hints: &[String], policy: &mut ConvergencePolicy) {
         policy.acceptance_threshold = policy.acceptance_threshold.min(0.85);
         policy.partial_acceptance = true;
         policy.partial_threshold = policy.partial_threshold.min(0.60);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::intent_verification::{GapCategory, IntentGap};
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    /// Mock intent verifier that returns a configurable result.
+    struct MockIntentVerifier {
+        result: Mutex<Option<DomainResult<Option<IntentVerificationResult>>>>,
+    }
+
+    impl MockIntentVerifier {
+        fn satisfied() -> Self {
+            Self {
+                result: Mutex::new(Some(Ok(Some(IntentVerificationResult {
+                    id: Uuid::new_v4(),
+                    intent_id: Uuid::new_v4(),
+                    satisfaction: IntentSatisfaction::Satisfied,
+                    confidence: 0.95,
+                    gaps: vec![],
+                    implicit_gaps: vec![],
+                    evaluated_tasks: vec![],
+                    accomplishment_summary: "All done".to_string(),
+                    reprompt_guidance: None,
+                    iteration: 0,
+                    verified_at: chrono::Utc::now(),
+                    constraint_evaluations: vec![],
+                    escalation: None,
+                })))),
+            }
+        }
+
+        fn partial() -> Self {
+            Self {
+                result: Mutex::new(Some(Ok(Some(IntentVerificationResult {
+                    id: Uuid::new_v4(),
+                    intent_id: Uuid::new_v4(),
+                    satisfaction: IntentSatisfaction::Partial,
+                    confidence: 0.6,
+                    gaps: vec![IntentGap {
+                        description: "Missing tests".to_string(),
+                        severity: GapSeverity::Moderate,
+                        category: GapCategory::Testing,
+                        suggested_action: Some("Add tests".to_string()),
+                        related_tasks: vec![],
+                        is_implicit: false,
+                        implicit_rationale: None,
+                        embedding: None,
+                    }],
+                    implicit_gaps: vec![],
+                    evaluated_tasks: vec![],
+                    accomplishment_summary: "Partial work".to_string(),
+                    reprompt_guidance: None,
+                    iteration: 0,
+                    verified_at: chrono::Utc::now(),
+                    constraint_evaluations: vec![],
+                    escalation: None,
+                })))),
+            }
+        }
+
+        fn no_intent() -> Self {
+            Self {
+                result: Mutex::new(Some(Ok(None))),
+            }
+        }
+
+        fn error() -> Self {
+            Self {
+                result: Mutex::new(Some(Err(DomainError::ExecutionFailed(
+                    "verification failed".to_string(),
+                )))),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ConvergentIntentVerifier for MockIntentVerifier {
+        async fn verify_convergent_intent(
+            &self,
+            _task: &Task,
+            _goal_id: Option<Uuid>,
+            _iteration: u32,
+            _overseer_signals: Option<&OverseerSignals>,
+        ) -> DomainResult<Option<IntentVerificationResult>> {
+            self.result
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(Ok(None))
+        }
+    }
+
+    /// Create a temporary git repo with an initial commit on `main`,
+    /// returning `(TempDir, path_string)`. The repo starts on `main`
+    /// with `origin/main` pointing at the same commit (via a local
+    /// fake remote).
+    async fn setup_git_repo() -> (TempDir, String) {
+        let dir = TempDir::new().expect("create tempdir");
+        let path = dir.path().to_str().unwrap().to_string();
+
+        // Init repo on main
+        run_git(&path, &["init", "-b", "main"]).await;
+        run_git(&path, &["config", "user.email", "test@test.com"]).await;
+        run_git(&path, &["config", "user.name", "Test"]).await;
+
+        // Initial commit
+        std::fs::write(dir.path().join("README"), "init").unwrap();
+        run_git(&path, &["add", "."]).await;
+        run_git(&path, &["commit", "-m", "initial"]).await;
+
+        // Create a bare clone to act as origin, then add it as a remote
+        let origin_dir = dir.path().join("origin.git");
+        let origin_path = origin_dir.to_str().unwrap().to_string();
+        tokio::process::Command::new("git")
+            .args(["clone", "--bare", &path, &origin_path])
+            .output()
+            .await
+            .unwrap();
+        run_git(&path, &["remote", "add", "origin", &origin_path]).await;
+        run_git(&path, &["fetch", "origin"]).await;
+        run_git(
+            &path,
+            &["branch", "--set-upstream-to=origin/main", "main"],
+        )
+        .await;
+
+        (dir, path)
+    }
+
+    async fn run_git(dir: &str, args: &[&str]) {
+        let out = tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .await
+            .expect("git command");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn make_task() -> Task {
+        Task::new("Implement the widget feature")
+    }
+
+    fn make_event_bus() -> Arc<EventBus> {
+        Arc::new(EventBus::new(Default::default()))
+    }
+
+    // ------- Tests -------
+
+    #[tokio::test]
+    async fn no_new_commits_and_no_staged_returns_none() {
+        let (_dir, path) = setup_git_repo().await;
+        let task = make_task();
+        let verifier: Arc<dyn ConvergentIntentVerifier> =
+            Arc::new(MockIntentVerifier::satisfied());
+        let event_bus = make_event_bus();
+
+        // No new commits on main (HEAD == origin/main), no staged changes
+        let result =
+            check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
+        assert!(result.is_none(), "should return None when no new work exists");
+    }
+
+    #[tokio::test]
+    async fn new_commits_and_satisfied_intent_returns_converged() {
+        let (dir, path) = setup_git_repo().await;
+        let task = make_task();
+        let verifier: Arc<dyn ConvergentIntentVerifier> =
+            Arc::new(MockIntentVerifier::satisfied());
+        let event_bus = make_event_bus();
+
+        // Add a new commit ahead of origin/main
+        std::fs::write(dir.path().join("feature.rs"), "fn feature() {}").unwrap();
+        run_git(&path, &["add", "."]).await;
+        run_git(&path, &["commit", "-m", "add feature"]).await;
+
+        let result =
+            check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
+        assert!(
+            matches!(result, Some(ConvergentOutcome::Converged)),
+            "should return Converged when new commits satisfy intent"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_commits_but_partial_intent_returns_none() {
+        let (dir, path) = setup_git_repo().await;
+        let task = make_task();
+        let verifier: Arc<dyn ConvergentIntentVerifier> =
+            Arc::new(MockIntentVerifier::partial());
+        let event_bus = make_event_bus();
+
+        // Add a new commit ahead of origin/main
+        std::fs::write(dir.path().join("feature.rs"), "fn feature() {}").unwrap();
+        run_git(&path, &["add", "."]).await;
+        run_git(&path, &["commit", "-m", "add feature"]).await;
+
+        let result =
+            check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
+        assert!(
+            result.is_none(),
+            "should return None when intent is only partially satisfied"
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_changes_and_satisfied_intent_returns_converged() {
+        let (dir, path) = setup_git_repo().await;
+        let task = make_task();
+        let verifier: Arc<dyn ConvergentIntentVerifier> =
+            Arc::new(MockIntentVerifier::satisfied());
+        let event_bus = make_event_bus();
+
+        // Stage a file without committing — no new commits, but staged changes
+        std::fs::write(dir.path().join("staged.rs"), "fn staged() {}").unwrap();
+        run_git(&path, &["add", "staged.rs"]).await;
+
+        let result =
+            check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
+        assert!(
+            matches!(result, Some(ConvergentOutcome::Converged)),
+            "should return Converged when staged changes satisfy intent"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_intent_extractable_returns_none() {
+        let (dir, path) = setup_git_repo().await;
+        let task = make_task();
+        let verifier: Arc<dyn ConvergentIntentVerifier> =
+            Arc::new(MockIntentVerifier::no_intent());
+        let event_bus = make_event_bus();
+
+        // Add work so we reach the verification branch
+        std::fs::write(dir.path().join("feature.rs"), "fn feature() {}").unwrap();
+        run_git(&path, &["add", "."]).await;
+        run_git(&path, &["commit", "-m", "add feature"]).await;
+
+        let result =
+            check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
+        assert!(
+            result.is_none(),
+            "should return None when no intent can be extracted"
+        );
+    }
+
+    #[tokio::test]
+    async fn intent_verification_error_returns_none() {
+        let (dir, path) = setup_git_repo().await;
+        let task = make_task();
+        let verifier: Arc<dyn ConvergentIntentVerifier> =
+            Arc::new(MockIntentVerifier::error());
+        let event_bus = make_event_bus();
+
+        // Add work so we reach the verification branch
+        std::fs::write(dir.path().join("feature.rs"), "fn feature() {}").unwrap();
+        run_git(&path, &["add", "."]).await;
+        run_git(&path, &["commit", "-m", "add feature"]).await;
+
+        let result =
+            check_work_already_done(&path, &task, None, &verifier, &event_bus).await;
+        assert!(
+            result.is_none(),
+            "should return None when verification errors out"
+        );
     }
 }
