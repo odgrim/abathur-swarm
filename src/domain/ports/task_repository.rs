@@ -1,6 +1,7 @@
 //! Task repository port.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::domain::errors::DomainResult;
@@ -15,6 +16,8 @@ pub struct TaskFilter {
     pub agent_type: Option<String>,
     pub task_type: Option<TaskType>,
     pub limit: Option<usize>,
+    /// Only include tasks created before this timestamp.
+    pub created_before: Option<DateTime<Utc>>,
 }
 
 /// Repository interface for Task persistence.

@@ -197,6 +197,10 @@ impl TaskRepository for SqliteTaskRepository {
             query.push_str(" AND task_type = ?");
             bindings.push(task_type.as_str().to_string());
         }
+        if let Some(created_before) = &filter.created_before {
+            query.push_str(" AND created_at < ?");
+            bindings.push(created_before.to_rfc3339());
+        }
 
         query.push_str(" ORDER BY created_at DESC");
 

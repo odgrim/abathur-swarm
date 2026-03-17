@@ -125,6 +125,36 @@ Examples:
     },
     /// Show task status summary
     Status,
+    /// Prune (delete) old or terminal tasks
+    #[command(after_help = "\
+Examples:
+  abathur task prune --status complete --older-than 7d
+  abathur task prune --status failed --agent overmind
+  abathur task prune --status canceled --dry-run
+  abathur task prune --status complete --status failed --older-than 30d
+  abathur task prune --force --older-than 1d
+")]
+    Prune {
+        /// Filter by status (can be repeated, e.g. --status complete --status failed)
+        #[arg(short, long)]
+        status: Vec<String>,
+        /// Filter by agent type
+        #[arg(short, long)]
+        agent: Option<String>,
+        /// Only prune tasks older than this duration (e.g. 7d, 24h, 1w)
+        #[arg(long)]
+        older_than: Option<String>,
+        /// Preview what would be pruned without deleting
+        #[arg(long)]
+        dry_run: bool,
+        /// Force pruning even for tasks in active DAGs, and skip the
+        /// requirement for at least one filter
+        #[arg(long)]
+        force: bool,
+        /// Maximum number of tasks to prune
+        #[arg(short, long)]
+        limit: Option<usize>,
+    },
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -359,6 +389,93 @@ impl CommandOutput for TaskStatusOutput {
     }
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct TaskPruneOutput {
+    pub pruned_count: usize,
+    pub pruned_ids: Vec<String>,
+    pub skipped: Vec<TaskPruneSkipped>,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct TaskPruneSkipped {
+    pub id: String,
+    pub title: String,
+    pub reason: String,
+}
+
+impl CommandOutput for TaskPruneOutput {
+    fn to_human(&self) -> String {
+        use colored::Colorize;
+
+        let mut lines = Vec::new();
+        let action = if self.dry_run { "Would prune" } else { "Pruned" };
+
+        if self.pruned_count == 0 && self.skipped.is_empty() {
+            return "No tasks matched the given filters.".to_string();
+        }
+
+        lines.push(format!(
+            "{} {} task(s){}",
+            action,
+            self.pruned_count.to_string().bold(),
+            if self.dry_run { " (dry run)" } else { "" },
+        ));
+
+        for id in &self.pruned_ids {
+            lines.push(format!("  {} {}", "✓".green(), short_id(id)));
+        }
+
+        if !self.skipped.is_empty() {
+            lines.push(format!(
+                "\n{} {} task(s):",
+                "Skipped".yellow(),
+                self.skipped.len()
+            ));
+            for s in &self.skipped {
+                lines.push(format!(
+                    "  {} {} — {}",
+                    "⊘".dimmed(),
+                    short_id(&s.id),
+                    s.reason
+                ));
+            }
+        }
+
+        lines.join("\n")
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+}
+
+/// Parse a human-friendly duration string like "7d", "24h", "1w", "30m" into a
+/// `chrono::Duration`.
+fn parse_duration(s: &str) -> Result<chrono::Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("duration string cannot be empty");
+    }
+
+    let (num_str, unit) = s.split_at(s.len() - 1);
+    let value: i64 = num_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid duration '{}': expected a number followed by a unit (d/h/w/m)", s))?;
+
+    match unit {
+        "m" => Ok(chrono::Duration::minutes(value)),
+        "h" => Ok(chrono::Duration::hours(value)),
+        "d" => Ok(chrono::Duration::days(value)),
+        "w" => Ok(chrono::Duration::weeks(value)),
+        _ => anyhow::bail!(
+            "unknown duration unit '{}' in '{}': expected one of m (minutes), h (hours), d (days), w (weeks)",
+            unit,
+            s
+        ),
+    }
+}
+
 pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
     let pool = initialize_default_database()
         .await
@@ -479,6 +596,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                     parent_id: None,
                     task_type: task_type.as_ref().and_then(|t| TaskType::from_str(t)),
                     limit: Some(limit),
+                    created_before: None,
                 };
                 service.list_tasks(filter).await?
             };
@@ -553,6 +671,71 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
             output(&out, json_mode);
         }
 
+        TaskCommands::Prune { status, agent, older_than, dry_run, force, limit } => {
+            // Require at least one filter unless --force
+            let has_filter = !status.is_empty() || agent.is_some() || older_than.is_some();
+            if !has_filter && !force {
+                anyhow::bail!(
+                    "at least one filter (--status, --agent, --older-than) is required.\n\
+                     Use --force to prune without filters."
+                );
+            }
+
+            let created_before = match older_than {
+                Some(ref dur_str) => {
+                    let duration = parse_duration(dur_str)?;
+                    Some(chrono::Utc::now() - duration)
+                }
+                None => None,
+            };
+
+            // If multiple statuses given, we need to run multiple queries and merge.
+            // If no statuses given, we query once with status=None.
+            let status_filters: Vec<Option<TaskStatus>> = if status.is_empty() {
+                vec![None]
+            } else {
+                status
+                    .iter()
+                    .map(|s| {
+                        TaskStatus::from_str(s)
+                            .ok_or_else(|| anyhow::anyhow!("unknown status '{}'. Valid: pending, ready, blocked, running, complete, failed, canceled", s))
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .map(Some)
+                    .collect()
+            };
+
+            let mut all_pruned_ids = Vec::new();
+            let mut all_skipped = Vec::new();
+
+            for status_filter in status_filters {
+                let filter = TaskFilter {
+                    status: status_filter,
+                    agent_type: agent.clone(),
+                    created_before,
+                    limit,
+                    ..Default::default()
+                };
+
+                let result = service.prune_tasks(filter, force, dry_run).await?;
+                all_pruned_ids.extend(result.pruned_ids.iter().map(|id| id.to_string()));
+                all_skipped.extend(result.skipped.into_iter().map(|s| TaskPruneSkipped {
+                    id: s.id.to_string(),
+                    title: s.title,
+                    reason: s.reason,
+                }));
+            }
+
+            let out = TaskPruneOutput {
+                pruned_count: all_pruned_ids.len(),
+                pruned_ids: all_pruned_ids,
+                skipped: all_skipped,
+                dry_run,
+            };
+            output(&out, json_mode);
+        }
+
         TaskCommands::Status => {
             let counts = service.get_status_counts().await?;
 
@@ -579,5 +762,49 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_duration_days() {
+        let d = parse_duration("7d").unwrap();
+        assert_eq!(d, chrono::Duration::days(7));
+    }
+
+    #[test]
+    fn test_parse_duration_hours() {
+        let d = parse_duration("24h").unwrap();
+        assert_eq!(d, chrono::Duration::hours(24));
+    }
+
+    #[test]
+    fn test_parse_duration_weeks() {
+        let d = parse_duration("2w").unwrap();
+        assert_eq!(d, chrono::Duration::weeks(2));
+    }
+
+    #[test]
+    fn test_parse_duration_minutes() {
+        let d = parse_duration("30m").unwrap();
+        assert_eq!(d, chrono::Duration::minutes(30));
+    }
+
+    #[test]
+    fn test_parse_duration_invalid_unit() {
+        assert!(parse_duration("7x").is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_empty() {
+        assert!(parse_duration("").is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_no_number() {
+        assert!(parse_duration("d").is_err());
+    }
 }
 
