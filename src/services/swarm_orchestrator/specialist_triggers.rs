@@ -83,7 +83,7 @@ where
             let mut diagnostic_exists = false;
             for status in &statuses_to_check {
                 if self.task_repo
-                    .list_by_status(status.clone())
+                    .list_by_status(*status)
                     .await?
                     .iter()
                     .any(|t| t.title.contains("Diagnostic:") && t.title.contains(id_prefix))

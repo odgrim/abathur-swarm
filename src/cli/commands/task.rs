@@ -235,11 +235,10 @@ impl CommandOutput for TaskDetailOutput {
             if let Some(serde_json::Value::String(sat)) = self.context_custom.get("satisfaction") {
                 view = view.field("Satisfaction", sat);
             }
-            if let Some(serde_json::Value::Number(conf)) = self.context_custom.get("confidence") {
-                if let Some(c) = conf.as_f64() {
+            if let Some(serde_json::Value::Number(conf)) = self.context_custom.get("confidence")
+                && let Some(c) = conf.as_f64() {
                     view = view.field("Confidence", &format!("{:.0}%", c * 100.0));
                 }
-            }
             if let Some(serde_json::Value::Number(iter)) = self.context_custom.get("iteration") {
                 view = view.field("Iteration", &iter.to_string());
             }

@@ -934,12 +934,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                                 "Failed to complete convergent task {} via CommandBus: {}",
                                                 task_id, e
                                             );
-                                            if let Ok(Some(mut t)) = task_repo.get(task_id).await {
-                                                if !t.status.is_terminal() {
+                                            if let Ok(Some(mut t)) = task_repo.get(task_id).await
+                                                && !t.status.is_terminal() {
                                                     let _ = t.transition_to(target_status);
                                                     let _ = task_repo.update(&t).await;
                                                 }
-                                            }
                                             // Only emit TaskCompleted when actually completing.
                                             // When target is Validating, the verification workflow
                                             // in run_post_completion_workflow will emit the event
@@ -1144,7 +1143,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                             "{}\n\n{}", t.description, gap_context,
                                         );
                                         let mut retry_task = Task::with_title(
-                                            &format!("[retry] {}", t.title),
+                                            format!("[retry] {}", t.title),
                                             &new_description,
                                         );
                                         retry_task.parent_id = t.parent_id;
@@ -1290,19 +1289,17 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                                 "Failed to fail convergent task {} via CommandBus: {}",
                                                 task_id, e
                                             );
-                                            if let Ok(Some(mut t)) = task_repo.get(task_id).await {
-                                                if !t.status.is_terminal() {
+                                            if let Ok(Some(mut t)) = task_repo.get(task_id).await
+                                                && !t.status.is_terminal() {
                                                     let _ = t.transition_to(TaskStatus::Failed);
                                                     let _ = task_repo.update(&t).await;
                                                 }
-                                            }
                                         }
-                                    } else if let Ok(Some(mut t)) = task_repo.get(task_id).await {
-                                        if !t.status.is_terminal() {
+                                    } else if let Ok(Some(mut t)) = task_repo.get(task_id).await
+                                        && !t.status.is_terminal() {
                                             let _ = t.transition_to(TaskStatus::Failed);
                                             let _ = task_repo.update(&t).await;
                                         }
-                                    }
 
                                     let current_retry_count = task_repo.get(task_id).await
                                         .ok().flatten().map(|t| t.retry_count).unwrap_or(0);
@@ -1542,12 +1539,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     );
                                     if let Err(e) = cb.dispatch(envelope).await {
                                         tracing::warn!("Failed to complete task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
-                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await {
-                                            if !t.status.is_terminal() {
+                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await
+                                            && !t.status.is_terminal() {
                                                 let _ = t.transition_to(target_status);
                                                 let _ = task_repo.update(&t).await;
                                             }
-                                        }
                                         // Only emit TaskCompleted when actually completing.
                                         // When target is Validating, the verification workflow
                                         // will emit the event after Validating -> Complete.
@@ -1717,12 +1713,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     );
                                     if let Err(e) = cb.dispatch(envelope).await {
                                         tracing::warn!("Failed to fail task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
-                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await {
-                                            if !t.status.is_terminal() {
+                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await
+                                            && !t.status.is_terminal() {
                                                 let _ = t.transition_to(TaskStatus::Failed);
                                                 let _ = task_repo.update(&t).await;
                                             }
-                                        }
                                         event_bus.publish(crate::services::event_factory::task_event(
                                             crate::services::event_bus::EventSeverity::Warning,
                                             None,
@@ -1827,12 +1822,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     );
                                     if let Err(e) = cb.dispatch(envelope).await {
                                         tracing::warn!("Failed to fail task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
-                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await {
-                                            if !t.status.is_terminal() {
+                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await
+                                            && !t.status.is_terminal() {
                                                 let _ = t.transition_to(TaskStatus::Failed);
                                                 let _ = task_repo.update(&t).await;
                                             }
-                                        }
                                         event_bus.publish(crate::services::event_factory::task_event(
                                             crate::services::event_bus::EventSeverity::Warning,
                                             None,

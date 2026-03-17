@@ -230,7 +230,7 @@ impl CommandOutput for ScheduleDetailOutput {
         }
 
         if let Some(ref task_id) = self.last_task_id {
-            view = view.field("Last Task", &short_id(task_id).to_string());
+            view = view.field("Last Task", short_id(task_id));
         }
 
         view = view.section("Timing")
