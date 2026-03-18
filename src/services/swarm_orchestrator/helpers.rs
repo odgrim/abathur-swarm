@@ -967,6 +967,11 @@ where
     T: TaskRepository + 'static,
     W: WorktreeRepository + 'static,
 {
+    // Serialize all auto-ship operations. The git checkout → merge --squash → commit
+    // sequence operates on the shared repo working directory and must not run concurrently.
+    static SHIP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = SHIP_LOCK.lock().await;
+
     if output_delivery == OutputDelivery::MemoryOnly {
         tracing::debug!(
             triggering_task_id = %triggering_task_id,
