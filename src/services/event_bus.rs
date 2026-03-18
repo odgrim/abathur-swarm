@@ -633,6 +633,16 @@ pub enum EventPayload {
         circuit_breaker_tripped: bool,
     },
 
+    /// Emitted when a critical handler's circuit breaker trips.
+    /// Critical handlers are essential for system invariants (e.g. task lifecycle
+    /// transitions) and use aggressive retry with exponential backoff.
+    CriticalHandlerDegraded {
+        handler_name: String,
+        error: String,
+        failure_count: u32,
+        backoff_attempt: u32,
+    },
+
     // Task lifecycle gap events
     TaskDependencyChanged {
         task_id: Uuid,
@@ -1081,6 +1091,7 @@ impl EventPayload {
             Self::MemoryDaemonDegraded { .. } => "MemoryDaemonDegraded",
             Self::MemoryDaemonStopped { .. } => "MemoryDaemonStopped",
             Self::HandlerError { .. } => "HandlerError",
+            Self::CriticalHandlerDegraded { .. } => "CriticalHandlerDegraded",
             Self::TaskDependencyChanged { .. } => "TaskDependencyChanged",
             Self::TaskPriorityChanged { .. } => "TaskPriorityChanged",
             Self::HumanEscalationExpired { .. } => "HumanEscalationExpired",

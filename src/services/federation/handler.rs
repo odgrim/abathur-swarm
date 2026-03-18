@@ -161,6 +161,7 @@ impl EventHandler for FederationResultHandler {
             },
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 

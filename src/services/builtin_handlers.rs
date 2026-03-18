@@ -57,6 +57,7 @@ impl<T: TaskRepository + 'static> EventHandler for TaskCompletedReadinessHandler
                 ]),
             priority: HandlerPriority::SYSTEM,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: true,
         }
     }
 
@@ -140,6 +141,7 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedBlockHandler<T> {
                 .payload_types(vec!["TaskFailed".to_string(), "TaskCanceled".to_string()]),
             priority: HandlerPriority::SYSTEM,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: true,
         }
     }
 
@@ -230,7 +232,8 @@ impl EventHandler for AgentTerminationHandler {
                 .categories(vec![EventCategory::Task])
                 .payload_types(vec!["TaskFailed".to_string()]),
             priority: HandlerPriority::SYSTEM,
-            error_strategy: ErrorStrategy::LogAndContinue,
+            error_strategy: ErrorStrategy::CircuitBreak,
+            critical: true,
         }
     }
 
@@ -294,6 +297,7 @@ impl<M: MemoryRepository + 'static> EventHandler for MemoryMaintenanceHandler<M>
             },
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -386,6 +390,7 @@ impl<G: GoalRepository + 'static> EventHandler for GoalRetiredHandler<G> {
             },
             priority: HandlerPriority::HIGH,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -451,6 +456,7 @@ impl EventHandler for EscalationTimeoutHandler {
             },
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -531,6 +537,7 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
                 .payload_types(vec!["TaskFailed".to_string()]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -719,6 +726,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReviewFailureLoopHandler<T> {
                 .payload_types(vec!["TaskFailed".to_string()]),
             priority: HandlerPriority::HIGH,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -985,6 +993,7 @@ impl<G: GoalRepository + 'static> EventHandler for GoalCreatedHandler<G> {
                 .payload_types(vec!["GoalStarted".to_string()]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -1047,6 +1056,7 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static, W: WorktreeReposi
             },
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -1139,6 +1149,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
             },
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -1593,6 +1604,7 @@ impl<T: TaskRepository + 'static> EventHandler for RetryProcessingHandler<T> {
             },
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -1706,6 +1718,7 @@ impl<T: TaskRepository + 'static> EventHandler for SpecialistCheckHandler<T> {
             },
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -1760,6 +1773,7 @@ impl<T: TaskRepository + 'static> EventHandler for EvolutionEvaluationHandler<T>
             },
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -1862,6 +1876,7 @@ impl EventHandler for A2APollHandler {
             },
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -2025,6 +2040,7 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
             },
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -2175,6 +2191,7 @@ impl<T: TaskRepository + 'static> EventHandler for TaskReadySpawnHandler<T> {
                 .payload_types(vec!["TaskReady".to_string()]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -2230,6 +2247,7 @@ impl<M: MemoryRepository + 'static> EventHandler for MemoryReconciliationHandler
                 .payload_types(vec!["ScheduledEventFired".to_string()]),
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -2295,6 +2313,7 @@ impl<G: GoalRepository + 'static> EventHandler for GoalReconciliationHandler<G> 
                 .payload_types(vec!["ScheduledEventFired".to_string()]),
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -2420,6 +2439,7 @@ impl<T: TaskRepository + 'static> EventHandler for SystemStallDetectorHandler<T>
                 .payload_types(vec!["ScheduledEventFired".to_string()]),
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -2569,6 +2589,7 @@ impl<T: TaskRepository + 'static, W: WorktreeRepository + 'static> EventHandler 
             },
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -2709,6 +2730,7 @@ impl EventHandler for WatermarkAuditHandler {
             },
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -2855,6 +2877,7 @@ impl EventHandler for TriggerCatchupHandler {
             },
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -3011,6 +3034,7 @@ impl EventHandler for EventStorePollerHandler {
             },
             priority: HandlerPriority::SYSTEM,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -3118,6 +3142,7 @@ impl EventHandler for DeadLetterRetryHandler {
             },
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -3228,6 +3253,7 @@ impl EventHandler for EventPruningHandler {
             },
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -3307,6 +3333,7 @@ impl<T: TaskRepository + 'static> EventHandler for TaskSLAEnforcementHandler<T> 
             },
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -3462,6 +3489,7 @@ impl<T: TaskRepository + 'static> EventHandler for PriorityAgingHandler<T> {
             },
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -3558,6 +3586,7 @@ impl<G: GoalRepository + 'static> EventHandler for MemoryInformedDecompositionHa
                 .payload_types(vec!["MemoryStored".to_string()]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -3673,6 +3702,7 @@ impl EventHandler for MemoryConflictEscalationHandler {
                 .payload_types(vec!["MemoryConflictDetected".to_string()]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -3751,6 +3781,7 @@ impl EventHandler for TaskCompletionLearningHandler {
                 .payload_types(vec!["TaskCompletedWithResult".to_string()]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -3862,6 +3893,7 @@ impl EventHandler for GoalEvaluationTaskCreationHandler {
                 ]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -3992,6 +4024,7 @@ impl EventHandler for EvolutionTriggeredTemplateUpdateHandler {
                 .payload_types(vec!["EvolutionTriggered".to_string()]),
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -4100,6 +4133,7 @@ impl<T: TaskRepository + 'static, G: GoalRepository + 'static> EventHandler for 
                 .payload_types(vec!["OrchestratorStarted".to_string()]),
             priority: HandlerPriority::SYSTEM,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -4288,6 +4322,7 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceCoordinationHandle
                 ]),
             priority: HandlerPriority::HIGH,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -4439,6 +4474,7 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceCancellationHandle
                 .payload_types(vec!["TaskCanceled".to_string()]),
             priority: HandlerPriority::HIGH,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -4538,6 +4574,7 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceSLAPressureHandler
                 ]),
             priority: HandlerPriority::HIGH,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -4625,6 +4662,7 @@ impl<T: TaskRepository + 'static, M: MemoryRepository + 'static> EventHandler fo
                 .payload_types(vec!["ConvergenceTerminated".to_string()]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -4787,6 +4825,7 @@ impl<M: MemoryRepository + 'static> EventHandler for DirectModeExecutionMemoryHa
                 .payload_types(vec!["TaskExecutionRecorded".to_string()]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -4929,6 +4968,7 @@ impl<T: TaskRepository + 'static, M: MemoryRepository + 'static> EventHandler
                 ]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -5114,6 +5154,7 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceEvolutionHandler<T
                 .payload_types(vec!["ConvergenceTerminated".to_string()]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -5260,6 +5301,7 @@ impl<T: TaskRepository + 'static, Tr: TrajectoryRepository + 'static> EventHandl
                 .payload_types(vec!["HumanResponseReceived".to_string()]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -5390,6 +5432,7 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowSubtaskCompletionHand
                 ]),
             priority: HandlerPriority::HIGH,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -5489,6 +5532,7 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowVerificationHandler<T
                 ]),
             priority: HandlerPriority::HIGH,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -7502,6 +7546,7 @@ impl<S: TaskScheduleRepository + 'static, T: TaskRepository + 'static> EventHand
                 .payload_types(vec!["ScheduledEventFired".to_string()]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -7769,6 +7814,7 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
             },
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -7939,6 +7985,7 @@ impl<G: GoalRepository + 'static> EventHandler for GoalStagnationDetectorHandler
                 .payload_types(vec!["ScheduledEventFired".to_string()]),
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -8089,6 +8136,7 @@ impl<T: TaskRepository + 'static> EventHandler for IngestionPollHandler<T> {
                 .payload_types(vec!["ScheduledEventFired".to_string()]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -8507,6 +8555,7 @@ impl<T: TaskRepository + 'static> EventHandler for AdapterLifecycleSyncHandler<T
                 ]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -8648,6 +8697,7 @@ impl EventHandler for EgressRoutingHandler {
                 .payload_types(vec!["TaskCompletedWithResult".to_string()]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
         }
     }
 
@@ -8782,6 +8832,7 @@ impl EventHandler for BudgetTokenAccumulatorHandler {
                 .payload_types(vec!["AgentInstanceCompleted".to_string()]),
             priority: HandlerPriority::SYSTEM,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -8833,6 +8884,7 @@ impl EventHandler for BudgetOpportunityHandler {
                 .payload_types(vec!["BudgetOpportunityDetected".to_string()]),
             priority: HandlerPriority::HIGH,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
@@ -9123,6 +9175,7 @@ impl<T: TaskRepository + 'static, M: MemoryRepository + 'static, G: GoalReposito
                 .payload_types(vec!["TaskFailed".to_string()]),
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 

@@ -76,6 +76,7 @@ impl EventHandler for CountingHandler {
             },
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 

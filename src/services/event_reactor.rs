@@ -175,6 +175,10 @@ pub struct HandlerMetadata {
     pub filter: EventFilter,
     pub priority: HandlerPriority,
     pub error_strategy: ErrorStrategy,
+    /// Critical handlers are essential for system invariants (e.g. task lifecycle
+    /// transitions). When their circuit breaker trips, they use aggressive retry
+    /// with exponential backoff instead of the default flat cooldown.
+    pub critical: bool,
 }
 
 /// Context passed to handlers during event processing.
@@ -201,6 +205,10 @@ struct CircuitBreakerState {
     last_failure: Option<Instant>,
     tripped: bool,
     tripped_at: Option<Instant>,
+    /// Whether this handler is marked as critical.
+    critical: bool,
+    /// Current backoff attempt for critical handlers (used for exponential backoff).
+    backoff_attempt: u32,
 }
 
 impl CircuitBreakerState {
@@ -210,6 +218,8 @@ impl CircuitBreakerState {
             last_failure: None,
             tripped: false,
             tripped_at: None,
+            critical: false,
+            backoff_attempt: 0,
         }
     }
 
@@ -224,31 +234,84 @@ impl CircuitBreakerState {
         self.last_failure = Some(now);
 
         if self.failure_count >= threshold {
+            if !self.tripped {
+                // First time tripping — start backoff from 0
+                self.backoff_attempt = 0;
+            }
             self.tripped = true;
             self.tripped_at = Some(now);
         }
     }
 
+    #[allow(dead_code)]
     fn is_tripped(&self, cooldown: Duration) -> bool {
+        self.is_tripped_with_config(cooldown, 1, 16)
+    }
+
+    fn is_tripped_with_config(&self, cooldown: Duration, critical_initial_secs: u64, critical_max_secs: u64) -> bool {
         if !self.tripped {
             return false;
         }
+        let effective_cooldown = self.effective_cooldown_with_config(cooldown, critical_initial_secs, critical_max_secs);
         // Auto-reset after cooldown
         if let Some(tripped_at) = self.tripped_at
-            && Instant::now().duration_since(tripped_at) > cooldown {
+            && Instant::now().duration_since(tripped_at) > effective_cooldown {
                 return false;
             }
         true
     }
 
+    #[allow(dead_code)]
     fn reset_if_cooled(&mut self, cooldown: Duration) {
+        self.reset_if_cooled_with_config(cooldown, 1, 16);
+    }
+
+    fn reset_if_cooled_with_config(&mut self, cooldown: Duration, critical_initial_secs: u64, critical_max_secs: u64) {
         if self.tripped
-            && let Some(tripped_at) = self.tripped_at
-                && Instant::now().duration_since(tripped_at) > cooldown {
+            && let Some(tripped_at) = self.tripped_at {
+                let effective_cooldown = self.effective_cooldown_with_config(cooldown, critical_initial_secs, critical_max_secs);
+                if Instant::now().duration_since(tripped_at) > effective_cooldown {
                     self.tripped = false;
                     self.failure_count = 0;
                     self.tripped_at = None;
+                    if self.critical {
+                        // Increment backoff for next potential trip
+                        self.backoff_attempt = self.backoff_attempt.saturating_add(1);
+                    }
                 }
+            }
+    }
+
+    /// Reset backoff on successful execution (critical handlers only).
+    fn reset_backoff(&mut self) {
+        self.backoff_attempt = 0;
+    }
+
+    /// Calculate effective cooldown: critical handlers use exponential backoff
+    /// (initial_secs * 2^attempt, capped at max_secs), non-critical use flat cooldown.
+    #[allow(dead_code)]
+    fn effective_cooldown(&self, default_cooldown: Duration) -> Duration {
+        if !self.critical {
+            return default_cooldown;
+        }
+        // Critical handler exponential backoff: 1s, 2s, 4s, 8s, 16s (capped)
+        // These defaults are overridden when called with config values via effective_cooldown_with_config
+        let initial_secs = 1u64;
+        let max_secs = 16u64;
+        Self::compute_critical_cooldown(initial_secs, max_secs, self.backoff_attempt)
+    }
+
+    /// Calculate effective cooldown using explicit config values.
+    fn effective_cooldown_with_config(&self, default_cooldown: Duration, critical_initial_secs: u64, critical_max_secs: u64) -> Duration {
+        if !self.critical {
+            return default_cooldown;
+        }
+        Self::compute_critical_cooldown(critical_initial_secs, critical_max_secs, self.backoff_attempt)
+    }
+
+    fn compute_critical_cooldown(initial_secs: u64, max_secs: u64, attempt: u32) -> Duration {
+        let backoff_secs = initial_secs.saturating_mul(1u64.checked_shl(attempt).unwrap_or(u64::MAX));
+        Duration::from_secs(backoff_secs.min(max_secs))
     }
 }
 
@@ -265,8 +328,12 @@ pub struct ReactorConfig {
     pub circuit_breaker_threshold: u32,
     /// Window in seconds for counting circuit breaker failures.
     pub circuit_breaker_window_secs: u64,
-    /// Cooldown in seconds before a tripped circuit breaker auto-resets.
+    /// Cooldown in seconds before a tripped circuit breaker auto-resets (non-critical handlers).
     pub circuit_breaker_cooldown_secs: u64,
+    /// Initial cooldown in seconds for critical handler circuit breakers (exponential backoff base).
+    pub critical_cooldown_initial_secs: u64,
+    /// Maximum cooldown in seconds for critical handler circuit breakers (backoff cap).
+    pub critical_cooldown_max_secs: u64,
     /// Maximum size of the dedup set (LRU of recent sequence numbers).
     pub dedup_set_capacity: usize,
     /// Maximum number of events to replay during startup catch-up.
@@ -283,6 +350,8 @@ impl Default for ReactorConfig {
             circuit_breaker_threshold: 5,
             circuit_breaker_window_secs: 600, // 10 minutes
             circuit_breaker_cooldown_secs: 60,
+            critical_cooldown_initial_secs: 1,
+            critical_cooldown_max_secs: 16,
             dedup_set_capacity: 50_000,
             startup_max_replay_events: Some(10_000),
         }
@@ -336,7 +405,9 @@ impl EventReactor {
         let meta = handler.metadata();
         {
             let mut cbs = self.circuit_breakers.write().await;
-            cbs.insert(meta.id, CircuitBreakerState::new());
+            let mut cb_state = CircuitBreakerState::new();
+            cb_state.critical = meta.critical;
+            cbs.insert(meta.id, cb_state);
         }
         let mut handlers = self.handlers.write().await;
         handlers.push(handler);
@@ -497,8 +568,16 @@ impl EventReactor {
                     {
                         let mut cbs = circuit_breakers.write().await;
                         if let Some(cb) = cbs.get_mut(&meta.id) {
-                            cb.reset_if_cooled(Duration::from_secs(config.circuit_breaker_cooldown_secs));
-                            if cb.is_tripped(Duration::from_secs(config.circuit_breaker_cooldown_secs)) {
+                            cb.reset_if_cooled_with_config(
+                                Duration::from_secs(config.circuit_breaker_cooldown_secs),
+                                config.critical_cooldown_initial_secs,
+                                config.critical_cooldown_max_secs,
+                            );
+                            if cb.is_tripped_with_config(
+                                Duration::from_secs(config.circuit_breaker_cooldown_secs),
+                                config.critical_cooldown_initial_secs,
+                                config.critical_cooldown_max_secs,
+                            ) {
                                 continue;
                             }
                         }
@@ -525,10 +604,24 @@ impl EventReactor {
                         Ok(Ok(Reaction::EmitEvents(events))) if !suppress_reactions => {
                             reactions.extend(events);
                             successful_handlers.push(meta.name.clone());
+                            // Reset backoff on success for critical handlers
+                            if meta.critical {
+                                let mut cbs = circuit_breakers.write().await;
+                                if let Some(cb) = cbs.get_mut(&meta.id) {
+                                    cb.reset_backoff();
+                                }
+                            }
                         }
                         Ok(Ok(_)) => {
                             // Reaction::None or suppressed — still a successful invocation
                             successful_handlers.push(meta.name.clone());
+                            // Reset backoff on success for critical handlers
+                            if meta.critical {
+                                let mut cbs = circuit_breakers.write().await;
+                                if let Some(cb) = cbs.get_mut(&meta.id) {
+                                    cb.reset_backoff();
+                                }
+                            }
                         }
                         Ok(Err(e)) => {
                             tracing::warn!("EventReactor: handler '{}' error: {}", meta.name, e);
@@ -544,6 +637,7 @@ impl EventReactor {
                                     tracing::warn!("EventReactor: failed to write DLQ entry: {}", dlq_err);
                                 }
                             let mut tripped = false;
+                            let mut backoff_attempt = 0u32;
                             if meta.error_strategy == ErrorStrategy::CircuitBreak {
                                 let mut cbs = circuit_breakers.write().await;
                                 if let Some(cb) = cbs.get_mut(&meta.id) {
@@ -551,7 +645,12 @@ impl EventReactor {
                                         config.circuit_breaker_threshold,
                                         Duration::from_secs(config.circuit_breaker_window_secs),
                                     );
-                                    tripped = cb.is_tripped(Duration::from_secs(config.circuit_breaker_cooldown_secs));
+                                    tripped = cb.is_tripped_with_config(
+                                        Duration::from_secs(config.circuit_breaker_cooldown_secs),
+                                        config.critical_cooldown_initial_secs,
+                                        config.critical_cooldown_max_secs,
+                                    );
+                                    backoff_attempt = cb.backoff_attempt;
                                 }
                             }
                             // Emit HandlerError event for monitoring
@@ -572,6 +671,30 @@ impl EventReactor {
                                     circuit_breaker_tripped: tripped,
                                 },
                             });
+                            // Emit CriticalHandlerDegraded when a critical handler's CB trips
+                            if tripped && meta.critical {
+                                tracing::error!(
+                                    "EventReactor: CRITICAL handler '{}' circuit breaker tripped (backoff attempt {})",
+                                    meta.name, backoff_attempt
+                                );
+                                reactions.push(UnifiedEvent {
+                                    id: EventId::new(),
+                                    sequence: SequenceNumber(0),
+                                    timestamp: chrono::Utc::now(),
+                                    severity: EventSeverity::Critical,
+                                    category: EventCategory::Orchestrator,
+                                    goal_id: None,
+                                    task_id: None,
+                                    correlation_id: event.correlation_id,
+                                    source_process_id: None,
+                                    payload: EventPayload::CriticalHandlerDegraded {
+                                        handler_name: meta.name.clone(),
+                                        error: e.clone(),
+                                        failure_count: config.circuit_breaker_threshold,
+                                        backoff_attempt,
+                                    },
+                                });
+                            }
                             // Do NOT advance watermark for failed handlers
                         }
                         Err(_) => {
@@ -903,6 +1026,7 @@ mod tests {
                 },
                 priority: HandlerPriority::NORMAL,
                 error_strategy: ErrorStrategy::CircuitBreak,
+                critical: false,
             }
         }
 
@@ -1024,6 +1148,7 @@ mod tests {
                     filter: EventFilter::default(),
                     priority: HandlerPriority::NORMAL,
                     error_strategy: ErrorStrategy::LogAndContinue,
+                    critical: false,
                 }
             }
             async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
@@ -1099,6 +1224,7 @@ mod tests {
                 },
                 priority: self.priority,
                 error_strategy: self.error_strategy,
+                critical: false,
             }
         }
 
@@ -1136,6 +1262,7 @@ mod tests {
                 filter: EventFilter::default(),
                 priority: self.priority,
                 error_strategy: ErrorStrategy::LogAndContinue,
+                critical: false,
             }
         }
 
@@ -1384,6 +1511,231 @@ mod tests {
 
         let count = call_count.load(Ordering::Relaxed);
         assert_eq!(count, 3, "LogAndContinue handler should be called all 3 times, got {}", count);
+
+        reactor.stop();
+        handle.abort();
+    }
+
+    // --- Critical handler tests ---
+
+    /// Configurable handler that supports critical flag and dynamic failure control.
+    struct CriticalTestHandler {
+        id: HandlerId,
+        name: String,
+        call_count: Arc<AtomicU64>,
+        should_fail: Arc<AtomicBool>,
+        critical: bool,
+        error_strategy: ErrorStrategy,
+    }
+
+    #[async_trait]
+    impl EventHandler for CriticalTestHandler {
+        fn metadata(&self) -> HandlerMetadata {
+            HandlerMetadata {
+                id: self.id,
+                name: self.name.clone(),
+                filter: EventFilter {
+                    categories: vec![EventCategory::Task],
+                    ..Default::default()
+                },
+                priority: HandlerPriority::NORMAL,
+                error_strategy: self.error_strategy,
+                critical: self.critical,
+            }
+        }
+
+        async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+            self.call_count.fetch_add(1, Ordering::Relaxed);
+            if self.should_fail.load(Ordering::Relaxed) {
+                Err("critical test failure".to_string())
+            } else {
+                Ok(Reaction::None)
+            }
+        }
+    }
+
+    #[test]
+    fn test_critical_handler_uses_shorter_cooldown() {
+        // Critical handler with backoff_attempt=0 should use 1s cooldown (initial),
+        // not the default 60s.
+        let mut cb = CircuitBreakerState::new();
+        cb.critical = true;
+        cb.backoff_attempt = 0;
+
+        let default_cooldown = Duration::from_secs(60);
+        let effective = cb.effective_cooldown(default_cooldown);
+        assert_eq!(effective, Duration::from_secs(1),
+            "Critical handler initial cooldown should be 1s, got {:?}", effective);
+
+        // Non-critical should use the default 60s
+        let mut cb_normal = CircuitBreakerState::new();
+        cb_normal.critical = false;
+        let effective_normal = cb_normal.effective_cooldown(default_cooldown);
+        assert_eq!(effective_normal, Duration::from_secs(60),
+            "Non-critical handler should use default 60s cooldown");
+    }
+
+    #[test]
+    fn test_critical_handler_exponential_backoff() {
+        // Test the exponential backoff sequence: 1s, 2s, 4s, 8s, 16s (capped)
+        let mut cb = CircuitBreakerState::new();
+        cb.critical = true;
+        let default_cooldown = Duration::from_secs(60);
+
+        let expected = [1, 2, 4, 8, 16, 16]; // 16 is the cap
+        for (attempt, &expected_secs) in expected.iter().enumerate() {
+            cb.backoff_attempt = attempt as u32;
+            let effective = cb.effective_cooldown(default_cooldown);
+            assert_eq!(effective, Duration::from_secs(expected_secs),
+                "Attempt {} should have {}s cooldown, got {:?}", attempt, expected_secs, effective);
+        }
+    }
+
+    #[test]
+    fn test_critical_handler_backoff_reset_on_success() {
+        let mut cb = CircuitBreakerState::new();
+        cb.critical = true;
+        cb.backoff_attempt = 3;
+        assert_eq!(cb.backoff_attempt, 3);
+
+        cb.reset_backoff();
+        assert_eq!(cb.backoff_attempt, 0,
+            "Backoff attempt should reset to 0 after reset_backoff()");
+
+        // After reset, effective cooldown should be back to initial (1s)
+        let effective = cb.effective_cooldown(Duration::from_secs(60));
+        assert_eq!(effective, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_critical_handler_configurable_backoff_params() {
+        // Test with custom initial/max via effective_cooldown_with_config
+        let mut cb = CircuitBreakerState::new();
+        cb.critical = true;
+
+        // Custom config: initial=2s, max=10s
+        // Expected sequence: 2, 4, 8, 10 (capped), 10
+        cb.backoff_attempt = 0;
+        assert_eq!(cb.effective_cooldown_with_config(Duration::from_secs(60), 2, 10),
+            Duration::from_secs(2));
+        cb.backoff_attempt = 1;
+        assert_eq!(cb.effective_cooldown_with_config(Duration::from_secs(60), 2, 10),
+            Duration::from_secs(4));
+        cb.backoff_attempt = 2;
+        assert_eq!(cb.effective_cooldown_with_config(Duration::from_secs(60), 2, 10),
+            Duration::from_secs(8));
+        cb.backoff_attempt = 3;
+        assert_eq!(cb.effective_cooldown_with_config(Duration::from_secs(60), 2, 10),
+            Duration::from_secs(10)); // capped
+    }
+
+    #[tokio::test]
+    async fn test_critical_handler_emits_degraded_event() {
+        // When a critical handler's CB trips, a CriticalHandlerDegraded event should be emitted.
+        let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let config = ReactorConfig {
+            circuit_breaker_threshold: 1, // Trip after 1 failure
+            circuit_breaker_window_secs: 600,
+            circuit_breaker_cooldown_secs: 300,
+            critical_cooldown_initial_secs: 1,
+            critical_cooldown_max_secs: 16,
+            ..Default::default()
+        };
+        let reactor = EventReactor::new(bus.clone(), config);
+
+        // Subscribe to catch the CriticalHandlerDegraded event
+        let mut monitor = bus.subscribe();
+
+        let call_count = Arc::new(AtomicU64::new(0));
+        let handler = Arc::new(CriticalTestHandler {
+            id: HandlerId::new(),
+            name: "critical-degraded-test".to_string(),
+            call_count: call_count.clone(),
+            should_fail: Arc::new(AtomicBool::new(true)),
+            critical: true,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        });
+
+        reactor.register(handler).await;
+        let handle = reactor.start();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Publish event that will cause critical handler to fail and trip CB
+        bus.publish(make_sequenced_event(EventCategory::Task, 500)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Collect events from the bus to find CriticalHandlerDegraded
+        let mut found_degraded = false;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(100), monitor.recv()).await {
+                Ok(Ok(event)) => {
+                    if let EventPayload::CriticalHandlerDegraded { handler_name, failure_count, .. } = &event.payload {
+                        assert_eq!(handler_name, "critical-degraded-test");
+                        assert_eq!(*failure_count, 1); // threshold is 1
+                        assert_eq!(event.severity, EventSeverity::Critical);
+                        found_degraded = true;
+                        break;
+                    }
+                }
+                _ => continue,
+            }
+        }
+        assert!(found_degraded, "Should have received a CriticalHandlerDegraded event");
+
+        reactor.stop();
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_critical_handler_resets_backoff_on_success() {
+        // After a critical handler succeeds, its backoff should reset so the next trip
+        // starts from the initial cooldown again.
+        let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let config = ReactorConfig {
+            circuit_breaker_threshold: 1,
+            circuit_breaker_window_secs: 600,
+            circuit_breaker_cooldown_secs: 300,
+            critical_cooldown_initial_secs: 1,
+            critical_cooldown_max_secs: 16,
+            ..Default::default()
+        };
+        let reactor = EventReactor::new(bus.clone(), config);
+
+        let call_count = Arc::new(AtomicU64::new(0));
+        let should_fail = Arc::new(AtomicBool::new(true));
+        let handler_id = HandlerId::new();
+        let handler = Arc::new(CriticalTestHandler {
+            id: handler_id,
+            name: "critical-reset-test".to_string(),
+            call_count: call_count.clone(),
+            should_fail: should_fail.clone(),
+            critical: true,
+            error_strategy: ErrorStrategy::CircuitBreak,
+        });
+
+        reactor.register(handler).await;
+        let handle = reactor.start();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Fail once to trip CB
+        bus.publish(make_sequenced_event(EventCategory::Task, 600)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(call_count.load(Ordering::Relaxed), 1);
+
+        // Wait for critical cooldown (1s initial + margin)
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+
+        // Now succeed
+        should_fail.store(false, Ordering::Relaxed);
+        bus.publish(make_sequenced_event(EventCategory::Task, 601)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(call_count.load(Ordering::Relaxed), 2, "Handler should be called after CB cooldown");
+
+        // Check that backoff was reset
+        let cbs = reactor.circuit_breakers.read().await;
+        let cb = cbs.get(&handler_id).expect("CB state should exist");
+        assert_eq!(cb.backoff_attempt, 0, "Backoff should reset to 0 after successful execution");
 
         reactor.stop();
         handle.abort();

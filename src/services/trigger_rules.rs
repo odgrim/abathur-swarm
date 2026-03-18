@@ -1072,6 +1072,7 @@ impl EventHandler for TriggerRuleEngine {
             filter: EventFilter::new(), // match everything; rules do their own filtering
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
         }
     }
 
