@@ -4,4 +4,4 @@ pub mod errors;
 pub mod models;
 pub mod ports;
 
-pub use errors::{DbErrorCategory, DomainError, DomainResult};
+pub use errors::{DomainError, DomainResult};

@@ -12,6 +12,7 @@ pub mod task_repository;
 pub mod task_schedule_repository;
 pub mod trajectory_repository;
 pub mod trigger_rule_repository;
+pub mod outbox_repository;
 pub mod worktree_repository;
 
 pub use adapter::{EgressAdapter, IngestionAdapter};
@@ -26,4 +27,5 @@ pub use task_repository::{TaskFilter, TaskRepository};
 pub use trajectory_repository::*;
 pub use task_schedule_repository::{TaskScheduleFilter, TaskScheduleRepository};
 pub use trigger_rule_repository::TriggerRuleRepository;
+pub use outbox_repository::OutboxRepository;
 pub use worktree_repository::WorktreeRepository;

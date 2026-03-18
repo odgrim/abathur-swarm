@@ -1,5 +1,6 @@
 //! SQLite implementation of the GoalRepository.
 
+use crate::exec_tx;
 use async_trait::async_trait;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -29,7 +30,7 @@ impl GoalRepository for SqliteGoalRepository {
         let metadata_json = serde_json::to_string(&goal.metadata)?;
         let domains_json = serde_json::to_string(&goal.applicability_domains)?;
 
-        sqlx::query(
+        let create_q = sqlx::query(
             r#"INSERT INTO goals (id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, evaluation_criteria, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)"#
         )
@@ -43,20 +44,18 @@ impl GoalRepository for SqliteGoalRepository {
         .bind(&metadata_json)
         .bind(&domains_json)
         .bind(goal.created_at.to_rfc3339())
-        .bind(goal.updated_at.to_rfc3339())
-        .execute(&self.pool)
-        .await?;
+        .bind(goal.updated_at.to_rfc3339());
+        exec_tx!(&self.pool, create_q, execute)?;
 
         Ok(())
     }
 
     async fn get(&self, id: Uuid) -> DomainResult<Option<Goal>> {
-        let row: Option<GoalRow> = sqlx::query_as(
+        let get_q = sqlx::query_as(
             "SELECT id, name, description, status, priority, parent_id, constraints, metadata, applicability_domains, created_at, updated_at, last_convergence_check_at FROM goals WHERE id = ?"
         )
-        .bind(id.to_string())
-        .fetch_optional(&self.pool)
-        .await?;
+        .bind(id.to_string());
+        let row: Option<GoalRow> = exec_tx!(&self.pool, get_q, fetch_optional)?;
 
         row.map(|r| r.try_into()).transpose()
     }
@@ -66,7 +65,7 @@ impl GoalRepository for SqliteGoalRepository {
         let metadata_json = serde_json::to_string(&goal.metadata)?;
         let domains_json = serde_json::to_string(&goal.applicability_domains)?;
 
-        let result = sqlx::query(
+        let update_q = sqlx::query(
             r#"UPDATE goals SET name = ?, description = ?, status = ?, priority = ?,
                parent_id = ?, constraints = ?, metadata = ?, applicability_domains = ?,
                updated_at = ?
@@ -81,9 +80,8 @@ impl GoalRepository for SqliteGoalRepository {
         .bind(&metadata_json)
         .bind(&domains_json)
         .bind(goal.updated_at.to_rfc3339())
-        .bind(goal.id.to_string())
-        .execute(&self.pool)
-        .await?;
+        .bind(goal.id.to_string());
+        let result = exec_tx!(&self.pool, update_q, execute)?;
 
         if result.rows_affected() == 0 {
             return Err(DomainError::GoalNotFound(goal.id));
@@ -93,10 +91,9 @@ impl GoalRepository for SqliteGoalRepository {
     }
 
     async fn delete(&self, id: Uuid) -> DomainResult<()> {
-        let result = sqlx::query("DELETE FROM goals WHERE id = ?")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let delete_q = sqlx::query("DELETE FROM goals WHERE id = ?")
+            .bind(id.to_string());
+        let result = exec_tx!(&self.pool, delete_q, execute)?;
 
         if result.rows_affected() == 0 {
             return Err(DomainError::GoalNotFound(id));

@@ -740,6 +740,17 @@ where
                     if let Some(ref ct) = conflict_task {
                         if ct.parent_id.is_some() {
                             let root_id = self.find_root_ancestor(conflict.task_id).await;
+                            // If the root ancestor is workflow-enrolled, don't parent
+                            // the specialist task under it — that would be rejected by
+                            // the workflow subtask guard. Create it as a top-level task.
+                            let root_is_workflow = self.task_repo.get(root_id).await
+                                .ok()
+                                .flatten()
+                                .map(|t| t.context.custom.contains_key("workflow_state"))
+                                .unwrap_or(false);
+                            if root_is_workflow {
+                                (None, None)
+                            } else {
                             let mut custom = std::collections::HashMap::new();
                             custom.insert(
                                 "feature_branch_conflict".to_string(),
@@ -760,6 +771,7 @@ where
                                 custom,
                             };
                             (Some(root_id), Some(ctx))
+                            }
                         } else {
                             (None, None)
                         }

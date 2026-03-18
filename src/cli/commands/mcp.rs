@@ -58,14 +58,28 @@ impl McpServices {
     }
 
     /// Build a CommandBus from the common services, consuming self.
-    fn into_command_bus(self) -> (TaskService<SqliteTaskRepository>, MemoryService<SqliteMemoryRepository>, Arc<CommandBus>) {
+    ///
+    /// Also starts a background [`OutboxPoller`] to publish events written
+    /// to the outbox table. The poller handle is returned so callers can
+    /// stop it on shutdown if needed.
+    fn into_command_bus(self) -> (TaskService<SqliteTaskRepository>, MemoryService<SqliteMemoryRepository>, Arc<CommandBus>, crate::services::outbox_poller::OutboxPollerHandle) {
+        let outbox_repo: Arc<dyn crate::domain::ports::OutboxRepository> = Arc::new(crate::adapters::sqlite::SqliteOutboxRepository::new(self.pool.clone()));
         let command_bus = Arc::new(CommandBus::new(
             Arc::new(self.task_service.clone()),
             Arc::new(self.goal_service),
             Arc::new(self.memory_service.clone()),
+            self.event_bus.clone(),
+        ).with_pool(self.pool.clone()).with_outbox(outbox_repo.clone()));
+
+        // Start a background poller so outbox events are published.
+        let poller = crate::services::outbox_poller::OutboxPoller::new(
+            outbox_repo,
             self.event_bus,
-        ));
-        (self.task_service, self.memory_service, command_bus)
+            crate::services::outbox_poller::OutboxPollerConfig::default(),
+        );
+        let poller_handle = poller.start();
+
+        (self.task_service, self.memory_service, command_bus, poller_handle)
     }
 }
 
@@ -241,7 +255,7 @@ pub async fn execute(args: McpArgs, json_mode: bool) -> Result<()> {
 
 async fn start_memory_http(host: String, port: u16, enable_cors: bool, json_mode: bool) -> Result<()> {
     let services = McpServices::init("abathur.db").await?;
-    let (_, memory_service, command_bus) = services.into_command_bus();
+    let (_, memory_service, command_bus, _poller_handle) = services.into_command_bus();
 
     let config = MemoryHttpConfig {
         host: host.clone(),
@@ -274,7 +288,7 @@ async fn start_memory_http(host: String, port: u16, enable_cors: bool, json_mode
 
 async fn start_tasks_http(host: String, port: u16, enable_cors: bool, json_mode: bool) -> Result<()> {
     let services = McpServices::init("abathur.db").await?;
-    let (task_service, _, command_bus) = services.into_command_bus();
+    let (task_service, _, command_bus, _poller_handle) = services.into_command_bus();
 
     let config = TasksHttpConfig {
         host: host.clone(),
@@ -435,7 +449,7 @@ async fn start_all(
     let agent_repo = Arc::new(SqliteAgentRepository::new(services.pool.clone()));
     let agent_service = AgentService::new(agent_repo, services.event_bus.clone());
 
-    let (task_service, memory_service, command_bus) = services.into_command_bus();
+    let (task_service, memory_service, command_bus, _poller_handle) = services.into_command_bus();
 
     // Create servers
     let memory_config = MemoryHttpConfig {
@@ -561,7 +575,7 @@ async fn start_stdio(db_path: String, task_id: Option<String>, workflow_session:
     let agent_service = AgentService::new(agent_repo, services.event_bus.clone());
     let goal_repo = Arc::new(SqliteGoalRepository::new(services.pool.clone()));
 
-    let (task_service, memory_service, command_bus) = services.into_command_bus();
+    let (task_service, memory_service, command_bus, _poller_handle) = services.into_command_bus();
 
     let server = StdioServer::new(task_service, agent_service, memory_service, goal_repo, command_bus, task_uuid)
         .with_workflow_session(workflow_session);

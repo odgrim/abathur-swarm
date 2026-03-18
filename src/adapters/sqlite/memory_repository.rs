@@ -1,5 +1,6 @@
 //! SQLite implementation of the MemoryRepository.
 
+use crate::exec_tx;
 use async_trait::async_trait;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -26,7 +27,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         let metadata_json = serde_json::to_string(&memory.metadata)?;
         let accessors_json = serde_json::to_string(&memory.distinct_accessors)?;
 
-        sqlx::query(
+        let store_q = sqlx::query(
             r#"INSERT INTO memories (id, namespace, key, content, value, memory_type, tier, metadata,
                access_count, version, created_at, updated_at, last_accessed_at, expires_at, distinct_accessors)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
@@ -45,43 +46,39 @@ impl MemoryRepository for SqliteMemoryRepository {
         .bind(memory.updated_at.to_rfc3339())
         .bind(memory.last_accessed.to_rfc3339())
         .bind(memory.expires_at.map(|t| t.to_rfc3339()))
-        .bind(&accessors_json)
-        .execute(&self.pool)
-        .await?;
+        .bind(&accessors_json);
+        exec_tx!(&self.pool, store_q, execute)?;
 
         // Update FTS index
-        sqlx::query(
+        let fts_q = sqlx::query(
             "INSERT INTO memories_fts (memory_id, key, value, namespace) VALUES (?, ?, ?, ?)"
         )
         .bind(memory.id.to_string())
         .bind(&memory.key)
         .bind(&memory.content)
-        .bind(&memory.namespace)
-        .execute(&self.pool)
-        .await?;
+        .bind(&memory.namespace);
+        exec_tx!(&self.pool, fts_q, execute)?;
 
         Ok(())
     }
 
     async fn get(&self, id: Uuid) -> DomainResult<Option<Memory>> {
-        let row: Option<MemoryRow> = sqlx::query_as(
+        let get_q = sqlx::query_as(
             "SELECT * FROM memories WHERE id = ?"
         )
-        .bind(id.to_string())
-        .fetch_optional(&self.pool)
-        .await?;
+        .bind(id.to_string());
+        let row: Option<MemoryRow> = exec_tx!(&self.pool, get_q, fetch_optional)?;
 
         row.map(|r| r.try_into()).transpose()
     }
 
     async fn get_by_key(&self, key: &str, namespace: &str) -> DomainResult<Option<Memory>> {
-        let row: Option<MemoryRow> = sqlx::query_as(
+        let get_key_q = sqlx::query_as(
             "SELECT * FROM memories WHERE key = ? AND namespace = ? ORDER BY version DESC LIMIT 1"
         )
         .bind(key)
-        .bind(namespace)
-        .fetch_optional(&self.pool)
-        .await?;
+        .bind(namespace);
+        let row: Option<MemoryRow> = exec_tx!(&self.pool, get_key_q, fetch_optional)?;
 
         row.map(|r| r.try_into()).transpose()
     }
@@ -90,7 +87,7 @@ impl MemoryRepository for SqliteMemoryRepository {
         let metadata_json = serde_json::to_string(&memory.metadata)?;
         let accessors_json = serde_json::to_string(&memory.distinct_accessors)?;
 
-        let result = sqlx::query(
+        let update_q = sqlx::query(
             r#"UPDATE memories SET namespace = ?, key = ?, content = ?, value = ?,
                memory_type = ?, tier = ?, metadata = ?, access_count = ?,
                version = ?, updated_at = ?, last_accessed_at = ?, expires_at = ?,
@@ -110,44 +107,39 @@ impl MemoryRepository for SqliteMemoryRepository {
         .bind(memory.last_accessed.to_rfc3339())
         .bind(memory.expires_at.map(|t| t.to_rfc3339()))
         .bind(&accessors_json)
-        .bind(memory.id.to_string())
-        .execute(&self.pool)
-        .await?;
+        .bind(memory.id.to_string());
+        let result = exec_tx!(&self.pool, update_q, execute)?;
 
         if result.rows_affected() == 0 {
             return Err(DomainError::MemoryNotFound(memory.id));
         }
 
         // Update FTS index
-        sqlx::query("DELETE FROM memories_fts WHERE memory_id = ?")
-            .bind(memory.id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let fts_del_q = sqlx::query("DELETE FROM memories_fts WHERE memory_id = ?")
+            .bind(memory.id.to_string());
+        exec_tx!(&self.pool, fts_del_q, execute)?;
 
-        sqlx::query(
+        let fts_ins_q = sqlx::query(
             "INSERT INTO memories_fts (memory_id, key, value, namespace) VALUES (?, ?, ?, ?)"
         )
         .bind(memory.id.to_string())
         .bind(&memory.key)
         .bind(&memory.content)
-        .bind(&memory.namespace)
-        .execute(&self.pool)
-        .await?;
+        .bind(&memory.namespace);
+        exec_tx!(&self.pool, fts_ins_q, execute)?;
 
         Ok(())
     }
 
     async fn delete(&self, id: Uuid) -> DomainResult<()> {
         // Delete from FTS first
-        sqlx::query("DELETE FROM memories_fts WHERE memory_id = ?")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let fts_del_q = sqlx::query("DELETE FROM memories_fts WHERE memory_id = ?")
+            .bind(id.to_string());
+        exec_tx!(&self.pool, fts_del_q, execute)?;
 
-        let result = sqlx::query("DELETE FROM memories WHERE id = ?")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let delete_q = sqlx::query("DELETE FROM memories WHERE id = ?")
+            .bind(id.to_string());
+        let result = exec_tx!(&self.pool, delete_q, execute)?;
 
         if result.rows_affected() == 0 {
             return Err(DomainError::MemoryNotFound(id));

@@ -33,6 +33,7 @@ pub mod model_router;
 pub mod memory_service;
 pub mod merge_queue;
 pub mod meta_planner; // Rust service module for decomposition planning
+pub mod outbox_poller;
 pub mod overmind;
 pub mod prompt_adapter;
 pub mod swarm_orchestrator;
@@ -72,6 +73,7 @@ pub use memory_decay_daemon::{DaemonHandle, DaemonStatus, DecayDaemonConfig, Dec
 pub use memory_service::{DecayConfig, MaintenanceReport, MemoryService, MemoryStats};
 pub use merge_queue::{MergeQueue, MergeQueueConfig, MergeQueueStats, MergeRequest, MergeResult, MergeStage, MergeStatus};
 pub use meta_planner::{AgentMetrics, AgentSpec, Complexity, DecompositionPlan, MetaPlanner, MetaPlannerConfig, TaskSpec};
+pub use outbox_poller::{OutboxPoller, OutboxPollerConfig, OutboxPollerHandle};
 pub use overmind::{OvermindConfig, OvermindService};
 pub use swarm_orchestrator::{ConvergenceLoopConfig, McpServerConfig, OrchestratorStatus, SwarmConfig, SwarmEvent, SwarmOrchestrator, SwarmStats, VerificationLevel};
 pub use task_schedule_service::TaskScheduleService;

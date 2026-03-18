@@ -1,5 +1,6 @@
 //! SQLite implementation of the TaskRepository.
 
+use crate::exec_tx;
 use async_trait::async_trait;
 
 /// Emit a warning when a serialized context JSON blob exceeds this size.
@@ -43,7 +44,7 @@ impl TaskRepository for SqliteTaskRepository {
         let (source_type, source_ref) = serialize_task_source(&task.source);
         let execution_mode_json = serde_json::to_string(&task.execution_mode)?;
 
-        sqlx::query(
+        let create_q = sqlx::query(
             r#"INSERT INTO tasks (id, parent_id, title, description, status, priority,
                agent_type, routing, artifacts, context, retry_count, max_retries, worktree_path,
                idempotency_key, source_type, source_ref, version, created_at, updated_at, started_at, completed_at, deadline,
@@ -74,9 +75,8 @@ impl TaskRepository for SqliteTaskRepository {
         .bind(task.deadline.map(|t| t.to_rfc3339()))
         .bind(&execution_mode_json)
         .bind(task.trajectory_id.map(|id| id.to_string()))
-        .bind(task.task_type.as_str())
-        .execute(&self.pool)
-        .await?;
+        .bind(task.task_type.as_str());
+        exec_tx!(&self.pool, create_q, execute)?;
 
         // Add dependencies
         for dep_id in &task.depends_on {
@@ -87,12 +87,11 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     async fn get(&self, id: Uuid) -> DomainResult<Option<Task>> {
-        let row: Option<TaskRow> = sqlx::query_as(
+        let get_q = sqlx::query_as(
             "SELECT * FROM tasks WHERE id = ?"
         )
-        .bind(id.to_string())
-        .fetch_optional(&self.pool)
-        .await?;
+        .bind(id.to_string());
+        let row: Option<TaskRow> = exec_tx!(&self.pool, get_q, fetch_optional)?;
 
         match row {
             Some(r) => {
@@ -118,7 +117,7 @@ impl TaskRepository for SqliteTaskRepository {
         let (source_type, source_ref) = serialize_task_source(&task.source);
         let execution_mode_json = serde_json::to_string(&task.execution_mode)?;
 
-        let result = sqlx::query(
+        let update_q = sqlx::query(
             r#"UPDATE tasks SET parent_id = ?, title = ?, description = ?,
                status = ?, priority = ?, agent_type = ?, routing = ?, artifacts = ?,
                context = ?, retry_count = ?, max_retries = ?, worktree_path = ?,
@@ -149,9 +148,8 @@ impl TaskRepository for SqliteTaskRepository {
         .bind(&execution_mode_json)
         .bind(task.trajectory_id.map(|id| id.to_string()))
         .bind(task.task_type.as_str())
-        .bind(task.id.to_string())
-        .execute(&self.pool)
-        .await?;
+        .bind(task.id.to_string());
+        let result = exec_tx!(&self.pool, update_q, execute)?;
 
         if result.rows_affected() == 0 {
             return Err(DomainError::TaskNotFound(task.id));
@@ -260,14 +258,13 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     async fn get_dependencies(&self, task_id: Uuid) -> DomainResult<Vec<Task>> {
-        let rows: Vec<TaskRow> = sqlx::query_as(
+        let deps_q = sqlx::query_as(
             r#"SELECT t.* FROM tasks t
                INNER JOIN task_dependencies d ON t.id = d.depends_on_id
                WHERE d.task_id = ?"#
         )
-        .bind(task_id.to_string())
-        .fetch_all(&self.pool)
-        .await?;
+        .bind(task_id.to_string());
+        let rows: Vec<TaskRow> = exec_tx!(&self.pool, deps_q, fetch_all)?;
 
         rows.into_iter().map(|r| r.try_into()).collect()
     }
@@ -286,13 +283,12 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     async fn add_dependency(&self, task_id: Uuid, depends_on: Uuid) -> DomainResult<()> {
-        sqlx::query(
+        let dep_q = sqlx::query(
             "INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_id) VALUES (?, ?)"
         )
         .bind(task_id.to_string())
-        .bind(depends_on.to_string())
-        .execute(&self.pool)
-        .await?;
+        .bind(depends_on.to_string());
+        exec_tx!(&self.pool, dep_q, execute)?;
         Ok(())
     }
 
@@ -325,12 +321,11 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     async fn get_by_idempotency_key(&self, key: &str) -> DomainResult<Option<Task>> {
-        let row: Option<TaskRow> = sqlx::query_as(
+        let idem_q = sqlx::query_as(
             "SELECT * FROM tasks WHERE idempotency_key = ?"
         )
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await?;
+        .bind(key);
+        let row: Option<TaskRow> = exec_tx!(&self.pool, idem_q, fetch_optional)?;
 
         match row {
             Some(r) => {
@@ -418,12 +413,11 @@ impl TaskRepository for SqliteTaskRepository {
 
 impl SqliteTaskRepository {
     async fn load_dependencies(&self, task: &mut Task) -> DomainResult<()> {
-        let deps: Vec<(String,)> = sqlx::query_as(
+        let load_deps_q = sqlx::query_as(
             "SELECT depends_on_id FROM task_dependencies WHERE task_id = ?"
         )
-        .bind(task.id.to_string())
-        .fetch_all(&self.pool)
-        .await?;
+        .bind(task.id.to_string());
+        let deps: Vec<(String,)> = exec_tx!(&self.pool, load_deps_q, fetch_all)?;
 
         task.depends_on = deps
             .into_iter()

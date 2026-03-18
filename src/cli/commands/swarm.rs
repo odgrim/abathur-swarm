@@ -806,6 +806,9 @@ async fn run_swarm_foreground(
         println!("Memory decay daemon started");
     }
 
+    // Start outbox poller for reliable event delivery
+    orchestrator.start_outbox_poller().await;
+
     // Create event channel for monitoring
     let (event_tx, mut event_rx) = mpsc::channel::<SwarmEvent>(100);
 
@@ -1213,12 +1216,13 @@ async fn start_mcp_servers(
     let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
     let goal_service = GoalService::new(goal_repo);
     let mcp_event_bus = Arc::new(EventBus::new(EventBusConfig { persist_events: true, ..Default::default() }));
+    let outbox_repo = Arc::new(crate::adapters::sqlite::SqliteOutboxRepository::new(pool.clone()));
     let command_bus = Arc::new(CommandBus::new(
         Arc::new(task_service.clone()),
         Arc::new(goal_service),
         Arc::new(memory_service.clone()),
         mcp_event_bus,
-    ).with_pool(pool.clone()));
+    ).with_pool(pool.clone()).with_outbox(outbox_repo));
 
     // Start Memory HTTP server
     if let Some(ref url) = urls.memory_server {

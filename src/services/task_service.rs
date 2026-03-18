@@ -477,11 +477,28 @@ impl<T: TaskRepository> TaskService<T> {
                 return Ok((existing, events));
             }
 
-        // Validate parent exists if specified
+        // Validate parent exists if specified, and reject subtask creation
+        // under workflow-enrolled tasks that are actively tracking phase subtasks.
+        // Tasks in Pending/PhaseReady/PhaseGate/terminal states don't have active
+        // subtask tracking, so creating children under them is safe.
         if let Some(pid) = parent_id {
             let parent = self.task_repo.get(pid).await?;
-            if parent.is_none() {
-                return Err(DomainError::TaskNotFound(pid));
+            match parent {
+                None => return Err(DomainError::TaskNotFound(pid)),
+                Some(ref p) => {
+                    if let Some(wf_val) = p.context.custom.get("workflow_state") {
+                        if let Ok(wf_state) = serde_json::from_value::<WorkflowState>(wf_val.clone()) {
+                            if wf_state.has_tracked_subtasks() {
+                                return Err(DomainError::ValidationFailed(format!(
+                                    "Cannot create subtask under workflow-enrolled task {}. \
+                                     Use workflow_fan_out() to create workflow subtasks, or \
+                                     submit this task without a parent_id / under a different parent.",
+                                    pid
+                                )));
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1797,5 +1814,104 @@ mod tests {
         // Default complexity is Moderate. "ensure that" keyword = +2, constraint hint = +2 => 4 >= 3
         assert!(task.execution_mode.is_convergent(),
             "Task with acceptance criteria + constraints should be inferred as Convergent");
+    }
+
+    #[tokio::test]
+    async fn test_submit_subtask_under_workflow_task_rejected() {
+        let service = setup_service().await;
+
+        // Create a parent task (will auto-enroll as Pending workflow)
+        let (mut parent, _) = service.submit_task(
+            Some("Workflow Parent".to_string()),
+            "A workflow-enrolled task".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        // Simulate the workflow engine advancing to PhaseRunning
+        // (submit_task auto-enrolls as Pending; we need an active phase)
+        let wf_state = WorkflowState::PhaseRunning {
+            workflow_name: "code".to_string(),
+            phase_index: 0,
+            phase_name: "research".to_string(),
+            subtask_ids: vec![uuid::Uuid::new_v4()],
+        };
+        parent.context.custom.insert(
+            "workflow_state".to_string(),
+            serde_json::to_value(&wf_state).unwrap(),
+        );
+        service.task_repo.update(&parent).await.unwrap();
+
+        // Attempting to create a subtask under the workflow parent should fail
+        let result = service.submit_task(
+            Some("Rogue Subtask".to_string()),
+            "Should be rejected".to_string(),
+            Some(parent.id),
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await;
+
+        assert!(result.is_err(), "Should reject subtask under workflow-enrolled parent");
+        match result.unwrap_err() {
+            DomainError::ValidationFailed(msg) => {
+                assert!(msg.contains("workflow-enrolled"), "Error should mention workflow: {msg}");
+            }
+            other => panic!("Expected ValidationFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_submit_subtask_under_non_workflow_parent_succeeds() {
+        let service = setup_service().await;
+
+        // Create a normal parent that won't be auto-enrolled in a workflow.
+        // Use TaskType::Verification to bypass the infer_workflow_name logic.
+        let (parent, _) = service.submit_task(
+            Some("Normal Parent".to_string()),
+            "Not enrolled in any workflow".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            Some(TaskType::Verification),
+            None,
+        ).await.unwrap();
+
+        // Creating a subtask under a non-workflow parent should succeed
+        let (child, _) = service.submit_task(
+            Some("Normal Subtask".to_string()),
+            "Should succeed".to_string(),
+            Some(parent.id),
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        assert_eq!(child.parent_id, Some(parent.id));
     }
 }

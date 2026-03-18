@@ -11,12 +11,14 @@ use std::fmt;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::adapters::sqlite::tx_context::{self, SharedTx};
 use crate::domain::errors::DomainError;
 use crate::domain::models::{
     AccessorId, ExecutionMode, Goal, GoalConstraint, GoalPriority, GoalStatus, Memory,
     MemoryMetadata, MemoryTier, MemoryType, Task, TaskContext, TaskPriority, TaskSource,
     TaskStatus, TaskType,
 };
+use crate::domain::ports::OutboxRepository;
 use crate::services::event_bus::{EventBus, UnifiedEvent};
 use crate::services::memory_service::MaintenanceReport;
 
@@ -306,6 +308,10 @@ pub struct CommandBus {
     processed_commands: moka::future::Cache<CommandId, ()>,
     /// Optional DB pool for persistent dedup across restarts.
     pool: Option<sqlx::SqlitePool>,
+    /// Optional outbox repository for transactional event persistence.
+    /// When present, events are written to the outbox instead of being
+    /// published directly; a background poller then delivers them.
+    outbox: Option<Arc<dyn OutboxRepository>>,
 }
 
 impl CommandBus {
@@ -325,12 +331,25 @@ impl CommandBus {
                 .time_to_live(std::time::Duration::from_secs(3600))
                 .build(),
             pool: None,
+            outbox: None,
         }
     }
 
     /// Enable persistent command deduplication via SQLite.
     pub fn with_pool(mut self, pool: sqlx::SqlitePool) -> Self {
         self.pool = Some(pool);
+        self
+    }
+
+    /// Enable transactional outbox for reliable event delivery.
+    ///
+    /// When set, events produced by command handlers are written to the
+    /// outbox table instead of being published directly to the EventBus.
+    /// A background [`OutboxPoller`](crate::services::outbox_poller::OutboxPoller)
+    /// then reads and publishes them, ensuring events are never lost even
+    /// if the EventBus publish fails.
+    pub fn with_outbox(mut self, outbox: Arc<dyn OutboxRepository>) -> Self {
+        self.outbox = Some(outbox);
         self
     }
 
@@ -373,17 +392,89 @@ impl CommandBus {
         let command_id = envelope.id;
 
         // 2. Execute handler -> get CommandOutcome
-        let outcome = match envelope.command {
-            DomainCommand::Task(cmd) => self.task_handler.handle(cmd).await?,
-            DomainCommand::Goal(cmd) => self.goal_handler.handle(cmd).await?,
-            DomainCommand::Memory(cmd) => self.memory_handler.handle(cmd).await?,
-        };
+        //    When an outbox is configured AND a pool is available, wrap the handler
+        //    execution and outbox inserts in a single SQLite transaction. This ensures
+        //    domain mutations and their corresponding events are committed atomically:
+        //    either both succeed or both are rolled back.
+        let outcome = if self.outbox.is_some() && self.pool.is_some() {
+            // Begin a transaction on the pool shared by all SQLite repositories.
+            // The task-local ACTIVE_TX context makes this transaction visible to
+            // all repository operations within the handler's execution scope.
+            let pool = self.pool.as_ref().unwrap();
+            let tx = pool.begin().await.map_err(|e| {
+                tracing::error!(error = %e, "Failed to begin outbox transaction");
+                CommandError::DomainError(DomainError::DatabaseError(e.to_string()))
+            })?;
+            let shared_tx: SharedTx = Arc::new(tokio::sync::Mutex::new(tx));
 
-        // 3. Journal + broadcast events via EventBus (journal-first: EventBus
-        //    persists to the store before broadcasting to in-memory subscribers)
-        for event in outcome.events {
-            self.event_bus.publish(event).await;
-        }
+            // Execute handler within the transaction scope.
+            // All repository read/write operations will use this transaction.
+            let handler_result = {
+                let tx_clone = shared_tx.clone();
+                tx_context::run_in_tx_scope(tx_clone, async {
+                    match envelope.command {
+                        DomainCommand::Task(cmd) => self.task_handler.handle(cmd).await,
+                        DomainCommand::Goal(cmd) => self.goal_handler.handle(cmd).await,
+                        DomainCommand::Memory(cmd) => self.memory_handler.handle(cmd).await,
+                    }
+                }).await
+            };
+
+            let outcome = match handler_result {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    // Handler failed — transaction will be rolled back on drop.
+                    // No mutations or outbox events are persisted.
+                    return Err(e);
+                }
+            };
+
+            // Insert events into the outbox within the same transaction.
+            {
+                let outbox = self.outbox.as_ref().unwrap();
+                let tx_clone = shared_tx.clone();
+                let insert_result = tx_context::run_in_tx_scope(tx_clone, async {
+                    for event in &outcome.events {
+                        outbox.insert(event).await?;
+                    }
+                    Ok::<(), crate::domain::errors::DomainError>(())
+                }).await;
+
+                if let Err(e) = insert_result {
+                    tracing::error!(
+                        error = %e,
+                        "Failed to insert events into outbox — rolling back transaction"
+                    );
+                    // Transaction rolls back on drop — neither mutations nor events persist.
+                    return Err(CommandError::DomainError(e));
+                }
+            }
+
+            // Commit the transaction — atomically persists both mutations and events.
+            let tx = Arc::try_unwrap(shared_tx)
+                .expect("shared_tx should have no other references after handler scope")
+                .into_inner();
+            tx.commit().await.map_err(|e| {
+                tracing::error!(error = %e, "Failed to commit outbox transaction");
+                CommandError::DomainError(DomainError::DatabaseError(e.to_string()))
+            })?;
+
+            outcome
+        } else {
+            // No outbox or no pool — execute handler directly without transaction scope.
+            let outcome = match envelope.command {
+                DomainCommand::Task(cmd) => self.task_handler.handle(cmd).await?,
+                DomainCommand::Goal(cmd) => self.goal_handler.handle(cmd).await?,
+                DomainCommand::Memory(cmd) => self.memory_handler.handle(cmd).await?,
+            };
+
+            // Publish events directly via EventBus (no outbox).
+            for event in &outcome.events {
+                self.event_bus.publish(event.clone()).await;
+            }
+
+            outcome
+        };
 
         // 4. Record command ID in dedup cache (in-memory + persistent)
         self.processed_commands.insert(command_id, ()).await;

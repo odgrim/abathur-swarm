@@ -65,10 +65,24 @@ where
 
         if let Some(ref memory_repo) = self.memory_repo {
             let memory_service = Arc::new(MemoryService::new(memory_repo.clone()));
-            Arc::new(CommandBus::new(task_service, goal_service, memory_service, self.event_bus.clone()))
+            let mut bus = CommandBus::new(task_service, goal_service, memory_service, self.event_bus.clone());
+            if let Some(ref pool) = self.pool {
+                bus = bus.with_pool(pool.clone());
+            }
+            if let Some(ref outbox) = self.outbox_repo {
+                bus = bus.with_outbox(outbox.clone());
+            }
+            Arc::new(bus)
         } else {
             let null_memory = Arc::new(MemoryService::new(Arc::new(NullMemoryRepository::new())));
-            Arc::new(CommandBus::new(task_service, goal_service, null_memory, self.event_bus.clone()))
+            let mut bus = CommandBus::new(task_service, goal_service, null_memory, self.event_bus.clone());
+            if let Some(ref pool) = self.pool {
+                bus = bus.with_pool(pool.clone());
+            }
+            if let Some(ref outbox) = self.outbox_repo {
+                bus = bus.with_outbox(outbox.clone());
+            }
+            Arc::new(bus)
         }
     }
 

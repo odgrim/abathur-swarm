@@ -101,6 +101,22 @@ impl WorkflowState {
         matches!(self, Self::Completed { .. } | Self::Rejected { .. } | Self::Failed { .. })
     }
 
+    /// Whether the workflow is actively tracking phase subtasks.
+    ///
+    /// Returns `true` for states where the workflow engine has created subtasks
+    /// and is waiting on them (PhaseRunning, FanningOut, Aggregating, Verifying).
+    /// Creating untracked subtasks under the parent during these states would
+    /// corrupt the workflow engine's completion tracking.
+    pub fn has_tracked_subtasks(&self) -> bool {
+        matches!(
+            self,
+            Self::PhaseRunning { .. }
+                | Self::FanningOut { .. }
+                | Self::Aggregating { .. }
+                | Self::Verifying { .. }
+        )
+    }
+
     /// Get the current phase index, if in an active phase.
     pub fn phase_index(&self) -> Option<usize> {
         match self {

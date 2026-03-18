@@ -98,6 +98,10 @@ where
     pub(super) federation_service: Option<Arc<crate::services::federation::FederationService>>,
     pub(super) trigger_rule_repo: Option<Arc<dyn crate::domain::ports::TriggerRuleRepository>>,
     pub(super) command_bus: Arc<RwLock<Option<Arc<CommandBus>>>>,
+    /// Optional outbox repository for transactional event delivery.
+    pub(super) outbox_repo: Option<Arc<dyn crate::domain::ports::OutboxRepository>>,
+    /// Optional handle to the outbox poller daemon.
+    pub(super) outbox_poller_handle: Arc<RwLock<Option<crate::services::outbox_poller::OutboxPollerHandle>>>,
     /// Optional DB pool for services that need persistence (absence timers, command dedup).
     pub(super) pool: Option<sqlx::SqlitePool>,
 
@@ -179,6 +183,8 @@ where
             specialist_rx: Arc::new(tokio::sync::Mutex::new(specialist_rx)),
             specialist_tx,
             command_bus: Arc::new(RwLock::new(None)),
+            outbox_repo: None,
+            outbox_poller_handle: Arc::new(RwLock::new(None)),
             pool: None,
             overseer_cluster: None,
             trajectory_repo: None,
@@ -327,15 +333,16 @@ where
     }
 
     /// Provide a DB pool for services that need persistence (absence timers, command dedup,
-    /// and evolution loop refinement requests).
+    /// evolution loop refinement requests, and event outbox).
     pub fn with_pool(mut self, pool: sqlx::SqlitePool) -> Self {
-        use crate::adapters::sqlite::SqliteRefinementRepository;
+        use crate::adapters::sqlite::{SqliteRefinementRepository, SqliteOutboxRepository};
         use crate::services::evolution_loop::EvolutionConfig;
 
         let refinement_repo = Arc::new(SqliteRefinementRepository::new(pool.clone()));
         self.evolution_loop = Arc::new(
             EvolutionLoop::new(EvolutionConfig::default()).with_repo(refinement_repo),
         );
+        self.outbox_repo = Some(Arc::new(SqliteOutboxRepository::new(pool.clone())));
         self.pool = Some(pool);
         self
     }
@@ -530,6 +537,9 @@ where
                     ),
                 ).await;
             }
+
+        // Start outbox poller for reliable event delivery
+        self.start_outbox_poller().await;
 
         // Refresh active goals cache for agent context
         if let Err(e) = self.refresh_active_goals_cache().await {

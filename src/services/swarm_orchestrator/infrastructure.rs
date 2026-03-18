@@ -487,6 +487,40 @@ where
         }
     }
 
+    /// Start the outbox poller background daemon.
+    ///
+    /// Reads unpublished events from the outbox table and publishes them
+    /// to the EventBus. Only starts if an outbox repository is configured
+    /// (i.e., a pool was provided via `with_pool`).
+    pub async fn start_outbox_poller(&self) {
+        let Some(ref outbox) = self.outbox_repo else {
+            return;
+        };
+
+        let poller = crate::services::outbox_poller::OutboxPoller::new(
+            outbox.clone(),
+            self.event_bus.clone(),
+            crate::services::outbox_poller::OutboxPollerConfig::default(),
+        );
+
+        let handle = poller.start();
+
+        {
+            let mut stored = self.outbox_poller_handle.write().await;
+            *stored = Some(handle);
+        }
+
+        tracing::info!("Outbox poller started");
+    }
+
+    /// Stop the outbox poller.
+    pub async fn stop_outbox_poller(&self) {
+        let handle = self.outbox_poller_handle.read().await;
+        if let Some(ref h) = *handle {
+            h.stop();
+        }
+    }
+
     /// Create or reuse a worktree for task execution.
     ///
     /// On retries the worktree from the previous attempt still exists in the DB

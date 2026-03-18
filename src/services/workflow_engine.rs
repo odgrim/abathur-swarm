@@ -468,7 +468,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
 
         // Guard: ignore completions for subtasks not in the current phase
         if !subtask_ids.contains(&subtask_id) {
-            tracing::debug!(
+            tracing::warn!(
                 parent_id = %parent_task_id,
                 subtask_id = %subtask_id,
                 "Ignoring stale phase completion — subtask not in current phase"

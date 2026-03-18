@@ -29,7 +29,7 @@ use crate::services::builtin_handlers::{
     ReviewFailureLoopHandler, RetryProcessingHandler, SpecialistCheckHandler,
     StartupCatchUpHandler, StatsUpdateHandler, SystemStallDetectorHandler,
     TaskCompletionLearningHandler,
-    TaskCompletedReadinessHandler, TaskFailedDecisionHandler,
+    TaskCompletedReadinessHandler, TaskFailedBlockHandler, TaskFailedRetryHandler,
     TaskOutcomeMemoryHandler,
     TaskReadySpawnHandler, TaskScheduleHandler, TaskSLAEnforcementHandler,
     TriggerCatchupHandler, WatermarkAuditHandler,
@@ -95,11 +95,10 @@ where
         // WorkflowAutoAdvanceHandler — REMOVED (Overmind owns first advance via MCP tools)
         // WorkflowPhaseReadyHandler — REMOVED (raced with Overmind, created agentless subtasks)
 
-        // TaskFailedDecisionHandler (SYSTEM) — atomic retry-or-block decision on failure/cancel
+        // TaskFailedBlockHandler (SYSTEM) — block dependents on failure/cancel
         reactor
-            .register(Arc::new(TaskFailedDecisionHandler::new(
+            .register(Arc::new(TaskFailedBlockHandler::new(
                 self.task_repo.clone(),
-                self.config.max_task_retries,
             )))
             .await;
 
@@ -141,6 +140,14 @@ where
                 )))
                 .await;
         }
+
+        // TaskFailedRetryHandler (NORMAL) — retry after failure if retries remain
+        reactor
+            .register(Arc::new(TaskFailedRetryHandler::new(
+                self.task_repo.clone(),
+                self.config.max_task_retries,
+            )))
+            .await;
 
         // GoalCreatedHandler (NORMAL) — refresh active goals cache
         reactor
@@ -310,12 +317,26 @@ where
                 let memory_service = Arc::new(MemoryService::new(
                     memory_repo.clone(),
                 ));
-                Arc::new(CommandBus::new(task_service, goal_service, memory_service, self.event_bus.clone()))
+                let mut bus = CommandBus::new(task_service, goal_service, memory_service, self.event_bus.clone());
+                if let Some(ref pool) = self.pool {
+                    bus = bus.with_pool(pool.clone());
+                }
+                if let Some(ref outbox) = self.outbox_repo {
+                    bus = bus.with_outbox(outbox.clone());
+                }
+                Arc::new(bus)
             } else {
                 let null_memory = Arc::new(MemoryService::new(
                     Arc::new(NullMemoryRepository::new()),
                 ));
-                Arc::new(CommandBus::new(task_service, goal_service, null_memory, self.event_bus.clone()))
+                let mut bus = CommandBus::new(task_service, goal_service, null_memory, self.event_bus.clone());
+                if let Some(ref pool) = self.pool {
+                    bus = bus.with_pool(pool.clone());
+                }
+                if let Some(ref outbox) = self.outbox_repo {
+                    bus = bus.with_outbox(outbox.clone());
+                }
+                Arc::new(bus)
             };
 
             // Store on the orchestrator so other subsystems can use it
