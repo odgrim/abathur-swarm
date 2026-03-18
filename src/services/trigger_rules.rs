@@ -93,6 +93,12 @@ pub enum TriggerCondition {
         expected_type: String,
         /// Seconds to wait for the expected event before firing.
         deadline_secs: u64,
+        /// Optional per-agent-type deadline overrides. When the triggering event
+        /// carries an `agent_type` (e.g. `TaskClaimed`), this map is consulted
+        /// first. If the agent type is found, its value is used as `deadline_secs`
+        /// instead of the default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_type_deadline_overrides: Option<HashMap<String, u64>>,
     },
     /// Fire on a cron schedule. The expression follows standard 5-field cron syntax.
     /// When this condition is set, the rule's filter is automatically configured to
@@ -335,6 +341,9 @@ struct AbsenceTimer {
     task_id: Option<Uuid>,
     /// Correlation from the triggering event.
     correlation_id: Option<Uuid>,
+    /// The agent_type from the triggering event (for logging/debugging).
+    #[allow(dead_code)]
+    agent_type: Option<String>,
 }
 
 /// Reactive engine that evaluates trigger rules on incoming events.
@@ -529,6 +538,7 @@ impl TriggerRuleEngine {
                 expected_type: row.expected_payload_type,
                 task_id: row.scope_task_id.and_then(|s| Uuid::parse_str(&s).ok()),
                 correlation_id: row.scope_correlation_id.and_then(|s| Uuid::parse_str(&s).ok()),
+                agent_type: None, // Not persisted; timer will use its deadline_secs directly
             };
 
             timers.entry(rule_id).or_default().push(timer);
@@ -831,16 +841,26 @@ impl TriggerRuleEngine {
 
                         window.len() >= *count as usize
                     }
-                    TriggerCondition::Absence { trigger_type, expected_type, deadline_secs } => {
+                    TriggerCondition::Absence { trigger_type, expected_type, deadline_secs, agent_type_deadline_overrides } => {
                         // If the current event matches the trigger_type, start a timer
                         if event_type == *trigger_type {
+                            // Extract agent_type from the event payload for per-agent overrides
+                            let event_agent_type = match &event.payload {
+                                EventPayload::TaskClaimed { agent_type, .. } => Some(agent_type.clone()),
+                                _ => None,
+                            };
+                            // Use agent-specific deadline if configured, otherwise default
+                            let effective_deadline = event_agent_type.as_ref()
+                                .and_then(|at| agent_type_deadline_overrides.as_ref()?.get(at).copied())
+                                .unwrap_or(*deadline_secs);
                             let timer = AbsenceTimer {
                                 id: Uuid::new_v4(),
                                 started_at: now,
-                                deadline_secs: *deadline_secs,
+                                deadline_secs: effective_deadline,
                                 expected_type: expected_type.clone(),
                                 task_id: event.task_id,
                                 correlation_id: event.correlation_id,
+                                agent_type: event_agent_type,
                             };
                             new_timers.push((rule.id, timer));
                         }
@@ -1235,6 +1255,9 @@ pub fn builtin_trigger_rules() -> Vec<TriggerRule> {
             trigger_type: "TaskClaimed".to_string(),
             expected_type: "TaskCompleted".to_string(),
             deadline_secs: 1800,
+            agent_type_deadline_overrides: Some(HashMap::from([
+                ("overmind".to_string(), 7200),
+            ])),
         }),
 
         // goal-progress-timeout: request evaluation if no task completes within 1hr of goal start
@@ -1258,6 +1281,7 @@ pub fn builtin_trigger_rules() -> Vec<TriggerRule> {
             trigger_type: "GoalStarted".to_string(),
             expected_type: "TaskCompleted".to_string(),
             deadline_secs: 3600,
+            agent_type_deadline_overrides: None,
         }),
     ]
 }
@@ -1464,5 +1488,97 @@ mod tests {
         assert!(validate_cron_expression("not a cron").is_err());
         assert!(validate_cron_expression("").is_err());
         assert!(validate_cron_expression("* * *").is_err());
+    }
+
+    #[test]
+    fn test_absence_agent_type_deadline_overrides_serialization() {
+        let condition = TriggerCondition::Absence {
+            trigger_type: "TaskClaimed".to_string(),
+            expected_type: "TaskCompleted".to_string(),
+            deadline_secs: 1800,
+            agent_type_deadline_overrides: Some(HashMap::from([
+                ("overmind".to_string(), 7200),
+            ])),
+        };
+        let json = serde_json::to_string(&condition).unwrap();
+        let deserialized: TriggerCondition = serde_json::from_str(&json).unwrap();
+
+        match deserialized {
+            TriggerCondition::Absence { deadline_secs, agent_type_deadline_overrides, .. } => {
+                assert_eq!(deadline_secs, 1800);
+                let overrides = agent_type_deadline_overrides.unwrap();
+                assert_eq!(overrides.get("overmind"), Some(&7200));
+            }
+            _ => panic!("Expected Absence variant"),
+        }
+    }
+
+    #[test]
+    fn test_absence_without_overrides_deserializes() {
+        // Backward compatibility: JSON without agent_type_deadline_overrides should deserialize
+        let json = r#"{"type":"absence","trigger_type":"TaskClaimed","expected_type":"TaskCompleted","deadline_secs":1800}"#;
+        let condition: TriggerCondition = serde_json::from_str(json).unwrap();
+
+        match condition {
+            TriggerCondition::Absence { deadline_secs, agent_type_deadline_overrides, .. } => {
+                assert_eq!(deadline_secs, 1800);
+                assert!(agent_type_deadline_overrides.is_none());
+            }
+            _ => panic!("Expected Absence variant"),
+        }
+    }
+
+    #[test]
+    fn test_builtin_task_completion_timeout_has_overmind_override() {
+        let rules = builtin_trigger_rules();
+        let timeout_rule = rules.iter().find(|r| r.name == "task-completion-timeout").unwrap();
+
+        match &timeout_rule.condition {
+            TriggerCondition::Absence { deadline_secs, agent_type_deadline_overrides, .. } => {
+                assert_eq!(*deadline_secs, 1800);
+                let overrides = agent_type_deadline_overrides.as_ref().unwrap();
+                assert_eq!(overrides.get("overmind"), Some(&7200));
+            }
+            _ => panic!("Expected Absence condition on task-completion-timeout rule"),
+        }
+    }
+
+    #[test]
+    fn test_absence_deadline_override_resolution() {
+        // Test the effective deadline computation logic that's used in the Absence match arm.
+        // An overmind agent should get the overridden deadline, others get the default.
+        let overrides: Option<HashMap<String, u64>> = Some(HashMap::from([
+            ("overmind".to_string(), 7200),
+            ("planner".to_string(), 3600),
+        ]));
+        let default_deadline: u64 = 1800;
+
+        // Helper mimicking the logic in the Absence arm
+        let effective = |agent_type: Option<&str>| -> u64 {
+            agent_type
+                .and_then(|at| overrides.as_ref()?.get(at).copied())
+                .unwrap_or(default_deadline)
+        };
+
+        assert_eq!(effective(Some("overmind")), 7200);
+        assert_eq!(effective(Some("planner")), 3600);
+        assert_eq!(effective(Some("rust-implementer")), 1800); // falls back to default
+        assert_eq!(effective(None), 1800); // no agent_type falls back to default
+    }
+
+    #[test]
+    fn test_absence_timer_records_agent_type() {
+        // Verify that an AbsenceTimer can store agent_type for logging
+        let timer = AbsenceTimer {
+            id: Uuid::new_v4(),
+            started_at: Utc::now(),
+            deadline_secs: 7200,
+            expected_type: "TaskCompleted".to_string(),
+            task_id: Some(Uuid::new_v4()),
+            correlation_id: None,
+            agent_type: Some("overmind".to_string()),
+        };
+        assert_eq!(timer.agent_type.as_deref(), Some("overmind"));
+        assert_eq!(timer.deadline_secs, 7200);
     }
 }
