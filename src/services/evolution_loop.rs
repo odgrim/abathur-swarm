@@ -372,6 +372,7 @@ impl EvolutionLoop {
 
     /// Evaluate templates and trigger evolution if needed.
     pub async fn evaluate(&self) -> Vec<EvolutionEvent> {
+        self.expire_stale_refinements().await;
         let mut new_requests: Vec<RefinementRequest> = Vec::new();
 
         let events = {
@@ -583,6 +584,60 @@ impl EvolutionLoop {
                 }
 
         found
+    }
+
+    /// Expire stale refinement requests that have been Pending or InProgress
+    /// for longer than `stale_refinement_timeout_hours`.
+    ///
+    /// Returns the number of requests that were expired.
+    /// Returns 0 immediately if the timeout is configured as 0 (disabled).
+    pub async fn expire_stale_refinements(&self) -> usize {
+        if self.config.stale_refinement_timeout_hours == 0 {
+            return 0;
+        }
+
+        let cutoff =
+            Utc::now() - Duration::hours(self.config.stale_refinement_timeout_hours);
+        let mut expired_ids: Vec<Uuid> = Vec::new();
+
+        {
+            let mut state = self.state.write().await;
+            for request in &mut state.refinement_queue {
+                if matches!(
+                    request.status,
+                    RefinementStatus::Pending | RefinementStatus::InProgress
+                ) && request.created_at < cutoff
+                {
+                    request.status = RefinementStatus::Failed;
+                    expired_ids.push(request.id);
+                }
+            }
+        }
+
+        if let Some(ref repo) = self.refinement_repo {
+            for id in &expired_ids {
+                if let Err(e) = repo
+                    .update_status(*id, RefinementStatus::Failed)
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to persist Failed status for stale refinement {}: {}",
+                        id,
+                        e
+                    );
+                }
+            }
+        }
+
+        if !expired_ids.is_empty() {
+            tracing::info!(
+                "Expired {} stale refinement request(s) older than {}h",
+                expired_ids.len(),
+                self.config.stale_refinement_timeout_hours
+            );
+        }
+
+        expired_ids.len()
     }
 
     /// Mark a refinement request as completed.
@@ -1387,6 +1442,109 @@ mod tests {
             !has_regression,
             "Should NOT detect regression outside the detection window; events: {:?}",
             events.iter().map(|e| &e.trigger).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_expire_stale_refinements() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            refinement_threshold: 0.80,
+            stale_refinement_timeout_hours: 2,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // Manually insert two Pending refinement requests with different ages
+        let old_request = RefinementRequest {
+            id: Uuid::new_v4(),
+            template_name: "stale-agent".to_string(),
+            template_version: 1,
+            severity: RefinementSeverity::Minor,
+            trigger: EvolutionTrigger::LowSuccessRate,
+            stats: TemplateStats::new("stale-agent".to_string(), 1),
+            failed_task_ids: vec![],
+            created_at: Utc::now() - Duration::hours(3), // 3h old → should expire
+            status: RefinementStatus::Pending,
+        };
+        let fresh_request = RefinementRequest {
+            id: Uuid::new_v4(),
+            template_name: "fresh-agent".to_string(),
+            template_version: 1,
+            severity: RefinementSeverity::Minor,
+            trigger: EvolutionTrigger::LowSuccessRate,
+            stats: TemplateStats::new("fresh-agent".to_string(), 1),
+            failed_task_ids: vec![],
+            created_at: Utc::now() - Duration::hours(1), // 1h old → should NOT expire
+            status: RefinementStatus::Pending,
+        };
+
+        {
+            let mut state = evolution.state.write().await;
+            state.refinement_queue.push(old_request.clone());
+            state.refinement_queue.push(fresh_request.clone());
+        }
+
+        let expired = evolution.expire_stale_refinements().await;
+        assert_eq!(expired, 1, "only the 3h-old request should be expired");
+
+        let state = evolution.state.read().await;
+        let old = state
+            .refinement_queue
+            .iter()
+            .find(|r| r.id == old_request.id)
+            .unwrap();
+        assert_eq!(old.status, RefinementStatus::Failed);
+
+        let fresh = state
+            .refinement_queue
+            .iter()
+            .find(|r| r.id == fresh_request.id)
+            .unwrap();
+        assert_eq!(fresh.status, RefinementStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_expire_stale_refinements_disabled_when_zero() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            refinement_threshold: 0.80,
+            stale_refinement_timeout_hours: 0, // disabled
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // Insert a very old Pending request
+        let ancient_request = RefinementRequest {
+            id: Uuid::new_v4(),
+            template_name: "ancient-agent".to_string(),
+            template_version: 1,
+            severity: RefinementSeverity::Minor,
+            trigger: EvolutionTrigger::LowSuccessRate,
+            stats: TemplateStats::new("ancient-agent".to_string(), 1),
+            failed_task_ids: vec![],
+            created_at: Utc::now() - Duration::hours(1000), // 1000h old
+            status: RefinementStatus::Pending,
+        };
+
+        {
+            let mut state = evolution.state.write().await;
+            state.refinement_queue.push(ancient_request.clone());
+        }
+
+        let expired = evolution.expire_stale_refinements().await;
+        assert_eq!(expired, 0, "expiry disabled when timeout=0");
+
+        let state = evolution.state.read().await;
+        let req = state
+            .refinement_queue
+            .iter()
+            .find(|r| r.id == ancient_request.id)
+            .unwrap();
+        assert_eq!(
+            req.status,
+            RefinementStatus::Pending,
+            "request must remain Pending when expiry is disabled"
         );
     }
 }

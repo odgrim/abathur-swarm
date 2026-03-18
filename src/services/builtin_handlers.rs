@@ -197,6 +197,69 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedBlockHandler<T> {
 }
 
 // ============================================================================
+// AgentTerminationHandler
+// ============================================================================
+
+/// When a task fails, terminate the underlying agent subprocess and free
+/// the guardrail agent slot.
+///
+/// Without this, a timed-out task gets retried back to Ready while the
+/// original agent process is still running and holding a concurrency slot,
+/// starving the scheduler of capacity.
+pub struct AgentTerminationHandler {
+    substrate: Arc<dyn crate::domain::ports::Substrate>,
+    guardrails: Arc<crate::services::guardrails::Guardrails>,
+}
+
+impl AgentTerminationHandler {
+    pub fn new(
+        substrate: Arc<dyn crate::domain::ports::Substrate>,
+        guardrails: Arc<crate::services::guardrails::Guardrails>,
+    ) -> Self {
+        Self { substrate, guardrails }
+    }
+}
+
+#[async_trait]
+impl EventHandler for AgentTerminationHandler {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "AgentTerminationHandler".to_string(),
+            filter: EventFilter::new()
+                .categories(vec![EventCategory::Task])
+                .payload_types(vec!["TaskFailed".to_string()]),
+            priority: HandlerPriority::SYSTEM,
+            error_strategy: ErrorStrategy::LogAndContinue,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let task_id = match &event.payload {
+            EventPayload::TaskFailed { task_id, .. } => *task_id,
+            _ => return Ok(Reaction::None),
+        };
+
+        // Kill the agent subprocess (no-op if already exited)
+        if let Err(e) = self.substrate.terminate_by_task_id(task_id).await {
+            tracing::warn!(
+                task_id = %task_id,
+                error = %e,
+                "AgentTerminationHandler: failed to terminate agent subprocess"
+            );
+        }
+
+        // Immediately free the guardrail slot so the scheduler can
+        // dispatch new work without waiting for the killed process
+        // to fully wind down. Double-deregistration is safe (HashMap::remove
+        // on a missing key is a no-op).
+        self.guardrails.register_agent_end(&task_id.to_string()).await;
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
 // MemoryMaintenanceHandler
 // ============================================================================
 

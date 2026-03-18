@@ -43,6 +43,15 @@ pub trait Substrate: Send + Sync {
     /// Terminate a running session.
     async fn terminate(&self, session_id: Uuid) -> DomainResult<()>;
 
+    /// Terminate any running session associated with a task.
+    ///
+    /// Unlike `terminate()` which requires a session ID, this looks up the
+    /// session by task ID. Used by timeout handlers that only know the task ID.
+    /// Default implementation is a no-op for substrates that don't track sessions by task.
+    async fn terminate_by_task_id(&self, _task_id: Uuid) -> DomainResult<()> {
+        Ok(())
+    }
+
     /// Get the status of a session.
     async fn get_session(&self, session_id: Uuid) -> DomainResult<Option<SubstrateSession>>;
 

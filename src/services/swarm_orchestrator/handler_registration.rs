@@ -10,7 +10,8 @@ use crate::domain::ports::{
     AgentRepository, GoalRepository, MemoryRepository, TaskRepository, WorktreeRepository,
 };
 use crate::services::builtin_handlers::{
-    A2APollHandler, AdapterLifecycleSyncHandler, ConvergenceCancellationHandler,
+    A2APollHandler, AdapterLifecycleSyncHandler, AgentTerminationHandler,
+    ConvergenceCancellationHandler,
     ConvergenceCoordinationHandler,
     ConvergenceEscalationFeedbackHandler,
     ConvergenceEvolutionHandler, ConvergenceMemoryHandler, ConvergenceSLAPressureHandler,
@@ -98,6 +99,14 @@ where
         reactor
             .register(Arc::new(TaskFailedBlockHandler::new(
                 self.task_repo.clone(),
+            )))
+            .await;
+
+        // AgentTerminationHandler (SYSTEM) — kill agent subprocess and free guardrail slot on task failure
+        reactor
+            .register(Arc::new(AgentTerminationHandler::new(
+                self.substrate.clone(),
+                self.guardrails.clone(),
             )))
             .await;
 

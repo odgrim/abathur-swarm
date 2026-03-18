@@ -839,6 +839,31 @@ impl Substrate for ClaudeCodeSubstrate {
         Ok(())
     }
 
+    async fn terminate_by_task_id(&self, task_id: Uuid) -> DomainResult<()> {
+        // Find the session ID for this task by scanning sessions
+        let session_id = {
+            let sessions = self.sessions.read().await;
+            sessions.values()
+                .find(|s| s.task_id == task_id && s.status == SessionStatus::Active)
+                .map(|s| s.id)
+        };
+
+        if let Some(sid) = session_id {
+            tracing::info!(
+                task_id = %task_id,
+                session_id = %sid,
+                "Terminating agent subprocess for timed-out task"
+            );
+            self.terminate(sid).await
+        } else {
+            tracing::debug!(
+                task_id = %task_id,
+                "No active session found for task — agent may have already exited"
+            );
+            Ok(())
+        }
+    }
+
     async fn get_session(&self, session_id: Uuid) -> DomainResult<Option<SubstrateSession>> {
         let sessions = self.sessions.read().await;
         Ok(sessions.get(&session_id).cloned())
