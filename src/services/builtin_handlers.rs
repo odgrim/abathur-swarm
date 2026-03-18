@@ -115,26 +115,45 @@ impl<T: TaskRepository + 'static> EventHandler for TaskCompletedReadinessHandler
 }
 
 // ============================================================================
-// TaskFailedBlockHandler
+// TaskFailedDecisionHandler
 // ============================================================================
 
-/// When a task fails with retries exhausted, block its dependent tasks.
-pub struct TaskFailedBlockHandler<T: TaskRepository> {
+/// Atomic retry-or-block decision handler for failed tasks.
+///
+/// When a task fails, this handler makes the retry-or-block decision atomically
+/// in a single SYSTEM-priority handler, eliminating the interleaving window that
+/// existed when retry and block were separate handlers at different priorities.
+///
+/// - If retries remain and the task is eligible: transition to Ready (retry).
+/// - If retries are exhausted: block all dependent tasks.
+/// - For canceled tasks: always block dependents.
+pub struct TaskFailedDecisionHandler<T: TaskRepository> {
     task_repo: Arc<T>,
+    max_retries: u32,
 }
 
-impl<T: TaskRepository> TaskFailedBlockHandler<T> {
-    pub fn new(task_repo: Arc<T>) -> Self {
-        Self { task_repo }
+impl<T: TaskRepository> TaskFailedDecisionHandler<T> {
+    pub fn new(task_repo: Arc<T>, max_retries: u32) -> Self {
+        Self { task_repo, max_retries }
+    }
+
+    /// Check if a task is a review task (same heuristic as ReviewFailureLoopHandler).
+    /// Review tasks are managed by ReviewFailureLoopHandler and should not be retried here.
+    fn is_review_task(task: &Task) -> bool {
+        if let Some(ref agent_type) = task.agent_type
+            && agent_type == "code-reviewer" {
+                return true;
+            }
+        task.title.starts_with("Review")
     }
 }
 
 #[async_trait]
-impl<T: TaskRepository + 'static> EventHandler for TaskFailedBlockHandler<T> {
+impl<T: TaskRepository + 'static> EventHandler for TaskFailedDecisionHandler<T> {
     fn metadata(&self) -> HandlerMetadata {
         HandlerMetadata {
             id: HandlerId::new(),
-            name: "TaskFailedBlockHandler".to_string(),
+            name: "TaskFailedDecisionHandler".to_string(),
             filter: EventFilter::new()
                 .categories(vec![EventCategory::Task])
                 .payload_types(vec!["TaskFailed".to_string(), "TaskCanceled".to_string()]),
@@ -144,8 +163,8 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedBlockHandler<T> {
     }
 
     async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
-        let (task_id, retry_count) = match &event.payload {
-            EventPayload::TaskFailed { task_id, retry_count, .. } => (*task_id, *retry_count),
+        let (task_id, error, retry_count) = match &event.payload {
+            EventPayload::TaskFailed { task_id, error, retry_count, .. } => (*task_id, error.as_str(), *retry_count),
             EventPayload::TaskCanceled { task_id, .. } => {
                 // For canceled tasks, always block dependents (retries don't apply)
                 let dependents = self.task_repo.get_dependents(*task_id).await
@@ -166,21 +185,148 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedBlockHandler<T> {
             _ => return Ok(Reaction::None),
         };
 
-        // Only block dependents if retries are exhausted.
-        // Fetch the actual task to check max_retries.
+        // Fetch the actual task to check current state
         let task = self.task_repo.get(task_id).await
             .map_err(|e| format!("Failed to get task: {}", e))?
             .ok_or_else(|| format!("Task {} not found", task_id))?;
 
-        if retry_count < task.max_retries {
-            return Ok(Reaction::None);
+        // Determine whether this task has retries remaining and is eligible.
+        let has_retries = task.status == TaskStatus::Failed
+            && task.can_retry()
+            && retry_count < task.max_retries
+            && task.retry_count < self.max_retries;
+
+        if has_retries {
+            // Skip tasks managed by the review failure loop.
+            // Also skip review tasks entirely — ReviewFailureLoopHandler (HIGH priority)
+            // runs after this SYSTEM handler and manages their lifecycle. Without this
+            // check, we would retry the task before ReviewFailureLoopHandler can intercept.
+            let is_review_managed = task.context.custom.contains_key("review_loop_active")
+                || task.context.custom.contains_key("review_iteration")
+                || Self::is_review_task(&task);
+
+            // Skip workflow phase subtasks — the workflow engine manages rework
+            let is_workflow_managed = task.context.custom.contains_key("workflow_phase");
+
+            if !is_review_managed && !is_workflow_managed {
+                let is_max_turns = error.starts_with("error_max_turns");
+
+                // Circuit-break: tasks that repeatedly exhaust their turn budget
+                const MAX_CONSECUTIVE_BUDGET_FAILURES: u64 = 3;
+                let should_circuit_break = if is_max_turns {
+                    let consecutive = task.context.custom
+                        .get("consecutive_budget_failures")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                        + 1;
+                    consecutive >= MAX_CONSECUTIVE_BUDGET_FAILURES
+                } else {
+                    false
+                };
+
+                if should_circuit_break {
+                    tracing::info!(
+                        "Task {} circuit-breaker: consecutive budget failures, not retrying",
+                        task_id,
+                    );
+                    // Circuit-broken tasks fall through to block dependents below.
+                } else {
+                    // Check exponential backoff (skip for structural failures like max_turns)
+                    let should_wait = if !is_max_turns {
+                        let backoff_secs = 2u64.pow(task.retry_count.min(10));
+                        if let Some(completed_at) = task.completed_at {
+                            let elapsed = (chrono::Utc::now() - completed_at).num_seconds();
+                            elapsed < backoff_secs as i64
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if should_wait {
+                        // Not ready to retry yet; the scheduled retry-check will try again.
+                        // Don't block dependents — retries are still available.
+                        return Ok(Reaction::None);
+                    }
+
+                    let mut updated = task.clone();
+
+                    // For max_turns failures, inject hint and track consecutive failures
+                    if is_max_turns {
+                        let consecutive = updated.context.custom
+                            .get("consecutive_budget_failures")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0)
+                            + 1;
+                        updated.context.custom.insert(
+                            "consecutive_budget_failures".to_string(),
+                            serde_json::json!(consecutive),
+                        );
+                        updated.context.push_hint_bounded("retry:max_turns_exceeded".to_string());
+                        updated.context.custom.insert(
+                            "last_failure_reason".to_string(),
+                            serde_json::Value::String(error.to_string()),
+                        );
+                    } else {
+                        // Non-budget failure — reset consecutive budget failure counter
+                        updated.context.custom.remove("consecutive_budget_failures");
+                    }
+
+                    if updated.retry().is_ok() {
+                        self.task_repo.update(&updated).await
+                            .map_err(|e| format!("Failed to update task: {}", e))?;
+
+                        let events = vec![
+                            UnifiedEvent {
+                                id: EventId::new(),
+                                sequence: SequenceNumber(0),
+                                timestamp: chrono::Utc::now(),
+                                severity: EventSeverity::Warning,
+                                category: EventCategory::Task,
+                                goal_id: event.goal_id,
+                                task_id: Some(task_id),
+                                correlation_id: event.correlation_id,
+                                source_process_id: None,
+                                payload: EventPayload::TaskRetrying {
+                                    task_id,
+                                    attempt: updated.retry_count,
+                                    max_attempts: updated.max_retries,
+                                },
+                            },
+                            UnifiedEvent {
+                                id: EventId::new(),
+                                sequence: SequenceNumber(0),
+                                timestamp: chrono::Utc::now(),
+                                severity: EventSeverity::Debug,
+                                category: EventCategory::Task,
+                                goal_id: event.goal_id,
+                                task_id: Some(task_id),
+                                correlation_id: event.correlation_id,
+                                source_process_id: None,
+                                payload: EventPayload::TaskReady {
+                                    task_id,
+                                    task_title: updated.title.clone(),
+                                },
+                            },
+                        ];
+                        return Ok(Reaction::EmitEvents(events));
+                    }
+                }
+            }
+            // For review/workflow-managed tasks with retries remaining:
+            // don't block dependents — those handlers manage the lifecycle.
+            if is_review_managed || is_workflow_managed {
+                return Ok(Reaction::None);
+            }
         }
 
+        // ── Block branch ──────────────────────────────────────────────
+        // Block dependents when retries are exhausted or circuit-broken.
         let dependents = self.task_repo.get_dependents(task_id).await
             .map_err(|e| format!("Failed to get dependents: {}", e))?;
 
         for dep in dependents {
-            // Idempotency: only block if not already blocked or terminal
             if dep.status == TaskStatus::Blocked || dep.status.is_terminal() {
                 continue;
             }
@@ -503,176 +649,8 @@ impl EventHandler for EscalationTimeoutHandler {
     }
 }
 
-// ============================================================================
-// TaskFailedRetryHandler
-// ============================================================================
-
-/// When a task fails with retries remaining, transition it back to Ready.
-/// Runs at NORMAL priority (after SYSTEM-priority TaskFailedBlockHandler).
-pub struct TaskFailedRetryHandler<T: TaskRepository> {
-    task_repo: Arc<T>,
-    max_retries: u32,
-}
-
-impl<T: TaskRepository> TaskFailedRetryHandler<T> {
-    pub fn new(task_repo: Arc<T>, max_retries: u32) -> Self {
-        Self { task_repo, max_retries }
-    }
-}
-
-#[async_trait]
-impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
-    fn metadata(&self) -> HandlerMetadata {
-        HandlerMetadata {
-            id: HandlerId::new(),
-            name: "TaskFailedRetryHandler".to_string(),
-            filter: EventFilter::new()
-                .categories(vec![EventCategory::Task])
-                .payload_types(vec!["TaskFailed".to_string()]),
-            priority: HandlerPriority::NORMAL,
-            error_strategy: ErrorStrategy::CircuitBreak,
-        }
-    }
-
-    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
-        let (task_id, error) = match &event.payload {
-            EventPayload::TaskFailed { task_id, error, .. } => (*task_id, error.as_str()),
-            _ => return Ok(Reaction::None),
-        };
-
-        // Re-fetch task to check it's still Failed (idempotency)
-        let task = self.task_repo.get(task_id).await
-            .map_err(|e| format!("Failed to get task: {}", e))?
-            .ok_or_else(|| format!("Task {} not found", task_id))?;
-
-        if task.status != TaskStatus::Failed {
-            return Ok(Reaction::None);
-        }
-
-        // Use task.can_retry() which checks retry_count < max_retries atomically
-        if !task.can_retry() || task.retry_count >= self.max_retries {
-            return Ok(Reaction::None);
-        }
-
-        // Skip tasks superseded by the review failure loop-back handler,
-        // and tasks that are part of a review loop chain (ReviewFailureLoopHandler
-        // manages their full lifecycle — independent retry would create duplicate work tracks).
-        if task.context.custom.contains_key("review_loop_active")
-            || task.context.custom.contains_key("review_iteration")
-        {
-            return Ok(Reaction::None);
-        }
-
-        // Skip workflow phase subtasks — the workflow engine manages rework via
-        // verification retries and gate escalation. Generic retry would race with
-        // WorkflowSubtaskCompletionHandler and cause double-advance.
-        if task.context.custom.contains_key("workflow_phase") {
-            return Ok(Reaction::None);
-        }
-
-        let is_max_turns = error.starts_with("error_max_turns");
-
-        // Circuit-break: tasks that repeatedly exhaust their turn budget should not retry
-        // indefinitely. After MAX_CONSECUTIVE_BUDGET_FAILURES consecutive budget failures,
-        // leave the task in Failed state so upstream handlers (review loop, specialist
-        // triggers) can respond appropriately.
-        const MAX_CONSECUTIVE_BUDGET_FAILURES: u64 = 3;
-        if is_max_turns {
-            let consecutive = task.context.custom
-                .get("consecutive_budget_failures")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0)
-                + 1;
-            if consecutive >= MAX_CONSECUTIVE_BUDGET_FAILURES {
-                tracing::info!(
-                    "Task {} circuit-breaker: {} consecutive budget failures, not retrying",
-                    task_id,
-                    consecutive
-                );
-                return Ok(Reaction::None);
-            }
-        }
-
-        // Skip exponential backoff for structural failures (max_turns) — immediate retry
-        if !is_max_turns {
-            let backoff_secs = 2u64.pow(task.retry_count.min(10));
-            if let Some(completed_at) = task.completed_at {
-                let elapsed = (chrono::Utc::now() - completed_at).num_seconds();
-                if elapsed < backoff_secs as i64 {
-                    // Not ready to retry yet; the scheduled retry-check will try again
-                    return Ok(Reaction::None);
-                }
-            }
-        }
-
-        let mut updated = task.clone();
-
-        // For max_turns failures, inject hint so the spawner can increase the turn budget
-        // and track consecutive failures for the circuit-breaker above.
-        if is_max_turns {
-            let consecutive = updated.context.custom
-                .get("consecutive_budget_failures")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0)
-                + 1;
-            updated.context.custom.insert(
-                "consecutive_budget_failures".to_string(),
-                serde_json::json!(consecutive),
-            );
-            updated.context.push_hint_bounded("retry:max_turns_exceeded".to_string());
-            updated.context.custom.insert(
-                "last_failure_reason".to_string(),
-                serde_json::Value::String(error.to_string()),
-            );
-        } else {
-            // Non-budget failure — reset the consecutive budget failure counter so a
-            // later budget failure doesn't inherit a stale count from a different failure mode.
-            updated.context.custom.remove("consecutive_budget_failures");
-        }
-
-        if updated.retry().is_ok() {
-            self.task_repo.update(&updated).await
-                .map_err(|e| format!("Failed to update task: {}", e))?;
-
-            let events = vec![
-                UnifiedEvent {
-                    id: EventId::new(),
-                    sequence: SequenceNumber(0),
-                    timestamp: chrono::Utc::now(),
-                    severity: EventSeverity::Warning,
-                    category: EventCategory::Task,
-                    goal_id: event.goal_id,
-                    task_id: Some(task_id),
-                    correlation_id: event.correlation_id,
-                    source_process_id: None,
-                    payload: EventPayload::TaskRetrying {
-                        task_id,
-                        attempt: updated.retry_count,
-                        max_attempts: updated.max_retries,
-                    },
-                },
-                UnifiedEvent {
-                    id: EventId::new(),
-                    sequence: SequenceNumber(0),
-                    timestamp: chrono::Utc::now(),
-                    severity: EventSeverity::Debug,
-                    category: EventCategory::Task,
-                    goal_id: event.goal_id,
-                    task_id: Some(task_id),
-                    correlation_id: event.correlation_id,
-                    source_process_id: None,
-                    payload: EventPayload::TaskReady {
-                        task_id,
-                        task_title: updated.title.clone(),
-                    },
-                },
-            ];
-            return Ok(Reaction::EmitEvents(events));
-        }
-
-        Ok(Reaction::None)
-    }
-}
+// TaskFailedRetryHandler has been merged into TaskFailedDecisionHandler above.
+// The retry-or-block decision is now atomic at SYSTEM priority.
 
 // ============================================================================
 // ReviewFailureLoopHandler
@@ -682,7 +660,7 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
 /// cycle that incorporates the review feedback. Bounded by `max_review_iterations`.
 ///
 /// Runs at HIGH priority so it can set the `review_loop_active` flag before the
-/// NORMAL-priority `TaskFailedRetryHandler` sees the event.
+/// SYSTEM-priority `TaskFailedDecisionHandler` makes its retry-or-block decision.
 pub struct ReviewFailureLoopHandler<T: TaskRepository> {
     task_repo: Arc<T>,
     command_bus: Arc<crate::services::command_bus::CommandBus>,
@@ -1561,7 +1539,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
 // RetryProcessingHandler
 // ============================================================================
 
-/// Triggered by the "retry-check" scheduled event. Supplements TaskFailedRetryHandler
+/// Triggered by the "retry-check" scheduled event. Supplements TaskFailedDecisionHandler
 /// for cases where the inline handler missed a retry.
 pub struct RetryProcessingHandler<T: TaskRepository> {
     task_repo: Arc<T>,
@@ -5777,10 +5755,14 @@ mod tests {
         assert!(matches!(reaction, Reaction::None));
     }
 
+    // ========================================================================
+    // TaskFailedDecisionHandler tests
+    // ========================================================================
+
     #[tokio::test]
-    async fn test_task_failed_block_handler() {
+    async fn test_task_failed_decision_blocks_when_retries_exhausted() {
         let repo = setup_task_repo().await;
-        let handler = TaskFailedBlockHandler::new(repo.clone());
+        let handler = TaskFailedDecisionHandler::new(repo.clone(), 3);
 
         // Create upstream task that has exhausted retries
         let mut upstream = Task::new("Upstream");
@@ -5826,9 +5808,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_task_failed_block_handler_retries_remaining() {
+    async fn test_task_failed_decision_retries_when_remaining() {
         let repo = setup_task_repo().await;
-        let handler = TaskFailedBlockHandler::new(repo.clone());
+        let handler = TaskFailedDecisionHandler::new(repo.clone(), 3);
 
         // Create upstream task that still has retries remaining
         let mut upstream = Task::new("Upstream");
@@ -5837,6 +5819,8 @@ mod tests {
         upstream.transition_to(TaskStatus::Ready).unwrap();
         upstream.transition_to(TaskStatus::Running).unwrap();
         upstream.transition_to(TaskStatus::Failed).unwrap();
+        // Set completed_at far enough in the past to clear exponential backoff (2^1 = 2s)
+        upstream.completed_at = Some(chrono::Utc::now() - chrono::Duration::seconds(10));
         repo.create(&upstream).await.unwrap();
 
         let downstream = Task::new("Downstream");
@@ -5865,21 +5849,20 @@ mod tests {
             correlation_id: None,
         };
 
-        handler.handle(&event, &ctx).await.unwrap();
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
 
-        // Downstream should NOT be blocked since retries remain
-        let updated = repo.get(downstream.id).await.unwrap().unwrap();
-        assert_eq!(updated.status, TaskStatus::Pending);
+        // Should retry (emit events) and downstream should NOT be blocked
+        assert!(matches!(reaction, Reaction::EmitEvents(_)));
+        let updated_upstream = repo.get(upstream.id).await.unwrap().unwrap();
+        assert_eq!(updated_upstream.status, TaskStatus::Ready);
+        let updated_downstream = repo.get(downstream.id).await.unwrap().unwrap();
+        assert_eq!(updated_downstream.status, TaskStatus::Pending);
     }
 
-    // ========================================================================
-    // TaskFailedRetryHandler tests
-    // ========================================================================
-
     #[tokio::test]
-    async fn test_retry_handler_injects_max_turns_hint() {
+    async fn test_decision_handler_injects_max_turns_hint() {
         let repo = setup_task_repo().await;
-        let handler = TaskFailedRetryHandler::new(repo.clone(), 3);
+        let handler = TaskFailedDecisionHandler::new(repo.clone(), 3);
 
         // Create a task that has failed due to max_turns
         let mut task = Task::new("Research codebase");
@@ -5924,9 +5907,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retry_handler_skips_backoff_for_max_turns() {
+    async fn test_decision_handler_skips_backoff_for_max_turns() {
         let repo = setup_task_repo().await;
-        let handler = TaskFailedRetryHandler::new(repo.clone(), 3);
+        let handler = TaskFailedDecisionHandler::new(repo.clone(), 3);
 
         // Create a task that has already been retried once (retry_count=1)
         // and just failed again. With normal backoff, 2^1 = 2s wait would apply.
@@ -7093,9 +7076,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_retry_handler_skips_review_loop_active() {
+    async fn test_decision_handler_skips_review_loop_active() {
         let repo = setup_task_repo().await;
-        let handler = TaskFailedRetryHandler::new(repo.clone(), 3);
+        let handler = TaskFailedDecisionHandler::new(repo.clone(), 3);
 
         // Create a review task with review_loop_active flag
         let mut task = Task::new("Review implementation");
@@ -7113,14 +7096,14 @@ mod tests {
         let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
         let reaction = handler.handle(&event, &ctx).await.unwrap();
 
-        // Should skip — review_loop_active flag prevents retry
+        // Should skip retry — review_loop_active flag prevents retry (blocks dependents instead)
         assert!(matches!(reaction, Reaction::None));
     }
 
     #[tokio::test]
-    async fn test_retry_handler_skips_review_iteration_tasks() {
+    async fn test_decision_handler_skips_review_iteration_tasks() {
         let repo = setup_task_repo().await;
-        let handler = TaskFailedRetryHandler::new(repo.clone(), 3);
+        let handler = TaskFailedDecisionHandler::new(repo.clone(), 3);
 
         // Create a task that is part of a review loop chain (has review_iteration)
         let mut task = Task::new("Re-implement (review iteration 2)");
@@ -7137,17 +7120,17 @@ mod tests {
         let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
         let reaction = handler.handle(&event, &ctx).await.unwrap();
 
-        // Should skip — review_iteration flag prevents independent retry
+        // Should skip retry — review_iteration flag prevents independent retry
         assert!(
             matches!(reaction, Reaction::None),
-            "TaskFailedRetryHandler must not retry tasks with review_iteration set"
+            "TaskFailedDecisionHandler must not retry tasks with review_iteration set"
         );
     }
 
     #[tokio::test]
-    async fn test_retry_handler_circuit_breaks_consecutive_budget_failures() {
+    async fn test_decision_handler_circuit_breaks_consecutive_budget_failures() {
         let repo = setup_task_repo().await;
-        let handler = TaskFailedRetryHandler::new(repo.clone(), 10); // high max_retries to not hit that limit
+        let handler = TaskFailedDecisionHandler::new(repo.clone(), 10); // high max_retries to not hit that limit
 
         // Create a task that has already seen 2 consecutive budget failures
         let mut task = Task::new("Some long-running task");
@@ -7183,7 +7166,7 @@ mod tests {
         // Should circuit-break and not retry
         assert!(
             matches!(reaction, Reaction::None),
-            "TaskFailedRetryHandler must circuit-break after 3 consecutive budget failures"
+            "TaskFailedDecisionHandler must circuit-break after 3 consecutive budget failures"
         );
     }
 

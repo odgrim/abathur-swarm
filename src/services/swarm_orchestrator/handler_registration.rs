@@ -29,7 +29,7 @@ use crate::services::builtin_handlers::{
     ReviewFailureLoopHandler, RetryProcessingHandler, SpecialistCheckHandler,
     StartupCatchUpHandler, StatsUpdateHandler, SystemStallDetectorHandler,
     TaskCompletionLearningHandler,
-    TaskCompletedReadinessHandler, TaskFailedBlockHandler, TaskFailedRetryHandler,
+    TaskCompletedReadinessHandler, TaskFailedDecisionHandler,
     TaskOutcomeMemoryHandler,
     TaskReadySpawnHandler, TaskScheduleHandler, TaskSLAEnforcementHandler,
     TriggerCatchupHandler, WatermarkAuditHandler,
@@ -95,10 +95,11 @@ where
         // WorkflowAutoAdvanceHandler — REMOVED (Overmind owns first advance via MCP tools)
         // WorkflowPhaseReadyHandler — REMOVED (raced with Overmind, created agentless subtasks)
 
-        // TaskFailedBlockHandler (SYSTEM) — block dependents on failure/cancel
+        // TaskFailedDecisionHandler (SYSTEM) — atomic retry-or-block decision on failure/cancel
         reactor
-            .register(Arc::new(TaskFailedBlockHandler::new(
+            .register(Arc::new(TaskFailedDecisionHandler::new(
                 self.task_repo.clone(),
+                self.config.max_task_retries,
             )))
             .await;
 
@@ -140,14 +141,6 @@ where
                 )))
                 .await;
         }
-
-        // TaskFailedRetryHandler (NORMAL) — retry after failure if retries remain
-        reactor
-            .register(Arc::new(TaskFailedRetryHandler::new(
-                self.task_repo.clone(),
-                self.config.max_task_retries,
-            )))
-            .await;
 
         // GoalCreatedHandler (NORMAL) — refresh active goals cache
         reactor
