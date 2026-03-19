@@ -124,7 +124,7 @@ impl TaskRepository for SqliteTaskRepository {
                source_type = ?, source_ref = ?,
                version = ?, updated_at = ?, started_at = ?, completed_at = ?, deadline = ?,
                execution_mode = ?, trajectory_id = ?, task_type = ?
-               WHERE id = ?"#
+               WHERE id = ? AND version = ?"#
         )
         .bind(task.parent_id.map(|id| id.to_string()))
         .bind(&task.title)
@@ -148,12 +148,30 @@ impl TaskRepository for SqliteTaskRepository {
         .bind(&execution_mode_json)
         .bind(task.trajectory_id.map(|id| id.to_string()))
         .bind(task.task_type.as_str())
-        .bind(task.id.to_string());
+        .bind(task.id.to_string())
+        .bind(task.loaded_version.get() as i64);
         let result = exec_tx!(&self.pool, update_q, execute)?;
 
         if result.rows_affected() == 0 {
+            // Distinguish between "task doesn't exist" and "version mismatch"
+            let exists: Option<(i64,)> = sqlx::query_as(
+                "SELECT COUNT(*) FROM tasks WHERE id = ?"
+            )
+            .bind(task.id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+
+            if exists.map_or(false, |(count,)| count > 0) {
+                return Err(DomainError::ConcurrencyConflict {
+                    entity: "Task".to_string(),
+                    id: task.id.to_string(),
+                });
+            }
             return Err(DomainError::TaskNotFound(task.id));
         }
+
+        // Sync loaded_version so subsequent updates on the same object succeed
+        task.loaded_version.set(task.version);
 
         Ok(())
     }
@@ -519,6 +537,7 @@ impl TryFrom<TaskRow> for Task {
             execution_mode,
             trajectory_id,
             task_type,
+            loaded_version: crate::domain::models::VersionTag::new(row.version as u64),
         })
     }
 }
@@ -672,6 +691,90 @@ mod tests {
 
         let result = repo.claim_task_atomic(task.id, "overmind").await.unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_update_with_correct_version_succeeds() {
+        let repo = setup_test_repo().await;
+        let task = Task::with_title("Versioned", "Desc");
+        repo.create(&task).await.unwrap();
+
+        // Fetch (loaded_version == 1), mutate, update
+        let mut fetched = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(fetched.loaded_version.get(), 1);
+        fetched.title = "Updated title".to_string();
+        fetched.version += 1; // caller bumps version before saving
+        repo.update(&fetched).await.unwrap();
+
+        let after = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(after.title, "Updated title");
+        assert_eq!(after.version, 2);
+        assert_eq!(after.loaded_version.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_update_with_stale_version_returns_concurrency_conflict() {
+        let repo = setup_test_repo().await;
+        let task = Task::with_title("Stale", "Desc");
+        repo.create(&task).await.unwrap();
+
+        // Two readers both see version 1
+        let mut reader_a = repo.get(task.id).await.unwrap().unwrap();
+        let mut reader_b = repo.get(task.id).await.unwrap().unwrap();
+
+        // Reader A writes first — succeeds
+        reader_a.title = "A wins".to_string();
+        reader_a.version += 1;
+        repo.update(&reader_a).await.unwrap();
+
+        // Reader B still has loaded_version == 1, DB is now version 2
+        reader_b.title = "B loses".to_string();
+        reader_b.version += 1;
+        let result = repo.update(&reader_b).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DomainError::ConcurrencyConflict { .. }),
+            "Expected ConcurrencyConflict, got: {:?}",
+            err
+        );
+
+        // DB still has reader_a's write
+        let after = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(after.title, "A wins");
+    }
+
+    #[tokio::test]
+    async fn test_update_nonexistent_returns_task_not_found() {
+        let repo = setup_test_repo().await;
+
+        let mut ghost = Task::with_title("Ghost", "Desc");
+        ghost.version = 1;
+        // Never created — should return TaskNotFound
+        let result = repo.update(&ghost).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DomainError::TaskNotFound(_)),
+            "Expected TaskNotFound, got: {:?}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_metadata_only_succeeds_with_correct_version() {
+        let repo = setup_test_repo().await;
+        let task = Task::with_title("Meta", "Desc");
+        repo.create(&task).await.unwrap();
+
+        let mut fetched = repo.get(task.id).await.unwrap().unwrap();
+        // Metadata-only change (no status transition, no version bump by domain logic)
+        fetched.description = "New description".to_string();
+        // Still must save with same version (no domain version bump)
+        repo.update(&fetched).await.unwrap();
+
+        let after = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(after.description, "New description");
     }
 
     #[tokio::test]

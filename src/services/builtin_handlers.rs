@@ -4410,32 +4410,28 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceCoordinationHandle
         } else {
             // All siblings completed successfully — complete the parent
             let mut updated_parent = parent.clone();
-            // Go through Validating first
-            if updated_parent.transition_to(TaskStatus::Validating).is_ok() {
+            // Go through Validating then Complete in one DB write
+            if updated_parent.transition_to(TaskStatus::Validating).is_ok()
+                && updated_parent.transition_to(TaskStatus::Complete).is_ok()
+            {
                 self.task_repo.update(&updated_parent).await
-                    .map_err(|e| format!("Failed to update parent to validating: {}", e))?;
+                    .map_err(|e| format!("Failed to update parent to complete: {}", e))?;
 
-                // Then complete
-                if updated_parent.transition_to(TaskStatus::Complete).is_ok() {
-                    self.task_repo.update(&updated_parent).await
-                        .map_err(|e| format!("Failed to update parent to complete: {}", e))?;
-
-                    new_events.push(UnifiedEvent {
-                        id: EventId::new(),
-                        sequence: SequenceNumber(0),
-                        timestamp: chrono::Utc::now(),
-                        severity: EventSeverity::Info,
-                        category: EventCategory::Task,
-                        goal_id: event.goal_id,
-                        task_id: Some(parent_id),
-                        correlation_id: event.correlation_id,
-                        source_process_id: None,
-                        payload: EventPayload::TaskCompleted {
-                            task_id: parent_id,
-                            tokens_used: 0,
-                        },
-                    });
-                }
+                new_events.push(UnifiedEvent {
+                    id: EventId::new(),
+                    sequence: SequenceNumber(0),
+                    timestamp: chrono::Utc::now(),
+                    severity: EventSeverity::Info,
+                    category: EventCategory::Task,
+                    goal_id: event.goal_id,
+                    task_id: Some(parent_id),
+                    correlation_id: event.correlation_id,
+                    source_process_id: None,
+                    payload: EventPayload::TaskCompleted {
+                        task_id: parent_id,
+                        tokens_used: 0,
+                    },
+                });
             }
         }
 

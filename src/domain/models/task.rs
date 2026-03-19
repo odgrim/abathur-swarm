@@ -5,7 +5,53 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
+
+/// Interior-mutable version tag used for optimistic locking.
+///
+/// Wraps an `AtomicU64` so that the repository `update()` method can sync
+/// `loaded_version` to the written `version` through a shared `&Task` reference,
+/// without requiring `&mut Task`.
+pub struct VersionTag(AtomicU64);
+
+impl VersionTag {
+    pub fn new(v: u64) -> Self {
+        Self(AtomicU64::new(v))
+    }
+
+    pub fn get(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    pub fn set(&self, v: u64) {
+        self.0.store(v, Ordering::Relaxed);
+    }
+}
+
+impl Default for VersionTag {
+    fn default() -> Self {
+        Self::new(1)
+    }
+}
+
+impl Clone for VersionTag {
+    fn clone(&self) -> Self {
+        Self::new(self.get())
+    }
+}
+
+impl std::fmt::Debug for VersionTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("VersionTag").field(&self.get()).finish()
+    }
+}
+
+impl PartialEq for VersionTag {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
+}
 
 /// Status of a task in the execution pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -463,6 +509,11 @@ pub struct Task {
     pub trajectory_id: Option<Uuid>,
     /// What kind of work this task represents (standard, verification, research, review).
     pub task_type: TaskType,
+    /// The DB version at read time, used for optimistic locking.
+    /// This is never serialized/deserialized — it is set when loading from the DB
+    /// and compared in the UPDATE WHERE clause to detect concurrent modifications.
+    #[serde(skip)]
+    pub loaded_version: VersionTag,
 }
 
 impl Task {
@@ -497,6 +548,7 @@ impl Task {
             execution_mode: ExecutionMode::default(),
             trajectory_id: None,
             task_type: TaskType::default(),
+            loaded_version: VersionTag::new(1),
         }
     }
 
@@ -529,6 +581,7 @@ impl Task {
             execution_mode: ExecutionMode::default(),
             trajectory_id: None,
             task_type: TaskType::default(),
+            loaded_version: VersionTag::new(1),
         }
     }
 
