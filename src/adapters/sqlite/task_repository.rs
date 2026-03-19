@@ -302,6 +302,18 @@ impl TaskRepository for SqliteTaskRepository {
     }
 
     async fn add_dependency(&self, task_id: Uuid, depends_on: Uuid) -> DomainResult<()> {
+        // Self-dependency is always a cycle
+        if task_id == depends_on {
+            return Err(DomainError::DependencyCycle(task_id));
+        }
+
+        // Check if adding this edge would create a cycle.
+        // A cycle exists if `depends_on` already transitively depends on `task_id`,
+        // because adding "task_id depends on depends_on" would close the loop.
+        if self.would_create_cycle(task_id, depends_on).await? {
+            return Err(DomainError::DependencyCycle(task_id));
+        }
+
         let dep_q = sqlx::query(
             "INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_id) VALUES (?, ?)"
         )
@@ -431,6 +443,30 @@ impl TaskRepository for SqliteTaskRepository {
 }
 
 impl SqliteTaskRepository {
+    /// Check whether adding edge `task_id -> depends_on` would create a cycle.
+    ///
+    /// Uses a recursive CTE to walk the transitive dependencies of `depends_on`.
+    /// If `task_id` is reachable from `depends_on`, then the proposed edge would
+    /// close a loop.
+    async fn would_create_cycle(&self, task_id: Uuid, depends_on: Uuid) -> DomainResult<bool> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            r#"WITH RECURSIVE reachable(id) AS (
+                SELECT ?1
+                UNION
+                SELECT td.depends_on_id
+                FROM task_dependencies td
+                INNER JOIN reachable r ON td.task_id = r.id
+            )
+            SELECT 1 FROM reachable WHERE id = ?2 LIMIT 1"#,
+        )
+        .bind(depends_on.to_string())
+        .bind(task_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.is_some())
+    }
+
     async fn load_dependencies(&self, task: &mut Task) -> DomainResult<()> {
         let load_deps_q = sqlx::query_as(
             "SELECT depends_on_id FROM task_dependencies WHERE task_id = ?"
@@ -777,6 +813,102 @@ mod tests {
 
         let refreshed = repo.get(task.id).await.unwrap().unwrap();
         assert_eq!(refreshed.agent_type.as_deref(), Some("specialist"));
+    }
+
+    #[tokio::test]
+    async fn test_cycle_detection_self_dependency() {
+        let repo = setup_test_repo().await;
+        let task = Task::with_title("Self", "Desc");
+        repo.create(&task).await.unwrap();
+
+        let result = repo.add_dependency(task.id, task.id).await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), DomainError::DependencyCycle(_)),
+            "Expected DependencyCycle for self-dependency"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cycle_detection_direct_ab_ba() {
+        let repo = setup_test_repo().await;
+
+        let a = Task::with_title("A", "Desc");
+        let b = Task::with_title("B", "Desc");
+        repo.create(&a).await.unwrap();
+        repo.create(&b).await.unwrap();
+
+        // A depends on B — should succeed
+        repo.add_dependency(a.id, b.id).await.unwrap();
+
+        // B depends on A — would create cycle A->B->A
+        let result = repo.add_dependency(b.id, a.id).await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), DomainError::DependencyCycle(_)),
+            "Expected DependencyCycle for direct A->B->A cycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cycle_detection_transitive_abc() {
+        let repo = setup_test_repo().await;
+
+        let a = Task::with_title("A", "Desc");
+        let b = Task::with_title("B", "Desc");
+        let c = Task::with_title("C", "Desc");
+        repo.create(&a).await.unwrap();
+        repo.create(&b).await.unwrap();
+        repo.create(&c).await.unwrap();
+
+        // A depends on B, B depends on C — both fine
+        repo.add_dependency(a.id, b.id).await.unwrap();
+        repo.add_dependency(b.id, c.id).await.unwrap();
+
+        // C depends on A — would create cycle A->B->C->A
+        let result = repo.add_dependency(c.id, a.id).await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), DomainError::DependencyCycle(_)),
+            "Expected DependencyCycle for transitive A->B->C->A cycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cycle_detection_allows_valid_dag() {
+        let repo = setup_test_repo().await;
+
+        let a = Task::with_title("A", "Desc");
+        let b = Task::with_title("B", "Desc");
+        let c = Task::with_title("C", "Desc");
+        repo.create(&a).await.unwrap();
+        repo.create(&b).await.unwrap();
+        repo.create(&c).await.unwrap();
+
+        // Diamond: A depends on B, A depends on C, B depends on C — valid DAG
+        repo.add_dependency(a.id, b.id).await.unwrap();
+        repo.add_dependency(a.id, c.id).await.unwrap();
+        repo.add_dependency(b.id, c.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cycle_detection_at_create_time() {
+        let repo = setup_test_repo().await;
+
+        let a = Task::with_title("A", "Desc");
+        repo.create(&a).await.unwrap();
+
+        // Create B with a dependency on A
+        let b = Task::with_title("B", "Desc").with_dependency(a.id);
+        repo.create(&b).await.unwrap();
+
+        // Now try to add A depends on B — would create cycle
+        let result = repo.add_dependency(a.id, b.id).await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), DomainError::DependencyCycle(_)),
+            "Expected DependencyCycle when adding reverse dependency"
+        );
     }
 
     #[tokio::test]
