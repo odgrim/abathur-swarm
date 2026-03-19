@@ -585,6 +585,9 @@ impl<T: TaskRepository> TaskService<T> {
         // Check if task is ready
         self.check_and_update_readiness(&mut task).await?;
         self.task_repo.update(&task).await?;
+        // Sync loaded_version so the returned task can be updated again
+        // without a re-fetch (optimistic locking bookkeeping).
+        task.loaded_version.set(task.version);
 
         // Collect TaskSubmitted event
         let goal_id = task.parent_id.unwrap_or_else(Uuid::new_v4);

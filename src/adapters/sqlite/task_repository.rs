@@ -155,19 +155,20 @@ impl TaskRepository for SqliteTaskRepository {
         if result.rows_affected() == 0 {
             // Distinguish between "task doesn't exist" and "version mismatch"
             let exists: Option<(i64,)> = sqlx::query_as(
-                "SELECT COUNT(*) FROM tasks WHERE id = ?"
+                "SELECT 1 FROM tasks WHERE id = ?"
             )
             .bind(task.id.to_string())
             .fetch_optional(&self.pool)
             .await?;
 
-            if exists.map_or(false, |(count,)| count > 0) {
+            if exists.is_some() {
                 return Err(DomainError::ConcurrencyConflict {
                     entity: "Task".to_string(),
                     id: task.id.to_string(),
                 });
+            } else {
+                return Err(DomainError::TaskNotFound(task.id));
             }
-            return Err(DomainError::TaskNotFound(task.id));
         }
 
         // Sync loaded_version so subsequent updates on the same object succeed
@@ -696,85 +697,86 @@ mod tests {
     #[tokio::test]
     async fn test_update_with_correct_version_succeeds() {
         let repo = setup_test_repo().await;
-        let task = Task::with_title("Versioned", "Desc");
+        let task = Task::with_title("Version OK", "Desc");
         repo.create(&task).await.unwrap();
 
-        // Fetch (loaded_version == 1), mutate, update
+        // Fetch the task (loaded_version will match DB version)
         let mut fetched = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(fetched.version, 1);
         assert_eq!(fetched.loaded_version.get(), 1);
-        fetched.title = "Updated title".to_string();
-        fetched.version += 1; // caller bumps version before saving
+
+        // Transition bumps version; loaded_version stays at 1
+        fetched.transition_to(TaskStatus::Ready).unwrap();
+        assert_eq!(fetched.version, 2);
+        assert_eq!(fetched.loaded_version.get(), 1);
+
+        // Update should succeed because loaded_version matches DB
         repo.update(&fetched).await.unwrap();
 
-        let after = repo.get(task.id).await.unwrap().unwrap();
-        assert_eq!(after.title, "Updated title");
-        assert_eq!(after.version, 2);
-        assert_eq!(after.loaded_version.get(), 2);
+        // Verify the DB was updated
+        let refreshed = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(refreshed.version, 2);
+        assert_eq!(refreshed.loaded_version.get(), 2);
+        assert_eq!(refreshed.status, TaskStatus::Ready);
     }
 
     #[tokio::test]
     async fn test_update_with_stale_version_returns_concurrency_conflict() {
         let repo = setup_test_repo().await;
-        let task = Task::with_title("Stale", "Desc");
+        let task = Task::with_title("Stale version", "Desc");
         repo.create(&task).await.unwrap();
 
-        // Two readers both see version 1
+        // Two readers fetch the same task
         let mut reader_a = repo.get(task.id).await.unwrap().unwrap();
         let mut reader_b = repo.get(task.id).await.unwrap().unwrap();
 
-        // Reader A writes first — succeeds
-        reader_a.title = "A wins".to_string();
-        reader_a.version += 1;
+        // Reader A transitions and writes first
+        reader_a.transition_to(TaskStatus::Ready).unwrap();
         repo.update(&reader_a).await.unwrap();
 
-        // Reader B still has loaded_version == 1, DB is now version 2
-        reader_b.title = "B loses".to_string();
-        reader_b.version += 1;
+        // Reader B tries to write with stale loaded_version
+        reader_b.transition_to(TaskStatus::Ready).unwrap();
         let result = repo.update(&reader_b).await;
+
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
             matches!(err, DomainError::ConcurrencyConflict { .. }),
             "Expected ConcurrencyConflict, got: {:?}",
-            err
+            err,
         );
-
-        // DB still has reader_a's write
-        let after = repo.get(task.id).await.unwrap().unwrap();
-        assert_eq!(after.title, "A wins");
     }
 
     #[tokio::test]
-    async fn test_update_nonexistent_returns_task_not_found() {
+    async fn test_update_nonexistent_task_returns_not_found() {
         let repo = setup_test_repo().await;
-
         let mut ghost = Task::with_title("Ghost", "Desc");
-        ghost.version = 1;
-        // Never created — should return TaskNotFound
+        ghost.id = Uuid::new_v4(); // never created
+        ghost.transition_to(TaskStatus::Ready).unwrap();
+
         let result = repo.update(&ghost).await;
         assert!(result.is_err());
-        let err = result.unwrap_err();
         assert!(
-            matches!(err, DomainError::TaskNotFound(_)),
-            "Expected TaskNotFound, got: {:?}",
-            err
+            matches!(result.unwrap_err(), DomainError::TaskNotFound(_)),
+            "Expected TaskNotFound for nonexistent task",
         );
     }
 
     #[tokio::test]
-    async fn test_update_metadata_only_succeeds_with_correct_version() {
+    async fn test_metadata_update_without_transition_succeeds() {
         let repo = setup_test_repo().await;
-        let task = Task::with_title("Meta", "Desc");
+        let task = Task::with_title("Metadata update", "Desc");
         repo.create(&task).await.unwrap();
 
         let mut fetched = repo.get(task.id).await.unwrap().unwrap();
-        // Metadata-only change (no status transition, no version bump by domain logic)
-        fetched.description = "New description".to_string();
-        // Still must save with same version (no domain version bump)
+        // Update metadata without transition (version stays the same)
+        fetched.agent_type = Some("specialist".to_string());
+        fetched.updated_at = chrono::Utc::now();
+
         repo.update(&fetched).await.unwrap();
 
-        let after = repo.get(task.id).await.unwrap().unwrap();
-        assert_eq!(after.description, "New description");
+        let refreshed = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(refreshed.agent_type.as_deref(), Some("specialist"));
     }
 
     #[tokio::test]

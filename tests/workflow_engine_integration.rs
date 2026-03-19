@@ -327,6 +327,7 @@ async fn test_handle_phase_complete_with_verification() {
     let mut impl_task = repo.get(implement.id).await.unwrap().unwrap();
     let _ = impl_task.transition_to(TaskStatus::Running);
     repo.update(&impl_task).await.unwrap();
+    let mut impl_task = repo.get(implement.id).await.unwrap().unwrap();
     let _ = impl_task.transition_to(TaskStatus::Complete);
     impl_task.completed_at = Some(chrono::Utc::now());
     repo.update(&impl_task).await.unwrap();
@@ -412,6 +413,7 @@ async fn test_fan_out_to_aggregation() {
         let mut sub = repo.get(*id).await.unwrap().unwrap();
         let _ = sub.transition_to(TaskStatus::Running);
         repo.update(&sub).await.unwrap();
+        let mut sub = repo.get(*id).await.unwrap().unwrap();
         let _ = sub.transition_to(TaskStatus::Complete);
         sub.completed_at = Some(chrono::Utc::now());
         repo.update(&sub).await.unwrap();
@@ -465,6 +467,7 @@ async fn test_convergent_skip_verification() {
     let mut sub = repo.get(subtask.id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Running);
     repo.update(&sub).await.unwrap();
+    let mut sub = repo.get(subtask.id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Complete);
     sub.completed_at = Some(chrono::Utc::now());
     repo.update(&sub).await.unwrap();
@@ -529,6 +532,7 @@ async fn test_convergent_skip_partial_accepted() {
     let mut sub = repo.get(subtask.id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Running);
     repo.update(&sub).await.unwrap();
+    let mut sub = repo.get(subtask.id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Complete);
     sub.completed_at = Some(chrono::Utc::now());
     repo.update(&sub).await.unwrap();
@@ -770,6 +774,7 @@ async fn test_advance_returns_completed_not_error() {
     let mut sub = repo.get(subtask.id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Running);
     repo.update(&sub).await.unwrap();
+    let mut sub = repo.get(subtask.id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Complete);
     sub.completed_at = Some(chrono::Utc::now());
     repo.update(&sub).await.unwrap();
@@ -869,6 +874,7 @@ async fn test_provide_verdict_approve_auto_advances() {
     let mut sub = repo.get(subtask.id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Running);
     repo.update(&sub).await.unwrap();
+    let mut sub = repo.get(subtask.id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Complete);
     sub.completed_at = Some(chrono::Utc::now());
     repo.update(&sub).await.unwrap();
@@ -1088,6 +1094,7 @@ async fn test_phase_failure_transitions_to_failed() {
     sub.max_retries = 0;
     let _ = sub.transition_to(TaskStatus::Running);
     repo.update(&sub).await.unwrap();
+    let mut sub = repo.get(subtask_id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Failed);
     repo.update(&sub).await.unwrap();
 
@@ -1145,6 +1152,7 @@ async fn test_advance_completes_parent_task() {
     let mut sub = repo.get(subtask.id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Running);
     repo.update(&sub).await.unwrap();
+    let mut sub = repo.get(subtask.id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Complete);
     sub.completed_at = Some(chrono::Utc::now());
     repo.update(&sub).await.unwrap();
@@ -1189,6 +1197,7 @@ async fn test_advance_errors_propagated() {
     let mut sub = repo.get(subtask_id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Running);
     repo.update(&sub).await.unwrap();
+    let mut sub = repo.get(subtask_id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Complete);
     sub.completed_at = Some(chrono::Utc::now());
     repo.update(&sub).await.unwrap();
@@ -1406,6 +1415,7 @@ async fn test_provide_verdict_approve_mid_workflow() {
     let mut sub = repo.get(subtask.id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Running);
     repo.update(&sub).await.unwrap();
+    let mut sub = repo.get(subtask.id).await.unwrap().unwrap();
     let _ = sub.transition_to(TaskStatus::Complete);
     sub.completed_at = Some(chrono::Utc::now());
     repo.update(&sub).await.unwrap();
