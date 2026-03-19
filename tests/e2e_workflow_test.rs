@@ -430,6 +430,7 @@ async fn test_gate_verdict_reject() {
 
     // Verify rejected state
     let task = repo.get(task_id).await.unwrap().unwrap();
+    assert_eq!(task.status, TaskStatus::Failed, "Parent task should be Failed after rejection");
     let ws = harness::read_workflow_state(&task);
     match ws {
         WorkflowState::Rejected { phase_index, reason, .. } => {

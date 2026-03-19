@@ -953,6 +953,7 @@ async fn test_provide_verdict_reject() {
         .unwrap();
 
     let reloaded = repo.get(task.id).await.unwrap().unwrap();
+    assert_eq!(reloaded.status, TaskStatus::Failed, "Parent task should be Failed after rejection");
     let ws: WorkflowState =
         serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
     match ws {

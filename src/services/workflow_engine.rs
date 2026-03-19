@@ -1011,12 +1011,33 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 Ok(Some(result))
             }
             GateVerdict::Reject => {
+                let rejection_reason = reason.to_string();
                 let rejected = WorkflowState::Rejected {
                     workflow_name,
                     phase_index,
-                    reason: reason.to_string(),
+                    reason: rejection_reason.clone(),
                 };
                 self.write_state(task_id, &rejected).await?;
+
+                // Transition parent task to Failed so it doesn't stay Running forever
+                let mut parent = self.task_repo.get(task_id).await?
+                    .ok_or(DomainError::TaskNotFound(task_id))?;
+                if !parent.status.is_terminal() {
+                    let _ = parent.transition_to(TaskStatus::Failed);
+                    self.task_repo.update(&parent).await?;
+                    self.event_bus.publish(event_factory::make_event(
+                        EventSeverity::Error,
+                        EventCategory::Task,
+                        None,
+                        Some(task_id),
+                        EventPayload::TaskFailed {
+                            task_id,
+                            error: format!("Workflow rejected at phase {}: {}", phase_index, rejection_reason),
+                            retry_count: parent.retry_count,
+                        },
+                    )).await;
+                }
+
                 Ok(None)
             }
             GateVerdict::Rework => {
