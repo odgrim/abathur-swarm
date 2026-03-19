@@ -3,12 +3,14 @@
 //! All handlers are **idempotent** — safe to run even if the poll loop already
 //! handled the same state change. They check current state before acting.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::{RwLock, Semaphore};
 
+use crate::domain::errors::DomainError;
 use crate::domain::models::{Goal, HumanEscalationEvent, Task, TaskSource, TaskStatus};
 use crate::domain::models::convergence::{AmendmentSource, SpecificationAmendment};
 use crate::domain::models::task_schedule::*;
@@ -1110,6 +1112,26 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static, W: WorktreeReposi
 // ReconciliationHandler
 // ============================================================================
 
+/// Attempt a task repository update, logging and ignoring ConcurrencyConflict errors.
+/// Returns `true` if the update succeeded, `false` if a conflict was suppressed.
+async fn try_update_task<T: TaskRepository>(
+    repo: &T,
+    task: &Task,
+    context: &str,
+) -> Result<bool, String> {
+    match repo.update(task).await {
+        Ok(()) => Ok(true),
+        Err(DomainError::ConcurrencyConflict { entity, id }) => {
+            tracing::warn!(
+                "ReconciliationHandler: ConcurrencyConflict on {} {} during {}; skipping",
+                entity, id, context
+            );
+            Ok(false)
+        }
+        Err(e) => Err(format!("Failed to update ({}): {}", context, e)),
+    }
+}
+
 /// Triggered by the "reconciliation" scheduled event. Scans for missed state
 /// transitions, detects stale running tasks, and corrects them (safety net
 /// for the event-driven system).
@@ -1156,6 +1178,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
     async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
         let mut corrections: u32 = 0;
         let mut new_events = Vec::new();
+        let mut processed_ids: HashSet<uuid::Uuid> = HashSet::new();
 
         // Check Pending tasks
         let pending = self.task_repo.list_by_status(TaskStatus::Pending).await
@@ -1167,17 +1190,19 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
 
             if deps.iter().any(|d| d.status == TaskStatus::Failed || d.status == TaskStatus::Canceled) {
                 let mut updated = task.clone();
-                if updated.transition_to(TaskStatus::Blocked).is_ok() {
-                    self.task_repo.update(&updated).await
-                        .map_err(|e| format!("Failed to update: {}", e))?;
+                if updated.transition_to(TaskStatus::Blocked).is_ok()
+                    && try_update_task(&*self.task_repo, &updated, "pending->blocked").await?
+                {
                     corrections += 1;
                 }
             } else if deps.iter().all(|d| d.status == TaskStatus::Complete) {
                 let mut updated = task.clone();
                 if updated.transition_to(TaskStatus::Ready).is_ok() {
-                    self.task_repo.update(&updated).await
-                        .map_err(|e| format!("Failed to update: {}", e))?;
-                    corrections += 1;
+                    if try_update_task(&*self.task_repo, &updated, "pending->ready").await? {
+                        corrections += 1;
+                    } else {
+                        continue;
+                    }
                     new_events.push(UnifiedEvent {
                         id: EventId::new(),
                         sequence: SequenceNumber(0),
@@ -1217,9 +1242,9 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
                 });
                 if all_failed_or_complete {
                     let mut updated = task.clone();
-                    if updated.transition_to(TaskStatus::Failed).is_ok() {
-                        self.task_repo.update(&updated).await
-                            .map_err(|e| format!("Failed to update: {}", e))?;
+                    if updated.transition_to(TaskStatus::Failed).is_ok()
+                        && try_update_task(&*self.task_repo, &updated, "blocked->failed cascade").await?
+                    {
                         corrections += 1;
                         new_events.push(UnifiedEvent {
                             id: EventId::new(),
@@ -1245,9 +1270,11 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
             if deps.iter().all(|d| d.status == TaskStatus::Complete) {
                 let mut updated = task.clone();
                 if updated.transition_to(TaskStatus::Ready).is_ok() {
-                    self.task_repo.update(&updated).await
-                        .map_err(|e| format!("Failed to update: {}", e))?;
-                    corrections += 1;
+                    if try_update_task(&*self.task_repo, &updated, "blocked->ready").await? {
+                        corrections += 1;
+                    } else {
+                        continue;
+                    }
                     new_events.push(UnifiedEvent {
                         id: EventId::new(),
                         sequence: SequenceNumber(0),
@@ -1286,10 +1313,11 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
                     // 100% — fail the task
                     let mut updated = task.clone();
                     updated.retry_count += 1;
-                    if updated.transition_to(TaskStatus::Failed).is_ok() {
-                        self.task_repo.update(&updated).await
-                            .map_err(|e| format!("Failed to update stale task: {}", e))?;
+                    if updated.transition_to(TaskStatus::Failed).is_ok()
+                        && try_update_task(&*self.task_repo, &updated, "running stale->failed").await?
+                    {
                         corrections += 1;
+                        processed_ids.insert(task.id);
 
                         new_events.push(UnifiedEvent {
                             id: EventId::new(),
@@ -1387,9 +1415,9 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
                     // 100% — fail the task
                     let mut updated = task.clone();
                     updated.retry_count += 1;
-                    if updated.transition_to(TaskStatus::Failed).is_ok() {
-                        self.task_repo.update(&updated).await
-                            .map_err(|e| format!("Failed to update stale validating task: {}", e))?;
+                    if updated.transition_to(TaskStatus::Failed).is_ok()
+                        && try_update_task(&*self.task_repo, &updated, "validating stale->failed").await?
+                    {
                         corrections += 1;
 
                         new_events.push(UnifiedEvent {
@@ -1479,6 +1507,10 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
         // Use half the stale timeout to catch these before the full Running staleness fires.
         let parking_timeout = chrono::Duration::seconds((self.stale_task_timeout_secs / 2) as i64);
         for task in &running {
+            // Skip tasks already processed by the stale-running loop above
+            if processed_ids.contains(&task.id) {
+                continue;
+            }
             if let Some(started_at) = task.started_at {
                 let elapsed = now - started_at;
                 if elapsed > parking_timeout {
@@ -1513,9 +1545,9 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
                                 serde_json::to_value(&failed_ws).unwrap_or_default(),
                             );
                             updated.retry_count += 1;
-                            if updated.transition_to(TaskStatus::Failed).is_ok() {
-                                self.task_repo.update(&updated).await
-                                    .map_err(|e| format!("Failed to update parked workflow task: {}", e))?;
+                            if updated.transition_to(TaskStatus::Failed).is_ok()
+                                && try_update_task(&*self.task_repo, &updated, "parking stale->failed").await?
+                            {
                                 corrections += 1;
 
                                 new_events.push(UnifiedEvent {
@@ -4447,7 +4479,7 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceCoordinationHandle
 // ConvergenceCancellationHandler
 // ============================================================================
 
-/// When a convergent parent task is canceled, cascade cancellation to all
+/// When a convergent parent task is canceled or fails, cascade cancellation to all
 /// Running/Ready children.
 pub struct ConvergenceCancellationHandler<T: TaskRepository> {
     task_repo: Arc<T>,
@@ -4467,7 +4499,7 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceCancellationHandle
             name: "ConvergenceCancellationHandler".to_string(),
             filter: EventFilter::new()
                 .categories(vec![EventCategory::Task])
-                .payload_types(vec!["TaskCanceled".to_string()]),
+                .payload_types(vec!["TaskCanceled".to_string(), "TaskFailed".to_string()]),
             priority: HandlerPriority::HIGH,
             error_strategy: ErrorStrategy::CircuitBreak,
             critical: false,
@@ -4475,8 +4507,9 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceCancellationHandle
     }
 
     async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
-        let task_id = match &event.payload {
-            EventPayload::TaskCanceled { task_id, .. } => *task_id,
+        let (task_id, reason_verb) = match &event.payload {
+            EventPayload::TaskCanceled { task_id, .. } => (*task_id, "canceled"),
+            EventPayload::TaskFailed { task_id, .. } => (*task_id, "failed"),
             _ => return Ok(Reaction::None),
         };
 
@@ -4522,7 +4555,7 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceCancellationHandle
                     source_process_id: None,
                     payload: EventPayload::TaskCanceled {
                         task_id: child.id,
-                        reason: format!("Parent task {} was canceled", task_id),
+                        reason: format!("Parent task {} was {}", task_id, reason_verb),
                     },
                 });
             }
@@ -6426,6 +6459,80 @@ mod tests {
                 }).collect();
                 assert!(canceled_ids.contains(&child1.id));
                 assert!(canceled_ids.contains(&child2.id));
+            }
+            Reaction::None => panic!("Expected EmitEvents, got Reaction::None"),
+        }
+
+        // Verify both children are now Canceled
+        let updated_child1 = repo.get(child1.id).await.unwrap().unwrap();
+        assert_eq!(updated_child1.status, TaskStatus::Canceled);
+        let updated_child2 = repo.get(child2.id).await.unwrap().unwrap();
+        assert_eq!(updated_child2.status, TaskStatus::Canceled);
+    }
+
+    #[tokio::test]
+    async fn test_convergence_cancellation_cascades_on_parent_failure() {
+        let repo = setup_task_repo().await;
+        let handler = ConvergenceCancellationHandler::new(repo.clone());
+
+        // Create parent: Failed, convergent (has trajectory_id)
+        let mut parent = Task::new("Parent convergent task");
+        parent.trajectory_id = Some(Uuid::new_v4());
+        parent.transition_to(TaskStatus::Ready).unwrap();
+        parent.transition_to(TaskStatus::Running).unwrap();
+        parent.transition_to(TaskStatus::Failed).unwrap();
+        repo.create(&parent).await.unwrap();
+
+        // Create child 1: Running
+        let mut child1 = Task::new("Child 1");
+        child1.parent_id = Some(parent.id);
+        child1.transition_to(TaskStatus::Ready).unwrap();
+        child1.transition_to(TaskStatus::Running).unwrap();
+        repo.create(&child1).await.unwrap();
+
+        // Create child 2: Ready (non-terminal, should also be canceled)
+        let mut child2 = Task::new("Child 2");
+        child2.parent_id = Some(parent.id);
+        child2.transition_to(TaskStatus::Ready).unwrap();
+        repo.create(&child2).await.unwrap();
+
+        // Fire TaskFailed for the parent
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Error,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(parent.id),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::TaskFailed {
+                task_id: parent.id,
+                error: "agent process crashed".to_string(),
+                retry_count: 1,
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Should emit TaskCanceled events for both children
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                assert_eq!(events.len(), 2);
+                for evt in &events {
+                    match &evt.payload {
+                        EventPayload::TaskCanceled { reason, .. } => {
+                            assert!(reason.contains("failed"), "Reason should mention 'failed': {}", reason);
+                        }
+                        other => panic!("Expected TaskCanceled, got {:?}", other),
+                    }
+                }
             }
             Reaction::None => panic!("Expected EmitEvents, got Reaction::None"),
         }
