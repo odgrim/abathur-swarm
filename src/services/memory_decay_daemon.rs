@@ -375,6 +375,227 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    use async_trait::async_trait;
+    use uuid::Uuid;
+
+    use crate::domain::errors::{DomainError, DomainResult};
+    use crate::domain::models::{Memory, MemoryQuery, MemoryTier};
+    use crate::domain::ports::MemoryRepository;
+
+    /// A mock MemoryRepository that can be configured to fail on `prune_expired()`.
+    struct FailingMemoryRepository {
+        should_fail: AtomicBool,
+    }
+
+    impl FailingMemoryRepository {
+        fn new(should_fail: bool) -> Self {
+            Self {
+                should_fail: AtomicBool::new(should_fail),
+            }
+        }
+
+        fn set_should_fail(&self, fail: bool) {
+            self.should_fail.store(fail, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl MemoryRepository for FailingMemoryRepository {
+        async fn store(&self, _memory: &Memory) -> DomainResult<()> { Ok(()) }
+        async fn get(&self, _id: Uuid) -> DomainResult<Option<Memory>> { Ok(None) }
+        async fn get_by_key(&self, _key: &str, _namespace: &str) -> DomainResult<Option<Memory>> { Ok(None) }
+        async fn update(&self, _memory: &Memory) -> DomainResult<()> { Ok(()) }
+        async fn delete(&self, _id: Uuid) -> DomainResult<()> { Ok(()) }
+        async fn query(&self, _query: MemoryQuery) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn search(&self, _query: &str, _namespace: Option<&str>, _limit: usize) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn list_by_tier(&self, _tier: MemoryTier) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn list_by_namespace(&self, _namespace: &str) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn get_expired(&self) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn prune_expired(&self) -> DomainResult<u64> {
+            if self.should_fail.load(Ordering::SeqCst) {
+                Err(DomainError::DatabaseError("simulated prune failure".to_string()))
+            } else {
+                Ok(0)
+            }
+        }
+        async fn get_decayed(&self, _threshold: f32) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn get_for_task(&self, _task_id: Uuid) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn get_for_goal(&self, _goal_id: Uuid) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn count_by_tier(&self) -> DomainResult<std::collections::HashMap<MemoryTier, u64>> { Ok(std::collections::HashMap::new()) }
+    }
+
+    /// Helper to create a daemon with the FailingMemoryRepository.
+    fn make_daemon(
+        should_fail: bool,
+        config: DecayDaemonConfig,
+    ) -> (MemoryDecayDaemon<FailingMemoryRepository>, Arc<FailingMemoryRepository>) {
+        let repo = Arc::new(FailingMemoryRepository::new(should_fail));
+        let service = Arc::new(MemoryService::new(repo.clone()));
+        let daemon = MemoryDecayDaemon::new(service, config);
+        (daemon, repo)
+    }
+
+    #[tokio::test]
+    async fn test_run_once_basic_execution() {
+        let (daemon, _repo) = make_daemon(false, DecayDaemonConfig::default());
+        let report = daemon.run_once().await.expect("run_once should succeed");
+        assert_eq!(report.expired_pruned, 0);
+        assert_eq!(report.decayed_pruned, 0);
+        assert_eq!(report.promoted, 0);
+        assert_eq!(report.conflicts_resolved, 0);
+    }
+
+    #[tokio::test]
+    async fn test_consecutive_failure_counting_and_warning() {
+        // Config: warning_threshold=2, max_consecutive_failures=5
+        let config = DecayDaemonConfig {
+            maintenance_interval: Duration::from_millis(50),
+            run_on_startup: false,
+            max_consecutive_failures: 5,
+            warning_threshold: 2,
+            verbose: false,
+        };
+        let (daemon, _repo) = make_daemon(true, config);
+
+        let handle = daemon.handle();
+        let mut rx = daemon.run().await;
+
+        // Collect events until we see FailureThresholdWarning, then stop.
+        let mut saw_warning = false;
+        let mut failure_events = Vec::new();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                match &event {
+                    DecayDaemonEvent::MaintenanceFailed { consecutive_failures, .. } => {
+                        failure_events.push(*consecutive_failures);
+                    }
+                    DecayDaemonEvent::FailureThresholdWarning {
+                        consecutive_failures,
+                        max_consecutive_failures,
+                        ..
+                    } => {
+                        assert_eq!(*consecutive_failures, 2);
+                        assert_eq!(*max_consecutive_failures, 5);
+                        saw_warning = true;
+                        handle.stop();
+                    }
+                    DecayDaemonEvent::Stopped { .. } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok(), "Test timed out waiting for events");
+        assert!(saw_warning, "Should have received FailureThresholdWarning");
+        assert!(
+            failure_events.contains(&1) && failure_events.contains(&2),
+            "Should have seen consecutive failure counts 1 and 2, got: {:?}",
+            failure_events,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_max_consecutive_failures_stops_daemon() {
+        // Config: max=3 so daemon stops after 3 consecutive failures
+        let config = DecayDaemonConfig {
+            maintenance_interval: Duration::from_millis(50),
+            run_on_startup: false,
+            max_consecutive_failures: 3,
+            warning_threshold: 2,
+            verbose: false,
+        };
+        let (daemon, _repo) = make_daemon(true, config);
+
+        let handle = daemon.handle();
+        let mut rx = daemon.run().await;
+
+        let mut stop_reason = None;
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                if let DecayDaemonEvent::Stopped { reason } = event {
+                    stop_reason = Some(reason);
+                    break;
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok(), "Test timed out waiting for daemon to stop");
+        assert_eq!(
+            stop_reason,
+            Some(StopReason::TooManyFailures),
+            "Daemon should stop due to TooManyFailures"
+        );
+
+        let status = handle.status().await;
+        assert!(!status.running);
+        assert_eq!(status.consecutive_failures, 3);
+        assert_eq!(status.failed_runs, 3);
+    }
+
+    #[tokio::test]
+    async fn test_successful_run_resets_failure_counter() {
+        // Config: warning_threshold=2, max=5
+        let config = DecayDaemonConfig {
+            maintenance_interval: Duration::from_millis(50),
+            run_on_startup: false,
+            max_consecutive_failures: 5,
+            warning_threshold: 2,
+            verbose: false,
+        };
+        let (daemon, repo) = make_daemon(true, config);
+
+        let handle = daemon.handle();
+        let mut rx = daemon.run().await;
+
+        // Wait for first failure, then flip repo to succeed, then observe reset.
+        let mut saw_success_after_failure = false;
+        let mut max_consecutive_seen = 0u32;
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                match &event {
+                    DecayDaemonEvent::MaintenanceFailed { consecutive_failures, .. } => {
+                        if *consecutive_failures > max_consecutive_seen {
+                            max_consecutive_seen = *consecutive_failures;
+                        }
+                        // After first failure, switch to success mode
+                        if *consecutive_failures == 1 {
+                            repo.set_should_fail(false);
+                        }
+                    }
+                    DecayDaemonEvent::MaintenanceCompleted { .. } => {
+                        if max_consecutive_seen > 0 {
+                            saw_success_after_failure = true;
+                            handle.stop();
+                        }
+                    }
+                    DecayDaemonEvent::Stopped { .. } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok(), "Test timed out waiting for events");
+        assert!(
+            saw_success_after_failure,
+            "Should have seen a successful run after a failure"
+        );
+        assert!(max_consecutive_seen >= 1, "Should have seen at least one failure");
+
+        let status = handle.status().await;
+        assert_eq!(
+            status.consecutive_failures, 0,
+            "Consecutive failures should reset to 0 after success"
+        );
+        assert!(status.successful_runs >= 1);
+    }
 
     #[test]
     fn test_config_default() {
