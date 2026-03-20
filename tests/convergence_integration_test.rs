@@ -13,17 +13,18 @@ use uuid::Uuid;
 use abathur::adapters::sqlite::{create_migrated_test_pool, SqliteTaskRepository};
 use abathur::domain::errors::DomainResult;
 use abathur::domain::models::convergence::{
-    ArtifactReference, AttractorType, ConvergenceBudget, ConvergenceTendency,
-    ConvergencePolicy, OverseerSignals, BuildResult, TestResults, Observation,
-    PriorityHint, SpecificationEvolution, SpecificationSnapshot, StrategyEntry,
-    StrategyKind, Trajectory,
+    ArtifactReference, AttractorType, ConvergenceBudget, ConvergenceEngineConfig,
+    ConvergenceOutcome, ConvergencePolicy, ConvergenceTendency, OverseerSignals,
+    BuildResult, TestResults, Observation, PriorityHint, SpecificationEvolution,
+    SpecificationSnapshot, StrategyBandit, StrategyEntry, StrategyKind, Trajectory,
 };
 use abathur::domain::models::task::{Complexity, ExecutionMode, Task, TaskPriority};
-use abathur::domain::ports::{StrategyStats, TaskRepository, TrajectoryRepository};
+use abathur::domain::ports::{NullMemoryRepository, StrategyStats, TaskRepository, TrajectoryRepository};
 use abathur::services::convergence_bridge::{
     build_convergent_prompt, build_engine_config, collect_artifact, task_to_submission,
     DynTrajectoryRepository,
 };
+use abathur::services::convergence_engine::{ConvergenceEngine, OverseerMeasurer};
 use abathur::services::event_bus::{
     EventBus, EventBusConfig, EventCategory, EventPayload, EventSeverity,
 };
@@ -1587,5 +1588,98 @@ async fn test_execution_mode_persistence_roundtrip() {
         loaded_convergent_none.execution_mode.parallel_samples(),
         None,
         "parallel_samples should be None when not set"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Calibration alerts integration test
+// ---------------------------------------------------------------------------
+
+/// Minimal OverseerMeasurer mock for convergence engine integration tests.
+struct StubOverseerMeasurer;
+
+#[async_trait]
+impl OverseerMeasurer for StubOverseerMeasurer {
+    async fn measure(
+        &self,
+        _artifact: &ArtifactReference,
+        _policy: &ConvergencePolicy,
+    ) -> DomainResult<OverseerSignals> {
+        Ok(OverseerSignals::default())
+    }
+}
+
+/// Verify that `finalize()` records calibration data to `BudgetCalibrationTracker`
+/// and that `calibration_alerts()` surfaces overshoot alerts when P95 token usage
+/// exceeds the budget for a given complexity tier by more than 20%.
+#[tokio::test]
+async fn test_finalize_records_calibration_and_alerts_overshoot() {
+    let trajectory_store = Arc::new(InMemoryTrajectoryRepo::new());
+    let memory_repo = Arc::new(NullMemoryRepository::new());
+    let overseer = Arc::new(StubOverseerMeasurer);
+
+    let config = ConvergenceEngineConfig {
+        default_policy: ConvergencePolicy::default(),
+        max_parallel_trajectories: 1,
+        enable_proactive_decomposition: false,
+        memory_enabled: false, // disable memory to avoid needing real repo
+        event_emission_enabled: false,
+    };
+
+    let engine = ConvergenceEngine::new(
+        trajectory_store,
+        memory_repo,
+        overseer,
+        config,
+    );
+
+    let bandit = StrategyBandit::default();
+
+    // Feed 25+ finalize calls with high token usage for Complexity::Moderate.
+    // The default budget for Medium is typically around 200_000 tokens.
+    // We set tokens_used far above that to trigger an overshoot alert.
+    let high_token_usage: u64 = 500_000;
+    for _ in 0..30 {
+        let spec = SpecificationEvolution::new(SpecificationSnapshot::new(
+            "test calibration task".into(),
+        ));
+        let mut trajectory = Trajectory::new(
+            Uuid::new_v4(),
+            None,
+            spec,
+            ConvergenceBudget::default(),
+            ConvergencePolicy::default(),
+        );
+        trajectory.complexity = Some(Complexity::Moderate);
+        trajectory.budget.tokens_used = high_token_usage;
+
+        let outcome = ConvergenceOutcome::Converged {
+            trajectory_id: trajectory.id.to_string(),
+            final_observation_sequence: 1,
+        };
+
+        engine
+            .finalize(&mut trajectory, &outcome, &bandit)
+            .await
+            .expect("finalize should succeed");
+    }
+
+    let alerts = engine.calibration_alerts();
+    assert!(
+        !alerts.is_empty(),
+        "Expected at least one calibration alert for overshooting the Moderate tier budget"
+    );
+
+    // Verify the alert is for the Medium tier
+    let medium_alert = alerts.iter().find(|a| a.tier == Complexity::Moderate);
+    assert!(
+        medium_alert.is_some(),
+        "Expected a calibration alert specifically for Complexity::Moderate"
+    );
+    let alert = medium_alert.unwrap();
+    assert!(
+        alert.overshoot_pct > 20.0,
+        "Overshoot percentage should exceed 20% threshold, got {}",
+        alert.overshoot_pct
     );
 }

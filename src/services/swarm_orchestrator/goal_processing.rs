@@ -1694,13 +1694,72 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
                             // Check if the agent already completed the task via MCP
                             // before attempting failure transition.
-                            if completed_task.status.is_terminal() {
+                            let auto_completed = if completed_task.status.is_terminal() {
                                 tracing::warn!(
                                     task_id = %task_id,
                                     status = ?completed_task.status,
                                     error = %error_msg,
                                     "Skipping task failure — already terminal (completed via MCP)"
                                 );
+                                false
+                            } else if is_max_turns_auto_completable(&error_msg) {
+                                // Agent exhausted max_turns but its last output says "completed".
+                                // Auto-complete instead of failing — the agent finished its work
+                                // but the session didn't end cleanly.
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    error = %error_msg,
+                                    "Auto-completing task — agent exhausted turns but reported completion"
+                                );
+                                let target_status = if verify_on_completion {
+                                    TaskStatus::Validating
+                                } else {
+                                    TaskStatus::Complete
+                                };
+                                if let Some(ref cb) = command_bus {
+                                    let envelope = CommandEnvelope::new(
+                                        CommandSource::System,
+                                        DomainCommand::Task(TaskCommand::Transition {
+                                            task_id,
+                                            new_status: target_status,
+                                        }),
+                                    );
+                                    if let Err(e) = cb.dispatch(envelope).await {
+                                        tracing::warn!("Failed to auto-complete task {} via CommandBus, using non-atomic fallback: {}", task_id, e);
+                                        if let Ok(Some(mut t)) = task_repo.get(task_id).await
+                                            && !t.status.is_terminal() {
+                                                let _ = t.transition_to(target_status);
+                                                let _ = task_repo.update(&t).await;
+                                            }
+                                        if target_status == TaskStatus::Complete {
+                                            event_bus.publish(crate::services::event_factory::task_event(
+                                                crate::services::event_bus::EventSeverity::Info,
+                                                None,
+                                                task_id,
+                                                crate::services::event_bus::EventPayload::TaskCompleted {
+                                                    task_id,
+                                                    tokens_used: tokens,
+                                                },
+                                            )).await;
+                                        }
+                                    }
+                                } else {
+                                    tracing::warn!("CommandBus not available for task {} auto-completion, using non-atomic fallback", task_id);
+                                    let _ = completed_task.transition_to(target_status);
+                                    let _ = task_repo.update(&completed_task).await;
+                                    if target_status == TaskStatus::Complete {
+                                        event_bus.publish(crate::services::event_factory::task_event(
+                                            crate::services::event_bus::EventSeverity::Info,
+                                            None,
+                                            task_id,
+                                            crate::services::event_bus::EventPayload::TaskCompleted {
+                                                task_id,
+                                                tokens_used: tokens,
+                                            },
+                                        )).await;
+                                    }
+                                }
+                                true
                             } else {
                                 // Fail task via CommandBus (transitions + journals event)
                                 if let Some(ref cb) = command_bus {
@@ -1744,21 +1803,24 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         },
                                     )).await;
                                 }
+                                false
+                            };
+
+                            if !auto_completed {
+                                // Record failure with circuit breaker
+                                circuit_breaker.record_failure(
+                                    circuit_scope.clone(),
+                                    &error_msg,
+                                ).await;
                             }
 
-                            // Record failure with circuit breaker
-                            circuit_breaker.record_failure(
-                                circuit_scope.clone(),
-                                &error_msg,
-                            ).await;
-
-                            // Record failure in evolution loop for template improvement
+                            // Record execution in evolution loop for template improvement
                             if track_evolution {
                                 let execution = TaskExecution {
                                     task_id,
                                     template_name: agent_type_for_evolution.clone(),
                                     template_version: template_version_for_evolution,
-                                    outcome: TaskOutcome::Failure,
+                                    outcome: if auto_completed { TaskOutcome::Success } else { TaskOutcome::Failure },
                                     executed_at: chrono::Utc::now(),
                                     turns_used: turns,
                                     tokens_used: tokens,
@@ -1767,34 +1829,58 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 evolution_loop.record_execution(execution).await;
                             }
 
-                            // Log task failure with retry state for debugging
-                            let consecutive_budget = completed_task.context.custom
-                                .get("consecutive_budget_failures")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            audit_log.log(
-                                AuditEntry::new(
-                                    AuditLevel::Warning,
-                                    AuditCategory::Task,
-                                    AuditAction::TaskFailed,
-                                    AuditActor::System,
-                                    format!(
-                                        "Task failed: {} (retry {}/{}, consecutive_budget_failures: {})",
-                                        error_msg,
-                                        completed_task.retry_count,
-                                        completed_task.max_retries,
-                                        consecutive_budget,
-                                    ),
-                                )
-                                .with_entity(task_id, "task"),
-                            ).await;
+                            if auto_completed {
+                                // Log auto-completion
+                                audit_log.log(
+                                    AuditEntry::new(
+                                        AuditLevel::Warning,
+                                        AuditCategory::Task,
+                                        AuditAction::TaskCompleted,
+                                        AuditActor::System,
+                                        format!(
+                                            "Task auto-completed (max_turns with completion signal): {}",
+                                            error_msg,
+                                        ),
+                                    )
+                                    .with_entity(task_id, "task"),
+                                ).await;
 
-                            // Mark worktree as failed
-                            if worktree_path.is_some()
-                                && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
-                                    wt.fail(error_msg.clone());
-                                    let _ = worktree_repo.update(&wt).await;
-                                }
+                                // Mark worktree as completed for auto-completed tasks
+                                if worktree_path.is_some()
+                                    && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                                        wt.complete();
+                                        let _ = worktree_repo.update(&wt).await;
+                                    }
+                            } else {
+                                // Log task failure with retry state for debugging
+                                let consecutive_budget = completed_task.context.custom
+                                    .get("consecutive_budget_failures")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                audit_log.log(
+                                    AuditEntry::new(
+                                        AuditLevel::Warning,
+                                        AuditCategory::Task,
+                                        AuditAction::TaskFailed,
+                                        AuditActor::System,
+                                        format!(
+                                            "Task failed: {} (retry {}/{}, consecutive_budget_failures: {})",
+                                            error_msg,
+                                            completed_task.retry_count,
+                                            completed_task.max_retries,
+                                            consecutive_budget,
+                                        ),
+                                    )
+                                    .with_entity(task_id, "task"),
+                                ).await;
+
+                                // Mark worktree as failed
+                                if worktree_path.is_some()
+                                    && let Ok(Some(mut wt)) = worktree_repo.get_by_task(task_id).await {
+                                        wt.fail(error_msg.clone());
+                                        let _ = worktree_repo.update(&wt).await;
+                                    }
+                            }
 
                             // (Bridge forwards EventBus→event_tx automatically)
                         }
@@ -1910,6 +1996,29 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
 }
 
+/// Checks if an error message represents a max-turns exhaustion where the agent's
+/// last output indicates it believed it had completed successfully. In this case,
+/// the task can be auto-completed instead of failed, since the agent did finish
+/// its work but ran out of turns before the session could end cleanly.
+///
+/// Returns `true` when the error starts with `error_max_turns` AND the text after
+/// "Last output:" (case-insensitive) contains "completed" or "complete".
+pub(crate) fn is_max_turns_auto_completable(error_msg: &str) -> bool {
+    if !error_msg.starts_with("error_max_turns") {
+        return false;
+    }
+
+    // Find "last output:" (case-insensitive) and check what follows
+    let lower = error_msg.to_lowercase();
+    if let Some(idx) = lower.find("last output:") {
+        let after = &lower[idx + "last output:".len()..];
+        let trimmed = after.trim();
+        trimmed.contains("completed") || trimmed.contains("complete")
+    } else {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1994,5 +2103,37 @@ mod tests {
             role_max_turns
         };
         assert_eq!(max_turns_zero, 50, "role default should be used when template is zero");
+    }
+
+    // -- is_max_turns_auto_completable tests ---------------------------------
+
+    #[test]
+    fn test_auto_completable_typical_message() {
+        let msg = "error_max_turns: agent exhausted 31 turns without completing. Last output: completed";
+        assert!(is_max_turns_auto_completable(msg));
+    }
+
+    #[test]
+    fn test_auto_completable_with_complete_variant() {
+        let msg = "error_max_turns: Agent exhausted turns without completing. Last output: complete";
+        assert!(is_max_turns_auto_completable(msg));
+    }
+
+    #[test]
+    fn test_not_auto_completable_different_last_output() {
+        let msg = "error_max_turns: agent exhausted 25 turns. Last output: working on tests";
+        assert!(!is_max_turns_auto_completable(msg));
+    }
+
+    #[test]
+    fn test_not_auto_completable_non_max_turns_error() {
+        let msg = "error_timeout: agent timed out. Last output: completed";
+        assert!(!is_max_turns_auto_completable(msg));
+    }
+
+    #[test]
+    fn test_not_auto_completable_no_last_output() {
+        let msg = "error_max_turns: agent exceeded 40 turns";
+        assert!(!is_max_turns_auto_completable(msg));
     }
 }
