@@ -736,4 +736,80 @@ mod tests {
             _ => panic!("Expected Stopped"),
         }
     }
+
+    /// A mock MemoryRepository that returns Ok(3) from prune_expired()
+    /// to generate MemoryPruned events via the MemoryService.
+    struct EventProducingMemoryRepository;
+
+    #[async_trait]
+    impl MemoryRepository for EventProducingMemoryRepository {
+        async fn store(&self, _memory: &Memory) -> DomainResult<()> { Ok(()) }
+        async fn get(&self, _id: Uuid) -> DomainResult<Option<Memory>> { Ok(None) }
+        async fn get_by_key(&self, _key: &str, _namespace: &str) -> DomainResult<Option<Memory>> { Ok(None) }
+        async fn update(&self, _memory: &Memory) -> DomainResult<()> { Ok(()) }
+        async fn delete(&self, _id: Uuid) -> DomainResult<()> { Ok(()) }
+        async fn query(&self, _query: MemoryQuery) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn search(&self, _query: &str, _namespace: Option<&str>, _limit: usize) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn list_by_tier(&self, _tier: MemoryTier) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn list_by_namespace(&self, _namespace: &str) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn get_expired(&self) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn prune_expired(&self) -> DomainResult<u64> { Ok(3) }
+        async fn get_decayed(&self, _threshold: f32) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn get_for_task(&self, _task_id: Uuid) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn get_for_goal(&self, _goal_id: Uuid) -> DomainResult<Vec<Memory>> { Ok(Vec::new()) }
+        async fn count_by_tier(&self) -> DomainResult<std::collections::HashMap<MemoryTier, u64>> { Ok(std::collections::HashMap::new()) }
+    }
+
+    /// Helper to create a daemon backed by EventProducingMemoryRepository.
+    fn make_event_producing_daemon(
+        config: DecayDaemonConfig,
+    ) -> MemoryDecayDaemon<EventProducingMemoryRepository> {
+        let repo = Arc::new(EventProducingMemoryRepository);
+        let service = Arc::new(MemoryService::new(repo));
+        MemoryDecayDaemon::new(service, config)
+    }
+
+    #[tokio::test]
+    async fn test_run_once_publishes_events_to_event_bus() {
+        use crate::services::event_bus::{EventBus, EventBusConfig, EventPayload};
+
+        let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let mut subscriber = bus.subscribe();
+
+        let daemon = make_event_producing_daemon(DecayDaemonConfig::default())
+            .with_event_bus(bus);
+
+        let report = daemon.run_once().await.expect("run_once should succeed");
+        assert_eq!(report.expired_pruned, 3);
+
+        // Collect events published to the bus (non-blocking drain)
+        let mut pruned_events = Vec::new();
+        while let Ok(event) = subscriber.try_recv() {
+            if let EventPayload::MemoryPruned { count, reason } = event.payload {
+                pruned_events.push((count, reason));
+            }
+        }
+
+        assert!(
+            !pruned_events.is_empty(),
+            "Should have received at least one MemoryPruned event on the EventBus"
+        );
+        // The expired prune produces a MemoryPruned event with count=3 reason="expired"
+        assert!(
+            pruned_events.iter().any(|(c, r)| *c == 3 && r == "expired"),
+            "Expected MemoryPruned {{ count: 3, reason: \"expired\" }}, got: {:?}",
+            pruned_events,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_once_without_event_bus_succeeds() {
+        // Daemon without an EventBus should still succeed when events are generated.
+        let daemon = make_event_producing_daemon(DecayDaemonConfig::default());
+
+        let report = daemon.run_once().await.expect("run_once should succeed without EventBus");
+        assert_eq!(report.expired_pruned, 3);
+        assert_eq!(report.decayed_pruned, 0);
+        assert_eq!(report.promoted, 0);
+    }
 }

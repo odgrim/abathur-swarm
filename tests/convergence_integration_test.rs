@@ -1683,3 +1683,84 @@ async fn test_finalize_records_calibration_and_alerts_overshoot() {
         alert.overshoot_pct
     );
 }
+
+// ---------------------------------------------------------------------------
+// Finalize with no complexity skips calibration
+// ---------------------------------------------------------------------------
+
+/// Verify that `finalize()` succeeds when the trajectory has no complexity set
+/// (i.e. `complexity == None`) and that no calibration alerts are produced.
+/// This exercises the guard in finalize that skips the calibration tracker
+/// when complexity is absent.
+#[tokio::test]
+async fn test_finalize_with_no_complexity_skips_calibration() {
+    let trajectory_store = Arc::new(InMemoryTrajectoryRepo::new());
+    let memory_repo = Arc::new(NullMemoryRepository::new());
+    let overseer = Arc::new(StubOverseerMeasurer);
+
+    let config = ConvergenceEngineConfig {
+        default_policy: ConvergencePolicy::default(),
+        max_parallel_trajectories: 1,
+        enable_proactive_decomposition: false,
+        memory_enabled: false,
+        event_emission_enabled: false,
+    };
+
+    let engine = ConvergenceEngine::new(
+        trajectory_store.clone(),
+        memory_repo,
+        overseer,
+        config,
+    );
+
+    let bandit = StrategyBandit::default();
+
+    // Create a trajectory WITHOUT setting complexity (defaults to None).
+    let spec = SpecificationEvolution::new(SpecificationSnapshot::new(
+        "task without complexity".into(),
+    ));
+    let mut trajectory = Trajectory::new(
+        Uuid::new_v4(),
+        None,
+        spec,
+        ConvergenceBudget::default(),
+        ConvergencePolicy::default(),
+    );
+    // Explicitly verify complexity is None before finalize.
+    assert!(
+        trajectory.complexity.is_none(),
+        "Trajectory complexity should be None by default"
+    );
+
+    // Set some token usage so calibration *would* record if complexity were set.
+    trajectory.budget.tokens_used = 500_000;
+
+    let outcome = ConvergenceOutcome::Converged {
+        trajectory_id: trajectory.id.to_string(),
+        final_observation_sequence: 1,
+    };
+
+    engine
+        .finalize(&mut trajectory, &outcome, &bandit)
+        .await
+        .expect("finalize should succeed even with no complexity");
+
+    // No calibration alerts should be produced since complexity was None.
+    let alerts = engine.calibration_alerts();
+    assert!(
+        alerts.is_empty(),
+        "Expected no calibration alerts when complexity is None, got {:?}",
+        alerts
+    );
+
+    // Verify the trajectory was persisted to the store.
+    let saved = trajectory_store.saved.lock().await;
+    assert!(
+        !saved.is_empty(),
+        "Expected trajectory to be persisted to the repository"
+    );
+    assert_eq!(
+        saved[0].id, trajectory.id,
+        "Persisted trajectory ID should match"
+    );
+}
