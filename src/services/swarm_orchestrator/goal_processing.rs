@@ -2002,7 +2002,9 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 /// its work but ran out of turns before the session could end cleanly.
 ///
 /// Returns `true` when the error starts with `error_max_turns` AND the text after
-/// "Last output:" (case-insensitive) contains "completed" or "complete".
+/// "Last output:" (case-insensitive) contains language indicating the agent
+/// believed it was done: "completed", "complete", "done", "finished",
+/// "stored", "marking complete", or "task_update_status".
 pub(crate) fn is_max_turns_auto_completable(error_msg: &str) -> bool {
     if !error_msg.starts_with("error_max_turns") {
         return false;
@@ -2013,7 +2015,16 @@ pub(crate) fn is_max_turns_auto_completable(error_msg: &str) -> bool {
     if let Some(idx) = lower.find("last output:") {
         let after = &lower[idx + "last output:".len()..];
         let trimmed = after.trim();
-        trimmed.contains("completed") || trimmed.contains("complete")
+        const COMPLETION_SIGNALS: &[&str] = &[
+            "completed",
+            "complete",
+            "done",
+            "finished",
+            "stored",
+            "marking complete",
+            "task_update_status",
+        ];
+        COMPLETION_SIGNALS.iter().any(|signal| trimmed.contains(signal))
     } else {
         false
     }
@@ -2135,5 +2146,35 @@ mod tests {
     fn test_not_auto_completable_no_last_output() {
         let msg = "error_max_turns: agent exceeded 40 turns";
         assert!(!is_max_turns_auto_completable(msg));
+    }
+
+    #[test]
+    fn test_auto_completable_done() {
+        let msg = "error_max_turns: agent exhausted 31 turns without completing. Last output: done";
+        assert!(is_max_turns_auto_completable(msg));
+    }
+
+    #[test]
+    fn test_auto_completable_finished() {
+        let msg = "error_max_turns: agent exhausted 31 turns without completing. Last output: finished";
+        assert!(is_max_turns_auto_completable(msg));
+    }
+
+    #[test]
+    fn test_auto_completable_stored() {
+        let msg = "error_max_turns: agent exhausted 31 turns without completing. Last output: stored results in memory";
+        assert!(is_max_turns_auto_completable(msg));
+    }
+
+    #[test]
+    fn test_auto_completable_marking_complete() {
+        let msg = "error_max_turns: agent exhausted 31 turns without completing. Last output: marking complete";
+        assert!(is_max_turns_auto_completable(msg));
+    }
+
+    #[test]
+    fn test_auto_completable_task_update_status() {
+        let msg = "error_max_turns: agent exhausted 31 turns without completing. Last output: task_update_status";
+        assert!(is_max_turns_auto_completable(msg));
     }
 }
