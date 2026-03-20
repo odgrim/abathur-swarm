@@ -434,8 +434,20 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                             Some(parent_task_id),
                             EventPayload::TaskFailed {
                                 task_id: parent_task_id,
-                                error: error_msg,
+                                error: error_msg.clone(),
                                 retry_count: parent.retry_count,
+                            },
+                        )).await;
+                        self.event_bus.publish(event_factory::make_event(
+                            EventSeverity::Error,
+                            EventCategory::Task,
+                            None,
+                            Some(parent_task_id),
+                            EventPayload::WorkflowPhaseFailed {
+                                task_id: parent_task_id,
+                                phase_index: *phase_index,
+                                phase_name: phase_name.clone(),
+                                reason: error_msg,
                             },
                         )).await;
                     }
@@ -533,8 +545,20 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                     Some(parent_task_id),
                     EventPayload::TaskFailed {
                         task_id: parent_task_id,
-                        error: error_msg,
+                        error: error_msg.clone(),
                         retry_count: parent.retry_count,
+                    },
+                )).await;
+                self.event_bus.publish(event_factory::make_event(
+                    EventSeverity::Error,
+                    EventCategory::Task,
+                    None,
+                    Some(parent_task_id),
+                    EventPayload::WorkflowPhaseFailed {
+                        task_id: parent_task_id,
+                        phase_index,
+                        phase_name: phase_name.clone(),
+                        reason: error_msg,
                     },
                 )).await;
             }
@@ -1456,11 +1480,13 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         Ok(true)
     }
 
-    /// Check if any subtask failed.
+    /// Check if any subtask failed or was canceled.
     async fn any_subtask_failed(&self, subtask_ids: &[Uuid]) -> DomainResult<bool> {
         for id in subtask_ids {
             match self.task_repo.get(*id).await? {
-                Some(t) if t.status == TaskStatus::Failed => return Ok(true),
+                Some(t) if t.status == TaskStatus::Failed || t.status == TaskStatus::Canceled => {
+                    return Ok(true)
+                }
                 _ => continue,
             }
         }
@@ -1518,18 +1544,33 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             }
 
             if retried_any {
+                let new_retry_count = phase_retry_count + 1;
                 parent.context.custom.insert(
                     phase_retry_key,
-                    serde_json::Value::Number((phase_retry_count + 1).into()),
+                    serde_json::Value::Number(new_retry_count.into()),
                 );
                 self.task_repo.update(&parent).await?;
                 tracing::info!(
                     parent_id = %parent_task_id,
                     phase = %phase_name,
-                    retry = phase_retry_count + 1,
+                    retry = new_retry_count,
                     max = MAX_PHASE_RETRIES,
                     "Retrying failed phase subtasks"
                 );
+                self.event_bus
+                    .publish(event_factory::make_event(
+                        EventSeverity::Warning,
+                        EventCategory::Task,
+                        None,
+                        Some(parent_task_id),
+                        EventPayload::WorkflowPhaseRetried {
+                            task_id: parent_task_id,
+                            phase_index,
+                            phase_name: phase_name.to_string(),
+                            retry_count: new_retry_count,
+                        },
+                    ))
+                    .await;
                 return Ok(true);
             }
         }
@@ -1652,5 +1693,127 @@ mod tests {
         assert_eq!(task.status, TaskStatus::Canceled);
         assert!(task.is_terminal());
         assert!(task.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_workflow_phase_retried_event_emitted_on_retry() {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+
+        let engine = WorkflowEngine::new(task_repo.clone(), event_bus.clone(), false);
+
+        // Create parent task in Running state
+        let mut parent = Task::with_title("Parent workflow task", "Do work");
+        parent.transition_to(TaskStatus::Ready).unwrap();
+        parent.transition_to(TaskStatus::Running).unwrap();
+
+        // Create a failed subtask that CAN be retried
+        let mut subtask = Task::with_title("Phase subtask", "Subtask work");
+        subtask.parent_id = Some(parent.id);
+        subtask.source = TaskSource::SubtaskOf(parent.id);
+        subtask.max_retries = 3;
+        subtask.transition_to(TaskStatus::Ready).unwrap();
+        subtask.transition_to(TaskStatus::Running).unwrap();
+        subtask.transition_to(TaskStatus::Failed).unwrap();
+
+        task_repo.create(&parent).await.unwrap();
+        task_repo.create(&subtask).await.unwrap();
+
+        // Write PhaseRunning workflow state on parent
+        let ws = WorkflowState::PhaseRunning {
+            workflow_name: "code".to_string(),
+            phase_index: 1,
+            phase_name: "implement".to_string(),
+            subtask_ids: vec![subtask.id],
+        };
+        engine.write_state(parent.id, &ws).await.unwrap();
+
+        // Subscribe to events before the action
+        let mut rx = event_bus.subscribe();
+
+        // Call handle_phase_complete — subtask failed but can retry
+        let result = engine.handle_phase_complete(parent.id, subtask.id).await;
+        assert!(result.is_ok(), "handle_phase_complete should succeed: {:?}", result.err());
+
+        // Collect emitted events
+        let mut found_retried = false;
+        while let Ok(event) = rx.try_recv() {
+            if let EventPayload::WorkflowPhaseRetried {
+                task_id,
+                phase_index,
+                phase_name,
+                retry_count,
+            } = &event.payload
+            {
+                assert_eq!(*task_id, parent.id);
+                assert_eq!(*phase_index, 1);
+                assert_eq!(phase_name, "implement");
+                assert_eq!(*retry_count, 1);
+                found_retried = true;
+            }
+        }
+        assert!(found_retried, "WorkflowPhaseRetried event should have been emitted");
+    }
+
+    #[tokio::test]
+    async fn test_workflow_phase_failed_event_emitted_when_retries_exhausted() {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+
+        let engine = WorkflowEngine::new(task_repo.clone(), event_bus.clone(), false);
+
+        // Create parent task in Running state
+        let mut parent = Task::with_title("Parent workflow task", "Do work");
+        parent.transition_to(TaskStatus::Ready).unwrap();
+        parent.transition_to(TaskStatus::Running).unwrap();
+
+        // Create a failed subtask with NO retries
+        let mut subtask = Task::with_title("Phase subtask", "Subtask work");
+        subtask.parent_id = Some(parent.id);
+        subtask.source = TaskSource::SubtaskOf(parent.id);
+        subtask.max_retries = 0;
+        subtask.transition_to(TaskStatus::Ready).unwrap();
+        subtask.transition_to(TaskStatus::Running).unwrap();
+        subtask.transition_to(TaskStatus::Failed).unwrap();
+
+        task_repo.create(&parent).await.unwrap();
+        task_repo.create(&subtask).await.unwrap();
+
+        // Write PhaseRunning workflow state on parent
+        let ws = WorkflowState::PhaseRunning {
+            workflow_name: "code".to_string(),
+            phase_index: 0,
+            phase_name: "implement".to_string(),
+            subtask_ids: vec![subtask.id],
+        };
+        engine.write_state(parent.id, &ws).await.unwrap();
+
+        // Subscribe to events before the action
+        let mut rx = event_bus.subscribe();
+
+        // Call handle_phase_complete — subtask failed with no retries
+        let result = engine.handle_phase_complete(parent.id, subtask.id).await;
+        assert!(result.is_ok(), "handle_phase_complete should succeed: {:?}", result.err());
+
+        // Collect emitted events
+        let mut found_failed = false;
+        while let Ok(event) = rx.try_recv() {
+            if let EventPayload::WorkflowPhaseFailed {
+                task_id,
+                phase_index,
+                phase_name,
+                reason,
+            } = &event.payload
+            {
+                assert_eq!(*task_id, parent.id);
+                assert_eq!(*phase_index, 0);
+                assert_eq!(phase_name, "implement");
+                assert!(reason.contains("failed after"), "reason should mention retries: {}", reason);
+                found_failed = true;
+            }
+        }
+        assert!(found_failed, "WorkflowPhaseFailed event should have been emitted");
     }
 }

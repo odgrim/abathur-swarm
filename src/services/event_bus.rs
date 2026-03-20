@@ -923,6 +923,22 @@ pub enum EventPayload {
         summary: String,
     },
 
+    /// A workflow phase subtask was retried after failure.
+    WorkflowPhaseRetried {
+        task_id: Uuid,
+        phase_index: usize,
+        phase_name: String,
+        retry_count: u64,
+    },
+
+    /// A workflow phase failed after exhausting all retries.
+    WorkflowPhaseFailed {
+        task_id: Uuid,
+        phase_index: usize,
+        phase_name: String,
+        reason: String,
+    },
+
     // Federation events
 
     /// A cerebrate connected to the federation.
@@ -1129,6 +1145,8 @@ impl EventPayload {
             Self::WorkflowCompleted { .. } => "WorkflowCompleted",
             Self::WorkflowVerificationRequested { .. } => "WorkflowVerificationRequested",
             Self::WorkflowVerificationCompleted { .. } => "WorkflowVerificationCompleted",
+            Self::WorkflowPhaseRetried { .. } => "WorkflowPhaseRetried",
+            Self::WorkflowPhaseFailed { .. } => "WorkflowPhaseFailed",
             Self::FederationCerebrateConnected { .. } => "FederationCerebrateConnected",
             Self::FederationCerebrateDisconnected { .. } => "FederationCerebrateDisconnected",
             Self::FederationTaskDelegated { .. } => "FederationTaskDelegated",

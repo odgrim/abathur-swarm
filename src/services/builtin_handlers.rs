@@ -5594,6 +5594,7 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowSubtaskCompletionHand
                     "TaskCompleted".to_string(),
                     "TaskCompletedWithResult".to_string(),
                     "TaskFailed".to_string(),
+                    "TaskCanceled".to_string(),
                 ]),
             priority: HandlerPriority::HIGH,
             error_strategy: ErrorStrategy::CircuitBreak,
@@ -5606,6 +5607,7 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowSubtaskCompletionHand
             EventPayload::TaskCompleted { task_id, .. } => *task_id,
             EventPayload::TaskCompletedWithResult { task_id, .. } => *task_id,
             EventPayload::TaskFailed { task_id, .. } => *task_id,
+            EventPayload::TaskCanceled { task_id, .. } => *task_id,
             _ => return Ok(Reaction::None),
         };
 
@@ -5885,6 +5887,7 @@ mod tests {
         create_migrated_test_pool, task_repository::SqliteTaskRepository,
     };
     use crate::domain::models::{Task, TaskStatus};
+    use crate::services::EventBusConfig;
     use uuid::Uuid;
 
     async fn setup_task_repo() -> Arc<SqliteTaskRepository> {
@@ -6678,6 +6681,88 @@ mod tests {
         assert_eq!(updated_child1.status, TaskStatus::Canceled);
         let updated_child2 = repo.get(child2.id).await.unwrap().unwrap();
         assert_eq!(updated_child2.status, TaskStatus::Canceled);
+    }
+
+    // ========================================================================
+    // WorkflowSubtaskCompletionHandler tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_task_canceled_handled_by_workflow_subtask_completion_handler() {
+        let repo = setup_task_repo().await;
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+
+        let handler = WorkflowSubtaskCompletionHandler::new(
+            repo.clone(),
+            event_bus.clone(),
+            false, // verification_enabled
+        );
+
+        // Create parent task with workflow_state in Running state
+        let mut parent = Task::with_title("Parent workflow task", "Do workflow work");
+        parent.transition_to(TaskStatus::Ready).unwrap();
+        parent.transition_to(TaskStatus::Running).unwrap();
+
+        // Create a canceled subtask linked to the parent
+        let mut subtask = Task::with_title("Phase subtask", "Subtask work");
+        subtask.parent_id = Some(parent.id);
+        subtask.source = TaskSource::SubtaskOf(parent.id);
+        subtask.max_retries = 0; // no retries => should fail the phase
+        subtask.transition_to(TaskStatus::Ready).unwrap();
+        subtask.transition_to(TaskStatus::Running).unwrap();
+        subtask.transition_to(TaskStatus::Canceled).unwrap();
+
+        // Write workflow state on the parent before persisting
+        let ws = WorkflowState::PhaseRunning {
+            workflow_name: "code".to_string(),
+            phase_index: 0,
+            phase_name: "implement".to_string(),
+            subtask_ids: vec![subtask.id],
+        };
+        parent.context.custom.insert(
+            "workflow_state".to_string(),
+            serde_json::to_value(&ws).unwrap(),
+        );
+
+        repo.create(&parent).await.unwrap();
+        repo.create(&subtask).await.unwrap();
+
+        // Fire a TaskCanceled event for the subtask
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(subtask.id),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::TaskCanceled {
+                task_id: subtask.id,
+                reason: "parent canceled".to_string(),
+            },
+        };
+
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        // The handler should process this without error (drives workflow state machine)
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        // WorkflowSubtaskCompletionHandler always returns Reaction::None
+        // (side effects happen through workflow engine + event bus)
+        assert!(matches!(reaction, Reaction::None));
+
+        // Verify that the handler drove handle_phase_complete, which should
+        // have transitioned the parent to Failed (since retries are exhausted)
+        let updated_parent = repo.get(parent.id).await.unwrap().unwrap();
+        assert_eq!(
+            updated_parent.status,
+            TaskStatus::Failed,
+            "Parent task should be Failed after canceled subtask with no retries"
+        );
     }
 
     // ========================================================================
