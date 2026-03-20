@@ -15,7 +15,7 @@ use crate::domain::models::workflow_template::{
 ///
 /// Returns only the Overmind - the sole pre-packaged agent.
 pub fn create_baseline_agents() -> Vec<AgentTemplate> {
-    create_baseline_agents_with_workflow(None)
+    create_baseline_agents_with_workflow(None, None)
 }
 
 /// Create all baseline agents with an optional workflow template.
@@ -24,8 +24,9 @@ pub fn create_baseline_agents() -> Vec<AgentTemplate> {
 /// the workflow template. If `None`, uses the static `OVERMIND_SYSTEM_PROMPT`.
 pub fn create_baseline_agents_with_workflow(
     workflow: Option<&WorkflowTemplate>,
+    overmind_max_turns: Option<u32>,
 ) -> Vec<AgentTemplate> {
-    vec![create_overmind_with_workflow(workflow), create_aggregator(), create_triage_agent()]
+    vec![create_overmind_with_workflow(workflow, overmind_max_turns), create_aggregator(), create_triage_agent()]
 }
 
 /// Create all baseline agents with awareness of all configured workflow spines.
@@ -33,22 +34,22 @@ pub fn create_baseline_agents_with_workflow(
 /// The single Overmind is seeded with a routing-aware prompt that describes all
 /// provided workflows and teaches the Overmind to select the appropriate spine
 /// based on task content at runtime.
-pub fn create_baseline_agents_with_workflows(workflows: &[WorkflowTemplate]) -> Vec<AgentTemplate> {
-    vec![create_overmind_with_workflows(workflows), create_aggregator(), create_triage_agent()]
+pub fn create_baseline_agents_with_workflows(workflows: &[WorkflowTemplate], overmind_max_turns: Option<u32>) -> Vec<AgentTemplate> {
+    vec![create_overmind_with_workflows(workflows, overmind_max_turns), create_aggregator(), create_triage_agent()]
 }
 
 /// Overmind - The agentic orchestrator of the swarm.
 ///
 /// Receives all tasks and selects the appropriate workflow spine at runtime.
 pub fn create_overmind() -> AgentTemplate {
-    create_overmind_with_workflow(None)
+    create_overmind_with_workflow(None, None)
 }
 
 /// Create the Overmind with an optional workflow template.
 ///
 /// If `workflow` is `Some`, generates the system prompt dynamically from the
 /// workflow template. If `None`, uses the static `OVERMIND_SYSTEM_PROMPT`.
-pub fn create_overmind_with_workflow(workflow: Option<&WorkflowTemplate>) -> AgentTemplate {
+pub fn create_overmind_with_workflow(workflow: Option<&WorkflowTemplate>, overmind_max_turns: Option<u32>) -> AgentTemplate {
     let has_triage = workflow
         .map(|w| w.phases.iter().any(|p| p.name.to_lowercase() == "triage"))
         .unwrap_or(false);
@@ -56,19 +57,19 @@ pub fn create_overmind_with_workflow(workflow: Option<&WorkflowTemplate>) -> Age
         Some(wf) => generate_overmind_prompt(wf),
         None => OVERMIND_SYSTEM_PROMPT.to_string(),
     };
-    build_overmind_template(prompt, has_triage)
+    build_overmind_template(prompt, has_triage, overmind_max_turns)
 }
 
 /// Create the Overmind with awareness of all configured workflow spines.
 ///
 /// Generates a routing-aware prompt that describes each workflow and teaches the
 /// Overmind to select the appropriate spine based on task content at runtime.
-pub fn create_overmind_with_workflows(workflows: &[WorkflowTemplate]) -> AgentTemplate {
+pub fn create_overmind_with_workflows(workflows: &[WorkflowTemplate], overmind_max_turns: Option<u32>) -> AgentTemplate {
     let has_triage = workflows
         .iter()
         .any(|w| w.phases.iter().any(|p| p.name.to_lowercase() == "triage"));
     let prompt = generate_overmind_prompt_multi(workflows);
-    build_overmind_template(prompt, has_triage)
+    build_overmind_template(prompt, has_triage, overmind_max_turns)
 }
 
 /// Aggregator — lightweight fan-in synthesis agent.
@@ -120,7 +121,7 @@ pub fn create_triage_agent() -> AgentTemplate {
 ///
 /// Shared by `create_overmind_with_workflow` and `create_overmind_with_workflows`
 /// so the tool list, constraints, and capabilities are defined in one place.
-fn build_overmind_template(prompt: String, has_triage: bool) -> AgentTemplate {
+fn build_overmind_template(prompt: String, has_triage: bool, max_turns_override: Option<u32>) -> AgentTemplate {
     let mut template = AgentTemplate::new("overmind", AgentTier::Architect)
         .with_description("Agentic orchestrator that analyzes tasks, selects the appropriate workflow spine, dynamically creates agents, and delegates work through MCP tools")
         .with_prompt(prompt)
@@ -152,7 +153,7 @@ fn build_overmind_template(prompt: String, has_triage: bool) -> AgentTemplate {
         .with_capability("stuck-recovery")
         .with_capability("escalation-evaluation")
         .with_capability("cross-goal-prioritization")
-        .with_max_turns(50)
+        .with_max_turns(max_turns_override.unwrap_or(50))
 }
 
 /// Generate a complete Overmind system prompt from a single workflow template.
@@ -1664,7 +1665,7 @@ mod tests {
 
         // Also verify with workflow-generated overmind
         let wf = WorkflowTemplate::default_code_workflow();
-        let wf_overmind = create_overmind_with_workflow(Some(&wf));
+        let wf_overmind = create_overmind_with_workflow(Some(&wf), None);
         assert!(!wf_overmind.has_tool("read"), "workflow overmind should not have read tool");
         assert!(!wf_overmind.has_tool("glob"), "workflow overmind should not have glob tool");
         assert!(!wf_overmind.has_tool("grep"), "workflow overmind should not have grep tool");
@@ -1680,7 +1681,7 @@ mod tests {
     #[test]
     fn test_create_overmind_with_no_workflow_matches_original() {
         let original = create_overmind();
-        let via_workflow = create_overmind_with_workflow(None);
+        let via_workflow = create_overmind_with_workflow(None, None);
 
         // Both should use the same static prompt
         assert_eq!(original.system_prompt, via_workflow.system_prompt);
@@ -1692,7 +1693,7 @@ mod tests {
     #[test]
     fn test_create_baseline_agents_with_no_workflow_matches_original() {
         let original = create_baseline_agents();
-        let via_workflow = create_baseline_agents_with_workflow(None);
+        let via_workflow = create_baseline_agents_with_workflow(None, None);
 
         assert_eq!(original.len(), via_workflow.len());
         // Overmind prompts match
@@ -1829,7 +1830,7 @@ mod tests {
     #[test]
     fn test_create_overmind_with_workflow_uses_dynamic_prompt() {
         let wf = WorkflowTemplate::default_code_workflow();
-        let overmind = create_overmind_with_workflow(Some(&wf));
+        let overmind = create_overmind_with_workflow(Some(&wf), None);
 
         // Dynamic prompt should differ from static prompt (different formatting)
         // but should contain the same key sections

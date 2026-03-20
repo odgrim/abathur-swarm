@@ -86,6 +86,9 @@ pub struct SwarmConfig {
     /// Claude Code. When false (default), the swarm prefers PRs and will not
     /// directly merge into the default branch.
     pub dangerously_skip_permissions: bool,
+
+    /// Override for the overmind agent's max turns (default: 50).
+    pub overmind_max_turns: Option<u32>,
 }
 
 /// Configurable polling intervals (seconds) for all scheduled handlers.
@@ -370,6 +373,7 @@ impl Default for SwarmConfig {
             workflow_template: None,
             all_workflows: vec![],
             dangerously_skip_permissions: false,
+            overmind_max_turns: None,
         }
     }
 }

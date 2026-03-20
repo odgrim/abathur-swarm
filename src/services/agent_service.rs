@@ -436,8 +436,9 @@ impl<R: AgentRepository> AgentService<R> {
     pub async fn seed_baseline_agents_with_workflow(
         &self,
         workflow: Option<&WorkflowTemplate>,
+        overmind_max_turns: Option<u32>,
     ) -> DomainResult<Vec<String>> {
-        let baseline = specialist_templates::create_baseline_agents_with_workflow(workflow);
+        let baseline = specialist_templates::create_baseline_agents_with_workflow(workflow, overmind_max_turns);
         let mut seeded = Vec::new();
 
         for template in baseline {
@@ -475,8 +476,9 @@ impl<R: AgentRepository> AgentService<R> {
     pub async fn seed_baseline_agents_with_workflows(
         &self,
         workflows: &[WorkflowTemplate],
+        overmind_max_turns: Option<u32>,
     ) -> DomainResult<Vec<String>> {
-        let baseline = specialist_templates::create_baseline_agents_with_workflows(workflows);
+        let baseline = specialist_templates::create_baseline_agents_with_workflows(workflows, overmind_max_turns);
         let mut seeded = Vec::new();
 
         for template in baseline {

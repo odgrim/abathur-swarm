@@ -44,6 +44,9 @@ pub struct Config {
     /// Federation configuration for cross-swarm delegation.
     #[serde(default)]
     pub federation: crate::services::federation::config::FederationConfig,
+    /// Overmind-specific configuration.
+    #[serde(default)]
+    pub overmind: OvermindTomlConfig,
     /// Name of the default workflow to use.
     #[serde(default = "default_workflow_name")]
     pub default_workflow: String,
@@ -68,6 +71,7 @@ impl Default for Config {
             adapters: AdapterConfig::default(),
             budget: BudgetConfig::default(),
             federation: crate::services::federation::config::FederationConfig::default(),
+            overmind: OvermindTomlConfig::default(),
             default_workflow: default_workflow_name(),
             workflows: Vec::new(),
         }
@@ -96,6 +100,20 @@ impl Default for LimitsConfig {
             max_retries: 3,
             task_timeout_secs: 300,
         }
+    }
+}
+
+/// Overmind-specific TOML configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OvermindTomlConfig {
+    /// Maximum turns for the overmind agent (default: 50).
+    pub max_turns: u32,
+}
+
+impl Default for OvermindTomlConfig {
+    fn default() -> Self {
+        Self { max_turns: 50 }
     }
 }
 

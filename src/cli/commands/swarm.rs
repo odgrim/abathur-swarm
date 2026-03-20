@@ -674,6 +674,7 @@ async fn run_swarm_foreground(
         dangerously_skip_permissions,
         polling: app_config.polling,
         use_worktrees: if no_worktrees { false } else { app_config.worktrees.enabled },
+        overmind_max_turns: Some(app_config.overmind.max_turns),
         ..Default::default()
     };
 

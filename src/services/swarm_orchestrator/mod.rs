@@ -561,9 +561,9 @@ where
             // Use routing-aware seeding when all_workflows is populated; otherwise fall
             // back to single-workflow seeding (legacy / empty config path).
             let seed_result = if !self.config.all_workflows.is_empty() {
-                agent_service.seed_baseline_agents_with_workflows(&self.config.all_workflows).await
+                agent_service.seed_baseline_agents_with_workflows(&self.config.all_workflows, self.config.overmind_max_turns).await
             } else {
-                agent_service.seed_baseline_agents_with_workflow(self.config.workflow_template.as_ref()).await
+                agent_service.seed_baseline_agents_with_workflow(self.config.workflow_template.as_ref(), self.config.overmind_max_turns).await
             };
             match seed_result {
                 Ok(seeded) if !seeded.is_empty() => {
