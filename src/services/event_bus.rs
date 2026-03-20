@@ -1776,6 +1776,8 @@ pub struct EventBus {
     /// Unique ID for this EventBus instance (process). Used to identify
     /// events originating from this process for cross-process dedup.
     process_id: Uuid,
+    /// Counter of events dropped due to broadcast channel being full or having no receivers.
+    dropped_count: AtomicU64,
 }
 
 impl EventBus {
@@ -1789,6 +1791,7 @@ impl EventBus {
             correlation_context: Arc::new(RwLock::new(None)),
             config,
             process_id: Uuid::new_v4(),
+            dropped_count: AtomicU64::new(0),
         }
     }
 
@@ -1815,8 +1818,12 @@ impl EventBus {
             event.correlation_id = *ctx;
         }
 
-        // Persist if store is configured
-        if self.config.persist_events
+        // Determine whether to persist: always persist Task and Workflow category
+        // events (state-bearing, loss causes correctness issues), otherwise honor config.
+        let should_persist = self.config.persist_events
+            || matches!(event.category, EventCategory::Task | EventCategory::Workflow);
+
+        if should_persist
             && let Some(ref store) = self.store
                 && let Err(e) = store.append(&event).await {
                     let err_msg = e.to_string();
@@ -1835,8 +1842,22 @@ impl EventBus {
                     }
                 }
 
-        // Broadcast to subscribers (ignore send errors - may have no subscribers)
-        let _ = self.sender.send(event);
+        // Broadcast to subscribers, tracking drops
+        if let Err(e) = self.sender.send(event) {
+            self.dropped_count.fetch_add(1, Ordering::Relaxed);
+            if self.sender.receiver_count() == 0 {
+                // No receivers is normal in CLI mode — log at debug, not warn
+                tracing::debug!(
+                    "EventBus: dropped event (no receivers): {}",
+                    e
+                );
+            } else {
+                tracing::warn!(
+                    "EventBus: dropped event (receivers lagged): {}",
+                    e
+                );
+            }
+        }
     }
 
     /// Publish a SwarmEvent (converts to UnifiedEvent).
@@ -1894,6 +1915,11 @@ impl EventBus {
     /// Get the number of active subscribers.
     pub fn subscriber_count(&self) -> usize {
         self.sender.receiver_count()
+    }
+
+    /// Get the total number of events dropped since this EventBus was created.
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped_count.load(Ordering::Relaxed)
     }
 
     /// Initialize the sequence counter from the event store.
@@ -1994,5 +2020,95 @@ mod tests {
         let unified: UnifiedEvent = event.into();
         assert_eq!(unified.severity, EventSeverity::Info);
         assert_eq!(unified.category, EventCategory::Execution);
+    }
+
+    #[tokio::test]
+    async fn test_dropped_count_increments_on_no_receivers() {
+        // Create bus with no subscribers — sends will be dropped
+        let bus = EventBus::new(EventBusConfig {
+            channel_capacity: 16,
+            persist_events: false,
+        });
+
+        assert_eq!(bus.dropped_count(), 0);
+
+        // Publish without any subscriber — should increment dropped_count
+        bus.publish_swarm_event(SwarmEvent::Started).await;
+        assert_eq!(bus.dropped_count(), 1);
+
+        bus.publish_swarm_event(SwarmEvent::Stopped).await;
+        assert_eq!(bus.dropped_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_task_events_persist_regardless_of_config() {
+        use crate::services::event_store::{EventStoreError, EventQuery};
+
+        // Minimal in-memory event store that records whether append was called
+        struct TrackingStore {
+            appended: std::sync::Mutex<Vec<EventCategory>>,
+        }
+
+        impl TrackingStore {
+            fn new() -> Self {
+                Self { appended: std::sync::Mutex::new(Vec::new()) }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl EventStore for TrackingStore {
+            async fn append(&self, event: &UnifiedEvent) -> Result<(), EventStoreError> {
+                self.appended.lock().unwrap().push(event.category);
+                Ok(())
+            }
+            async fn query(&self, _query: EventQuery) -> Result<Vec<UnifiedEvent>, EventStoreError> {
+                Ok(vec![])
+            }
+            async fn latest_sequence(&self) -> Result<Option<SequenceNumber>, EventStoreError> {
+                Ok(None)
+            }
+            async fn count(&self) -> Result<u64, EventStoreError> {
+                Ok(0)
+            }
+            async fn prune_older_than(&self, _duration: std::time::Duration) -> Result<u64, EventStoreError> {
+                Ok(0)
+            }
+        }
+
+        let store = Arc::new(TrackingStore::new());
+
+        // persist_events is FALSE, but Task/Workflow events should still persist
+        let bus = EventBus::new(EventBusConfig {
+            channel_capacity: 16,
+            persist_events: false,
+        }).with_store(store.clone());
+
+        let _rx = bus.subscribe(); // Need a subscriber so events don't get dropped
+
+        // Publish an Orchestrator event — should NOT be persisted
+        bus.publish_swarm_event(SwarmEvent::Started).await;
+
+        // Publish a Task event — should be persisted
+        let task_event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: Some(Uuid::new_v4()),
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::TaskReady {
+                task_id: Uuid::new_v4(),
+                task_title: "test".to_string(),
+            },
+        };
+        bus.publish(task_event).await;
+
+        let appended = store.appended.lock().unwrap();
+        // Only the Task event should have been persisted
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0], EventCategory::Task);
     }
 }

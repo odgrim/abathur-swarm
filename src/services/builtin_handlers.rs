@@ -1109,68 +1109,50 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static, W: WorktreeReposi
 }
 
 // ============================================================================
-// ReconciliationHandler
+// FastReconciliationHandler
 // ============================================================================
 
-/// Attempt a task repository update, logging and ignoring ConcurrencyConflict errors.
-/// Returns `true` if the update succeeded, `false` if a conflict was suppressed.
-async fn try_update_task<T: TaskRepository>(
-    repo: &T,
-    task: &Task,
-    context: &str,
-) -> Result<bool, String> {
-    match repo.update(task).await {
-        Ok(()) => Ok(true),
-        Err(DomainError::ConcurrencyConflict { entity, id }) => {
-            tracing::warn!(
-                "ReconciliationHandler: ConcurrencyConflict on {} {} during {}; skipping",
-                entity, id, context
-            );
-            Ok(false)
-        }
-        Err(e) => Err(format!("Failed to update ({}): {}", context, e)),
-    }
-}
-
-/// Triggered by the "reconciliation" scheduled event. Scans for missed state
-/// transitions, detects stale running tasks, and corrects them (safety net
-/// for the event-driven system).
-pub struct ReconciliationHandler<T: TaskRepository> {
+/// Fast-path reconciliation handler (NORMAL priority, every ~15s).
+///
+/// Only checks cheap state transitions:
+/// - Pending tasks with all deps Complete → Ready
+/// - Pending tasks with failed/canceled deps → Blocked
+/// - Blocked tasks with all deps Complete → Ready
+/// - Blocked tasks with all deps terminal and some failed → cascade failure
+///
+/// Expensive checks (stale Running tasks, Validating timeouts, workflow parking)
+/// remain in the slow-path `ReconciliationHandler` (LOW priority, every ~5min).
+///
+/// Triggered by `ScheduledEventFired { name: "fast-reconciliation" }`.
+pub struct FastReconciliationHandler<T: TaskRepository> {
     task_repo: Arc<T>,
-    /// Tasks stuck in Running longer than this are considered stale (seconds).
-    stale_task_timeout_secs: u64,
 }
 
-impl<T: TaskRepository> ReconciliationHandler<T> {
+impl<T: TaskRepository> FastReconciliationHandler<T> {
     pub fn new(task_repo: Arc<T>) -> Self {
-        Self { task_repo, stale_task_timeout_secs: 7200 } // 2 hours default
-    }
-
-    pub fn with_stale_timeout(mut self, secs: u64) -> Self {
-        self.stale_task_timeout_secs = secs;
-        self
+        Self { task_repo }
     }
 }
 
 #[async_trait]
-impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
+impl<T: TaskRepository + 'static> EventHandler for FastReconciliationHandler<T> {
     fn metadata(&self) -> HandlerMetadata {
         HandlerMetadata {
             id: HandlerId::new(),
-            name: "ReconciliationHandler".to_string(),
+            name: "FastReconciliationHandler".to_string(),
             filter: EventFilter {
                 categories: vec![EventCategory::Scheduler],
                 payload_types: vec!["ScheduledEventFired".to_string()],
                 custom_predicate: Some(Arc::new(|event| {
                     matches!(
                         &event.payload,
-                        EventPayload::ScheduledEventFired { name, .. } if name == "reconciliation"
+                        EventPayload::ScheduledEventFired { name, .. } if name == "fast-reconciliation"
                     )
                 })),
                 ..Default::default()
             },
-            priority: HandlerPriority::LOW,
-            error_strategy: ErrorStrategy::CircuitBreak,
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::LogAndContinue,
             critical: false,
         }
     }
@@ -1178,7 +1160,6 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
     async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
         let mut corrections: u32 = 0;
         let mut new_events = Vec::new();
-        let mut processed_ids: HashSet<uuid::Uuid> = HashSet::new();
 
         // Check Pending tasks
         let pending = self.task_repo.list_by_status(TaskStatus::Pending).await
@@ -1233,8 +1214,6 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
             let has_failed_dep = deps.iter().any(|d| d.status == TaskStatus::Failed || d.status == TaskStatus::Canceled);
 
             if has_failed_dep {
-                // Cascade failure: if a critical dependency has permanently failed,
-                // fail this task too rather than leaving it stuck in Blocked forever
                 let all_failed_or_complete = deps.iter().all(|d| {
                     d.status == TaskStatus::Complete ||
                     d.status == TaskStatus::Failed ||
@@ -1293,6 +1272,98 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
                 }
             }
         }
+
+        if corrections > 0 {
+            tracing::info!("FastReconciliationHandler: made {} corrections", corrections);
+        }
+
+        if new_events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(new_events))
+        }
+    }
+}
+
+// ============================================================================
+// ReconciliationHandler
+// ============================================================================
+
+/// Attempt a task repository update, logging and ignoring ConcurrencyConflict errors.
+/// Returns `true` if the update succeeded, `false` if a conflict was suppressed.
+async fn try_update_task<T: TaskRepository>(
+    repo: &T,
+    task: &Task,
+    context: &str,
+) -> Result<bool, String> {
+    match repo.update(task).await {
+        Ok(()) => Ok(true),
+        Err(DomainError::ConcurrencyConflict { entity, id }) => {
+            tracing::warn!(
+                "ReconciliationHandler: ConcurrencyConflict on {} {} during {}; skipping",
+                entity, id, context
+            );
+            Ok(false)
+        }
+        Err(e) => Err(format!("Failed to update ({}): {}", context, e)),
+    }
+}
+
+/// Slow-path reconciliation handler (LOW priority, every ~5min).
+///
+/// Handles expensive checks only: stale Running tasks, Validating timeouts,
+/// workflow parking timeouts. Cheap state transition checks (Pending→Ready,
+/// Blocked→Ready) have been moved to `FastReconciliationHandler`.
+///
+/// Triggered by the "reconciliation" scheduled event.
+pub struct ReconciliationHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+    /// Tasks stuck in Running longer than this are considered stale (seconds).
+    stale_task_timeout_secs: u64,
+}
+
+impl<T: TaskRepository> ReconciliationHandler<T> {
+    pub fn new(task_repo: Arc<T>) -> Self {
+        Self { task_repo, stale_task_timeout_secs: 7200 } // 2 hours default
+    }
+
+    pub fn with_stale_timeout(mut self, secs: u64) -> Self {
+        self.stale_task_timeout_secs = secs;
+        self
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "ReconciliationHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "reconciliation"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::LOW,
+            error_strategy: ErrorStrategy::CircuitBreak,
+            critical: false,
+        }
+    }
+
+    async fn handle(&self, event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let mut corrections: u32 = 0;
+        let mut new_events = Vec::new();
+        let mut processed_ids: HashSet<uuid::Uuid> = HashSet::new();
+
+        // NOTE: Pending→Ready and Blocked→Ready checks have been moved to
+        // FastReconciliationHandler (NORMAL priority, every ~15s) for faster
+        // state transition recovery. This handler only runs expensive checks.
 
         // Stale-task detection: tasks stuck in Running for > stale_task_timeout_secs
         // Tiered warnings: 50% -> TaskRunningLong, 80% -> TaskRunningCritical + escalation, 100% -> fail
@@ -2244,6 +2315,71 @@ impl<T: TaskRepository + 'static> EventHandler for TaskReadySpawnHandler<T> {
             _ => {
                 // Task no longer Ready, skip
             }
+        }
+
+        Ok(Reaction::None)
+    }
+}
+
+// ============================================================================
+// ReadyTaskPollingHandler
+// ============================================================================
+
+/// Periodic safety-net companion to TaskReadySpawnHandler. Polls get_ready_tasks()
+/// to discover tasks that are Ready in the DB but never got pushed to the spawn
+/// channel (e.g. because the TaskReady event was dropped by the broadcast channel).
+///
+/// Triggered by `ScheduledEventFired { name: "ready-task-poll" }`.
+pub struct ReadyTaskPollingHandler<T: TaskRepository> {
+    task_repo: Arc<T>,
+    ready_tx: tokio::sync::mpsc::Sender<uuid::Uuid>,
+}
+
+impl<T: TaskRepository> ReadyTaskPollingHandler<T> {
+    pub fn new(task_repo: Arc<T>, ready_tx: tokio::sync::mpsc::Sender<uuid::Uuid>) -> Self {
+        Self { task_repo, ready_tx }
+    }
+}
+
+#[async_trait]
+impl<T: TaskRepository + 'static> EventHandler for ReadyTaskPollingHandler<T> {
+    fn metadata(&self) -> HandlerMetadata {
+        HandlerMetadata {
+            id: HandlerId::new(),
+            name: "ReadyTaskPollingHandler".to_string(),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "ready-task-poll"
+                    )
+                })),
+                ..Default::default()
+            },
+            priority: HandlerPriority::NORMAL,
+            error_strategy: ErrorStrategy::LogAndContinue,
+            critical: false,
+        }
+    }
+
+    async fn handle(&self, _event: &UnifiedEvent, _ctx: &HandlerContext) -> Result<Reaction, String> {
+        let ready_tasks = self.task_repo.get_ready_tasks(100).await
+            .map_err(|e| format!("Failed to poll ready tasks: {}", e))?;
+
+        let mut pushed = 0usize;
+        for task in &ready_tasks {
+            if self.ready_tx.try_send(task.id).is_ok() {
+                pushed += 1;
+            }
+        }
+
+        if pushed > 0 {
+            tracing::info!(
+                "ReadyTaskPollingHandler: pushed {} ready task(s) to spawn channel",
+                pushed
+            );
         }
 
         Ok(Reaction::None)
@@ -9833,5 +9969,161 @@ mod reconciliation_handler_tests {
             }
             Reaction::None => panic!("Expected EmitEvents reaction"),
         }
+    }
+}
+
+#[cfg(test)]
+mod ready_task_polling_handler_tests {
+    use super::*;
+    use crate::adapters::sqlite::{
+        create_migrated_test_pool, task_repository::SqliteTaskRepository,
+    };
+    use crate::domain::models::{Task, TaskStatus};
+    use std::sync::Arc;
+
+    async fn setup_task_repo() -> Arc<SqliteTaskRepository> {
+        let pool = create_migrated_test_pool().await.unwrap();
+        Arc::new(SqliteTaskRepository::new(pool))
+    }
+
+    fn make_ready_task_poll_event() -> UnifiedEvent {
+        UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Debug,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "ready-task-poll".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ready_task_polling_pushes_ready_tasks() {
+        let repo = setup_task_repo().await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+        let handler = ReadyTaskPollingHandler::new(repo.clone(), tx);
+
+        // Create a task and transition it to Ready
+        let mut task = Task::new("Ready task");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        repo.create(&task).await.unwrap();
+
+        let event = make_ready_task_poll_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::None));
+
+        // Verify the task was pushed to the channel
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received, task.id);
+    }
+
+    #[tokio::test]
+    async fn test_ready_task_polling_no_ready_tasks() {
+        let repo = setup_task_repo().await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+        let handler = ReadyTaskPollingHandler::new(repo.clone(), tx);
+
+        // Create a Pending task (not Ready)
+        let task = Task::new("Pending task");
+        repo.create(&task).await.unwrap();
+
+        let event = make_ready_task_poll_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        handler.handle(&event, &ctx).await.unwrap();
+
+        // Should not push anything
+        assert!(rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod fast_reconciliation_handler_tests {
+    use super::*;
+    use crate::adapters::sqlite::{
+        create_migrated_test_pool, task_repository::SqliteTaskRepository,
+    };
+    use crate::domain::models::{Task, TaskStatus};
+    use std::sync::Arc;
+
+    async fn setup_task_repo() -> Arc<SqliteTaskRepository> {
+        let pool = create_migrated_test_pool().await.unwrap();
+        Arc::new(SqliteTaskRepository::new(pool))
+    }
+
+    fn make_fast_reconciliation_event() -> UnifiedEvent {
+        UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Debug,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "fast-reconciliation".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fast_reconciliation_pending_to_ready() {
+        let repo = setup_task_repo().await;
+        let handler = FastReconciliationHandler::new(repo.clone());
+
+        // Create a parent task that is Complete
+        let mut parent = Task::new("Parent task");
+        parent.transition_to(TaskStatus::Ready).unwrap();
+        parent.transition_to(TaskStatus::Running).unwrap();
+        parent.transition_to(TaskStatus::Complete).unwrap();
+        repo.create(&parent).await.unwrap();
+
+        // Create a child task that is Pending with parent as dependency
+        let child = Task::new("Child task");
+        repo.create(&child).await.unwrap();
+        repo.add_dependency(child.id, parent.id).await.unwrap();
+
+        let event = make_fast_reconciliation_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Verify child was transitioned to Ready
+        let updated = repo.get(child.id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Ready, "Pending task with complete deps should become Ready");
+
+        // Verify a TaskReady event was emitted
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                let has_ready = events.iter().any(|e| matches!(&e.payload, EventPayload::TaskReady { task_id, .. } if *task_id == child.id));
+                assert!(has_ready, "Should emit TaskReady event");
+            }
+            Reaction::None => panic!("Expected EmitEvents reaction"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fast_reconciliation_no_work() {
+        let repo = setup_task_repo().await;
+        let handler = FastReconciliationHandler::new(repo.clone());
+
+        // No tasks at all
+        let event = make_fast_reconciliation_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::None), "No work should produce Reaction::None");
     }
 }

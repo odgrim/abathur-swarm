@@ -93,6 +93,10 @@ pub struct SwarmConfig {
 #[serde(default)]
 pub struct PollingConfig {
     pub reconciliation_interval_secs: u64,
+    /// Interval for fast reconciliation checks (Pending→Ready, Blocked→Ready) in seconds (default: 15s).
+    pub fast_reconciliation_interval_secs: u64,
+    /// Interval for polling ready tasks as safety net for dropped events (default: 15s).
+    pub ready_task_poll_interval_secs: u64,
     pub stats_update_interval_secs: u64,
     pub memory_maintenance_interval_secs: u64,
     pub memory_reconciliation_interval_secs: u64,
@@ -186,7 +190,9 @@ pub struct PollingConfig {
 impl Default for PollingConfig {
     fn default() -> Self {
         Self {
-            reconciliation_interval_secs: 30,
+            reconciliation_interval_secs: 300,
+            fast_reconciliation_interval_secs: 15,
+            ready_task_poll_interval_secs: 15,
             stats_update_interval_secs: 10,
             memory_maintenance_interval_secs: 300,
             memory_reconciliation_interval_secs: 120,

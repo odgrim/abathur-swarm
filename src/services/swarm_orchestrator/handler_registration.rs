@@ -15,7 +15,7 @@ use crate::services::builtin_handlers::{
     ConvergenceCoordinationHandler,
     ConvergenceEscalationFeedbackHandler,
     ConvergenceEvolutionHandler, ConvergenceMemoryHandler, ConvergenceSLAPressureHandler,
-    DeadLetterRetryHandler, DirectModeExecutionMemoryHandler, EscalationTimeoutHandler,
+    DeadLetterRetryHandler, DirectModeExecutionMemoryHandler, EscalationTimeoutHandler, FastReconciliationHandler,
     EgressRoutingHandler,
     EventPruningHandler, EventStorePollerHandler,
     GoalConvergenceCheckHandler, GoalStagnationDetectorHandler,
@@ -25,7 +25,7 @@ use crate::services::builtin_handlers::{
     MemoryConflictEscalationHandler, MemoryInformedDecompositionHandler,
     MemoryMaintenanceHandler, MemoryReconciliationHandler,
     ObstacleEscalationHandler,
-    PriorityAgingHandler, ReconciliationHandler,
+    PriorityAgingHandler, ReadyTaskPollingHandler, ReconciliationHandler,
     ReviewFailureLoopHandler, RetryProcessingHandler, SpecialistCheckHandler,
     StartupCatchUpHandler, StatsUpdateHandler, SystemStallDetectorHandler,
     TaskCompletionLearningHandler,
@@ -178,7 +178,14 @@ where
             )))
             .await;
 
-        // ReconciliationHandler (LOW) — periodic safety-net reconciliation
+        // FastReconciliationHandler (NORMAL) — fast-path state transition recovery
+        reactor
+            .register(Arc::new(FastReconciliationHandler::new(
+                self.task_repo.clone(),
+            )))
+            .await;
+
+        // ReconciliationHandler (LOW) — slow-path expensive checks (stale tasks, timeouts)
         reactor
             .register(Arc::new(ReconciliationHandler::new(
                 self.task_repo.clone(),
@@ -244,6 +251,14 @@ where
         // TaskReadySpawnHandler (NORMAL) — push ready tasks to spawn channel
         reactor
             .register(Arc::new(TaskReadySpawnHandler::new(
+                self.task_repo.clone(),
+                self.ready_task_tx.clone(),
+            )))
+            .await;
+
+        // ReadyTaskPollingHandler (NORMAL) — periodic poll for ready tasks missed by events
+        reactor
+            .register(Arc::new(ReadyTaskPollingHandler::new(
                 self.task_repo.clone(),
                 self.ready_task_tx.clone(),
             )))
@@ -719,7 +734,17 @@ where
             .reconciliation_interval_secs
             .unwrap_or(p.reconciliation_interval_secs);
 
-        // Reconciliation — safety net for missed transitions
+        // Fast reconciliation — cheap state transition recovery (Pending→Ready, Blocked→Ready)
+        scheduler
+            .register(interval_schedule(
+                "fast-reconciliation",
+                Duration::from_secs(p.fast_reconciliation_interval_secs),
+                EventCategory::Scheduler,
+                EventSeverity::Debug,
+            ))
+            .await;
+
+        // Reconciliation — slow-path expensive checks (stale tasks, timeouts)
         scheduler
             .register(interval_schedule(
                 "reconciliation",
@@ -802,6 +827,16 @@ where
                 ))
                 .await;
         }
+
+        // Ready task poll — safety net for missed TaskReady events
+        scheduler
+            .register(interval_schedule(
+                "ready-task-poll",
+                Duration::from_secs(p.ready_task_poll_interval_secs),
+                EventCategory::Scheduler,
+                EventSeverity::Debug,
+            ))
+            .await;
 
         // Specialist check — scan for stuck/failed tasks needing specialists
         scheduler
