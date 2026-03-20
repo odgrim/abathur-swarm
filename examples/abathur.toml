@@ -17,6 +17,12 @@ max_retries = 3
 # Seconds before a running task is considered timed out
 task_timeout_secs = 300
 
+# ─── Overmind agent ───────────────────────────────────────────────────────────
+
+[overmind]
+# Maximum turns for the overmind agent before it stops
+max_turns = 75
+
 # ─── Subtask spawning limits ──────────────────────────────────────────────────
 
 [spawn_limits]
