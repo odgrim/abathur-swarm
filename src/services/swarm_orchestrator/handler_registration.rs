@@ -63,10 +63,17 @@ where
         let reactor = &self.event_reactor;
         let p = &self.config.polling;
 
+        // Create a TaskService for SYSTEM handlers that need validated state transitions.
+        // This ensures all mutations go through TaskService (validation + event emission).
+        let handler_task_service = Arc::new(TaskService::new(
+            self.task_repo.clone(),
+        ));
+
         // TaskCompletedReadinessHandler (SYSTEM) — cascade readiness on completion
         reactor
             .register(Arc::new(TaskCompletedReadinessHandler::new(
                 self.task_repo.clone(),
+                handler_task_service.clone(),
             )))
             .await;
 
@@ -99,6 +106,7 @@ where
         reactor
             .register(Arc::new(TaskFailedBlockHandler::new(
                 self.task_repo.clone(),
+                handler_task_service.clone(),
             )))
             .await;
 

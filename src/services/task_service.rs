@@ -815,6 +815,75 @@ impl<T: TaskRepository> TaskService<T> {
         Ok((task, events))
     }
 
+    /// Transition a task to Ready status.
+    ///
+    /// Used by SYSTEM handlers (e.g. `TaskCompletedReadinessHandler`) to cascade
+    /// readiness through the task DAG. This method follows the same pattern as
+    /// `complete_task()`: fetch → validate transition → persist → emit event.
+    ///
+    /// If the task is already in `Ready` status, the transition is treated as
+    /// idempotent and returns `Ok` with an empty events vec.
+    pub async fn transition_to_ready(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        let mut task = self.task_repo.get(task_id).await?
+            .ok_or(DomainError::TaskNotFound(task_id))?;
+
+        // Idempotent: already ready
+        if task.status == TaskStatus::Ready {
+            return Ok((task, Vec::new()));
+        }
+
+        task.transition_to(TaskStatus::Ready).map_err(|e| DomainError::InvalidStateTransition {
+            from: task.status.as_str().to_string(),
+            to: "ready".to_string(),
+            reason: e,
+        })?;
+
+        self.task_repo.update(&task).await?;
+        tracing::debug!(%task_id, "task transitioned to ready");
+
+        let events = vec![Self::make_event(
+            EventSeverity::Debug,
+            EventCategory::Task,
+            None,
+            Some(task_id),
+            EventPayload::TaskReady {
+                task_id,
+                task_title: task.title.clone(),
+            },
+        )];
+
+        Ok((task, events))
+    }
+
+    /// Transition a task to Blocked status.
+    ///
+    /// Used by SYSTEM handlers (e.g. `TaskFailedBlockHandler`) to block
+    /// dependent tasks when an upstream task fails with exhausted retries.
+    ///
+    /// If the task is already in `Blocked` or a terminal status, the transition
+    /// is treated as idempotent and returns `Ok` with an empty events vec.
+    pub async fn transition_to_blocked(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        let mut task = self.task_repo.get(task_id).await?
+            .ok_or(DomainError::TaskNotFound(task_id))?;
+
+        // Idempotent: already blocked or terminal
+        if task.status == TaskStatus::Blocked || task.status.is_terminal() {
+            return Ok((task, Vec::new()));
+        }
+
+        task.transition_to(TaskStatus::Blocked).map_err(|e| DomainError::InvalidStateTransition {
+            from: task.status.as_str().to_string(),
+            to: "blocked".to_string(),
+            reason: e,
+        })?;
+
+        self.task_repo.update(&task).await?;
+        tracing::debug!(%task_id, "task transitioned to blocked");
+
+        // No events emitted for blocked transitions (matches existing Reaction::None behavior)
+        Ok((task, Vec::new()))
+    }
+
     /// Retry a failed task.
     ///
     /// For convergent tasks (`trajectory_id.is_some()`), the retry intentionally

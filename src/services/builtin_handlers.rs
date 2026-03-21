@@ -28,6 +28,7 @@ use crate::services::event_reactor::{
 };
 use crate::services::memory_service::MemoryService;
 use crate::services::swarm_orchestrator::SwarmStats;
+use crate::services::task_service::TaskService;
 
 // ============================================================================
 // TaskCompletedReadinessHandler
@@ -35,13 +36,17 @@ use crate::services::swarm_orchestrator::SwarmStats;
 
 /// When a task completes, check its dependents and transition Pending/Blocked → Ready
 /// if all their dependencies are now complete.
+///
+/// State transitions are routed through `TaskService` to ensure validation,
+/// optimistic locking, and proper event emission.
 pub struct TaskCompletedReadinessHandler<T: TaskRepository> {
     task_repo: Arc<T>,
+    task_service: Arc<TaskService<T>>,
 }
 
 impl<T: TaskRepository> TaskCompletedReadinessHandler<T> {
-    pub fn new(task_repo: Arc<T>) -> Self {
-        Self { task_repo }
+    pub fn new(task_repo: Arc<T>, task_service: Arc<TaskService<T>>) -> Self {
+        Self { task_repo, task_service }
     }
 }
 
@@ -85,39 +90,16 @@ impl<T: TaskRepository + 'static> EventHandler for TaskCompletedReadinessHandler
                 .map_err(|e| format!("Failed to get dependencies: {}", e))?;
 
             if all_deps.iter().all(|d| d.status == TaskStatus::Complete) {
-                let dep_id = dep.id;
-                let dep_title = dep.title.clone();
-                let result = update_with_retry(
-                    self.task_repo.as_ref(),
-                    dep_id,
-                    |task| {
-                        if task.status != TaskStatus::Pending && task.status != TaskStatus::Blocked {
-                            return Ok(false); // already transitioned
-                        }
-                        task.transition_to(TaskStatus::Ready)
-                            .map(|_| true)
-                            .map_err(|e| format!("transition failed: {}", e))
-                    },
-                    3,
-                    "TaskCompletedReadinessHandler",
-                ).await?;
-
-                if result.is_some() {
-                    new_events.push(UnifiedEvent {
-                        id: EventId::new(),
-                        sequence: SequenceNumber(0),
-                        timestamp: chrono::Utc::now(),
-                        severity: EventSeverity::Debug,
-                        category: EventCategory::Task,
-                        goal_id: event.goal_id,
-                        task_id: Some(dep_id),
-                        correlation_id: event.correlation_id,
-                        source_process_id: None,
-                        payload: EventPayload::TaskReady {
-                            task_id: dep_id,
-                            task_title: dep_title,
-                        },
-                    });
+                match self.task_service.transition_to_ready(dep.id).await {
+                    Ok((_task, events)) => {
+                        new_events.extend(events);
+                    }
+                    Err(DomainError::InvalidStateTransition { .. }) => {
+                        // Idempotent skip: task already transitioned
+                    }
+                    Err(e) => {
+                        return Err(format!("Failed to transition task to ready: {}", e));
+                    }
                 }
             }
         }
@@ -135,13 +117,17 @@ impl<T: TaskRepository + 'static> EventHandler for TaskCompletedReadinessHandler
 // ============================================================================
 
 /// When a task fails with retries exhausted, block its dependent tasks.
+///
+/// State transitions are routed through `TaskService` to ensure validation,
+/// optimistic locking, and proper event emission.
 pub struct TaskFailedBlockHandler<T: TaskRepository> {
     task_repo: Arc<T>,
+    task_service: Arc<TaskService<T>>,
 }
 
 impl<T: TaskRepository> TaskFailedBlockHandler<T> {
-    pub fn new(task_repo: Arc<T>) -> Self {
-        Self { task_repo }
+    pub fn new(task_repo: Arc<T>, task_service: Arc<TaskService<T>>) -> Self {
+        Self { task_repo, task_service }
     }
 }
 
@@ -169,20 +155,18 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedBlockHandler<T> {
                     .map_err(|e| format!("Failed to get dependents: {}", e))?;
 
                 for dep in dependents {
-                    update_with_retry(
-                        self.task_repo.as_ref(),
-                        dep.id,
-                        |task| {
-                            if task.status == TaskStatus::Blocked || task.status.is_terminal() {
-                                return Ok(false);
-                            }
-                            task.transition_to(TaskStatus::Blocked)
-                                .map(|_| true)
-                                .map_err(|e| format!("transition failed: {}", e))
-                        },
-                        3,
-                        "TaskFailedBlockHandler(canceled)",
-                    ).await?;
+                    if dep.status == TaskStatus::Blocked || dep.status.is_terminal() {
+                        continue;
+                    }
+                    match self.task_service.transition_to_blocked(dep.id).await {
+                        Ok(_) => {}
+                        Err(DomainError::InvalidStateTransition { .. }) => {
+                            // Idempotent skip
+                        }
+                        Err(e) => {
+                            return Err(format!("Failed to transition task to blocked: {}", e));
+                        }
+                    }
                 }
                 return Ok(Reaction::None);
             }
@@ -203,20 +187,20 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedBlockHandler<T> {
             .map_err(|e| format!("Failed to get dependents: {}", e))?;
 
         for dep in dependents {
-            update_with_retry(
-                self.task_repo.as_ref(),
-                dep.id,
-                |task| {
-                    if task.status == TaskStatus::Blocked || task.status.is_terminal() {
-                        return Ok(false);
-                    }
-                    task.transition_to(TaskStatus::Blocked)
-                        .map(|_| true)
-                        .map_err(|e| format!("transition failed: {}", e))
-                },
-                3,
-                "TaskFailedBlockHandler(failed)",
-            ).await?;
+            // Idempotency: only block if not already blocked or terminal
+            if dep.status == TaskStatus::Blocked || dep.status.is_terminal() {
+                continue;
+            }
+
+            match self.task_service.transition_to_blocked(dep.id).await {
+                Ok(_) => {}
+                Err(DomainError::InvalidStateTransition { .. }) => {
+                    // Idempotent skip
+                }
+                Err(e) => {
+                    return Err(format!("Failed to transition task to blocked: {}", e));
+                }
+            }
         }
 
         Ok(Reaction::None)
@@ -5996,15 +5980,22 @@ mod tests {
     use crate::services::EventBusConfig;
     use uuid::Uuid;
 
+    use crate::services::task_service::TaskService;
+
     async fn setup_task_repo() -> Arc<SqliteTaskRepository> {
         let pool = create_migrated_test_pool().await.unwrap();
         Arc::new(SqliteTaskRepository::new(pool))
     }
 
+    fn make_task_service(repo: &Arc<SqliteTaskRepository>) -> Arc<TaskService<SqliteTaskRepository>> {
+        Arc::new(TaskService::new(repo.clone()))
+    }
+
     #[tokio::test]
     async fn test_task_completed_readiness_handler() {
         let repo = setup_task_repo().await;
-        let handler = TaskCompletedReadinessHandler::new(repo.clone());
+        let task_service = make_task_service(&repo);
+        let handler = TaskCompletedReadinessHandler::new(repo.clone(), task_service);
 
         // Create upstream task
         let mut upstream = Task::new("Upstream task");
@@ -6059,7 +6050,8 @@ mod tests {
     #[tokio::test]
     async fn test_task_completed_readiness_handler_idempotent() {
         let repo = setup_task_repo().await;
-        let handler = TaskCompletedReadinessHandler::new(repo.clone());
+        let task_service = make_task_service(&repo);
+        let handler = TaskCompletedReadinessHandler::new(repo.clone(), task_service);
 
         // Create upstream and downstream
         let mut upstream = Task::new("Upstream");
@@ -6102,7 +6094,8 @@ mod tests {
     #[tokio::test]
     async fn test_task_failed_block_handler() {
         let repo = setup_task_repo().await;
-        let handler = TaskFailedBlockHandler::new(repo.clone());
+        let task_service = make_task_service(&repo);
+        let handler = TaskFailedBlockHandler::new(repo.clone(), task_service);
 
         // Create upstream task that has exhausted retries
         let mut upstream = Task::new("Upstream");
@@ -6150,7 +6143,8 @@ mod tests {
     #[tokio::test]
     async fn test_task_failed_block_handler_retries_remaining() {
         let repo = setup_task_repo().await;
-        let handler = TaskFailedBlockHandler::new(repo.clone());
+        let task_service = make_task_service(&repo);
+        let handler = TaskFailedBlockHandler::new(repo.clone(), task_service);
 
         // Create upstream task that still has retries remaining
         let mut upstream = Task::new("Upstream");
