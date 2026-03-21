@@ -692,6 +692,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let memory_repo = self.memory_repo.clone();
             let guardrails = self.guardrails.clone();
             let agent_unique_id_for_spawn = agent_unique_id.clone();
+            let merge_request_repo = self.merge_request_repo.clone();
 
             // Cast the generic IntentVerifierService to the trait object for
             // convergent execution. This erases the <G, T> generics.
@@ -1011,6 +1012,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         require_commits,
                                         intent_satisfied,
                                         output_delivery.clone(),
+                                        merge_request_repo.clone(),
                                     ).await;
                                 }
 
@@ -1639,6 +1641,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     require_commits,
                                     false, // intent_satisfied: no convergence verification on this path
                                     output_delivery.clone(),
+                                    merge_request_repo.clone(),
                                 ).await;
 
                                 if let Err(e) = workflow_result {

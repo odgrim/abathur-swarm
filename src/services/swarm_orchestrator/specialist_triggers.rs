@@ -675,6 +675,14 @@ where
         &self,
         _event_tx: &mpsc::Sender<SwarmEvent>,
     ) -> DomainResult<()> {
+        let mr_repo = match self.merge_request_repo.as_ref() {
+            Some(repo) => repo.clone(),
+            None => {
+                tracing::debug!("merge_request_repo not available, skipping conflict specialist check");
+                return Ok(());
+            }
+        };
+
         let verifier = IntegrationVerifierService::new(
             self.task_repo.clone(),
             self.goal_repo.clone(),
@@ -695,41 +703,61 @@ where
             self.worktree_repo.clone(),
             Arc::new(verifier),
             merge_config,
+            mr_repo,
         );
 
         let conflicts = merge_queue.get_conflicts_needing_resolution().await;
 
         for conflict in conflicts {
-            // Check if a resolution task already exists for this conflict
+            // Skip stale conflicts: if the associated task is already terminal,
+            // mark the merge request as Failed and move on.
+            if let Ok(Some(conflict_task)) = self.task_repo.get(conflict.task_id).await {
+                if conflict_task.status.is_terminal() && conflict_task.status != TaskStatus::Complete {
+                    tracing::debug!(
+                        task_id = %conflict.task_id,
+                        merge_request_id = %conflict.merge_request_id,
+                        "skipping stale conflict — associated task is terminal"
+                    );
+                    // Mark the merge request as failed so it's not picked up again
+                    if let Some(ref mr_repo) = self.merge_request_repo {
+                        if let Ok(Some(mut mr)) = mr_repo.get(conflict.merge_request_id).await {
+                            mr.status = crate::services::merge_queue::MergeStatus::Failed;
+                            mr.error = Some("Associated task is terminal".to_string());
+                            mr.updated_at = chrono::Utc::now();
+                            let _ = mr_repo.update(&mr).await;
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            // Check if a resolution task already exists for this conflict.
+            // Match on merge_request_id in task context (more reliable than branch name matching).
+            let mr_id_str = conflict.merge_request_id.to_string();
+            let has_existing_task = |tasks: Vec<Task>| -> bool {
+                tasks.iter().any(|t| {
+                    t.context.custom.get("merge_request_id")
+                        .and_then(|v| v.as_str())
+                        .map(|id| id == mr_id_str)
+                        .unwrap_or(false)
+                    || (t.title.contains("Resolve merge conflict")
+                        && t.title.contains(&conflict.source_branch))
+                })
+            };
             let resolution_exists = self.task_repo
                 .list_by_status(TaskStatus::Ready)
                 .await
-                .map(|tasks| {
-                    tasks.iter().any(|t| {
-                        t.title.contains("Resolve merge conflict") &&
-                        t.title.contains(&conflict.source_branch)
-                    })
-                })
+                .map(&has_existing_task)
                 .unwrap_or(false)
                 || self.task_repo
                     .list_by_status(TaskStatus::Running)
                     .await
-                    .map(|tasks| {
-                        tasks.iter().any(|t| {
-                            t.title.contains("Resolve merge conflict") &&
-                            t.title.contains(&conflict.source_branch)
-                        })
-                    })
+                    .map(&has_existing_task)
                     .unwrap_or(false)
                 || self.task_repo
                     .list_by_status(TaskStatus::Pending)
                     .await
-                    .map(|tasks| {
-                        tasks.iter().any(|t| {
-                            t.title.contains("Resolve merge conflict") &&
-                            t.title.contains(&conflict.source_branch)
-                        })
-                    })
+                    .map(&has_existing_task)
                     .unwrap_or(false);
 
             if !resolution_exists {

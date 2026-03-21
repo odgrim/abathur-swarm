@@ -6,16 +6,14 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use std::process::Command;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::instrument;
 use uuid::Uuid;
 
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{TaskStatus, WorktreeStatus};
-use crate::domain::ports::{GoalRepository, TaskRepository, WorktreeRepository};
+use crate::domain::ports::{GoalRepository, MergeRequestRepository, TaskRepository, WorktreeRepository};
 use crate::services::integration_verifier::{IntegrationVerifierService, VerificationResult};
 
 /// Stage of the merge process.
@@ -25,6 +23,24 @@ pub enum MergeStage {
     AgentToTask,
     /// Stage 2: Merging task branch into main.
     TaskToMain,
+}
+
+impl MergeStage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AgentToTask => "AgentToTask",
+            Self::TaskToMain => "TaskToMain",
+        }
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "AgentToTask" => Some(Self::AgentToTask),
+            "TaskToMain" => Some(Self::TaskToMain),
+            _ => None,
+        }
+    }
 }
 
 /// Status of a merge request.
@@ -42,6 +58,37 @@ pub enum MergeStatus {
     Conflict,
     /// Verification failed (Stage 2 only).
     VerificationFailed,
+}
+
+impl MergeStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::InProgress => "InProgress",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Conflict => "Conflict",
+            Self::VerificationFailed => "VerificationFailed",
+        }
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "Queued" => Some(Self::Queued),
+            "InProgress" => Some(Self::InProgress),
+            "Completed" => Some(Self::Completed),
+            "Failed" => Some(Self::Failed),
+            "Conflict" => Some(Self::Conflict),
+            "VerificationFailed" => Some(Self::VerificationFailed),
+            _ => None,
+        }
+    }
+
+    /// Whether this status is terminal (no further transitions expected).
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::VerificationFailed)
+    }
 }
 
 /// A merge request in the queue.
@@ -67,6 +114,12 @@ pub struct MergeRequest {
     pub commit_sha: Option<String>,
     /// Verification result (Stage 2 only).
     pub verification: Option<VerificationResult>,
+    /// Files with merge conflicts (populated when status is Conflict).
+    #[serde(default)]
+    pub conflict_files: Vec<String>,
+    /// Number of resolution attempts so far.
+    #[serde(default)]
+    pub attempts: u32,
     /// When the request was created.
     pub created_at: DateTime<Utc>,
     /// When the request was last updated.
@@ -87,6 +140,8 @@ impl MergeRequest {
             error: None,
             commit_sha: None,
             verification: None,
+            conflict_files: Vec::new(),
+            attempts: 0,
             created_at: now,
             updated_at: now,
         }
@@ -105,6 +160,8 @@ impl MergeRequest {
             error: None,
             commit_sha: None,
             verification: None,
+            conflict_files: Vec::new(),
+            attempts: 0,
             created_at: now,
             updated_at: now,
         }
@@ -192,6 +249,9 @@ pub struct MergeQueueStats {
 }
 
 /// Two-Stage Merge Queue Service.
+///
+/// Persists merge requests to a `MergeRequestRepository` so that conflict
+/// records survive across ephemeral instances and process restarts.
 pub struct MergeQueue<T, G, W>
 where
     T: TaskRepository + 'static,
@@ -202,8 +262,7 @@ where
     worktree_repo: Arc<W>,
     verifier: Arc<IntegrationVerifierService<T, G, W>>,
     config: MergeQueueConfig,
-    queue: Arc<RwLock<VecDeque<MergeRequest>>>,
-    history: Arc<RwLock<Vec<MergeRequest>>>,
+    merge_repo: Arc<dyn MergeRequestRepository>,
 }
 
 impl<T, G, W> MergeQueue<T, G, W>
@@ -217,14 +276,14 @@ where
         worktree_repo: Arc<W>,
         verifier: Arc<IntegrationVerifierService<T, G, W>>,
         config: MergeQueueConfig,
+        merge_repo: Arc<dyn MergeRequestRepository>,
     ) -> Self {
         Self {
             task_repo,
             worktree_repo,
             verifier,
             config,
-            queue: Arc::new(RwLock::new(VecDeque::new())),
-            history: Arc::new(RwLock::new(Vec::new())),
+            merge_repo,
         }
     }
 
@@ -251,7 +310,7 @@ where
 
         let id = request.id;
         tracing::info!(%task_id, merge_request_id = %id, "stage 1 merge request queued");
-        self.queue.write().await.push_back(request);
+        self.merge_repo.create(&request).await?;
         Ok(id)
     }
 
@@ -272,7 +331,7 @@ where
         );
         let id = request.id;
         tracing::info!(%task_id, merge_request_id = %id, "merge-back request queued");
-        self.queue.write().await.push_back(request);
+        self.merge_repo.create(&request).await?;
         Ok(id)
     }
 
@@ -294,31 +353,37 @@ where
 
         let id = request.id;
         tracing::info!(%task_id, merge_request_id = %id, "stage 2 merge request queued");
-        self.queue.write().await.push_back(request);
+        self.merge_repo.create(&request).await?;
         Ok(id)
     }
 
     /// Process the next merge in the queue.
     #[instrument(skip(self), fields(stage))]
     pub async fn process_next(&self) -> DomainResult<Option<MergeResult>> {
-        // Get next queued request
-        let mut request = {
-            let mut queue = self.queue.write().await;
-            match queue.iter().position(|r| r.status == MergeStatus::Queued) {
-                Some(idx) => {
-                    let mut req = queue.remove(idx).unwrap();
-                    tracing::info!(merge_request_id = %req.id, stage = ?req.stage, task_id = %req.task_id, "processing merge request");
-                    req.status = MergeStatus::InProgress;
-                    req.updated_at = Utc::now();
-                    queue.push_front(req.clone());
-                    req
-                }
-                None => {
-                    tracing::debug!("no queued merge requests to process");
-                    return Ok(None);
-                }
+        // Get next queued request from persistent storage
+        let queued = self.merge_repo.list_by_status(MergeStatus::Queued).await?;
+        let mut request = match queued.into_iter().next() {
+            Some(req) => req,
+            None => {
+                tracing::debug!("no queued merge requests to process");
+                return Ok(None);
             }
         };
+
+        // Skip if another merge to the same target branch is already in progress
+        let in_progress = self.merge_repo.list_by_status(MergeStatus::InProgress).await?;
+        if in_progress.iter().any(|r| r.target_branch == request.target_branch) {
+            tracing::debug!(
+                target_branch = %request.target_branch,
+                "skipping merge — another merge to same target is in progress"
+            );
+            return Ok(None);
+        }
+
+        tracing::info!(merge_request_id = %request.id, stage = ?request.stage, task_id = %request.task_id, "processing merge request");
+        request.status = MergeStatus::InProgress;
+        request.updated_at = Utc::now();
+        self.merge_repo.update(&request).await?;
 
         // Process based on stage
         let result = match request.stage {
@@ -326,22 +391,8 @@ where
             MergeStage::TaskToMain => self.process_stage2(&mut request).await,
         };
 
-        // Update request with result
-        {
-            let mut queue = self.queue.write().await;
-            if let Some(idx) = queue.iter().position(|r| r.id == request.id) {
-                queue[idx] = request.clone();
-            }
-        }
-
-        // Move completed/failed to history
-        if request.status != MergeStatus::InProgress {
-            let mut queue = self.queue.write().await;
-            if let Some(idx) = queue.iter().position(|r| r.id == request.id) {
-                let completed = queue.remove(idx).unwrap();
-                self.history.write().await.push(completed);
-            }
-        }
+        // Persist final state
+        self.merge_repo.update(&request).await?;
 
         result.map(Some)
     }
@@ -349,6 +400,22 @@ where
     /// Process a Stage 1 merge (agent → task branch).
     #[instrument(skip(self, request), fields(task_id = %request.task_id, source = %request.source_branch, target = %request.target_branch))]
     async fn process_stage1(&self, request: &mut MergeRequest) -> DomainResult<MergeResult> {
+        // Verify workdir still exists
+        if !std::path::Path::new(&request.workdir).exists() {
+            tracing::error!(task_id = %request.task_id, workdir = %request.workdir, "workdir does not exist");
+            request.status = MergeStatus::Failed;
+            request.error = Some(format!("Working directory no longer exists: {}", request.workdir));
+            request.updated_at = Utc::now();
+            return Ok(MergeResult {
+                request_id: request.id,
+                success: false,
+                commit_sha: None,
+                error: request.error.clone(),
+                had_conflicts: false,
+                conflict_files: vec![],
+            });
+        }
+
         // Check for conflicts first
         let conflict_check = self.check_merge_conflicts(
             &request.workdir,
@@ -359,6 +426,7 @@ where
         if !conflict_check.0.is_empty() {
             tracing::warn!(task_id = %request.task_id, conflict_count = conflict_check.0.len(), "stage 1 merge: conflicts detected");
             request.status = MergeStatus::Conflict;
+            request.conflict_files = conflict_check.0.clone();
             request.error = Some(format!("Merge conflicts in: {}", conflict_check.0.join(", ")));
             request.updated_at = Utc::now();
 
@@ -442,6 +510,7 @@ where
         if !conflict_check.0.is_empty() {
             tracing::warn!(task_id = %request.task_id, conflict_count = conflict_check.0.len(), "stage 2 merge: conflicts detected");
             request.status = MergeStatus::Conflict;
+            request.conflict_files = conflict_check.0.clone();
             request.error = Some(format!("Merge conflicts in: {}", conflict_check.0.join(", ")));
             request.updated_at = Utc::now();
 
@@ -604,44 +673,54 @@ where
         .map_err(|e| DomainError::ValidationFailed(format!("spawn_blocking panicked: {}", e)))?
     }
 
-    /// Get the current queue status.
+    /// Get the current queue (non-terminal requests).
     pub async fn get_queue(&self) -> Vec<MergeRequest> {
-        self.queue.read().await.iter().cloned().collect()
+        let mut result = Vec::new();
+        for status in [MergeStatus::Queued, MergeStatus::InProgress, MergeStatus::Conflict] {
+            if let Ok(reqs) = self.merge_repo.list_by_status(status).await {
+                result.extend(reqs);
+            }
+        }
+        result
     }
 
-    /// Get merge history.
-    pub async fn get_history(&self, limit: usize) -> Vec<MergeRequest> {
-        let history = self.history.read().await;
-        history.iter().rev().take(limit).cloned().collect()
+    /// Get merge history (terminal requests).
+    pub async fn get_history(&self, _limit: usize) -> Vec<MergeRequest> {
+        let mut result = Vec::new();
+        for status in [MergeStatus::Completed, MergeStatus::Failed, MergeStatus::VerificationFailed] {
+            if let Ok(reqs) = self.merge_repo.list_by_status(status).await {
+                result.extend(reqs);
+            }
+        }
+        result
     }
 
     /// Get statistics about the merge queue.
     pub async fn get_stats(&self) -> MergeQueueStats {
-        let queue = self.queue.read().await;
-        let history = self.history.read().await;
-
         let mut stats = MergeQueueStats::default();
 
-        for req in queue.iter() {
-            match req.status {
-                MergeStatus::Queued => stats.queued += 1,
-                MergeStatus::InProgress => stats.in_progress += 1,
-                _ => {}
-            }
-        }
-
-        for req in history.iter() {
-            match req.status {
+        for status in [MergeStatus::Queued, MergeStatus::InProgress, MergeStatus::Completed,
+                       MergeStatus::Failed, MergeStatus::Conflict, MergeStatus::VerificationFailed] {
+            let count = self.merge_repo.list_by_status(status).await
+                .map(|v| v.len())
+                .unwrap_or(0);
+            match status {
+                MergeStatus::Queued => stats.queued = count,
+                MergeStatus::InProgress => stats.in_progress = count,
                 MergeStatus::Completed => {
-                    stats.completed += 1;
-                    match req.stage {
-                        MergeStage::AgentToTask => stats.stage1_completed += 1,
-                        MergeStage::TaskToMain => stats.stage2_completed += 1,
+                    stats.completed = count;
+                    // Count stage breakdowns from the completed list
+                    if let Ok(reqs) = self.merge_repo.list_by_status(MergeStatus::Completed).await {
+                        for req in &reqs {
+                            match req.stage {
+                                MergeStage::AgentToTask => stats.stage1_completed += 1,
+                                MergeStage::TaskToMain => stats.stage2_completed += 1,
+                            }
+                        }
                     }
                 }
-                MergeStatus::Failed | MergeStatus::VerificationFailed => stats.failed += 1,
-                MergeStatus::Conflict => stats.conflicts += 1,
-                _ => {}
+                MergeStatus::Failed | MergeStatus::VerificationFailed => stats.failed += count,
+                MergeStatus::Conflict => stats.conflicts = count,
             }
         }
 
@@ -650,24 +729,20 @@ where
 
     /// Get a specific merge request by ID.
     pub async fn get_request(&self, id: Uuid) -> Option<MergeRequest> {
-        // Check queue first
-        let queue = self.queue.read().await;
-        if let Some(req) = queue.iter().find(|r| r.id == id) {
-            return Some(req.clone());
-        }
-
-        // Then check history
-        let history = self.history.read().await;
-        history.iter().find(|r| r.id == id).cloned()
+        self.merge_repo.get(id).await.ok().flatten()
     }
 
     /// Cancel a queued merge request.
     pub async fn cancel(&self, id: Uuid) -> DomainResult<bool> {
         tracing::info!(merge_request_id = %id, "cancelling merge request");
-        let mut queue = self.queue.write().await;
-        if let Some(idx) = queue.iter().position(|r| r.id == id && r.status == MergeStatus::Queued) {
-            queue.remove(idx);
-            return Ok(true);
+        if let Some(mut req) = self.merge_repo.get(id).await? {
+            if req.status == MergeStatus::Queued {
+                req.status = MergeStatus::Failed;
+                req.error = Some("Cancelled".to_string());
+                req.updated_at = Utc::now();
+                self.merge_repo.update(&req).await?;
+                return Ok(true);
+            }
         }
         Ok(false)
     }
@@ -716,113 +791,72 @@ where
 
     /// Get all merge requests that have conflicts and need specialist resolution.
     ///
-    /// Returns requests that:
-    /// - Have status = Conflict
-    /// - Are configured to route to specialists
-    /// - Haven't exceeded max retry attempts
+    /// Queries persistent storage so conflicts survive across MergeQueue instances.
     pub async fn get_conflicts_needing_resolution(&self) -> Vec<ConflictResolutionRequest> {
         if !self.config.route_conflicts_to_specialist {
             return vec![];
         }
 
-        let queue = self.queue.read().await;
-        let history = self.history.read().await;
+        let conflicts = match self.merge_repo.list_unresolved_conflicts(self.config.max_retries).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to query unresolved conflicts: {}", e);
+                return vec![];
+            }
+        };
 
-        let mut conflicts = Vec::new();
-
-        // Check queue for conflicts
-        for req in queue.iter() {
-            if req.status == MergeStatus::Conflict
-                && let Some(ref error) = req.error {
-                    // Parse conflict files from error message
-                    let conflict_files = if error.contains("Merge conflicts in:") {
-                        error
-                            .replace("Merge conflicts in:", "")
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .collect()
-                    } else {
-                        vec![]
-                    };
-
-                    conflicts.push(ConflictResolutionRequest {
-                        merge_request_id: req.id,
-                        task_id: req.task_id,
-                        source_branch: req.source_branch.clone(),
-                        target_branch: req.target_branch.clone(),
-                        workdir: req.workdir.clone(),
-                        conflict_files,
-                        detected_at: req.updated_at,
-                        attempts: 0,
-                    });
-                }
-        }
-
-        // Also check history for recent conflicts (might be retryable)
-        for req in history.iter().rev().take(10) {
-            if req.status == MergeStatus::Conflict
-                && let Some(ref error) = req.error {
-                    let conflict_files = if error.contains("Merge conflicts in:") {
-                        error
-                            .replace("Merge conflicts in:", "")
-                            .split(',')
-                            .map(|s| s.trim().to_string())
-                            .collect()
-                    } else {
-                        vec![]
-                    };
-
-                    conflicts.push(ConflictResolutionRequest {
-                        merge_request_id: req.id,
-                        task_id: req.task_id,
-                        source_branch: req.source_branch.clone(),
-                        target_branch: req.target_branch.clone(),
-                        workdir: req.workdir.clone(),
-                        conflict_files,
-                        detected_at: req.updated_at,
-                        attempts: 0,
-                    });
-                }
-        }
-
-        conflicts
+        conflicts.into_iter().map(|req| {
+            ConflictResolutionRequest {
+                merge_request_id: req.id,
+                task_id: req.task_id,
+                source_branch: req.source_branch,
+                target_branch: req.target_branch,
+                workdir: req.workdir,
+                conflict_files: req.conflict_files,
+                detected_at: req.updated_at,
+                attempts: req.attempts,
+            }
+        }).collect()
     }
 
     /// Mark a conflict as resolved and retry the merge.
     ///
     /// Should be called after a specialist agent has resolved the conflicts
-    /// in the working directory.
+    /// in the working directory. Looks up the merge request from persistent
+    /// storage, so it works even across ephemeral MergeQueue instances.
     pub async fn retry_after_conflict_resolution(&self, merge_request_id: Uuid) -> DomainResult<bool> {
         tracing::info!(merge_request_id = %merge_request_id, "re-queuing merge request after conflict resolution");
-        // Check queue for the request
-        {
-            let mut queue = self.queue.write().await;
-            if let Some(req) = queue.iter_mut().find(|r| r.id == merge_request_id)
-                && req.status == MergeStatus::Conflict {
-                    req.status = MergeStatus::Queued;
-                    req.error = None;
-                    req.updated_at = Utc::now();
-                    return Ok(true);
-                }
+
+        let mut request = match self.merge_repo.get(merge_request_id).await? {
+            Some(req) => req,
+            None => {
+                tracing::warn!(merge_request_id = %merge_request_id, "merge request not found for conflict resolution retry");
+                return Ok(false);
+            }
+        };
+
+        if request.status != MergeStatus::Conflict {
+            tracing::warn!(
+                merge_request_id = %merge_request_id,
+                status = request.status.as_str(),
+                "merge request is not in Conflict status, skipping retry"
+            );
+            return Ok(false);
         }
 
-        // Check history and re-queue if found
-        {
-            let history = self.history.read().await;
-            if let Some(req) = history.iter().find(|r| r.id == merge_request_id)
-                && req.status == MergeStatus::Conflict {
-                    let mut new_req = req.clone();
-                    new_req.status = MergeStatus::Queued;
-                    new_req.error = None;
-                    new_req.updated_at = Utc::now();
+        request.status = MergeStatus::Queued;
+        request.error = None;
+        request.conflict_files.clear();
+        request.attempts += 1;
+        request.updated_at = Utc::now();
+        self.merge_repo.update(&request).await?;
 
-                    drop(history);
-                    self.queue.write().await.push_back(new_req);
-                    return Ok(true);
-                }
-        }
-
-        Ok(false)
+        tracing::info!(
+            merge_request_id = %merge_request_id,
+            attempts = request.attempts,
+            "merge request re-queued after conflict resolution"
+        );
+        Ok(true)
     }
 }
 
@@ -882,5 +916,48 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"success\":true"));
         assert!(json.contains("\"commit_sha\":\"abc123\""));
+    }
+
+    #[test]
+    fn test_merge_stage_str_roundtrip() {
+        for stage in [MergeStage::AgentToTask, MergeStage::TaskToMain] {
+            let s = stage.as_str();
+            assert_eq!(MergeStage::from_str(s), Some(stage));
+        }
+        assert_eq!(MergeStage::from_str("invalid"), None);
+    }
+
+    #[test]
+    fn test_merge_status_str_roundtrip() {
+        for status in [
+            MergeStatus::Queued, MergeStatus::InProgress, MergeStatus::Completed,
+            MergeStatus::Failed, MergeStatus::Conflict, MergeStatus::VerificationFailed,
+        ] {
+            let s = status.as_str();
+            assert_eq!(MergeStatus::from_str(s), Some(status));
+        }
+        assert_eq!(MergeStatus::from_str("invalid"), None);
+    }
+
+    #[test]
+    fn test_merge_status_is_terminal() {
+        assert!(MergeStatus::Completed.is_terminal());
+        assert!(MergeStatus::Failed.is_terminal());
+        assert!(MergeStatus::VerificationFailed.is_terminal());
+        assert!(!MergeStatus::Queued.is_terminal());
+        assert!(!MergeStatus::InProgress.is_terminal());
+        assert!(!MergeStatus::Conflict.is_terminal());
+    }
+
+    #[test]
+    fn test_new_fields_initialized() {
+        let req = MergeRequest::new_stage1(
+            Uuid::new_v4(),
+            "src".to_string(),
+            "dst".to_string(),
+            "/work".to_string(),
+        );
+        assert!(req.conflict_files.is_empty());
+        assert_eq!(req.attempts, 0);
     }
 }

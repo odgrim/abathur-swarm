@@ -97,6 +97,7 @@ where
     pub(super) federation_client: Option<Arc<crate::adapters::mcp::FederationClient>>,
     pub(super) federation_service: Option<Arc<crate::services::federation::FederationService>>,
     pub(super) trigger_rule_repo: Option<Arc<dyn crate::domain::ports::TriggerRuleRepository>>,
+    pub(super) merge_request_repo: Option<Arc<dyn crate::domain::ports::MergeRequestRepository>>,
     pub(super) command_bus: Arc<RwLock<Option<Arc<CommandBus>>>>,
     /// Optional outbox repository for transactional event delivery.
     pub(super) outbox_repo: Option<Arc<dyn crate::domain::ports::OutboxRepository>>,
@@ -178,6 +179,7 @@ where
             federation_client: None,
             federation_service: None,
             trigger_rule_repo: None,
+            merge_request_repo: None,
             ready_task_rx: Arc::new(tokio::sync::Mutex::new(ready_rx)),
             ready_task_tx: ready_tx,
             specialist_rx: Arc::new(tokio::sync::Mutex::new(specialist_rx)),
@@ -335,7 +337,7 @@ where
     /// Provide a DB pool for services that need persistence (absence timers, command dedup,
     /// evolution loop refinement requests, and event outbox).
     pub fn with_pool(mut self, pool: sqlx::SqlitePool) -> Self {
-        use crate::adapters::sqlite::{SqliteRefinementRepository, SqliteOutboxRepository};
+        use crate::adapters::sqlite::{SqliteRefinementRepository, SqliteOutboxRepository, SqliteMergeRequestRepository};
         use crate::services::evolution_loop::EvolutionConfig;
 
         let refinement_repo = Arc::new(SqliteRefinementRepository::new(pool.clone()));
@@ -343,6 +345,7 @@ where
             EvolutionLoop::new(EvolutionConfig::default()).with_repo(refinement_repo),
         );
         self.outbox_repo = Some(Arc::new(SqliteOutboxRepository::new(pool.clone())));
+        self.merge_request_repo = Some(Arc::new(SqliteMergeRequestRepository::new(pool.clone())));
         self.pool = Some(pool);
         self
     }

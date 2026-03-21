@@ -247,6 +247,7 @@ where
         M: MemoryRepository + Send + Sync + 'static,
     {
         use crate::domain::models::task::{Task, TaskSource, TaskStatus, TaskType};
+        use crate::domain::models::SessionStatus;
 
         let Some(ref memory_repo) = self.memory_repo else {
             return Ok(false);
@@ -275,15 +276,37 @@ where
              Follow the steps in your system prompt exactly.",
         )
         .with_source(TaskSource::System)
-        .with_task_type(TaskType::Research);
+        .with_task_type(TaskType::Research)
+        .with_agent("codebase-triage");
 
         let _ = task.transition_to(TaskStatus::Ready);
         let _ = task.transition_to(TaskStatus::Running);
 
         self.task_repo.create(&task).await?;
 
-        // Build and execute the triage agent via substrate
+        // Build MCP stdio config so the triage agent can access memory and task tools.
+        // Same pattern as goal_processing.rs — uses absolute paths so the MCP server
+        // finds the DB regardless of the agent's working directory.
         let triage_template = crate::domain::models::specialist_templates::create_triage_agent();
+        let abathur_exe = std::env::current_exe()
+            .unwrap_or_else(|_| std::path::PathBuf::from("abathur"));
+        let db_path = std::env::current_dir()
+            .unwrap_or_else(|_| self.config.repo_path.clone())
+            .join(".abathur")
+            .join("abathur.db");
+        let mcp_config = serde_json::json!({
+            "mcpServers": {
+                "abathur": {
+                    "command": abathur_exe.to_string_lossy(),
+                    "args": [
+                        "mcp", "stdio",
+                        "--db-path", db_path.to_string_lossy(),
+                        "--task-id", task.id.to_string()
+                    ]
+                }
+            }
+        });
+
         let request = crate::domain::models::SubstrateRequest::new(
             task.id,
             &triage_template.name,
@@ -293,11 +316,12 @@ where
             max_turns: 10,
             working_dir: Some(self.config.repo_path.to_string_lossy().to_string()),
             model: triage_template.preferred_model.clone(),
+            mcp_servers: vec![mcp_config.to_string()],
             ..Default::default()
         });
 
         match self.substrate.execute(request).await {
-            Ok(session) => {
+            Ok(session) if session.status == SessionStatus::Completed => {
                 tracing::info!(
                     session_id = %session.id,
                     turns = session.turns_completed,
@@ -307,6 +331,21 @@ where
                 let _ = task.transition_to(TaskStatus::Complete);
                 let _ = self.task_repo.update(&task).await;
                 Ok(true)
+            }
+            Ok(session) => {
+                // Agent ran but didn't complete (max_turns, error, etc.)
+                let error = session.error.unwrap_or_else(|| "unknown".to_string());
+                tracing::warn!(
+                    status = ?session.status,
+                    turns = session.turns_completed,
+                    task_id = %task.id,
+                    "Startup codebase triage agent did not complete: {}", error
+                );
+                let _ = task.transition_to(TaskStatus::Failed);
+                let _ = self.task_repo.update(&task).await;
+                Err(crate::domain::errors::DomainError::ExecutionFailed(
+                    format!("Triage agent did not complete: {}", error)
+                ))
             }
             Err(e) => {
                 tracing::warn!("Startup codebase triage failed: {}", e);

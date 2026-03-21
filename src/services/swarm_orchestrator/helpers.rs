@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::domain::errors::{DomainError, DomainResult};
 use crate::domain::models::{TaskStatus, WorktreeStatus};
 use crate::domain::models::workflow_template::OutputDelivery;
-use crate::domain::ports::{GoalRepository, TaskRepository, WorktreeRepository};
+use crate::domain::ports::{GoalRepository, MergeRequestRepository, TaskRepository, WorktreeRepository};
 use crate::services::{
     AuditAction, AuditActor, AuditCategory, AuditEntry, AuditLevel, AuditLogService,
     IntegrationVerifierService, MergeQueue, MergeQueueConfig, VerifierConfig,
@@ -299,6 +299,7 @@ pub async fn run_post_completion_workflow<G, T, W>(
     require_commits: bool,
     intent_satisfied: bool,
     output_delivery: OutputDelivery,
+    merge_request_repo: Option<Arc<dyn MergeRequestRepository>>,
 ) -> DomainResult<()>
 where
     G: GoalRepository + 'static,
@@ -595,10 +596,11 @@ where
                             let _ = worktree_repo.update(&original_wt).await;
                         }
 
-                // Mark the merge request as completed in the queue
-                if let Some(mr_id_str) = task.context.custom
-                    .get("merge_request_id")
-                    .and_then(|v| v.as_str())
+                // Re-queue the merge request and process it now that conflicts are resolved
+                if let Some(ref mr_repo) = merge_request_repo
+                    && let Some(mr_id_str) = task.context.custom
+                        .get("merge_request_id")
+                        .and_then(|v| v.as_str())
                     && let Ok(mr_id) = Uuid::parse_str(mr_id_str) {
                         let verifier = IntegrationVerifierService::new(
                             task_repo.clone(),
@@ -616,8 +618,29 @@ where
                             worktree_repo.clone(),
                             Arc::new(verifier),
                             merge_config,
+                            mr_repo.clone(),
                         );
-                        let _ = merge_queue.retry_after_conflict_resolution(mr_id).await;
+                        if let Ok(true) = merge_queue.retry_after_conflict_resolution(mr_id).await {
+                            // Process the re-queued merge now
+                            match merge_queue.process_next().await {
+                                Ok(Some(result)) if result.success => {
+                                    tracing::info!(task_id = %task_id, "merge succeeded after conflict resolution");
+                                }
+                                Ok(Some(result)) if result.had_conflicts => {
+                                    tracing::warn!(task_id = %task_id, "merge still has conflicts after specialist resolution");
+                                    // Will be picked up again by specialist trigger on next tick
+                                }
+                                Ok(Some(result)) => {
+                                    tracing::warn!(task_id = %task_id, error = ?result.error, "merge failed after conflict resolution");
+                                }
+                                Ok(None) => {
+                                    tracing::debug!(task_id = %task_id, "no merge to process after conflict resolution retry");
+                                }
+                                Err(e) => {
+                                    tracing::warn!(task_id = %task_id, error = %e, "error processing merge after conflict resolution");
+                                }
+                            }
+                        }
                     }
 
                 // Don't try to merge-back again (specialist already did the merge)
@@ -634,6 +657,7 @@ where
                         audit_log,
                         repo_path,
                         default_base_ref,
+                        merge_request_repo.clone(),
                     ).await;
 
                     match merge_result {
@@ -744,6 +768,7 @@ where
 
     // Step 3: Queue for merge if verification passed and merge queue is enabled
     if verification_passed && use_merge_queue && require_commits
+        && let Some(ref mr_repo) = merge_request_repo
         && let Ok(Some(worktree)) = worktree_repo.get_by_task(task_id).await {
             let verifier = IntegrationVerifierService::new(
                 task_repo.clone(),
@@ -764,6 +789,7 @@ where
                 worktree_repo.clone(),
                 Arc::new(verifier),
                 merge_config,
+                mr_repo.clone(),
             );
 
             // Queue Stage 1: Agent worktree -> task branch
@@ -841,6 +867,7 @@ async fn merge_subtask_into_feature_branch<G, T, W>(
     audit_log: &Arc<AuditLogService>,
     repo_path: &std::path::Path,
     default_base_ref: &str,
+    merge_request_repo: Option<Arc<dyn MergeRequestRepository>>,
 ) -> DomainResult<MergeBackOutcome>
 where
     G: GoalRepository + 'static,
@@ -882,6 +909,13 @@ where
     }
 
     // Use MergeQueue for the merge (gets conflict handling + specialist integration)
+    let mr_repo = match merge_request_repo {
+        Some(repo) => repo,
+        None => {
+            tracing::warn!(task_id = %task_id, "merge_request_repo not available, cannot merge subtask");
+            return Err(DomainError::ValidationFailed("MergeRequestRepository not configured".to_string()));
+        }
+    };
     let verifier = IntegrationVerifierService::new(
         task_repo.clone(),
         goal_repo.clone(),
@@ -900,6 +934,7 @@ where
         worktree_repo.clone(),
         Arc::new(verifier),
         merge_config,
+        mr_repo,
     );
 
     // Queue merge: subtask branch → feature branch, in root's worktree

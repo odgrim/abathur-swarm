@@ -124,5 +124,10 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
             description: "Event outbox for transactional outbox pattern".to_string(),
             sql: include_str!("../../../migrations/008_event_outbox.sql").to_string(),
         },
+        Migration {
+            version: 9,
+            description: "Merge request persistence for conflict resolution".to_string(),
+            sql: include_str!("../../../migrations/009_merge_requests.sql").to_string(),
+        },
     ]
 }
