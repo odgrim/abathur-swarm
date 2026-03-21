@@ -85,11 +85,24 @@ impl<T: TaskRepository + 'static> EventHandler for TaskCompletedReadinessHandler
                 .map_err(|e| format!("Failed to get dependencies: {}", e))?;
 
             if all_deps.iter().all(|d| d.status == TaskStatus::Complete) {
-                let mut updated = dep.clone();
-                if updated.transition_to(TaskStatus::Ready).is_ok() {
-                    self.task_repo.update(&updated).await
-                        .map_err(|e| format!("Failed to update task: {}", e))?;
+                let dep_id = dep.id;
+                let dep_title = dep.title.clone();
+                let result = update_with_retry(
+                    self.task_repo.as_ref(),
+                    dep_id,
+                    |task| {
+                        if task.status != TaskStatus::Pending && task.status != TaskStatus::Blocked {
+                            return Ok(false); // already transitioned
+                        }
+                        task.transition_to(TaskStatus::Ready)
+                            .map(|_| true)
+                            .map_err(|e| format!("transition failed: {}", e))
+                    },
+                    3,
+                    "TaskCompletedReadinessHandler",
+                ).await?;
 
+                if result.is_some() {
                     new_events.push(UnifiedEvent {
                         id: EventId::new(),
                         sequence: SequenceNumber(0),
@@ -97,12 +110,12 @@ impl<T: TaskRepository + 'static> EventHandler for TaskCompletedReadinessHandler
                         severity: EventSeverity::Debug,
                         category: EventCategory::Task,
                         goal_id: event.goal_id,
-                        task_id: Some(dep.id),
+                        task_id: Some(dep_id),
                         correlation_id: event.correlation_id,
                         source_process_id: None,
                         payload: EventPayload::TaskReady {
-                            task_id: dep.id,
-                            task_title: dep.title.clone(),
+                            task_id: dep_id,
+                            task_title: dep_title,
                         },
                     });
                 }
@@ -156,14 +169,20 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedBlockHandler<T> {
                     .map_err(|e| format!("Failed to get dependents: {}", e))?;
 
                 for dep in dependents {
-                    if dep.status == TaskStatus::Blocked || dep.status.is_terminal() {
-                        continue;
-                    }
-                    let mut updated = dep.clone();
-                    if updated.transition_to(TaskStatus::Blocked).is_ok() {
-                        self.task_repo.update(&updated).await
-                            .map_err(|e| format!("Failed to update task: {}", e))?;
-                    }
+                    update_with_retry(
+                        self.task_repo.as_ref(),
+                        dep.id,
+                        |task| {
+                            if task.status == TaskStatus::Blocked || task.status.is_terminal() {
+                                return Ok(false);
+                            }
+                            task.transition_to(TaskStatus::Blocked)
+                                .map(|_| true)
+                                .map_err(|e| format!("transition failed: {}", e))
+                        },
+                        3,
+                        "TaskFailedBlockHandler(canceled)",
+                    ).await?;
                 }
                 return Ok(Reaction::None);
             }
@@ -184,16 +203,20 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedBlockHandler<T> {
             .map_err(|e| format!("Failed to get dependents: {}", e))?;
 
         for dep in dependents {
-            // Idempotency: only block if not already blocked or terminal
-            if dep.status == TaskStatus::Blocked || dep.status.is_terminal() {
-                continue;
-            }
-
-            let mut updated = dep.clone();
-            if updated.transition_to(TaskStatus::Blocked).is_ok() {
-                self.task_repo.update(&updated).await
-                    .map_err(|e| format!("Failed to update task: {}", e))?;
-            }
+            update_with_retry(
+                self.task_repo.as_ref(),
+                dep.id,
+                |task| {
+                    if task.status == TaskStatus::Blocked || task.status.is_terminal() {
+                        return Ok(false);
+                    }
+                    task.transition_to(TaskStatus::Blocked)
+                        .map(|_| true)
+                        .map_err(|e| format!("transition failed: {}", e))
+                },
+                3,
+                "TaskFailedBlockHandler(failed)",
+            ).await?;
         }
 
         Ok(Reaction::None)
@@ -1307,6 +1330,60 @@ async fn try_update_task<T: TaskRepository>(
         }
         Err(e) => Err(format!("Failed to update ({}): {}", context, e)),
     }
+}
+
+/// Retry-aware task update: re-fetches the task on ConcurrencyConflict and re-applies the
+/// mutation. The mutation closure receives a `&mut Task` and should return:
+///   - `Ok(true)`  → proceed with the update (mutation was applied)
+///   - `Ok(false)` → skip this task (precondition no longer met, e.g. already transitioned)
+///   - `Err(msg)`  → non-retryable error
+///
+/// Returns `Ok(Some(task))` on successful update, `Ok(None)` if the mutation signalled
+/// "not applicable", or `Err` on a non-retryable / exhausted-retries error.
+async fn update_with_retry<T: TaskRepository>(
+    repo: &T,
+    task_id: uuid::Uuid,
+    mutation: impl Fn(&mut Task) -> Result<bool, String>,
+    max_retries: usize,
+    context: &str,
+) -> Result<Option<Task>, String> {
+    for attempt in 0..max_retries {
+        let mut task = repo
+            .get(task_id)
+            .await
+            .map_err(|e| format!("Failed to get task ({}): {}", context, e))?
+            .ok_or_else(|| format!("Task {} not found ({})", task_id, context))?;
+
+        match mutation(&mut task) {
+            Ok(true) => { /* proceed to update */ }
+            Ok(false) => return Ok(None), // precondition no longer met
+            Err(e) => return Err(e),
+        }
+
+        match repo.update(&task).await {
+            Ok(()) => return Ok(Some(task)),
+            Err(DomainError::ConcurrencyConflict { entity, id }) => {
+                if attempt < max_retries - 1 {
+                    tracing::debug!(
+                        "{}: ConcurrencyConflict on {} {} (attempt {}/{}), retrying",
+                        context, entity, id, attempt + 1, max_retries
+                    );
+                    continue;
+                }
+                tracing::warn!(
+                    "{}: ConcurrencyConflict on {} {} after {} attempts, giving up",
+                    context, entity, id, max_retries
+                );
+                return Err(format!(
+                    "ConcurrencyConflict on {} {} after {} retries ({})",
+                    entity, id, max_retries, context
+                ));
+            }
+            Err(e) => return Err(format!("Failed to update ({}): {}", context, e)),
+        }
+    }
+    // Should not be reached, but just in case max_retries is 0
+    Err(format!("update_with_retry called with max_retries=0 ({})", context))
 }
 
 /// Slow-path reconciliation handler (LOW priority, every ~5min).
@@ -4552,12 +4629,23 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceCoordinationHandle
         let mut new_events = Vec::new();
 
         if any_failed {
-            // Fail the parent
-            let mut updated_parent = parent.clone();
-            if updated_parent.transition_to(TaskStatus::Failed).is_ok() {
-                self.task_repo.update(&updated_parent).await
-                    .map_err(|e| format!("Failed to update parent: {}", e))?;
+            // Fail the parent (with retry on conflict)
+            let result = update_with_retry(
+                self.task_repo.as_ref(),
+                parent_id,
+                |task| {
+                    if task.status != TaskStatus::Running {
+                        return Ok(false); // parent already transitioned
+                    }
+                    task.transition_to(TaskStatus::Failed)
+                        .map(|_| true)
+                        .map_err(|e| format!("transition failed: {}", e))
+                },
+                3,
+                "ConvergenceCoordinationHandler(fail-parent)",
+            ).await?;
 
+            if let Some(updated_parent) = result {
                 new_events.push(UnifiedEvent {
                     id: EventId::new(),
                     sequence: SequenceNumber(0),
@@ -4576,15 +4664,26 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceCoordinationHandle
                 });
             }
         } else {
-            // All siblings completed successfully — complete the parent
-            let mut updated_parent = parent.clone();
-            // Go through Validating then Complete in one DB write
-            if updated_parent.transition_to(TaskStatus::Validating).is_ok()
-                && updated_parent.transition_to(TaskStatus::Complete).is_ok()
-            {
-                self.task_repo.update(&updated_parent).await
-                    .map_err(|e| format!("Failed to update parent to complete: {}", e))?;
+            // All siblings completed successfully — complete the parent (with retry on conflict)
+            let result = update_with_retry(
+                self.task_repo.as_ref(),
+                parent_id,
+                |task| {
+                    if task.status != TaskStatus::Running {
+                        return Ok(false); // parent already transitioned
+                    }
+                    // Go through Validating then Complete in one mutation
+                    task.transition_to(TaskStatus::Validating)
+                        .map_err(|e| format!("transition to Validating failed: {}", e))?;
+                    task.transition_to(TaskStatus::Complete)
+                        .map(|_| true)
+                        .map_err(|e| format!("transition to Complete failed: {}", e))
+                },
+                3,
+                "ConvergenceCoordinationHandler(complete-parent)",
+            ).await?;
 
+            if result.is_some() {
                 new_events.push(UnifiedEvent {
                     id: EventId::new(),
                     sequence: SequenceNumber(0),
@@ -4669,16 +4768,23 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceCancellationHandle
         let mut new_events = Vec::new();
 
         for child in children {
-            // Only cancel active (non-terminal) children
-            if child.status.is_terminal() {
-                continue;
-            }
+            let child_id = child.id;
+            let result = update_with_retry(
+                self.task_repo.as_ref(),
+                child_id,
+                |task| {
+                    if task.status.is_terminal() {
+                        return Ok(false);
+                    }
+                    task.transition_to(TaskStatus::Canceled)
+                        .map(|_| true)
+                        .map_err(|e| format!("transition failed: {}", e))
+                },
+                3,
+                "ConvergenceCancellationHandler",
+            ).await?;
 
-            let mut updated = child.clone();
-            if updated.transition_to(TaskStatus::Canceled).is_ok() {
-                self.task_repo.update(&updated).await
-                    .map_err(|e| format!("Failed to cancel child task: {}", e))?;
-
+            if result.is_some() {
                 new_events.push(UnifiedEvent {
                     id: EventId::new(),
                     sequence: SequenceNumber(0),
@@ -4686,11 +4792,11 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceCancellationHandle
                     severity: EventSeverity::Warning,
                     category: EventCategory::Task,
                     goal_id: event.goal_id,
-                    task_id: Some(child.id),
+                    task_id: Some(child_id),
                     correlation_id: event.correlation_id,
                     source_process_id: None,
                     payload: EventPayload::TaskCanceled {
-                        task_id: child.id,
+                        task_id: child_id,
                         reason: format!("Parent task {} was {}", task_id, reason_verb),
                     },
                 });
@@ -10210,5 +10316,87 @@ mod fast_reconciliation_handler_tests {
 
         let reaction = handler.handle(&event, &ctx).await.unwrap();
         assert!(matches!(reaction, Reaction::None), "No work should produce Reaction::None");
+    }
+
+    // ========================================================================
+    // update_with_retry tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_update_with_retry_succeeds() {
+        let repo = setup_task_repo().await;
+
+        let task = Task::new("Retry test task");
+        repo.create(&task).await.unwrap();
+
+        // Mutation transitions Pending → Ready
+        let result = update_with_retry(
+            repo.as_ref(),
+            task.id,
+            |t| {
+                t.transition_to(TaskStatus::Ready)
+                    .map(|_| true)
+                    .map_err(|e| format!("{}", e))
+            },
+            3,
+            "test",
+        ).await.unwrap();
+
+        assert!(result.is_some(), "Should return updated task");
+        let updated = result.unwrap();
+        assert_eq!(updated.status, TaskStatus::Ready);
+
+        // Verify it persisted
+        let from_db = repo.get(task.id).await.unwrap().unwrap();
+        assert_eq!(from_db.status, TaskStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn test_update_with_retry_mutation_not_applicable() {
+        let repo = setup_task_repo().await;
+
+        let mut task = Task::new("Already ready");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        repo.create(&task).await.unwrap();
+
+        // Mutation returns Ok(false) because task is already Ready
+        let result = update_with_retry(
+            repo.as_ref(),
+            task.id,
+            |t| {
+                if t.status == TaskStatus::Ready {
+                    Ok(false) // not applicable
+                } else {
+                    t.transition_to(TaskStatus::Ready)
+                        .map(|_| true)
+                        .map_err(|e| format!("{}", e))
+                }
+            },
+            3,
+            "test",
+        ).await.unwrap();
+
+        assert!(result.is_none(), "Should return None when mutation is not applicable");
+    }
+
+    #[tokio::test]
+    async fn test_update_with_retry_task_not_found() {
+        let repo = setup_task_repo().await;
+        let fake_id = uuid::Uuid::new_v4();
+
+        let result = update_with_retry(
+            repo.as_ref(),
+            fake_id,
+            |t| {
+                t.transition_to(TaskStatus::Ready)
+                    .map(|_| true)
+                    .map_err(|e| format!("{}", e))
+            },
+            3,
+            "test",
+        ).await;
+
+        assert!(result.is_err(), "Should return error for missing task");
+        assert!(result.unwrap_err().contains("not found"));
     }
 }
