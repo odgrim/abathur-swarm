@@ -67,7 +67,7 @@ where
         // This ensures all mutations go through TaskService (validation + event emission).
         let handler_task_service = Arc::new(TaskService::new(
             self.task_repo.clone(),
-        ));
+        ).with_event_bus(self.event_bus.clone()));
 
         // TaskCompletedReadinessHandler (SYSTEM) — cascade readiness on completion
         reactor
@@ -332,7 +332,8 @@ where
 
             let task_service = Arc::new(TaskService::new(
                 self.task_repo.clone(),
-            ).with_default_execution_mode(self.config.default_execution_mode.clone()));
+            ).with_event_bus(self.event_bus.clone())
+             .with_default_execution_mode(self.config.default_execution_mode.clone()));
             let goal_service = Arc::new(GoalService::new(
                 self.goal_repo.clone(),
             ));

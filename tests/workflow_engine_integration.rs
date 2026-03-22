@@ -25,7 +25,7 @@ async fn setup() -> (
     let pool = create_migrated_test_pool().await.unwrap();
     let task_repo = Arc::new(SqliteTaskRepository::new(pool));
     let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
-    let task_service = TaskService::new(task_repo.clone());
+    let task_service = TaskService::new(task_repo.clone()).with_event_bus(event_bus.clone());
     let engine = WorkflowEngine::new(task_repo.clone(), task_service.clone(), event_bus.clone(), true);
     (task_service, engine, task_repo, event_bus)
 }

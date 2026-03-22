@@ -13,6 +13,7 @@ use crate::services::command_bus::{CommandError, CommandOutcome, CommandResult, 
 use crate::services::event_bus::{
     EventCategory, EventPayload, EventSeverity, UnifiedEvent,
 };
+use crate::services::event_bus::EventBus;
 use crate::services::event_factory;
 
 /// Configuration for spawn limits.
@@ -117,6 +118,11 @@ pub struct TaskService<T: TaskRepository> {
     /// kill switch (set to `Some(ExecutionMode::Direct)` to disable convergence
     /// inference globally).
     default_execution_mode: Option<ExecutionMode>,
+    /// Optional EventBus for publishing events directly after persisting.
+    /// When `Some`, events are published to the bus before being returned to
+    /// the caller, closing the persist-then-publish gap (S7). When `None`,
+    /// events are only returned (backward-compatible behavior for tests).
+    event_bus: Option<Arc<EventBus>>,
 }
 
 impl<T: TaskRepository> TaskService<T> {
@@ -125,7 +131,15 @@ impl<T: TaskRepository> TaskService<T> {
             task_repo,
             spawn_limits: SpawnLimitConfig::default(),
             default_execution_mode: None,
+            event_bus: None,
         }
+    }
+
+    /// Attach an EventBus so that events are published immediately after
+    /// persisting, before being returned to the caller (S7 fix).
+    pub fn with_event_bus(mut self, bus: Arc<EventBus>) -> Self {
+        self.event_bus = Some(bus);
+        self
     }
 
     /// Create with custom spawn limits.
@@ -193,6 +207,18 @@ impl<T: TaskRepository> TaskService<T> {
         payload: EventPayload,
     ) -> UnifiedEvent {
         event_factory::make_event(severity, category, goal_id, task_id, payload)
+    }
+
+    /// Publish events to the attached EventBus, if any.
+    ///
+    /// Called after persisting state changes so that events are delivered
+    /// even if the caller never publishes them (S7 fix).
+    async fn publish_events(&self, events: &[UnifiedEvent]) {
+        if let Some(ref bus) = self.event_bus {
+            for evt in events {
+                bus.publish(evt.clone()).await;
+            }
+        }
     }
 
     /// Check spawn limits for creating a subtask under a parent.
@@ -635,6 +661,7 @@ impl<T: TaskRepository> TaskService<T> {
             ));
         }
 
+        self.publish_events(&events).await;
         Ok((task, events))
     }
 
@@ -689,6 +716,7 @@ impl<T: TaskRepository> TaskService<T> {
             },
         )];
 
+        self.publish_events(&events).await;
         Ok((task, events))
     }
 
@@ -751,6 +779,7 @@ impl<T: TaskRepository> TaskService<T> {
             },
         ));
 
+        self.publish_events(&events).await;
         Ok((task, events))
     }
 
@@ -812,6 +841,7 @@ impl<T: TaskRepository> TaskService<T> {
             ),
         ];
 
+        self.publish_events(&events).await;
         Ok((task, events))
     }
 
@@ -852,6 +882,7 @@ impl<T: TaskRepository> TaskService<T> {
             },
         )];
 
+        self.publish_events(&events).await;
         Ok((task, events))
     }
 
@@ -939,6 +970,7 @@ impl<T: TaskRepository> TaskService<T> {
             },
         )];
 
+        self.publish_events(&events).await;
         Ok((task, events))
     }
 
@@ -1096,6 +1128,7 @@ impl<T: TaskRepository> TaskService<T> {
             },
         )];
 
+        self.publish_events(&events).await;
         Ok((task, events))
     }
 

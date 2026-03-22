@@ -60,6 +60,7 @@ where
 
         tracing::warn!("CommandBus not initialized — building ephemeral instance");
         let task_service = Arc::new(TaskService::new(self.task_repo.clone())
+            .with_event_bus(self.event_bus.clone())
             .with_default_execution_mode(self.config.default_execution_mode.clone()));
         let goal_service = Arc::new(GoalService::new(self.goal_repo.clone()));
 

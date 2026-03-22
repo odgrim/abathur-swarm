@@ -83,7 +83,7 @@ mod harness {
             .expect("Failed to open CLI database");
         let repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
-        let task_service = TaskService::new(repo.clone());
+        let task_service = TaskService::new(repo.clone()).with_event_bus(event_bus.clone());
         let engine = WorkflowEngine::new(repo.clone(), task_service.clone(), event_bus, true);
         (task_service, engine, repo)
     }
