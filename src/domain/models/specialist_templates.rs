@@ -540,7 +540,16 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
                  - You have a limited turn budget. At the halfway point, assess what you have and begin wrapping up.\n\
                  - Prefer breadth over depth — cover all assigned scope areas before diving deep into any one.\n\
                  - When you have sufficient findings, STOP researching and immediately move to the Completion Protocol.\n\
-                 - It is better to report partial findings on time than to exhaust your turns and lose everything.\n",
+                 - It is better to report partial findings on time than to exhaust your turns and lose everything.\n\
+                 \n\
+                 ## Contract Discovery\n\
+                 - For every function or module under investigation, identify its contract: what inputs it expects, \
+                 what outputs it guarantees, and what invariants it upholds.\n\
+                 - Document contracts of upstream callers and downstream consumers — who depends on the current \
+                 behavior, and what assumptions do they encode?\n\
+                 - When the issue involves changing behavior, explicitly list which contracts will be affected \
+                 and which consumers rely on the current contract.\n\
+                 - Store discovered contracts in your findings so planners can assess the impact of changes.\n",
             );
         }
         "planner" => {
@@ -576,7 +585,18 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
                  ## Edge Case Planning\n\
                  - When listing edge cases, think combinatorially across parameters. If the fix handles a condition \
                  on input X, include test cases where X has that condition but other inputs do not \
-                 (e.g., one parameter empty, another non-empty; one parameter None, another set).\n",
+                 (e.g., one parameter empty, another non-empty; one parameter None, another set).\n\
+                 \n\
+                 ## Contract Preservation\n\
+                 - For every function the plan modifies, state its existing contract: expected inputs, \
+                 guaranteed outputs, and upheld invariants.\n\
+                 - If the plan changes a contract, explicitly list every upstream caller and downstream \
+                 consumer that depends on the old contract, and include steps to update each one.\n\
+                 - Prefer plans that extend contracts (adding optional parameters, widening output types) \
+                 over plans that break them. A contract-breaking change must justify itself and account \
+                 for all dependents.\n\
+                 - Include contract assertions in planned tests — verify not just correct output but \
+                 that guarantees (e.g., error types, ordering, idempotency) are maintained.\n",
             );
         }
         "implementer" => {
@@ -604,7 +624,18 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
                  treat it as a regression — fix it before moving on. Do not leave regressions for later.\n\
                  - When the plan references specific existing tests that should pass after the fix, \
                  verify those exact tests by name. Do not assume your own new test is a substitute.\n\
-                 - If tests pass and implementation matches the plan, stop immediately.\n",
+                 - If tests pass and implementation matches the plan, stop immediately.\n\
+                 \n\
+                 ## Contract Compliance\n\
+                 - When calling functions, respect their contracts: provide valid inputs within documented \
+                 ranges, handle ALL documented output variants (including errors), and do not rely on \
+                 undocumented behavior.\n\
+                 - When modifying a function, maintain its existing contract unless the plan explicitly \
+                 authorizes a change. If the plan says to change a contract, update all callers and tests.\n\
+                 - New functions you create must have clear contracts: typed inputs, documented outputs, \
+                 explicit error handling. Avoid stringly-typed interfaces or ambiguous return values.\n\
+                 - Before committing, verify that your changes do not silently break the contract of any \
+                 function you touched — check that callers still receive what they expect.\n",
             );
         }
         "reviewer" => {
@@ -626,7 +657,18 @@ fn agent_prompt_skeleton(phase: &crate::domain::models::workflow_template::Workf
                  matter, or only trivial happy-path cases? Would the tests catch a regression \
                  in a complementary path?\n\
                  - Output a structured verdict via memory_store: approved/needs-changes with specific issues.\n\
-                 - Do NOT re-implement or suggest refactors beyond the task scope.\n",
+                 - Do NOT re-implement or suggest refactors beyond the task scope.\n\
+                 \n\
+                 ## Contract Verification\n\
+                 - For every modified function, verify that its contract is preserved: same input expectations, \
+                 same output guarantees, same error behavior. If the contract changed intentionally, verify \
+                 that all callers were updated.\n\
+                 - Check that new functions have explicit contracts — typed inputs, documented outputs, and \
+                 clear error handling. Flag functions with ambiguous return types or undocumented side effects.\n\
+                 - Verify that tests assert contract properties (error types, output invariants, boundary \
+                 behavior), not just happy-path results.\n\
+                 - If the diff introduces a new dependency on another function's behavior, verify that the \
+                 dependency aligns with that function's documented contract, not just its current implementation.\n",
             );
         }
         _ => {}
@@ -1158,6 +1200,7 @@ Use these class-specific patterns when writing system_prompts:
 - Report every location that encodes the assumption being changed, so implementers don't miss secondary fix sites.
 - **Complementary path mandate**: When the issue mentions one direction of a feature (e.g., write), the researcher MUST also investigate the complementary direction (e.g., read) and report whether it already works, needs changes, or will break. Do NOT dismiss complementary paths as "out of scope" — report the full picture and let the planner decide scope.
 - **Edge case enumeration**: For input-handling bugs, enumerate input combinations systematically — not just the reported case. If the fix handles empty inputs, also consider: mixed empty/non-empty across parameters, single-element inputs, boundary shapes. Store these as explicit test scenarios in findings.
+- **Contract discovery**: For every function or module under investigation, identify its contract — expected inputs, guaranteed outputs, upheld invariants. Document contracts of upstream callers and downstream consumers so planners can assess the impact of changes.
 
 **Planner agents** (read_only: true, typical ~10 turns, ceiling 30):
 - First action: memory_search for existing plans or research findings.
@@ -1167,6 +1210,7 @@ Use these class-specific patterns when writing system_prompts:
 - Think about complementary paths — if the fix touches a write path, the plan must also address the read path (and vice versa). If it touches serialization, address deserialization.
 - **Derive scope from requirements, not the issue description**: The issue description often shows only one failing example. The planner must independently determine what a complete fix requires — if adding a parameter to a writer, ask "will the reader also need to handle this parameter?" Don't accept the researcher's or issue author's scope framing without verifying it. If research identified multiple public entry points that reach the affected code, the plan must address ALL of them — not just the one used in the example.
 - **Combinatorial edge cases**: When listing edge cases, think combinatorially across parameters. If the fix handles a condition on input X, consider what happens when X has that condition but Y does not (e.g., one array empty, another non-empty). Include these mixed-state scenarios as explicit test cases in the plan.
+- **Contract preservation**: For every function the plan modifies, state its existing contract. If the plan changes a contract, list every caller and consumer that depends on the old contract and include steps to update each. Prefer extending contracts over breaking them.
 
 **Implementer agents** (read_only: false, typical ~25 turns, ceiling 75):
 - First action: memory_search for the plan and research findings.
@@ -1175,11 +1219,13 @@ Use these class-specific patterns when writing system_prompts:
 - Commit early and often — small atomic commits, not one big commit at the end.
 - Run tests after each significant change. Fix failures before moving on.
 - If tests pass and implementation matches the plan, stop immediately.
+- **Contract compliance**: When calling functions, respect their contracts. When modifying a function, maintain its existing contract unless the plan explicitly authorizes a change. New functions must have clear contracts: typed inputs, documented outputs, explicit error handling.
 
 **Reviewer agents** (read_only: true, typical ~10 turns, ceiling 30):
 - Use `shell` with `git diff` to see exactly what changed — don't read entire files.
 - Output a structured verdict via memory_store: approved/needs-changes with specific issues.
 - Do NOT re-implement or suggest refactors beyond the task scope.
+- **Contract verification**: For every modified function, verify its contract is preserved — same inputs, outputs, and error behavior. If the contract changed, verify all callers were updated. Check that tests assert contract properties, not just happy-path results.
 
 ## Spawn Limits
 
@@ -1350,6 +1396,7 @@ Use these class-specific patterns when writing system_prompts:
 - Report every location that encodes the assumption being changed, so implementers don't miss secondary fix sites.
 - **Complementary path mandate**: When the issue mentions one direction of a feature (e.g., write), the researcher MUST also investigate the complementary direction (e.g., read) and report whether it already works, needs changes, or will break. Do NOT dismiss complementary paths as "out of scope" — report the full picture and let the planner decide scope.
 - **Edge case enumeration**: For input-handling bugs, enumerate input combinations systematically — not just the reported case. If the fix handles empty inputs, also consider: mixed empty/non-empty across parameters, single-element inputs, boundary shapes. Store these as explicit test scenarios in findings.
+- **Contract discovery**: For every function or module under investigation, identify its contract — expected inputs, guaranteed outputs, upheld invariants. Document contracts of upstream callers and downstream consumers so planners can assess the impact of changes.
 
 **Planner agents** (read_only: true, typical ~10 turns, ceiling 30):
 - First action: memory_search for existing plans or research findings.
@@ -1359,6 +1406,7 @@ Use these class-specific patterns when writing system_prompts:
 - Think about complementary paths — if the fix touches a write path, the plan must also address the read path (and vice versa). If it touches serialization, address deserialization.
 - **Derive scope from requirements, not the issue description**: The issue description often shows only one failing example. The planner must independently determine what a complete fix requires — if adding a parameter to a writer, ask "will the reader also need to handle this parameter?" Don't accept the researcher's or issue author's scope framing without verifying it. If research identified multiple public entry points that reach the affected code, the plan must address ALL of them — not just the one used in the example.
 - **Combinatorial edge cases**: When listing edge cases, think combinatorially across parameters. If the fix handles a condition on input X, consider what happens when X has that condition but Y does not (e.g., one array empty, another non-empty). Include these mixed-state scenarios as explicit test cases in the plan.
+- **Contract preservation**: For every function the plan modifies, state its existing contract. If the plan changes a contract, list every caller and consumer that depends on the old contract and include steps to update each. Prefer extending contracts over breaking them.
 
 **Implementer agents** (read_only: false, typical ~25 turns, ceiling 75):
 - First action: memory_search for the plan and research findings.
@@ -1367,11 +1415,13 @@ Use these class-specific patterns when writing system_prompts:
 - Commit early and often — small atomic commits, not one big commit at the end.
 - Run tests after each significant change. Fix failures before moving on.
 - If tests pass and implementation matches the plan, stop immediately.
+- **Contract compliance**: When calling functions, respect their contracts. When modifying a function, maintain its existing contract unless the plan explicitly authorizes a change. New functions must have clear contracts: typed inputs, documented outputs, explicit error handling.
 
 **Reviewer agents** (read_only: true, typical ~10 turns, ceiling 30):
 - Use `shell` with `git diff` to see exactly what changed — don't read entire files.
 - Output a structured verdict via memory_store: approved/needs-changes with specific issues.
 - Do NOT re-implement or suggest refactors beyond the task scope.
+- **Contract verification**: For every modified function, verify its contract is preserved — same inputs, outputs, and error behavior. If the contract changed, verify all callers were updated. Check that tests assert contract properties, not just happy-path results.
 
 ## Spawn Limits
 
