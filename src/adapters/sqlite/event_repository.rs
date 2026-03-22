@@ -229,13 +229,26 @@ impl EventStore for SqliteEventRepository {
         let cutoff = Utc::now() - chrono::Duration::from_std(duration).unwrap_or_default();
         let cutoff_str = cutoff.to_rfc3339();
 
-        let result = sqlx::query("DELETE FROM events WHERE timestamp < ?")
+        let result = sqlx::query(
+            "DELETE FROM events WHERE timestamp < ? AND sequence < COALESCE((SELECT MIN(last_sequence) FROM handler_watermarks), sequence)"
+        )
             .bind(cutoff_str)
             .execute(&self.pool)
             .await
             .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
 
         Ok(result.rows_affected())
+    }
+
+    async fn minimum_handler_watermark(&self) -> Result<Option<SequenceNumber>, EventStoreError> {
+        let result: Option<(Option<i64>,)> = sqlx::query_as(
+            "SELECT MIN(last_sequence) FROM handler_watermarks"
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+
+        Ok(result.and_then(|(maybe_seq,)| maybe_seq.map(|seq| SequenceNumber(seq as u64))))
     }
 
     async fn get_watermark(&self, handler_name: &str) -> Result<Option<SequenceNumber>, EventStoreError> {

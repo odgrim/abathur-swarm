@@ -199,6 +199,12 @@ pub trait EventStore: Send + Sync {
         Ok(())
     }
 
+    /// Return the minimum watermark across all registered handlers.
+    /// Returns `None` when no watermarks have been recorded yet.
+    async fn minimum_handler_watermark(&self) -> Result<Option<SequenceNumber>, EventStoreError> {
+        Ok(None)
+    }
+
     /// Detect gaps in the sequence number range [from, to].
     ///
     /// Returns a list of (gap_start, gap_end) pairs representing missing
@@ -451,9 +457,21 @@ impl EventStore for InMemoryEventStore {
 
     async fn prune_older_than(&self, duration: Duration) -> Result<u64, EventStoreError> {
         let cutoff = Utc::now() - chrono::Duration::from_std(duration).unwrap_or_default();
+        let min_watermark = self.minimum_handler_watermark().await?;
         let mut events = self.events.write().await;
         let original_len = events.len();
-        events.retain(|e| e.timestamp >= cutoff);
+        events.retain(|e| {
+            if e.timestamp >= cutoff {
+                return true;
+            }
+            // Never prune events at or above the minimum handler watermark
+            if let Some(wm) = min_watermark {
+                if e.sequence >= wm {
+                    return true;
+                }
+            }
+            false
+        });
         Ok((original_len - events.len()) as u64)
     }
 
@@ -468,6 +486,11 @@ impl EventStore for InMemoryEventStore {
         let mut watermarks = self.watermarks.write().await;
         watermarks.insert(handler_name.to_string(), seq);
         Ok(())
+    }
+
+    async fn minimum_handler_watermark(&self) -> Result<Option<SequenceNumber>, EventStoreError> {
+        let watermarks = self.watermarks.read().await;
+        Ok(watermarks.values().copied().min())
     }
 
     // === Sequence Gap Detection ===

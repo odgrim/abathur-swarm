@@ -3428,13 +3428,31 @@ impl EventHandler for DeadLetterRetryHandler {
                 }
                 None => {
                     // Event no longer in store (pruned), resolve the DLQ entry
-                    tracing::info!(
-                        "DeadLetterRetry: event seq {} no longer in store, resolving DLQ entry {}",
-                        entry.event_sequence, entry.id
+                    tracing::warn!(
+                        "DeadLetterRetry: event seq {} no longer in store (pruned), resolving DLQ entry {} — handler recovery lost for '{}'",
+                        entry.event_sequence, entry.id, entry.handler_name
                     );
                     if let Err(e) = self.event_store.resolve_dead_letter(&entry.id).await {
                         tracing::warn!("DeadLetterRetry: failed to resolve entry {}: {}", entry.id, e);
                     }
+                    // Emit a HandlerError event to make the permanent loss visible
+                    events_to_replay.push(UnifiedEvent {
+                        id: EventId::new(),
+                        sequence: SequenceNumber(0),
+                        timestamp: chrono::Utc::now(),
+                        severity: EventSeverity::Warning,
+                        category: EventCategory::Orchestrator,
+                        goal_id: None,
+                        task_id: None,
+                        correlation_id: None,
+                        source_process_id: None,
+                        payload: EventPayload::HandlerError {
+                            handler_name: entry.handler_name.clone(),
+                            event_sequence: entry.event_sequence,
+                            error: format!("Original event seq {} pruned before dead-letter retry — handler recovery lost", entry.event_sequence),
+                            circuit_breaker_tripped: false,
+                        },
+                    });
                 }
             }
         }
