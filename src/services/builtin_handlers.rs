@@ -1190,13 +1190,18 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static, W: WorktreeReposi
 /// Triggered by `ScheduledEventFired { name: "fast-reconciliation" }`.
 pub struct FastReconciliationHandler<T: TaskRepository> {
     task_repo: Arc<T>,
+    task_service: Arc<TaskService<T>>,
 }
 
 impl<T: TaskRepository> FastReconciliationHandler<T> {
-    pub fn new(task_repo: Arc<T>) -> Self {
-        Self { task_repo }
+    pub fn new(task_repo: Arc<T>, task_service: Arc<TaskService<T>>) -> Self {
+        Self { task_repo, task_service }
     }
 }
+
+/// Maximum number of tasks to process per reconciliation cycle to avoid
+/// monopolising the event loop.
+const FAST_RECONCILIATION_BATCH_LIMIT: usize = 100;
 
 #[async_trait]
 impl<T: TaskRepository + 'static> EventHandler for FastReconciliationHandler<T> {
@@ -1229,7 +1234,7 @@ impl<T: TaskRepository + 'static> EventHandler for FastReconciliationHandler<T> 
         let pending = self.task_repo.list_by_status(TaskStatus::Pending).await
             .map_err(|e| format!("Failed to list pending tasks: {}", e))?;
 
-        for task in &pending {
+        for task in pending.iter().take(FAST_RECONCILIATION_BATCH_LIMIT) {
             let deps = self.task_repo.get_dependencies(task.id).await
                 .map_err(|e| format!("Failed to get deps: {}", e))?;
 
@@ -1271,7 +1276,7 @@ impl<T: TaskRepository + 'static> EventHandler for FastReconciliationHandler<T> 
         let blocked = self.task_repo.list_by_status(TaskStatus::Blocked).await
             .map_err(|e| format!("Failed to list blocked tasks: {}", e))?;
 
-        for task in &blocked {
+        for task in blocked.iter().take(FAST_RECONCILIATION_BATCH_LIMIT) {
             let deps = self.task_repo.get_dependencies(task.id).await
                 .map_err(|e| format!("Failed to get deps: {}", e))?;
 
@@ -1333,6 +1338,56 @@ impl<T: TaskRepository + 'static> EventHandler for FastReconciliationHandler<T> 
                             task_title: task.title.clone(),
                         },
                     });
+                }
+            }
+        }
+
+        // Check for zombie Pending tasks whose dependencies include Blocked,
+        // terminally-Failed, or Canceled tasks — these will never become Ready.
+        let zombie_pending = self.task_repo.list_by_status(TaskStatus::Pending).await
+            .map_err(|e| format!("Failed to list pending tasks (zombie check): {}", e))?;
+
+        for task in zombie_pending.iter().take(FAST_RECONCILIATION_BATCH_LIMIT) {
+            let deps = self.task_repo.get_dependencies(task.id).await
+                .map_err(|e| format!("Failed to get deps (zombie check): {}", e))?;
+
+            let any_blocked_or_failed = deps.iter().any(|d| {
+                d.status == TaskStatus::Blocked
+                    || (d.status == TaskStatus::Failed && !d.can_retry())
+                    || d.status == TaskStatus::Canceled
+            });
+            if any_blocked_or_failed {
+                // This task will never become Ready — block it
+                match self.task_service.transition_to_blocked(task.id).await {
+                    Ok((_, events)) => {
+                        new_events.extend(events);
+                        corrections += 1;
+                    }
+                    Err(DomainError::ConcurrencyConflict { .. }) => {}
+                    Err(e) => tracing::warn!("Failed to block zombie pending task {}: {}", task.id, e),
+                }
+            }
+        }
+
+        // Check for tasks where workflow_state is Completed but TaskStatus is
+        // not Complete (workflow/status mismatch).
+        let running_tasks = self.task_repo.list_by_status(TaskStatus::Running).await
+            .map_err(|e| format!("Failed to list running tasks (workflow check): {}", e))?;
+
+        for task in running_tasks.iter().take(FAST_RECONCILIATION_BATCH_LIMIT) {
+            if let Some(ws_val) = task.context.custom.get("workflow_state") {
+                if let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_val.clone()) {
+                    if matches!(ws, WorkflowState::Completed { .. }) {
+                        // Workflow says done but task is still Running — force complete
+                        match self.task_service.complete_task(task.id).await {
+                            Ok((_, events)) => {
+                                new_events.extend(events);
+                                corrections += 1;
+                            }
+                            Err(DomainError::ConcurrencyConflict { .. }) => {}
+                            Err(e) => tracing::warn!("Failed to complete workflow-done task {}: {}", task.id, e),
+                        }
+                    }
                 }
             }
         }
@@ -10391,11 +10446,16 @@ mod fast_reconciliation_handler_tests {
         create_migrated_test_pool, task_repository::SqliteTaskRepository,
     };
     use crate::domain::models::{Task, TaskStatus};
+    use crate::services::task_service::TaskService;
     use std::sync::Arc;
 
     async fn setup_task_repo() -> Arc<SqliteTaskRepository> {
         let pool = create_migrated_test_pool().await.unwrap();
         Arc::new(SqliteTaskRepository::new(pool))
+    }
+
+    fn make_task_service(repo: &Arc<SqliteTaskRepository>) -> Arc<TaskService<SqliteTaskRepository>> {
+        Arc::new(TaskService::new(repo.clone()))
     }
 
     fn make_fast_reconciliation_event() -> UnifiedEvent {
@@ -10419,7 +10479,8 @@ mod fast_reconciliation_handler_tests {
     #[tokio::test]
     async fn test_fast_reconciliation_pending_to_ready() {
         let repo = setup_task_repo().await;
-        let handler = FastReconciliationHandler::new(repo.clone());
+        let task_service = make_task_service(&repo);
+        let handler = FastReconciliationHandler::new(repo.clone(), task_service);
 
         // Create a parent task that is Complete
         let mut parent = Task::new("Parent task");
@@ -10455,7 +10516,8 @@ mod fast_reconciliation_handler_tests {
     #[tokio::test]
     async fn test_fast_reconciliation_no_work() {
         let repo = setup_task_repo().await;
-        let handler = FastReconciliationHandler::new(repo.clone());
+        let task_service = make_task_service(&repo);
+        let handler = FastReconciliationHandler::new(repo.clone(), task_service);
 
         // No tasks at all
         let event = make_fast_reconciliation_event();

@@ -190,6 +190,7 @@ where
         reactor
             .register(Arc::new(FastReconciliationHandler::new(
                 self.task_repo.clone(),
+                handler_task_service.clone(),
             )))
             .await;
 
