@@ -22,6 +22,7 @@ use crate::domain::models::intent_verification::{GapCategory, GapSeverity, Inten
 use crate::domain::models::task::Complexity;
 use crate::domain::models::{Memory, MemoryQuery, MemoryType};
 use crate::domain::ports::{MemoryRepository, TrajectoryRepository};
+use crate::services::budget_tracker::BudgetTracker;
 
 // ---------------------------------------------------------------------------
 // OverseerMeasurer trait
@@ -85,6 +86,12 @@ pub struct ConvergenceEngine<T: TrajectoryRepository, M: MemoryRepository, O: Ov
     memory_repository: Arc<M>,
     overseer_measurer: Arc<O>,
     config: ConvergenceEngineConfig,
+    /// Optional global budget tracker for pressure-aware convergence.
+    ///
+    /// When set, the convergence loop checks global budget pressure at the top
+    /// of each iteration and terminates early with `BudgetDenied` if the
+    /// pressure level is Critical (>95% consumed).
+    budget_tracker: Option<Arc<BudgetTracker>>,
     /// Tracks actual token usage per complexity tier for budget calibration.
     calibration_tracker: Mutex<BudgetCalibrationTracker>,
 }
@@ -108,8 +115,18 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             memory_repository,
             overseer_measurer,
             config,
+            budget_tracker: None,
             calibration_tracker: Mutex::new(BudgetCalibrationTracker::default()),
         }
+    }
+
+    /// Set the global budget tracker for pressure-aware convergence.
+    ///
+    /// When configured, the convergence loop will check global budget pressure
+    /// at the start of each iteration and terminate early if the pressure level
+    /// is Critical.
+    pub fn set_budget_tracker(&mut self, tracker: Arc<BudgetTracker>) {
+        self.budget_tracker = Some(tracker);
     }
 
     /// Returns any calibration alerts where P95 token usage exceeds the
@@ -315,6 +332,22 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         let mut bandit = self.initialize_bandit(&trajectory).await;
 
         loop {
+            // 0. Global budget pressure check (S8 fix).
+            //
+            // If a global BudgetTracker is wired in, verify that we are not at
+            // Critical pressure before proceeding with the next iteration.
+            if let Some(ref tracker) = self.budget_tracker {
+                if tracker.should_pause_new_work().await {
+                    tracing::warn!(
+                        trajectory_id = %trajectory.id,
+                        "Global budget critical — terminating convergence early",
+                    );
+                    return Ok(ConvergenceOutcome::BudgetDenied {
+                        trajectory_id: trajectory.id.to_string(),
+                    });
+                }
+            }
+
             // a. Check context degradation (spec 6.4 pre-check)
             if context_is_degraded(
                 &trajectory.observations,
