@@ -17,6 +17,7 @@ use crate::domain::models::workflow_template::WorkflowTemplate;
 use crate::domain::ports::TaskRepository;
 use crate::services::event_bus::{EventBus, EventCategory, EventPayload, EventSeverity};
 use crate::services::event_factory;
+use crate::services::task_service::TaskService;
 
 /// Whether a phase name is a gate phase.
 ///
@@ -61,15 +62,22 @@ pub struct WorkflowStatus {
 /// The deterministic workflow engine.
 pub struct WorkflowEngine<T: TaskRepository> {
     task_repo: Arc<T>,
+    task_service: TaskService<T>,
     event_bus: Arc<EventBus>,
     templates: std::collections::HashMap<String, WorkflowTemplate>,
     verification_enabled: bool,
 }
 
 impl<T: TaskRepository + 'static> WorkflowEngine<T> {
-    pub fn new(task_repo: Arc<T>, event_bus: Arc<EventBus>, verification_enabled: bool) -> Self {
+    pub fn new(
+        task_repo: Arc<T>,
+        task_service: TaskService<T>,
+        event_bus: Arc<EventBus>,
+        verification_enabled: bool,
+    ) -> Self {
         Self {
             task_repo,
+            task_service,
             event_bus,
             templates: WorkflowTemplate::builtin_templates(),
             verification_enabled,
@@ -96,19 +104,10 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         Self::read_state(task)
     }
 
-    /// Write workflow state to task context and persist.
+    /// Write workflow state to task context and persist via TaskService
+    /// (with retry-on-conflict).
     async fn write_state(&self, task_id: Uuid, state: &WorkflowState) -> DomainResult<()> {
-        let mut task = self
-            .task_repo
-            .get(task_id)
-            .await?
-            .ok_or(DomainError::TaskNotFound(task_id))?;
-        let value = serde_json::to_value(state)
-            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
-        task.context.custom.insert("workflow_state".to_string(), value);
-        task.updated_at = chrono::Utc::now();
-        self.task_repo.update(&task).await?;
-        Ok(())
+        self.task_service.update_workflow_state(task_id, state).await
     }
 
     // ========================================================================
@@ -155,7 +154,9 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             }
         }
 
-        // Overwrite workflow state with the new spine
+        // Overwrite workflow state and routing hints atomically.
+        // We already loaded `task` fresh above (with version), so set both
+        // fields and persist in one write. On conflict, the caller can retry.
         let new_state = WorkflowState::Pending {
             workflow_name: workflow_name.to_string(),
         };
@@ -164,8 +165,6 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         task.context
             .custom
             .insert("workflow_state".to_string(), value);
-
-        // Update routing hints
         task.routing_hints.workflow_name = Some(workflow_name.to_string());
         task.updated_at = chrono::Utc::now();
         self.task_repo.update(&task).await?;
@@ -260,15 +259,8 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             };
             self.write_state(task_id, &completed).await?;
 
-            // Complete the parent task
-            {
-                let mut parent = self.task_repo.get(task_id).await?
-                    .ok_or(DomainError::TaskNotFound(task_id))?;
-                if !parent.status.is_terminal() {
-                    let _ = parent.transition_to(TaskStatus::Complete);
-                    self.task_repo.update(&parent).await?;
-                }
-            }
+            // Complete the parent task via TaskService (emits TaskCompleted + TaskExecutionRecorded)
+            self.complete_parent_task(task_id).await?;
 
             self.event_bus
                 .publish(event_factory::make_event(
@@ -415,42 +407,13 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                         "Phase '{}' fan-out subtask failed after {} retries",
                         phase_name, phase_retry_count,
                     );
-                    let failed_state = WorkflowState::Failed {
-                        workflow_name: workflow_name.clone(),
-                        error: error_msg.clone(),
-                    };
-                    self.write_state(parent_task_id, &failed_state).await?;
-
-                    // Transition parent task to Failed so it doesn't stay Running forever
-                    let mut parent = self.task_repo.get(parent_task_id).await?
-                        .ok_or(DomainError::TaskNotFound(parent_task_id))?;
-                    if !parent.status.is_terminal() {
-                        let _ = parent.transition_to(TaskStatus::Failed);
-                        self.task_repo.update(&parent).await?;
-                        self.event_bus.publish(event_factory::make_event(
-                            EventSeverity::Error,
-                            EventCategory::Task,
-                            None,
-                            Some(parent_task_id),
-                            EventPayload::TaskFailed {
-                                task_id: parent_task_id,
-                                error: error_msg.clone(),
-                                retry_count: parent.retry_count,
-                            },
-                        )).await;
-                        self.event_bus.publish(event_factory::make_event(
-                            EventSeverity::Error,
-                            EventCategory::Task,
-                            None,
-                            Some(parent_task_id),
-                            EventPayload::WorkflowPhaseFailed {
-                                task_id: parent_task_id,
-                                phase_index: *phase_index,
-                                phase_name: phase_name.clone(),
-                                reason: error_msg,
-                            },
-                        )).await;
-                    }
+                    self.fail_workflow_phase(
+                        parent_task_id,
+                        &workflow_name,
+                        *phase_index,
+                        &phase_name,
+                        &error_msg,
+                    ).await?;
                     return Ok(());
                 }
                 // All fan-out subtasks done → handle fan-in
@@ -526,42 +489,13 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 "Phase '{}' subtask failed after {} retries",
                 phase_name, phase_retry_count
             );
-            let failed_state = WorkflowState::Failed {
-                workflow_name,
-                error: error_msg.clone(),
-            };
-            self.write_state(parent_task_id, &failed_state).await?;
-
-            // Transition parent task to Failed so it doesn't stay Running forever
-            let mut parent = self.task_repo.get(parent_task_id).await?
-                .ok_or(DomainError::TaskNotFound(parent_task_id))?;
-            if !parent.status.is_terminal() {
-                let _ = parent.transition_to(TaskStatus::Failed);
-                self.task_repo.update(&parent).await?;
-                self.event_bus.publish(event_factory::make_event(
-                    EventSeverity::Error,
-                    EventCategory::Task,
-                    None,
-                    Some(parent_task_id),
-                    EventPayload::TaskFailed {
-                        task_id: parent_task_id,
-                        error: error_msg.clone(),
-                        retry_count: parent.retry_count,
-                    },
-                )).await;
-                self.event_bus.publish(event_factory::make_event(
-                    EventSeverity::Error,
-                    EventCategory::Task,
-                    None,
-                    Some(parent_task_id),
-                    EventPayload::WorkflowPhaseFailed {
-                        task_id: parent_task_id,
-                        phase_index,
-                        phase_name: phase_name.clone(),
-                        reason: error_msg,
-                    },
-                )).await;
-            }
+            self.fail_workflow_phase(
+                parent_task_id,
+                &workflow_name,
+                phase_index,
+                &phase_name,
+                &error_msg,
+            ).await?;
             return Ok(());
         }
 
@@ -573,22 +507,11 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         let all_converged = self.all_subtasks_converged(&subtask_ids).await?;
 
         if phase.verify && self.verification_enabled && !all_converged {
-            // Transition parent TaskStatus to Validating (Step 4.2)
+            // Transition parent TaskStatus to Validating via TaskService
             {
-                let mut parent = self.task_repo.get(parent_task_id).await?
-                    .ok_or(DomainError::TaskNotFound(parent_task_id))?;
-                if parent.status == TaskStatus::Running {
-                    let _ = parent.transition_to(TaskStatus::Validating);
-                    self.task_repo.update(&parent).await?;
-                    self.event_bus
-                        .publish(event_factory::make_event(
-                            EventSeverity::Info,
-                            EventCategory::Task,
-                            None,
-                            Some(parent_task_id),
-                            EventPayload::TaskValidating { task_id: parent_task_id },
-                        ))
-                        .await;
+                let (_task, events) = self.task_service.transition_to_validating(parent_task_id).await?;
+                for evt in events {
+                    self.event_bus.publish(evt).await;
                 }
             }
 
@@ -655,15 +578,8 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             };
             self.write_state(parent_task_id, &completed).await?;
 
-            // Complete the parent task
-            {
-                let mut parent = self.task_repo.get(parent_task_id).await?
-                    .ok_or(DomainError::TaskNotFound(parent_task_id))?;
-                if !parent.status.is_terminal() {
-                    let _ = parent.transition_to(TaskStatus::Complete);
-                    self.task_repo.update(&parent).await?;
-                }
-            }
+            // Complete the parent task via TaskService
+            self.complete_parent_task(parent_task_id).await?;
 
             self.event_bus
                 .publish(event_factory::make_event(
@@ -777,15 +693,8 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             .await;
 
         if satisfied {
-            // Transition parent TaskStatus: Validating -> Running (to continue)
-            {
-                let mut parent = self.task_repo.get(parent_task_id).await?
-                    .ok_or(DomainError::TaskNotFound(parent_task_id))?;
-                if parent.status == TaskStatus::Validating {
-                    let _ = parent.transition_to(TaskStatus::Running);
-                    self.task_repo.update(&parent).await?;
-                }
-            }
+            // Transition parent TaskStatus: Validating -> Running via TaskService
+            let _ = self.task_service.transition_to_running(parent_task_id).await?;
 
             // Verification passed — proceed
             if is_gate_phase(&phase_name) {
@@ -818,15 +727,8 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                     };
                     self.write_state(parent_task_id, &completed).await?;
 
-                    // Complete the parent task
-                    {
-                        let mut parent = self.task_repo.get(parent_task_id).await?
-                            .ok_or(DomainError::TaskNotFound(parent_task_id))?;
-                        if !parent.status.is_terminal() {
-                            let _ = parent.transition_to(TaskStatus::Complete);
-                            self.task_repo.update(&parent).await?;
-                        }
-                    }
+                    // Complete the parent task via TaskService
+                    self.complete_parent_task(parent_task_id).await?;
 
                     self.event_bus
                         .publish(event_factory::make_event(
@@ -905,15 +807,11 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                         "Workflow auto-rework: phase ready for rework with verification feedback"
                     );
 
-                    // Update retry count on the parent task regardless of workflow state
-                    let mut current_task = self.task_repo.get(parent_task_id).await?
-                        .ok_or(DomainError::TaskNotFound(parent_task_id))?;
-                    current_task.context.custom.insert(
-                        "verification_retry_count".to_string(),
-                        serde_json::json!(retry_count + 1),
-                    );
-                    current_task.updated_at = chrono::Utc::now();
-                    self.task_repo.update(&current_task).await?;
+                    // Update retry count on the parent task via TaskService
+                    self.task_service.update_task_context(
+                        parent_task_id,
+                        vec![("verification_retry_count".to_string(), serde_json::json!(retry_count + 1))],
+                    ).await?;
                 }
                 Ok(AdvanceResult::Completed) => {
                     tracing::info!(
@@ -1043,24 +941,9 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 };
                 self.write_state(task_id, &rejected).await?;
 
-                // Transition parent task to Failed so it doesn't stay Running forever
-                let mut parent = self.task_repo.get(task_id).await?
-                    .ok_or(DomainError::TaskNotFound(task_id))?;
-                if !parent.status.is_terminal() {
-                    let _ = parent.transition_to(TaskStatus::Failed);
-                    self.task_repo.update(&parent).await?;
-                    self.event_bus.publish(event_factory::make_event(
-                        EventSeverity::Error,
-                        EventCategory::Task,
-                        None,
-                        Some(task_id),
-                        EventPayload::TaskFailed {
-                            task_id,
-                            error: format!("Workflow rejected at phase {}: {}", phase_index, rejection_reason),
-                            retry_count: parent.retry_count,
-                        },
-                    )).await;
-                }
+                // Fail parent task via TaskService
+                let error_msg = format!("Workflow rejected at phase {}: {}", phase_index, rejection_reason);
+                self.fail_parent_task(task_id, &error_msg).await?;
 
                 Ok(None)
             }
@@ -1298,37 +1181,113 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
     }
 
     // ========================================================================
-    // Internal helpers
+    // Internal helpers — task mutations via TaskService
+    // ========================================================================
+
+    /// Complete the parent workflow task via TaskService.
+    ///
+    /// Routes through `TaskService::complete_task()` so that
+    /// `TaskCompleted` + `TaskExecutionRecorded` events are emitted
+    /// and optimistic locking is handled correctly.
+    async fn complete_parent_task(&self, task_id: Uuid) -> DomainResult<()> {
+        let task = self.task_repo.get(task_id).await?
+            .ok_or(DomainError::TaskNotFound(task_id))?;
+        if task.status.is_terminal() {
+            return Ok(());
+        }
+        let (_task, events) = self.task_service.complete_task(task_id).await?;
+        for evt in events {
+            self.event_bus.publish(evt).await;
+        }
+        Ok(())
+    }
+
+    /// Fail the parent workflow task via TaskService.
+    ///
+    /// Routes through `TaskService::fail_task()` so that
+    /// `TaskFailed` + `TaskExecutionRecorded` events are emitted.
+    async fn fail_parent_task(&self, task_id: Uuid, error: &str) -> DomainResult<()> {
+        let task = self.task_repo.get(task_id).await?
+            .ok_or(DomainError::TaskNotFound(task_id))?;
+        if task.status.is_terminal() {
+            return Ok(());
+        }
+        let (_task, events) = self.task_service
+            .fail_task(task_id, Some(error.to_string()))
+            .await?;
+        for evt in events {
+            self.event_bus.publish(evt).await;
+        }
+        Ok(())
+    }
+
+    /// Fail a workflow phase: write Failed workflow state, fail the parent task,
+    /// and emit `WorkflowPhaseFailed`. Consolidates the duplicated failure pattern.
+    async fn fail_workflow_phase(
+        &self,
+        parent_task_id: Uuid,
+        workflow_name: &str,
+        phase_index: usize,
+        phase_name: &str,
+        error_msg: &str,
+    ) -> DomainResult<()> {
+        let failed_state = WorkflowState::Failed {
+            workflow_name: workflow_name.to_string(),
+            error: error_msg.to_string(),
+        };
+        self.write_state(parent_task_id, &failed_state).await?;
+
+        // Fail parent task via TaskService (emits TaskFailed + TaskExecutionRecorded)
+        self.fail_parent_task(parent_task_id, error_msg).await?;
+
+        // Emit workflow-specific event
+        self.event_bus
+            .publish(event_factory::make_event(
+                EventSeverity::Error,
+                EventCategory::Task,
+                None,
+                Some(parent_task_id),
+                EventPayload::WorkflowPhaseFailed {
+                    task_id: parent_task_id,
+                    phase_index,
+                    phase_name: phase_name.to_string(),
+                    reason: error_msg.to_string(),
+                },
+            ))
+            .await;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Internal helpers — reads and subtask queries
     // ========================================================================
 
     /// Store verification feedback in the parent task context.
     ///
     /// Appends to the `verification_feedback` array in the task's custom context
-    /// so rework agents can see what failed.
+    /// so rework agents can see what failed. Uses TaskService for retry-on-conflict.
     async fn store_verification_feedback(
         &self,
         task_id: Uuid,
         summary: &str,
     ) -> DomainResult<()> {
-        let mut task = self
-            .task_repo
-            .get(task_id)
-            .await?
+        // Read current feedback array, append, then write back via TaskService.
+        let task = self.task_repo.get(task_id).await?
             .ok_or(DomainError::TaskNotFound(task_id))?;
 
-        let feedback_array = task
+        let mut feedback = task
             .context
             .custom
-            .entry("verification_feedback".to_string())
-            .or_insert_with(|| serde_json::json!([]));
+            .get("verification_feedback")
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+        feedback.push(serde_json::json!(summary));
 
-        if let Some(arr) = feedback_array.as_array_mut() {
-            arr.push(serde_json::json!(summary));
-        }
-
-        task.updated_at = chrono::Utc::now();
-        self.task_repo.update(&task).await?;
-        Ok(())
+        self.task_service.update_task_context(
+            task_id,
+            vec![("verification_feedback".to_string(), serde_json::json!(feedback))],
+        ).await
     }
 
     /// Handle fan-in: all fan-out subtasks are done, create aggregation task.
@@ -1506,7 +1465,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         const MAX_PHASE_RETRIES: u64 = 2;
 
         let phase_retry_key = format!("phase_{}_retry_count", phase_index);
-        let mut parent = self
+        let parent = self
             .task_repo
             .get(parent_task_id)
             .await?
@@ -1521,35 +1480,24 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         if phase_retry_count < MAX_PHASE_RETRIES {
             let mut retried_any = false;
             for &sid in subtask_ids {
-                if let Some(mut sub) = self.task_repo.get(sid).await?
+                if let Some(sub) = self.task_repo.get(sid).await?
                     && sub.status == TaskStatus::Failed
                     && sub.can_retry()
-                    && sub.retry().is_ok()
                 {
-                    self.task_repo.update(&sub).await?;
-                    self.event_bus
-                        .publish(event_factory::make_event(
-                            EventSeverity::Info,
-                            EventCategory::Task,
-                            None,
-                            Some(sid),
-                            EventPayload::TaskReady {
-                                task_id: sid,
-                                task_title: sub.title.clone(),
-                            },
-                        ))
-                        .await;
+                    let (_task, events) = self.task_service.retry_task(sid).await?;
+                    for evt in events {
+                        self.event_bus.publish(evt).await;
+                    }
                     retried_any = true;
                 }
             }
 
             if retried_any {
                 let new_retry_count = phase_retry_count + 1;
-                parent.context.custom.insert(
-                    phase_retry_key,
-                    serde_json::Value::Number(new_retry_count.into()),
-                );
-                self.task_repo.update(&parent).await?;
+                self.task_service.update_task_context(
+                    parent_task_id,
+                    vec![(phase_retry_key, serde_json::Value::Number(new_retry_count.into()))],
+                ).await?;
                 tracing::info!(
                     parent_id = %parent_task_id,
                     phase = %phase_name,
@@ -1627,7 +1575,8 @@ mod tests {
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
 
-        let engine = WorkflowEngine::new(task_repo.clone(), event_bus.clone(), false);
+        let task_service = TaskService::new(task_repo.clone());
+        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
 
         // Create a parent task enrolled in a workflow, in Running state
         let mut parent = Task::with_title("Parent workflow task", "Do work");
@@ -1701,7 +1650,8 @@ mod tests {
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
 
-        let engine = WorkflowEngine::new(task_repo.clone(), event_bus.clone(), false);
+        let task_service = TaskService::new(task_repo.clone());
+        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
 
         // Create parent task in Running state
         let mut parent = Task::with_title("Parent workflow task", "Do work");
@@ -1762,7 +1712,8 @@ mod tests {
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
 
-        let engine = WorkflowEngine::new(task_repo.clone(), event_bus.clone(), false);
+        let task_service = TaskService::new(task_repo.clone());
+        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
 
         // Create parent task in Running state
         let mut parent = Task::with_title("Parent workflow task", "Do work");

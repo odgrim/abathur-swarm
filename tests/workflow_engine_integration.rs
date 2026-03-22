@@ -26,7 +26,7 @@ async fn setup() -> (
     let task_repo = Arc::new(SqliteTaskRepository::new(pool));
     let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
     let task_service = TaskService::new(task_repo.clone());
-    let engine = WorkflowEngine::new(task_repo.clone(), event_bus.clone(), true);
+    let engine = WorkflowEngine::new(task_repo.clone(), task_service.clone(), event_bus.clone(), true);
     (task_service, engine, task_repo, event_bus)
 }
 

@@ -5727,9 +5727,11 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowSubtaskCompletionHand
             return Ok(Reaction::None);
         }
 
-        // Delegate to workflow engine
+        // Delegate to workflow engine (via TaskService for all mutations)
+        let task_service = crate::services::task_service::TaskService::new(self.task_repo.clone());
         let engine = crate::services::workflow_engine::WorkflowEngine::new(
             self.task_repo.clone(),
+            task_service,
             self.event_bus.clone(),
             self.verification_enabled,
         );
@@ -5935,9 +5937,11 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowVerificationHandler<T
                 }
             };
 
-            // Feed result back to workflow engine
+            // Feed result back to workflow engine (via TaskService for all mutations)
+            let task_service = crate::services::task_service::TaskService::new(task_repo.clone());
             let engine = crate::services::workflow_engine::WorkflowEngine::new(
                 task_repo,
+                task_service,
                 event_bus,
                 verification_enabled,
             );

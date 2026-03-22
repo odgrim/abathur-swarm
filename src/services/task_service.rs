@@ -942,6 +942,128 @@ impl<T: TaskRepository> TaskService<T> {
         Ok((task, events))
     }
 
+    /// Update workflow state stored in task.context.custom["workflow_state"].
+    ///
+    /// This is the **only** sanctioned path for writing workflow state. It
+    /// performs a load-mutate-persist cycle with retry-on-conflict (up to 3
+    /// attempts) so that concurrent TaskService status transitions and
+    /// WorkflowEngine state writes don't permanently collide.
+    pub async fn update_workflow_state(
+        &self,
+        task_id: Uuid,
+        state: &WorkflowState,
+    ) -> DomainResult<()> {
+        let value = serde_json::to_value(state)
+            .map_err(|e| DomainError::SerializationError(e.to_string()))?;
+
+        for attempt in 0..3u32 {
+            let mut task = self.task_repo.get(task_id).await?
+                .ok_or(DomainError::TaskNotFound(task_id))?;
+            task.context.custom.insert("workflow_state".to_string(), value.clone());
+            task.updated_at = chrono::Utc::now();
+            match self.task_repo.update(&task).await {
+                Ok(()) => return Ok(()),
+                Err(DomainError::ConcurrencyConflict { .. }) if attempt < 2 => {
+                    tracing::debug!(%task_id, attempt, "update_workflow_state: conflict, retrying");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(DomainError::ConcurrencyConflict {
+            entity: "Task".to_string(),
+            id: task_id.to_string(),
+        })
+    }
+
+    /// Update arbitrary keys in task.context.custom with retry-on-conflict.
+    ///
+    /// Used by the WorkflowEngine for non-workflow-state context mutations
+    /// (verification feedback, retry counters, etc.).
+    pub async fn update_task_context(
+        &self,
+        task_id: Uuid,
+        updates: Vec<(String, serde_json::Value)>,
+    ) -> DomainResult<()> {
+        for attempt in 0..3u32 {
+            let mut task = self.task_repo.get(task_id).await?
+                .ok_or(DomainError::TaskNotFound(task_id))?;
+            for (key, val) in &updates {
+                task.context.custom.insert(key.clone(), val.clone());
+            }
+            task.updated_at = chrono::Utc::now();
+            match self.task_repo.update(&task).await {
+                Ok(()) => return Ok(()),
+                Err(DomainError::ConcurrencyConflict { .. }) if attempt < 2 => {
+                    tracing::debug!(%task_id, attempt, "update_task_context: conflict, retrying");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(DomainError::ConcurrencyConflict {
+            entity: "Task".to_string(),
+            id: task_id.to_string(),
+        })
+    }
+
+    /// Transition a task to Validating status.
+    ///
+    /// Used by the WorkflowEngine when a phase enters verification.
+    /// Idempotent: if already Validating, returns Ok with empty events.
+    pub async fn transition_to_validating(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        let mut task = self.task_repo.get(task_id).await?
+            .ok_or(DomainError::TaskNotFound(task_id))?;
+
+        if task.status == TaskStatus::Validating {
+            return Ok((task, Vec::new()));
+        }
+
+        task.transition_to(TaskStatus::Validating).map_err(|e| DomainError::InvalidStateTransition {
+            from: task.status.as_str().to_string(),
+            to: "validating".to_string(),
+            reason: e,
+        })?;
+
+        self.task_repo.update(&task).await?;
+        tracing::debug!(%task_id, "task transitioned to validating");
+
+        let events = vec![Self::make_event(
+            EventSeverity::Info,
+            EventCategory::Task,
+            None,
+            Some(task_id),
+            EventPayload::TaskValidating { task_id },
+        )];
+
+        Ok((task, events))
+    }
+
+    /// Transition a task back to Running from Validating.
+    ///
+    /// Used by the WorkflowEngine when verification passes and the workflow
+    /// needs the parent task back in Running state to continue.
+    /// Idempotent: if already Running, returns Ok with empty events.
+    pub async fn transition_to_running(&self, task_id: Uuid) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        let mut task = self.task_repo.get(task_id).await?
+            .ok_or(DomainError::TaskNotFound(task_id))?;
+
+        if task.status == TaskStatus::Running {
+            return Ok((task, Vec::new()));
+        }
+
+        task.transition_to(TaskStatus::Running).map_err(|e| DomainError::InvalidStateTransition {
+            from: task.status.as_str().to_string(),
+            to: "running".to_string(),
+            reason: e,
+        })?;
+
+        self.task_repo.update(&task).await?;
+        tracing::debug!(%task_id, "task transitioned to running");
+
+        Ok((task, Vec::new()))
+    }
+
     /// Cancel a task.
     pub async fn cancel_task(&self, task_id: Uuid, reason: &str) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
         tracing::info!(%task_id, reason, "cancelling task");

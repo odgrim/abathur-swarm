@@ -84,7 +84,7 @@ mod harness {
         let repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(repo.clone());
-        let engine = WorkflowEngine::new(repo.clone(), event_bus, true);
+        let engine = WorkflowEngine::new(repo.clone(), task_service.clone(), event_bus, true);
         (task_service, engine, repo)
     }
 

@@ -1088,6 +1088,7 @@ where
 
         let engine = crate::services::workflow_engine::WorkflowEngine::new(
             self.task_service.repo().clone(),
+            self.task_service.clone(),
             self.event_bus.clone().unwrap_or_else(|| {
                 Arc::new(crate::services::event_bus::EventBus::new(
                     crate::services::event_bus::EventBusConfig::default(),
@@ -1125,6 +1126,7 @@ where
 
         let engine = crate::services::workflow_engine::WorkflowEngine::new(
             self.task_service.repo().clone(),
+            self.task_service.clone(),
             self.event_bus.clone().unwrap_or_else(|| {
                 Arc::new(crate::services::event_bus::EventBus::new(
                     crate::services::event_bus::EventBusConfig::default(),
@@ -1178,6 +1180,7 @@ where
 
         let engine = crate::services::workflow_engine::WorkflowEngine::new(
             self.task_service.repo().clone(),
+            self.task_service.clone(),
             self.event_bus.clone().unwrap_or_else(|| {
                 Arc::new(crate::services::event_bus::EventBus::new(
                     crate::services::event_bus::EventBusConfig::default(),
@@ -1231,6 +1234,7 @@ where
 
         let engine = crate::services::workflow_engine::WorkflowEngine::new(
             self.task_service.repo().clone(),
+            self.task_service.clone(),
             self.event_bus.clone().unwrap_or_else(|| {
                 Arc::new(crate::services::event_bus::EventBus::new(
                     crate::services::event_bus::EventBusConfig::default(),
@@ -1297,6 +1301,7 @@ where
 
         let engine = crate::services::workflow_engine::WorkflowEngine::new(
             self.task_service.repo().clone(),
+            self.task_service.clone(),
             self.event_bus.clone().unwrap_or_else(|| {
                 Arc::new(crate::services::event_bus::EventBus::new(
                     crate::services::event_bus::EventBusConfig::default(),
