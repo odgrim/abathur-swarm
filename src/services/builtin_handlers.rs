@@ -39,6 +39,13 @@ use crate::services::task_service::TaskService;
 ///
 /// State transitions are routed through `TaskService` to ensure validation,
 /// optimistic locking, and proper event emission.
+///
+/// **Deduplication (S3):** Both `TaskCompleted` and `TaskCompletedWithResult` may
+/// fire for the same task (from different code paths). The handler matches both
+/// because some paths emit only one variant. The early status check on each
+/// dependent (line `dep.status != Pending && dep.status != Blocked`) ensures
+/// idempotent behavior — a second invocation for the same task_id is a no-op
+/// when the dependents have already been transitioned.
 pub struct TaskCompletedReadinessHandler<T: TaskRepository> {
     task_repo: Arc<T>,
     task_service: Arc<TaskService<T>>,
@@ -5660,6 +5667,15 @@ impl<T: TaskRepository + 'static, Tr: TrajectoryRepository + 'static> EventHandl
 /// When a task completes or fails, check if its parent has workflow state.
 /// If so, call `workflow_engine.handle_phase_complete()` to drive the
 /// workflow state machine forward.
+///
+/// **Priority (S4):** Runs at SYSTEM priority (same as `TaskCompletedReadinessHandler`)
+/// to prevent priority inversion: workflow state must be updated before or
+/// alongside readiness cascades so that a dependent task outside the workflow
+/// cannot become Ready before the workflow gate verdict.
+///
+/// **Deduplication (S3):** Both `TaskCompleted` and `TaskCompletedWithResult` may
+/// fire for the same subtask. The workflow engine's `handle_phase_complete` is
+/// idempotent — a second call for an already-advanced phase is a no-op.
 pub struct WorkflowSubtaskCompletionHandler<T: TaskRepository> {
     task_repo: Arc<T>,
     event_bus: Arc<EventBus>,
@@ -5686,7 +5702,7 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowSubtaskCompletionHand
                     "TaskFailed".to_string(),
                     "TaskCanceled".to_string(),
                 ]),
-            priority: HandlerPriority::HIGH,
+            priority: HandlerPriority::SYSTEM, // S4: was HIGH — raised to SYSTEM to prevent priority inversion with TaskCompletedReadinessHandler
             error_strategy: ErrorStrategy::CircuitBreak,
             critical: false,
         }
@@ -5712,6 +5728,9 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowSubtaskCompletionHand
             return Ok(Reaction::None);
         }
 
+        // S3 dedup: if the subtask is already in a terminal state and we've
+        // seen this before, the workflow engine will no-op, but we can skip
+        // the parent lookup entirely when the subtask has no parent.
         let parent_id = match subtask.parent_id {
             Some(id) => id,
             None => return Ok(Reaction::None),
@@ -5727,7 +5746,8 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowSubtaskCompletionHand
             return Ok(Reaction::None);
         }
 
-        // Delegate to workflow engine (via TaskService for all mutations)
+        // Delegate to workflow engine (via TaskService for all mutations).
+        // Idempotent — safe to call twice for same subtask (e.g. from dual TaskCompleted events).
         let task_service = crate::services::task_service::TaskService::new(self.task_repo.clone());
         let engine = crate::services::workflow_engine::WorkflowEngine::new(
             self.task_repo.clone(),
