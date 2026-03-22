@@ -1326,6 +1326,18 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             (trajectory.complexity, self.calibration_tracker.lock())
         {
             tracker.record_completion(tier, trajectory.budget.tokens_used);
+
+            // 5b. Emit budget calibration alerts if P95 exceeds allocated budget
+            let now = Utc::now();
+            for alert in tracker.calibration_alerts() {
+                self.emit_event(ConvergenceEvent::BudgetCalibrationExceeded {
+                    tier: alert.tier,
+                    p95_tokens: alert.p95_tokens,
+                    allocated_tokens: alert.allocated_tokens,
+                    overshoot_pct: alert.overshoot_pct,
+                    timestamp: now,
+                });
+            }
         }
 
         // 6. Save final trajectory state
@@ -4784,6 +4796,77 @@ mod tests {
         assert_eq!(
             signals.test_results.as_ref().unwrap().failed,
             expected_signals.test_results.as_ref().unwrap().failed,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // budget calibration alert tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_finalize_emits_calibration_alert_when_p95_exceeds_budget() {
+        let engine = test_engine();
+
+        // Simple tier has max_tokens = 150_000. Overshoot threshold is 20%.
+        // So max_allowed = 180_000. We need P95 > 180_000.
+        // With 20 samples all at 200_000, P95 = 200_000 which exceeds 180_000.
+        let bandit = StrategyBandit::with_default_priors();
+
+        for _ in 0..20 {
+            let mut trajectory = test_trajectory();
+            trajectory.complexity = Some(Complexity::Simple);
+            trajectory.budget.tokens_used = 200_000;
+
+            let outcome = ConvergenceOutcome::Converged {
+                trajectory_id: trajectory.id.to_string(),
+                final_observation_sequence: 1,
+            };
+
+            engine
+                .finalize(&mut trajectory, &outcome, &bandit)
+                .await
+                .unwrap();
+        }
+
+        let alerts = engine.calibration_alerts();
+        assert!(
+            !alerts.is_empty(),
+            "Expected calibration alert for Simple tier exceeding budget"
+        );
+        assert!(alerts.iter().any(|a| a.tier == Complexity::Simple));
+        let alert = alerts.iter().find(|a| a.tier == Complexity::Simple).unwrap();
+        assert!(alert.overshoot_pct > 20.0);
+    }
+
+    #[tokio::test]
+    async fn test_finalize_no_calibration_alert_when_within_budget() {
+        let engine = test_engine();
+
+        // Simple tier has max_tokens = 150_000. Overshoot threshold is 20%.
+        // max_allowed = 180_000. All samples at 100_000 => P95 = 100_000 < 180_000.
+        let bandit = StrategyBandit::with_default_priors();
+
+        for _ in 0..20 {
+            let mut trajectory = test_trajectory();
+            trajectory.complexity = Some(Complexity::Simple);
+            trajectory.budget.tokens_used = 100_000;
+
+            let outcome = ConvergenceOutcome::Converged {
+                trajectory_id: trajectory.id.to_string(),
+                final_observation_sequence: 1,
+            };
+
+            engine
+                .finalize(&mut trajectory, &outcome, &bandit)
+                .await
+                .unwrap();
+        }
+
+        let alerts = engine.calibration_alerts();
+        assert!(
+            alerts.is_empty(),
+            "Expected no calibration alerts when within budget, got {:?}",
+            alerts
         );
     }
 }

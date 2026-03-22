@@ -13,6 +13,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::domain::models::AgentStatus;
+use crate::domain::ports::AgentRepository;
+
 /// Configuration for the evolution loop.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvolutionConfig {
@@ -298,6 +301,7 @@ pub struct EvolutionLoop {
     config: EvolutionConfig,
     state: Arc<RwLock<EvolutionState>>,
     refinement_repo: Option<Arc<dyn RefinementRepository>>,
+    agent_repo: Option<Arc<dyn AgentRepository>>,
 }
 
 impl EvolutionLoop {
@@ -306,6 +310,7 @@ impl EvolutionLoop {
             config,
             state: Arc::new(RwLock::new(EvolutionState::new())),
             refinement_repo: None,
+            agent_repo: None,
         }
     }
 
@@ -319,6 +324,16 @@ impl EvolutionLoop {
     /// are written through to the DB. Failures are non-fatal (logged as warnings).
     pub fn with_repo(mut self, repo: Arc<dyn RefinementRepository>) -> Self {
         self.refinement_repo = Some(repo);
+        self
+    }
+
+    /// Attach an agent repository for auto-revert support.
+    ///
+    /// When set, auto-revert on regression will actually fetch the previous
+    /// template version from the repository and mark it as active.
+    /// Without this, auto-revert emits the event but does not restore the template.
+    pub fn with_agent_repo(mut self, repo: Arc<dyn AgentRepository>) -> Self {
+        self.agent_repo = Some(repo);
         self
     }
 
@@ -374,6 +389,9 @@ impl EvolutionLoop {
     pub async fn evaluate(&self) -> Vec<EvolutionEvent> {
         self.expire_stale_refinements().await;
         let mut new_requests: Vec<RefinementRequest> = Vec::new();
+        // Collect revert instructions: (template_name, to_version) to execute
+        // outside the write lock since agent_repo calls are async.
+        let mut revert_instructions: Vec<(String, u32)> = Vec::new();
 
         let events = {
             let mut state = self.state.write().await;
@@ -440,9 +458,11 @@ impl EvolutionLoop {
                     {
                         // Auto-revert
                         if let Some(prev_stats) = state.previous_version_stats.get(&template_name) {
+                            let to_version = prev_stats.template_version;
+                            revert_instructions.push((template_name.clone(), to_version));
                             EvolutionAction::Reverted {
                                 from_version: stats.template_version,
-                                to_version: prev_stats.template_version,
+                                to_version,
                             }
                         } else {
                             EvolutionAction::FlaggedForRefinement { severity }
@@ -520,6 +540,59 @@ impl EvolutionLoop {
                         e
                     );
                 }
+            }
+        }
+
+        // Actually restore previous template versions for auto-reverts.
+        // This must happen outside the write lock because agent_repo calls are async.
+        if !revert_instructions.is_empty() {
+            if let Some(ref agent_repo) = self.agent_repo {
+                for (template_name, to_version) in &revert_instructions {
+                    match agent_repo
+                        .get_template_version(template_name, *to_version)
+                        .await
+                    {
+                        Ok(Some(mut prev_template)) => {
+                            prev_template.status = AgentStatus::Active;
+                            prev_template.updated_at = Utc::now();
+                            if let Err(e) = agent_repo.update_template(&prev_template).await {
+                                tracing::error!(
+                                    "Auto-revert failed: could not update template '{}' v{} to active: {}",
+                                    template_name,
+                                    to_version,
+                                    e,
+                                );
+                            } else {
+                                tracing::info!(
+                                    "Auto-revert: restored template '{}' v{} as active",
+                                    template_name,
+                                    to_version,
+                                );
+                            }
+                        }
+                        Ok(None) => {
+                            tracing::error!(
+                                "Auto-revert failed: template '{}' v{} not found in repository",
+                                template_name,
+                                to_version,
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Auto-revert failed: could not fetch template '{}' v{}: {}",
+                                template_name,
+                                to_version,
+                                e,
+                            );
+                        }
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "Auto-revert: {} template(s) flagged for revert but no agent repository configured — \
+                     revert event emitted but template not actually restored",
+                    revert_instructions.len(),
+                );
             }
         }
 
@@ -1545,6 +1618,253 @@ mod tests {
             req.status,
             RefinementStatus::Pending,
             "request must remain Pending when expiry is disabled"
+        );
+    }
+
+    /// A mock agent repository that records update_template calls for verification.
+    struct MockAgentRepo {
+        templates: tokio::sync::Mutex<HashMap<(String, u32), crate::domain::models::AgentTemplate>>,
+        updated: tokio::sync::Mutex<Vec<crate::domain::models::AgentTemplate>>,
+    }
+
+    impl MockAgentRepo {
+        fn new() -> Self {
+            Self {
+                templates: tokio::sync::Mutex::new(HashMap::new()),
+                updated: tokio::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+    }
+
+    #[async_trait]
+    impl crate::domain::ports::AgentRepository for MockAgentRepo {
+        async fn create_template(
+            &self,
+            _template: &crate::domain::models::AgentTemplate,
+        ) -> crate::domain::errors::DomainResult<()> {
+            Ok(())
+        }
+        async fn get_template(
+            &self,
+            _id: Uuid,
+        ) -> crate::domain::errors::DomainResult<Option<crate::domain::models::AgentTemplate>> {
+            Ok(None)
+        }
+        async fn get_template_by_name(
+            &self,
+            _name: &str,
+        ) -> crate::domain::errors::DomainResult<Option<crate::domain::models::AgentTemplate>> {
+            Ok(None)
+        }
+        async fn get_template_version(
+            &self,
+            name: &str,
+            version: u32,
+        ) -> crate::domain::errors::DomainResult<Option<crate::domain::models::AgentTemplate>> {
+            let templates = self.templates.lock().await;
+            Ok(templates.get(&(name.to_string(), version)).cloned())
+        }
+        async fn update_template(
+            &self,
+            template: &crate::domain::models::AgentTemplate,
+        ) -> crate::domain::errors::DomainResult<()> {
+            let mut updated = self.updated.lock().await;
+            updated.push(template.clone());
+            Ok(())
+        }
+        async fn delete_template(
+            &self,
+            _id: Uuid,
+        ) -> crate::domain::errors::DomainResult<()> {
+            Ok(())
+        }
+        async fn list_templates(
+            &self,
+            _filter: crate::domain::ports::AgentFilter,
+        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentTemplate>> {
+            Ok(vec![])
+        }
+        async fn list_by_tier(
+            &self,
+            _tier: crate::domain::models::AgentTier,
+        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentTemplate>> {
+            Ok(vec![])
+        }
+        async fn get_active_templates(
+            &self,
+        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentTemplate>> {
+            Ok(vec![])
+        }
+        async fn create_instance(
+            &self,
+            _instance: &crate::domain::models::AgentInstance,
+        ) -> crate::domain::errors::DomainResult<()> {
+            Ok(())
+        }
+        async fn get_instance(
+            &self,
+            _id: Uuid,
+        ) -> crate::domain::errors::DomainResult<Option<crate::domain::models::AgentInstance>> {
+            Ok(None)
+        }
+        async fn update_instance(
+            &self,
+            _instance: &crate::domain::models::AgentInstance,
+        ) -> crate::domain::errors::DomainResult<()> {
+            Ok(())
+        }
+        async fn delete_instance(
+            &self,
+            _id: Uuid,
+        ) -> crate::domain::errors::DomainResult<()> {
+            Ok(())
+        }
+        async fn list_instances_by_status(
+            &self,
+            _status: crate::domain::models::InstanceStatus,
+        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentInstance>> {
+            Ok(vec![])
+        }
+        async fn get_running_instances(
+            &self,
+            _template_name: &str,
+        ) -> crate::domain::errors::DomainResult<Vec<crate::domain::models::AgentInstance>> {
+            Ok(vec![])
+        }
+        async fn count_running_by_template(
+            &self,
+        ) -> crate::domain::errors::DomainResult<HashMap<String, u32>> {
+            Ok(HashMap::new())
+        }
+    }
+
+    fn make_template(name: &str, version: u32) -> crate::domain::models::AgentTemplate {
+        use crate::domain::models::{AgentCard, AgentStatus, AgentTier};
+        crate::domain::models::AgentTemplate {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            description: format!("{} v{}", name, version),
+            tier: AgentTier::Worker,
+            version,
+            system_prompt: "test prompt".to_string(),
+            tools: vec![],
+            constraints: vec![],
+            agent_card: AgentCard::default(),
+            max_turns: 10,
+            read_only: false,
+            preferred_model: None,
+            status: AgentStatus::Active,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auto_revert_actually_restores_template() {
+        let v1_template = make_template("revert-real", 1);
+
+        let mock_repo = Arc::new(MockAgentRepo::new());
+        {
+            let mut templates = mock_repo.templates.lock().await;
+            templates.insert((v1_template.name.clone(), v1_template.version), v1_template.clone());
+        }
+
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 3,
+            regression_min_tasks: 3,
+            regression_threshold: 0.15,
+            regression_detection_window_hours: 24,
+            auto_revert_enabled: true,
+            refinement_threshold: 0.01,
+            major_refinement_threshold: 0.01,
+            major_refinement_min_tasks: 100,
+            stale_refinement_timeout_hours: 48,
+        };
+        let evolution = EvolutionLoop::new(config).with_agent_repo(mock_repo.clone());
+
+        // v1: 5 successes → 100% rate
+        for _ in 0..5 {
+            evolution
+                .record_execution(make_execution("revert-real", 1, TaskOutcome::Success))
+                .await;
+        }
+        evolution.evaluate().await;
+
+        // Switch to v2: 1 success + 2 failures → 33% rate (drop of 67%)
+        evolution
+            .record_execution(make_execution("revert-real", 2, TaskOutcome::Success))
+            .await;
+        for _ in 0..2 {
+            evolution
+                .record_execution(make_execution("revert-real", 2, TaskOutcome::Failure))
+                .await;
+        }
+
+        let events = evolution.evaluate().await;
+
+        // Verify the Reverted event was emitted
+        let revert_event = events
+            .iter()
+            .find(|e| matches!(e.action_taken, EvolutionAction::Reverted { .. }));
+        assert!(revert_event.is_some(), "Should emit Reverted event");
+
+        // Verify the agent repo was actually called to restore v1
+        let updated = mock_repo.updated.lock().await;
+        assert_eq!(updated.len(), 1, "Should have called update_template exactly once");
+        assert_eq!(updated[0].name, "revert-real");
+        assert_eq!(updated[0].version, 1, "Should restore version 1");
+        assert_eq!(
+            updated[0].status,
+            crate::domain::models::AgentStatus::Active,
+            "Restored template should be marked Active"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auto_revert_graceful_when_no_repo() {
+        // No agent_repo configured — should still emit the Reverted event
+        // without panicking
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 3,
+            regression_min_tasks: 3,
+            regression_threshold: 0.15,
+            regression_detection_window_hours: 24,
+            auto_revert_enabled: true,
+            refinement_threshold: 0.01,
+            major_refinement_threshold: 0.01,
+            major_refinement_min_tasks: 100,
+            stale_refinement_timeout_hours: 48,
+        };
+        let evolution = EvolutionLoop::new(config);
+        // Deliberately NOT calling with_agent_repo
+
+        // v1: 5 successes
+        for _ in 0..5 {
+            evolution
+                .record_execution(make_execution("no-repo-agent", 1, TaskOutcome::Success))
+                .await;
+        }
+        evolution.evaluate().await;
+
+        // Switch to v2 with regression
+        evolution
+            .record_execution(make_execution("no-repo-agent", 2, TaskOutcome::Success))
+            .await;
+        for _ in 0..2 {
+            evolution
+                .record_execution(make_execution("no-repo-agent", 2, TaskOutcome::Failure))
+                .await;
+        }
+
+        // Should not panic — just emit the event without repo restoration
+        let events = evolution.evaluate().await;
+        let revert_event = events
+            .iter()
+            .find(|e| matches!(e.action_taken, EvolutionAction::Reverted { .. }));
+        assert!(
+            revert_event.is_some(),
+            "Should still emit Reverted event even without agent_repo"
         );
     }
 }

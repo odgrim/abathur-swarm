@@ -10609,3 +10609,243 @@ mod fast_reconciliation_handler_tests {
         assert!(result.unwrap_err().contains("not found"));
     }
 }
+
+#[cfg(test)]
+mod goal_convergence_check_handler_tests {
+    use super::*;
+    use crate::adapters::sqlite::{
+        create_migrated_test_pool, goal_repository::SqliteGoalRepository,
+        task_repository::SqliteTaskRepository,
+    };
+    use crate::domain::models::{GoalPriority, GoalConstraint, Task, TaskStatus};
+    use std::sync::Arc;
+
+    async fn setup_convergence_handler() -> (
+        GoalConvergenceCheckHandler<SqliteGoalRepository, SqliteTaskRepository>,
+        Arc<SqliteGoalRepository>,
+        Arc<SqliteTaskRepository>,
+    ) {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
+
+        let task_service = Arc::new(crate::services::task_service::TaskService::new(task_repo.clone()));
+        let goal_service = Arc::new(crate::services::goal_service::GoalService::new(goal_repo.clone()));
+        let memory_repo = Arc::new(crate::adapters::sqlite::SqliteMemoryRepository::new(pool.clone()));
+        let memory_service = Arc::new(crate::services::memory_service::MemoryService::new(memory_repo));
+        let event_bus = Arc::new(crate::services::EventBus::new(crate::services::EventBusConfig {
+            persist_events: false,
+            ..Default::default()
+        }));
+        let command_bus = Arc::new(crate::services::command_bus::CommandBus::new(
+            task_service, goal_service, memory_service, event_bus,
+        ));
+
+        // Use a 4-hour (14400s) check interval for idempotency bucketing
+        let handler = GoalConvergenceCheckHandler::new(
+            goal_repo.clone(),
+            task_repo.clone(),
+            command_bus,
+            14400,
+        );
+
+        (handler, goal_repo, task_repo)
+    }
+
+    fn make_convergence_check_event() -> UnifiedEvent {
+        UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "goal-convergence-check".to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_no_goals_returns_early() {
+        let (handler, _goal_repo, task_repo) = setup_convergence_handler().await;
+        let event = make_convergence_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::None), "No goals should produce Reaction::None");
+
+        // Verify no tasks were created (tasks auto-transition from Pending to Ready)
+        let ready_tasks = task_repo.list_by_status(TaskStatus::Ready).await.unwrap();
+        assert!(ready_tasks.is_empty(), "No tasks should be created when there are no goals");
+    }
+
+    #[tokio::test]
+    async fn test_creates_convergence_task_with_active_goals() {
+        let (handler, goal_repo, task_repo) = setup_convergence_handler().await;
+
+        // Insert two active goals
+        let goal1 = Goal::new("Test Goal Alpha", "Description for alpha")
+            .with_priority(GoalPriority::High);
+        let goal2 = Goal::new("Test Goal Beta", "Description for beta")
+            .with_priority(GoalPriority::Normal);
+        goal_repo.create(&goal1).await.unwrap();
+        goal_repo.create(&goal2).await.unwrap();
+
+        let event = make_convergence_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::None), "Handler should return Reaction::None on success");
+
+        // Verify a convergence check task was created (auto-transitions to Ready)
+        let ready = task_repo.list_by_status(TaskStatus::Ready).await.unwrap();
+        assert_eq!(ready.len(), 1, "Exactly one convergence check task should be created");
+        assert!(
+            ready[0].title.starts_with("Goal Convergence Check"),
+            "Task title should start with 'Goal Convergence Check'"
+        );
+        assert!(
+            ready[0].title.contains("2 active goal(s)"),
+            "Task title should mention the number of active goals"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_idempotency_bucketing_prevents_duplicate() {
+        let (handler, goal_repo, task_repo) = setup_convergence_handler().await;
+
+        // Insert a goal so the handler doesn't skip due to empty goals
+        let goal = Goal::new("Idempotency Test Goal", "Testing dedup")
+            .with_priority(GoalPriority::Normal);
+        goal_repo.create(&goal).await.unwrap();
+
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        // First invocation should create a task
+        let event1 = make_convergence_check_event();
+        handler.handle(&event1, &ctx).await.unwrap();
+
+        // Second invocation within the same time bucket should be deduplicated
+        let event2 = make_convergence_check_event();
+        handler.handle(&event2, &ctx).await.unwrap();
+
+        // Only one task should exist (idempotency key dedup by TaskService)
+        let ready = task_repo.list_by_status(TaskStatus::Ready).await.unwrap();
+        assert_eq!(ready.len(), 1, "Duplicate convergence check should be prevented by idempotency key");
+    }
+
+    #[tokio::test]
+    async fn test_overlap_detection_skips_when_active() {
+        let (handler, goal_repo, task_repo) = setup_convergence_handler().await;
+
+        // Insert a goal
+        let goal = Goal::new("Overlap Test Goal", "Testing overlap detection")
+            .with_priority(GoalPriority::Normal);
+        goal_repo.create(&goal).await.unwrap();
+
+        // Create an existing running task with a convergence-check-style title
+        let mut existing_task = Task::new("Goal Convergence Check — 1 active goal(s)");
+        existing_task.description = "Previous convergence check still running".to_string();
+        existing_task.transition_to(TaskStatus::Ready).unwrap();
+        existing_task.transition_to(TaskStatus::Running).unwrap();
+        task_repo.create(&existing_task).await.unwrap();
+
+        let event = make_convergence_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::None), "Should skip when active convergence check exists");
+
+        // Verify no new task was created (only the existing running one)
+        let ready = task_repo.list_by_status(TaskStatus::Ready).await.unwrap();
+        assert!(ready.is_empty(), "No new task should be created when overlap detected");
+    }
+
+    #[tokio::test]
+    async fn test_last_convergence_check_at_updated() {
+        let (handler, goal_repo, _task_repo) = setup_convergence_handler().await;
+
+        // Insert a goal with no previous convergence check
+        let goal = Goal::new("Timestamp Test Goal", "Testing timestamp update")
+            .with_priority(GoalPriority::Normal);
+        let goal_id = goal.id;
+        goal_repo.create(&goal).await.unwrap();
+
+        // Verify last_convergence_check_at is initially None
+        let before = goal_repo.get(goal_id).await.unwrap().unwrap();
+        assert!(
+            before.last_convergence_check_at.is_none(),
+            "last_convergence_check_at should be None before first check"
+        );
+
+        let event = make_convergence_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        handler.handle(&event, &ctx).await.unwrap();
+
+        // Verify last_convergence_check_at is now set
+        let after = goal_repo.get(goal_id).await.unwrap().unwrap();
+        assert!(
+            after.last_convergence_check_at.is_some(),
+            "last_convergence_check_at should be updated after convergence check"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_task_description_contains_goal_details() {
+        let (handler, goal_repo, task_repo) = setup_convergence_handler().await;
+
+        // Create goals with constraints and specific details
+        let goal1 = Goal::new("Memory Lifecycle Goal", "Ensure memory decay works correctly")
+            .with_priority(GoalPriority::High)
+            .with_constraint(GoalConstraint::preference(
+                "no-silent-data-loss",
+                "Decay daemon must not silently drop memories",
+            ));
+        let goal2 = Goal::new("Convergence Loop Goal", "Drive tasks to completion")
+            .with_priority(GoalPriority::Critical)
+            .with_constraint(GoalConstraint::preference(
+                "strategy-diversity",
+                "Never retry the same failing approach",
+            ));
+        let goal1_id = goal1.id;
+        let goal2_id = goal2.id;
+        goal_repo.create(&goal1).await.unwrap();
+        goal_repo.create(&goal2).await.unwrap();
+
+        let event = make_convergence_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        handler.handle(&event, &ctx).await.unwrap();
+
+        let ready = task_repo.list_by_status(TaskStatus::Ready).await.unwrap();
+        assert_eq!(ready.len(), 1);
+        let desc = &ready[0].description;
+
+        // Verify goal names appear in description
+        assert!(desc.contains("Memory Lifecycle Goal"), "Description should contain first goal name");
+        assert!(desc.contains("Convergence Loop Goal"), "Description should contain second goal name");
+
+        // Verify goal IDs appear in description
+        assert!(desc.contains(&goal1_id.to_string()), "Description should contain first goal ID");
+        assert!(desc.contains(&goal2_id.to_string()), "Description should contain second goal ID");
+
+        // Verify constraint details appear in description
+        assert!(desc.contains("no-silent-data-loss"), "Description should contain constraint name");
+        assert!(desc.contains("strategy-diversity"), "Description should contain constraint name");
+        assert!(
+            desc.contains("Decay daemon must not silently drop memories"),
+            "Description should contain constraint description"
+        );
+
+        // Verify overall structure
+        assert!(desc.contains("# Goal Convergence Check"), "Description should contain header");
+        assert!(desc.contains("## Active Goals"), "Description should contain Active Goals section");
+        assert!(desc.contains("## Current Task Statistics"), "Description should contain statistics");
+    }
+}

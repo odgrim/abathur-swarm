@@ -342,7 +342,9 @@ where
 
         let refinement_repo = Arc::new(SqliteRefinementRepository::new(pool.clone()));
         self.evolution_loop = Arc::new(
-            EvolutionLoop::new(EvolutionConfig::default()).with_repo(refinement_repo),
+            EvolutionLoop::new(EvolutionConfig::default())
+                .with_repo(refinement_repo)
+                .with_agent_repo(self.agent_repo.clone()),
         );
         self.outbox_repo = Some(Arc::new(SqliteOutboxRepository::new(pool.clone())));
         self.merge_request_repo = Some(Arc::new(SqliteMergeRequestRepository::new(pool.clone())));

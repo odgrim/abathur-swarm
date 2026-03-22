@@ -16,6 +16,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::models::task::Complexity;
+
 use super::*;
 
 // ---------------------------------------------------------------------------
@@ -268,6 +270,29 @@ pub enum ConvergenceEvent {
         /// Number of parallel trajectory samples being spawned.
         parallel_count: usize,
     },
+
+    // -------------------------------------------------------------------
+    // Budget calibration events
+    // -------------------------------------------------------------------
+
+    /// P95 token usage for a complexity tier exceeded the allocated budget
+    /// by more than 20%.
+    ///
+    /// Emitted during trajectory finalization when calibration tracking
+    /// detects overshoot. Serves the budget-calibration constraint so
+    /// downstream consumers (dashboards, alerting) can react.
+    BudgetCalibrationExceeded {
+        /// The complexity tier that exceeded its budget.
+        tier: Complexity,
+        /// The observed P95 token usage for this tier.
+        p95_tokens: u64,
+        /// The allocated token budget for this tier.
+        allocated_tokens: u64,
+        /// How far above the budget the P95 is, as a percentage.
+        overshoot_pct: f64,
+        /// When the alert was generated.
+        timestamp: DateTime<Utc>,
+    },
 }
 
 impl ConvergenceEvent {
@@ -301,6 +326,9 @@ impl ConvergenceEvent {
             ConvergenceEvent::ParallelConvergenceStarted { .. } => {
                 "parallel_convergence_started"
             }
+            ConvergenceEvent::BudgetCalibrationExceeded { .. } => {
+                "budget_calibration_exceeded"
+            }
         }
     }
 
@@ -331,7 +359,8 @@ impl ConvergenceEvent {
                 ..
             } => Some(parent_trajectory_id),
             ConvergenceEvent::SpecificationAmbiguityDetected { .. }
-            | ConvergenceEvent::DecompositionRecommended { .. } => None,
+            | ConvergenceEvent::DecompositionRecommended { .. }
+            | ConvergenceEvent::BudgetCalibrationExceeded { .. } => None,
         }
     }
 }
@@ -486,6 +515,13 @@ mod tests {
                 trajectory_id: String::new(),
                 parallel_count: 0,
             },
+            ConvergenceEvent::BudgetCalibrationExceeded {
+                tier: Complexity::Moderate,
+                p95_tokens: 200_000,
+                allocated_tokens: 150_000,
+                overshoot_pct: 33.3,
+                timestamp: Utc::now(),
+            },
         ];
 
         let mut names: Vec<&str> = events.iter().map(|e| e.event_name()).collect();
@@ -531,5 +567,44 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: ConvergenceEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.event_name(), "strategy_selected");
+    }
+
+    #[test]
+    fn test_budget_calibration_exceeded_event_name() {
+        let event = ConvergenceEvent::BudgetCalibrationExceeded {
+            tier: Complexity::Complex,
+            p95_tokens: 250_000,
+            allocated_tokens: 200_000,
+            overshoot_pct: 25.0,
+            timestamp: Utc::now(),
+        };
+        assert_eq!(event.event_name(), "budget_calibration_exceeded");
+    }
+
+    #[test]
+    fn test_budget_calibration_exceeded_has_no_trajectory_id() {
+        let event = ConvergenceEvent::BudgetCalibrationExceeded {
+            tier: Complexity::Moderate,
+            p95_tokens: 180_000,
+            allocated_tokens: 150_000,
+            overshoot_pct: 20.0,
+            timestamp: Utc::now(),
+        };
+        assert_eq!(event.trajectory_id(), None);
+    }
+
+    #[test]
+    fn test_budget_calibration_exceeded_serde_roundtrip() {
+        let event = ConvergenceEvent::BudgetCalibrationExceeded {
+            tier: Complexity::Simple,
+            p95_tokens: 120_000,
+            allocated_tokens: 100_000,
+            overshoot_pct: 20.0,
+            timestamp: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: ConvergenceEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.event_name(), "budget_calibration_exceeded");
     }
 }
