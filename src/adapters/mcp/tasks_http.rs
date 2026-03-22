@@ -23,6 +23,7 @@ use crate::domain::ports::TaskRepository;
 use crate::services::command_bus::{
     CommandBus, CommandEnvelope, CommandResult, CommandSource, DomainCommand, TaskCommand,
 };
+use crate::services::guardrails::{GuardrailResult, Guardrails};
 use crate::services::TaskService;
 
 /// Configuration for the tasks HTTP server.
@@ -166,6 +167,7 @@ pub struct ErrorResponse {
 struct AppState<T: TaskRepository> {
     service: TaskService<T>,
     command_bus: Arc<CommandBus>,
+    guardrails: Option<Arc<Guardrails>>,
 }
 
 /// Tasks HTTP Server.
@@ -173,13 +175,20 @@ pub struct TasksHttpServer<T: TaskRepository + 'static> {
     config: TasksHttpConfig,
     service: TaskService<T>,
     command_bus: Arc<CommandBus>,
+    guardrails: Option<Arc<Guardrails>>,
 }
 
 impl<T: TaskRepository + Clone + Send + Sync + 'static>
     TasksHttpServer<T>
 {
     pub fn new(service: TaskService<T>, command_bus: Arc<CommandBus>, config: TasksHttpConfig) -> Self {
-        Self { config, service, command_bus }
+        Self { config, service, command_bus, guardrails: None }
+    }
+
+    /// Set an optional guardrails instance for pre-flight checks on task submission.
+    pub fn with_guardrails(mut self, guardrails: Arc<Guardrails>) -> Self {
+        self.guardrails = Some(guardrails);
+        self
     }
 
     /// Build the router.
@@ -187,6 +196,7 @@ impl<T: TaskRepository + Clone + Send + Sync + 'static>
         let state = Arc::new(AppState {
             service: self.service,
             command_bus: self.command_bus,
+            guardrails: self.guardrails,
         });
 
         let app = Router::new()
@@ -287,6 +297,25 @@ async fn submit_task<T: TaskRepository + Clone + Send + Sync + 'static>(
     State(state): State<Arc<AppState<T>>>,
     Json(req): Json<SubmitTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskResponse>), (StatusCode, Json<ErrorResponse>)> {
+    // Pre-flight guardrails check: reject task creation if limits are exceeded.
+    if let Some(guardrails) = &state.guardrails {
+        match guardrails.check_task_creation().await {
+            GuardrailResult::Blocked(reason) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: reason,
+                        code: "GUARDRAIL_BLOCKED".to_string(),
+                    }),
+                ));
+            }
+            GuardrailResult::Warning(msg) => {
+                tracing::warn!("Guardrail warning on task submission: {}", msg);
+            }
+            GuardrailResult::Allowed => {}
+        }
+    }
+
     let priority = req
         .priority
         .as_ref()

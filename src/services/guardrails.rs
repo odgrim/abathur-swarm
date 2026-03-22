@@ -200,6 +200,39 @@ impl Guardrails {
         Self::new(GuardrailsConfig::default())
     }
 
+    /// Check if a new task can be created (pre-flight check at the API boundary).
+    ///
+    /// Unlike [`check_task_start`], this does not require a task ID because the
+    /// task has not been created yet. It only validates that the concurrent-task
+    /// limit has not been reached.
+    pub async fn check_task_creation(&self) -> GuardrailResult {
+        let tasks = self.current_tasks.read().await;
+
+        if tasks.len() >= self.config.max_concurrent_tasks {
+            tracing::warn!(
+                current_count = tasks.len(),
+                max = self.config.max_concurrent_tasks,
+                "task creation blocked: max concurrent tasks reached"
+            );
+            return GuardrailResult::Blocked(format!(
+                "Maximum concurrent tasks ({}) reached",
+                self.config.max_concurrent_tasks
+            ));
+        }
+
+        // Warn when approaching the limit (80%+)
+        let threshold = (self.config.max_concurrent_tasks * 80) / 100;
+        if threshold > 0 && tasks.len() >= threshold {
+            return GuardrailResult::Warning(format!(
+                "Approaching concurrent task limit: {}/{}",
+                tasks.len(),
+                self.config.max_concurrent_tasks
+            ));
+        }
+
+        GuardrailResult::Allowed
+    }
+
     /// Check if we can start a new task.
     pub async fn check_task_start(&self, task_id: uuid::Uuid) -> GuardrailResult {
         let tasks = self.current_tasks.read().await;
@@ -550,5 +583,59 @@ mod tests {
         // After ending, the same ID can be re-used
         guardrails.register_agent_end(agent_id).await;
         assert!(guardrails.check_agent_spawn(agent_id).await.is_allowed());
+    }
+
+    #[tokio::test]
+    async fn test_check_task_creation_blocks_at_limit() {
+        let config = GuardrailsConfig {
+            max_concurrent_tasks: 2,
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        // No tasks yet — creation should be allowed
+        assert!(guardrails.check_task_creation().await.is_allowed());
+
+        // Register two tasks to fill the limit
+        let id1 = uuid::Uuid::new_v4();
+        let id2 = uuid::Uuid::new_v4();
+        guardrails.register_task_start(id1).await;
+        guardrails.register_task_start(id2).await;
+
+        // At the limit — creation should be blocked
+        let result = guardrails.check_task_creation().await;
+        assert!(result.is_blocked());
+        match result {
+            GuardrailResult::Blocked(msg) => {
+                assert!(msg.contains("Maximum concurrent tasks"), "Unexpected message: {}", msg);
+            }
+            _ => panic!("Expected Blocked result"),
+        }
+
+        // Free a slot — creation should be allowed again
+        guardrails.register_task_end(id1, true).await;
+        assert!(guardrails.check_task_creation().await.is_allowed());
+    }
+
+    #[tokio::test]
+    async fn test_check_task_creation_warns_near_limit() {
+        let config = GuardrailsConfig {
+            max_concurrent_tasks: 10,
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        // Register 8 tasks (80% of 10)
+        for _ in 0..8 {
+            guardrails.register_task_start(uuid::Uuid::new_v4()).await;
+        }
+
+        // Should get a warning at 80%
+        match guardrails.check_task_creation().await {
+            GuardrailResult::Warning(msg) => {
+                assert!(msg.contains("Approaching"), "Unexpected warning: {}", msg);
+            }
+            other => panic!("Expected Warning, got {:?}", other),
+        }
     }
 }
