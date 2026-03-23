@@ -1926,7 +1926,7 @@ fn default_min_pass_rate() -> f64 {
 }
 
 fn default_min_level() -> f64 {
-    1.0
+    0.8 // Match the 80% threshold used by SwarmOverseer
 }
 
 impl SignalYamlSpec {
