@@ -159,6 +159,12 @@ pub enum SwarmCommand {
         /// Disable git worktree isolation for agents (overrides abathur.toml)
         #[arg(long)]
         no_worktrees: bool,
+
+        /// Path to a DAG YAML specification file to execute on startup.
+        /// When provided, the swarm parses the DAG, creates a parent goal,
+        /// and delegates root nodes through the federation pipeline.
+        #[arg(long)]
+        dag: Option<String>,
     },
     /// Stop the running swarm orchestrator
     Stop,
@@ -220,20 +226,11 @@ pub enum SwarmCommand {
 /// Subcommands for swarm DAG management.
 #[derive(Subcommand, Debug)]
 pub enum DagCommand {
-    /// Create a DAG from a YAML specification file
+    /// Validate a DAG YAML specification file (dry-run parse + cycle check)
     Create {
         /// Path to the YAML DAG specification file
         #[arg(long)]
         file: String,
-    },
-    /// Start executing a DAG (delegates root nodes immediately)
-    Start {
-        /// Path to the YAML DAG specification file
-        #[arg(long)]
-        file: String,
-        /// Goal name for the parent goal that owns this pipeline
-        #[arg(long, default_value = "Pipeline execution")]
-        goal_name: String,
     },
     /// Show status of all DAGs
     Status,
@@ -255,6 +252,7 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
             workflow,
             dangerously_skip_permissions,
             no_worktrees,
+            dag,
         } => {
             start_swarm(
                 max_agents,
@@ -271,6 +269,7 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
                 workflow,
                 dangerously_skip_permissions,
                 no_worktrees,
+                dag,
             ).await
         }
         SwarmCommand::Stop => stop_swarm(json_mode).await,
@@ -297,7 +296,6 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
         SwarmCommand::Dag { command } => {
             match command {
                 DagCommand::Create { file } => dag_create(&file, json_mode).await,
-                DagCommand::Start { file, goal_name } => dag_start(&file, &goal_name, json_mode).await,
                 DagCommand::Status => dag_status(json_mode).await,
             }
         }
@@ -394,6 +392,7 @@ async fn start_swarm(
     workflow: Option<String>,
     dangerously_skip_permissions: bool,
     no_worktrees: bool,
+    dag: Option<String>,
 ) -> Result<()> {
     // Check if swarm is already running
     if let Some(pid) = check_existing_swarm() {
@@ -430,10 +429,10 @@ async fn start_swarm(
 
     if foreground {
         // Run in foreground (original behavior)
-        run_swarm_foreground(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref(), dangerously_skip_permissions, no_worktrees).await
+        run_swarm_foreground(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref(), dangerously_skip_permissions, no_worktrees, dag.as_deref()).await
     } else {
         // Background the swarm
-        start_swarm_background(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref(), dangerously_skip_permissions, no_worktrees)
+        start_swarm_background(max_agents, dry_run, json_mode, mcp_urls, with_mcp_servers, &default_execution_mode, workflow.as_deref(), dangerously_skip_permissions, no_worktrees, dag.as_deref())
     }
 }
 
@@ -448,6 +447,7 @@ fn start_swarm_background(
     workflow: Option<&str>,
     dangerously_skip_permissions: bool,
     no_worktrees: bool,
+    dag: Option<&str>,
 ) -> Result<()> {
     use std::process::{Command, Stdio};
 
@@ -489,6 +489,9 @@ fn start_swarm_background(
     }
     if no_worktrees {
         cmd.arg("--no-worktrees");
+    }
+    if let Some(dag_file) = dag {
+        cmd.arg("--dag").arg(dag_file);
     }
 
     // Ensure .abathur directory exists for log file
@@ -614,6 +617,7 @@ async fn run_swarm_foreground(
     workflow: Option<&str>,
     dangerously_skip_permissions: bool,
     no_worktrees: bool,
+    dag_file: Option<&str>,
 ) -> Result<()> {
     use crate::adapters::sqlite::{
         create_pool, Migrator, all_embedded_migrations,
@@ -772,7 +776,7 @@ async fn run_swarm_foreground(
         substrate.clone(),
         config.clone(),
         event_bus.clone(),
-        reactor,
+        reactor.clone(),
         scheduler,
     )
     .with_memory_repo(memory_repo)
@@ -914,6 +918,75 @@ async fn run_swarm_foreground(
                 println!("Warning: Failed to start convergence publisher: {}", e);
             }
         }
+    }
+
+    // If a DAG file was provided, parse it, create the parent goal, register
+    // the DAG event handler on the reactor, and delegate root nodes so the
+    // federation pipeline drives DAG progression alongside normal goal processing.
+    if let Some(dag_path) = dag_file {
+        use crate::domain::models::goal::GoalPriority;
+        use crate::services::federation::{SwarmDagExecutor, SwarmDagEventHandler};
+        use crate::services::goal_service::GoalService;
+
+        let federation_service = orchestrator
+            .federation_service()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!(
+                "Federation must be enabled to run a DAG. Set [federation] enabled = true in abathur.toml"
+            ))?;
+
+        let mut dag = parse_dag_from_yaml(dag_path)?;
+
+        let dag_goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
+        let goal_service = GoalService::new(dag_goal_repo);
+        let (goal, goal_events) = goal_service
+            .create_goal(
+                format!("DAG: {}", dag.name),
+                format!("DAG pipeline: {}", dag.name),
+                GoalPriority::Normal,
+                None,
+                vec![],
+                vec![],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create DAG parent goal: {}", e))?;
+
+        for ev in goal_events {
+            event_bus.publish(ev).await;
+        }
+
+        let executor = Arc::new(SwarmDagExecutor::new(federation_service, event_bus.clone()));
+
+        let delegated = executor
+            .start(&mut dag, &goal)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to start DAG execution: {}", e))?;
+
+        if !json_mode {
+            println!("DAG '{}' started ({} root nodes delegated)", dag.name, delegated.len());
+            print_dag_nodes(&dag);
+            println!();
+        }
+
+        // Register the DAG event handler so convergence/failure events drive
+        // the DAG forward automatically via the shared reactor.
+        let swarm_dags = Arc::new(tokio::sync::RwLock::new({
+            let mut map = std::collections::HashMap::new();
+            map.insert(dag.id, dag);
+            map
+        }));
+        let placeholder_goals = Arc::new(tokio::sync::RwLock::new({
+            let mut map = std::collections::HashMap::new();
+            map.insert(goal.id, goal);
+            map
+        }));
+
+        let dag_handler = SwarmDagEventHandler::new(
+            swarm_dags,
+            executor,
+            placeholder_goals,
+        );
+        reactor.register(Arc::new(dag_handler)).await;
     }
 
     // Create event channel for monitoring
@@ -2178,7 +2251,7 @@ async fn dag_create(file_path: &str, json_mode: bool) -> Result<()> {
         }
 
         println!();
-        println!("DAG is validated and ready. Use 'abathur swarm start' to begin execution.");
+        println!("DAG is validated and ready. Use 'abathur swarm start --dag <path>' to begin execution.");
     }
 
     Ok(())
@@ -2197,225 +2270,6 @@ async fn dag_status(_json_mode: bool) -> Result<()> {
         println!();
         println!("Create a DAG with: abathur swarm dag create --file <path.yaml>");
     }
-
-    Ok(())
-}
-
-async fn dag_start(file_path: &str, goal_name: &str, json_mode: bool) -> Result<()> {
-    use crate::adapters::sqlite::{create_pool, Migrator, all_embedded_migrations, SqliteFederatedGoalRepository};
-    use crate::adapters::a2a::client::HttpA2AClient;
-    use crate::domain::models::goal::GoalPriority;
-    use crate::services::event_bus::{EventBus, EventBusConfig, EventPayload};
-    use crate::services::federation::service::FederationService;
-    use crate::services::federation::{SwarmDagExecutor, SwarmDagEventHandler};
-    use crate::services::federation::convergence_poller::{ConvergencePollerConfig, ConvergencePollingDaemon};
-    use crate::services::goal_service::GoalService;
-    use crate::services::{EventReactor, ReactorConfig};
-
-    let mut dag = parse_dag_from_yaml(file_path)?;
-
-    // Connect to the swarm's database.
-    let pool = create_pool("sqlite:.abathur/abathur.db", None).await?;
-    let migrator = Migrator::new(pool.clone());
-    migrator.run_embedded_migrations(all_embedded_migrations()).await?;
-
-    let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
-
-    // Set up event bus early so we can publish goal lifecycle events.
-    let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
-
-    // Create the parent goal.
-    let goal_service = GoalService::new(goal_repo);
-    let (goal, events) = goal_service
-        .create_goal(
-            goal_name.to_string(),
-            format!("DAG pipeline: {}", dag.name),
-            GoalPriority::Normal,
-            None,
-            vec![],
-            vec![],
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create parent goal: {}", e))?;
-
-    // Publish goal creation lifecycle events.
-    for event in events {
-        event_bus.publish(event).await;
-    }
-
-    // Set up federation service and executor.
-    let federation_service = Arc::new(FederationService::new(
-        load_federation_config_from_toml(),
-        event_bus.clone(),
-    ));
-
-    // Register cerebrates from config so delegation can find them.
-    for cc in &federation_service.config().cerebrates {
-        federation_service.register_cerebrate(&cc.id, &cc.display_name, &cc.url).await;
-        if cc.auto_connect {
-            if let Err(e) = federation_service.connect(&cc.id).await {
-                tracing::warn!(cerebrate_id = %cc.id, error = %e, "Auto-connect failed");
-            }
-        }
-    }
-
-    // Start federation background loops (heartbeat, stall/orphan detection).
-    federation_service.start().await;
-
-    let executor = Arc::new(SwarmDagExecutor::new(federation_service.clone(), event_bus.clone()));
-
-    // Delegate root nodes.
-    let delegated = executor
-        .start(&mut dag, &goal)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to start DAG execution: {}", e))?;
-
-    // Print initial status.
-    let dag_id = dag.id;
-    let dag_name = dag.name.clone();
-
-    if !json_mode {
-        println!("DAG '{}' execution started", dag_name);
-        println!("  DAG ID:  {}", dag_id);
-        println!("  Goal ID: {}", goal.id);
-        println!("  Delegated {} root node(s)", delegated.len());
-        println!();
-        print_dag_nodes(&dag);
-    }
-
-    // Register SwarmDagEventHandler with event reactor so convergence/failure
-    // events drive the DAG forward automatically.
-    let reactor = Arc::new(EventReactor::new(event_bus.clone(), ReactorConfig::default()));
-
-    let swarm_dags = Arc::new(tokio::sync::RwLock::new({
-        let mut map = std::collections::HashMap::new();
-        map.insert(dag.id, dag);
-        map
-    }));
-    let placeholder_goals = Arc::new(tokio::sync::RwLock::new({
-        let mut map = std::collections::HashMap::new();
-        map.insert(goal.id, goal);
-        map
-    }));
-
-    let dag_handler = SwarmDagEventHandler::new(
-        swarm_dags.clone(),
-        executor.clone(),
-        placeholder_goals,
-    );
-    reactor.register(Arc::new(dag_handler)).await;
-
-    // Start the event reactor loop.
-    let reactor_handle = reactor.start();
-
-    // Start convergence polling daemon to monitor child swarm progress.
-    let a2a_client: Arc<dyn crate::adapters::a2a::client::A2AClient> =
-        Arc::new(HttpA2AClient::new_or_panic());
-    let federated_goal_repo: Arc<dyn crate::domain::ports::FederatedGoalRepository> =
-        Arc::new(SqliteFederatedGoalRepository::new(pool.clone()));
-
-    let poller = ConvergencePollingDaemon::new(
-        federation_service.clone(),
-        a2a_client,
-        federated_goal_repo,
-        event_bus.clone(),
-        ConvergencePollerConfig::default(),
-    );
-    let poller_handle = poller.start();
-
-    // Subscribe to DAG completion/failure events and wait for the DAG to finish.
-    let mut event_rx = event_bus.subscribe();
-
-    if !json_mode {
-        println!("Monitoring DAG execution (Ctrl-C to stop)...");
-        println!();
-    }
-
-    loop {
-        tokio::select! {
-            result = event_rx.recv() => {
-                match result {
-                    Ok(event) => {
-                        match &event.payload {
-                            EventPayload::SwarmDagNodeDelegated { node_label, cerebrate_id, .. } => {
-                                if !json_mode {
-                                    println!("  -> Delegated '{}' to {}", node_label, cerebrate_id);
-                                }
-                            }
-                            EventPayload::SwarmDagNodeUnblocked { node_label, .. } => {
-                                if !json_mode {
-                                    println!("  -> Unblocked '{}'", node_label);
-                                }
-                            }
-                            EventPayload::SwarmDagNodeFailed { node_label, reason, .. } => {
-                                if !json_mode {
-                                    println!("  !! Node '{}' failed: {}", node_label, reason);
-                                }
-                            }
-                            EventPayload::FederatedGoalProgress { convergence_level, .. } => {
-                                if !json_mode {
-                                    println!("  .. convergence: {:.0}%", convergence_level * 100.0);
-                                }
-                            }
-                            EventPayload::SwarmDagCompleted { dag_id: completed_id, dag_name: name, converged_count, failed_count } => {
-                                if *completed_id == dag_id {
-                                    if json_mode {
-                                        let dags = swarm_dags.read().await;
-                                        let final_dag = dags.get(&dag_id);
-                                        let output = serde_json::json!({
-                                            "status": "completed",
-                                            "dag_id": dag_id.to_string(),
-                                            "dag_name": name,
-                                            "converged_count": converged_count,
-                                            "failed_count": failed_count,
-                                            "nodes": final_dag.map(|d| d.nodes.iter().map(|n| {
-                                                serde_json::json!({
-                                                    "id": n.id.to_string(),
-                                                    "label": n.label,
-                                                    "cerebrate": n.cerebrate_id,
-                                                    "state": n.state.as_str(),
-                                                    "federated_goal_id": n.federated_goal_id.map(|id| id.to_string()),
-                                                })
-                                            }).collect::<Vec<_>>()),
-                                        });
-                                        println!("{}", serde_json::to_string_pretty(&output)?);
-                                    } else {
-                                        println!();
-                                        println!("DAG '{}' completed: {} converged, {} failed",
-                                            name, converged_count, failed_count);
-
-                                        let dags = swarm_dags.read().await;
-                                        if let Some(final_dag) = dags.get(&dag_id) {
-                                            print_dag_nodes(final_dag);
-                                        }
-                                    }
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "Event subscriber lagged");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        break;
-                    }
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                if !json_mode {
-                    println!("\nInterrupted. Shutting down...");
-                }
-                break;
-            }
-        }
-    }
-
-    // Cleanup.
-    poller_handle.stop();
-    reactor_handle.abort();
-    federation_service.shutdown().await;
 
     Ok(())
 }
@@ -2448,20 +2302,3 @@ fn print_dag_nodes(dag: &crate::domain::models::swarm_dag::SwarmDag) {
     }
 }
 
-/// Load federation config from abathur.toml if present, else use defaults.
-fn load_federation_config_from_toml() -> crate::services::federation::config::FederationConfig {
-    use crate::services::federation::config::FederationConfig;
-    let Ok(content) = std::fs::read_to_string("abathur.toml") else {
-        return FederationConfig::default();
-    };
-    let Ok(toml_val) = content.parse::<toml::Value>() else {
-        return FederationConfig::default();
-    };
-    toml_val
-        .get("federation")
-        .and_then(|v| {
-            let s = toml::to_string(v).ok()?;
-            toml::from_str(&s).ok()
-        })
-        .unwrap_or_default()
-}
