@@ -41,7 +41,12 @@ pub fn truncate_ellipsis(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}\u{2026}", &s[..max_len.saturating_sub(1)])
+        let boundary = s.char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i < max_len.saturating_sub(1))
+            .last()
+            .unwrap_or(0);
+        format!("{}\u{2026}", &s[..boundary])
     }
 }
 

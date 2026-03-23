@@ -4248,11 +4248,20 @@ impl EventHandler for TaskCompletionLearningHandler {
 
 /// Triggered by `SemanticDriftDetected` or `GoalConstraintViolated`.
 /// Creates diagnostic/remediation tasks for recurring issues.
+///
+/// For `SemanticDriftDetected`, tasks are deduplicated by error pattern — not
+/// per-goal.  When the same gap recurs across multiple goals, a single
+/// investigation task is created and subsequent goals are recorded in its
+/// description rather than spawning duplicate tasks.
 pub struct GoalEvaluationTaskCreationHandler {
     command_bus: Arc<crate::services::command_bus::CommandBus>,
     auto_create_diagnostic: bool,
     max_diagnostic_per_goal: u32,
     auto_create_remediation: bool,
+    /// Tracks gap_hash → list of (goal_id, iterations) already folded into an
+    /// investigation task.  Used to build an aggregated description on the first
+    /// dispatch and to skip subsequent dispatches for the same error pattern.
+    seen_gaps: std::sync::Mutex<std::collections::HashMap<u64, Vec<(uuid::Uuid, u32)>>>,
 }
 
 impl GoalEvaluationTaskCreationHandler {
@@ -4262,7 +4271,13 @@ impl GoalEvaluationTaskCreationHandler {
         max_diagnostic_per_goal: u32,
         auto_create_remediation: bool,
     ) -> Self {
-        Self { command_bus, auto_create_diagnostic, max_diagnostic_per_goal, auto_create_remediation }
+        Self {
+            command_bus,
+            auto_create_diagnostic,
+            max_diagnostic_per_goal,
+            auto_create_remediation,
+            seen_gaps: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
     }
 }
 
@@ -4295,12 +4310,40 @@ impl EventHandler for GoalEvaluationTaskCreationHandler {
                         break;
                     }
 
-                    let gap_hash = format!("{:x}", md5_lite(gap));
-                    let idem_key = format!("drift:{}:{}", goal_id, gap_hash);
+                    let gap_hash_val = md5_lite(gap);
+
+                    // Accumulate this goal into the per-gap tracker.  If we've
+                    // already dispatched a task for this error pattern, skip —
+                    // the idempotency key would dedup anyway, but skipping here
+                    // avoids the command bus round-trip entirely.
+                    let is_first = {
+                        let mut seen = self.seen_gaps.lock().unwrap();
+                        let entry = seen.entry(gap_hash_val).or_default();
+                        let first = entry.is_empty();
+                        entry.push((*goal_id, *iterations));
+                        first
+                    };
+
+                    if !is_first {
+                        tracing::debug!(
+                            gap_hash = %format!("{:x}", gap_hash_val),
+                            goal_id = %goal_id,
+                            "Skipping duplicate investigate task — already enqueued for this error pattern"
+                        );
+                        continue;
+                    }
+
+                    let gap_hash = format!("{:x}", gap_hash_val);
+                    let idem_key = format!("drift:{}", gap_hash);
                     let title = format!("Investigate recurring gap: {}", truncate_str(gap, 60));
                     let description = format!(
-                        "Recurring gap detected across {} iterations for goal {}:\n\n{}",
-                        iterations, goal_id, gap
+                        "Recurring error pattern detected across convergence iterations.\n\n\
+                         First observed in goal {} ({} iterations).\n\
+                         Additional goals may be affected — query events with \
+                         payload_type = 'SemanticDriftDetected' to identify the \
+                         full set.\n\n\
+                         Error pattern:\n{}",
+                        goal_id, iterations, gap
                     );
 
                     let envelope = CommandEnvelope::new(
