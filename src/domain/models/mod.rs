@@ -1,6 +1,7 @@
 //! Domain models for the Abathur swarm system.
 
 pub mod a2a;
+pub mod a2a_protocol;
 pub mod adapter;
 pub mod agent;
 pub mod convergence;
@@ -18,6 +19,7 @@ pub mod workflow_template;
 pub mod worktree;
 
 pub use a2a::*;
+pub use a2a_protocol::*;
 pub use adapter::*;
 pub use agent::*;
 pub use convergence::*;

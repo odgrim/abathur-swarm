@@ -606,6 +606,8 @@ impl A2AHttpGateway {
             .route("/tasks/{task_id}/stream", get(stream_task))
             // Health check
             .route("/health", get(health_check))
+            // A2A standard agent card discovery
+            .route("/.well-known/agent.json", get(handle_well_known_agent_card))
             // Delegation endpoints (for orchestrator integration)
             .route("/api/v1/delegations", post(create_delegation))
             .route("/api/v1/delegations/pending", get(list_pending_delegations))
@@ -861,6 +863,54 @@ pub fn create_federation_jwt(
 
 async fn health_check() -> &'static str {
     "OK"
+}
+
+/// Handle GET /.well-known/agent.json — A2A standard agent card discovery.
+async fn handle_well_known_agent_card(
+    State(state): State<Arc<A2AState>>,
+) -> Json<crate::domain::models::a2a_protocol::A2AStandardAgentCard> {
+    use crate::domain::models::a2a_protocol::*;
+
+    let (swarm_id, display_name) = if let Some(ref fed) = state.federation_service {
+        let config = fed.config();
+        (config.swarm_id.clone(), config.display_name.clone())
+    } else {
+        (
+            uuid::Uuid::new_v4().to_string(),
+            "Abathur Swarm".to_string(),
+        )
+    };
+
+    let url = format!("http://{}:{}", state.config.host, state.config.port);
+
+    Json(A2AStandardAgentCard {
+        id: swarm_id,
+        name: display_name,
+        description: "Abathur swarm orchestrator".to_string(),
+        url,
+        version: Some("0.3".to_string()),
+        provider: Some(A2AProvider {
+            organization: "Abathur".to_string(),
+            url: None,
+        }),
+        capabilities: A2ACapabilities {
+            streaming: true,
+            push_notifications: false,
+            state_transition_history: false,
+        },
+        skills: vec![A2ASkill {
+            id: "task-execution".to_string(),
+            name: "Task Execution".to_string(),
+            description: Some(
+                "Execute delegated tasks via AI agent orchestration".to_string(),
+            ),
+            tags: vec!["orchestration".to_string(), "delegation".to_string()],
+            examples: vec![],
+        }],
+        security_schemes: vec![],
+        default_input_modes: vec!["application/json".to_string()],
+        default_output_modes: vec!["application/json".to_string()],
+    })
 }
 
 /// Request to create a delegation.

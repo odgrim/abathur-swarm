@@ -57,7 +57,7 @@ scopeguard = "1"
 libc = "0.2"
 futures = "0.3.31"
 cron = "0.15"
-reqwest = { version = "0.13.1", features = ["json"] }
+reqwest = { version = "0.13.1", features = ["json", "stream"] }
 serde_yaml = "0.9.34"
 moka = { version = "0.12", features = ["future"] }
 hmac = "0.12"
