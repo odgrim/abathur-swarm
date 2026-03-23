@@ -11,7 +11,13 @@ use crate::domain::models::a2a::{
     CerebrateStatus, ConnectionState, FederationCard, FederationResult, FederationTaskEnvelope,
     FederationTaskStatus,
 };
-use crate::domain::models::a2a_protocol::TaskSendParams;
+use crate::domain::models::a2a_protocol::{
+    A2APart, A2AProtocolMessage, A2ARole, TaskSendParams,
+};
+use crate::domain::models::goal::Goal;
+use crate::domain::models::goal_federation::{
+    ConvergenceContract, FederatedGoal, FederatedGoalState,
+};
 use crate::services::event_bus::{EventBus, EventPayload, EventSeverity};
 use crate::services::event_factory;
 
@@ -694,6 +700,178 @@ impl FederationService {
             .await;
 
         Ok(cerebrate_id.to_string())
+    }
+
+    /// Delegate a goal to a specific cerebrate via A2A.
+    ///
+    /// Builds an A2A message with `abathur:federation` metadata containing
+    /// the `goal_delegate` intent, sends it to the target cerebrate, creates
+    /// an in-memory `FederatedGoal`, and emits a `FederatedGoalCreated` event.
+    pub async fn delegate_goal(
+        &self,
+        goal: &Goal,
+        cerebrate_id: &str,
+        contract: ConvergenceContract,
+    ) -> Result<FederatedGoal, String> {
+        // 1. Verify the cerebrate exists, is connected, and can accept tasks.
+        let url = {
+            let cerebrates = self.cerebrates.read().await;
+            let status = cerebrates
+                .get(cerebrate_id)
+                .ok_or_else(|| format!("Unknown cerebrate: {}", cerebrate_id))?;
+
+            if !status.can_accept_task() {
+                return Err(format!(
+                    "Cerebrate {} cannot accept tasks (state: {}, delegations: {}/{})",
+                    cerebrate_id,
+                    status.connection_state,
+                    status.active_delegations,
+                    status.max_concurrent_delegations,
+                ));
+            }
+            status.url.clone()
+        };
+
+        // 2. Build federation metadata.
+        let contract_json = serde_json::to_value(&contract)
+            .map_err(|e| format!("Failed to serialize convergence contract: {}", e))?;
+
+        let constraints_strs: Vec<String> = goal
+            .constraints
+            .iter()
+            .map(|c| c.description.clone())
+            .collect();
+
+        let mut federation_data = serde_json::Map::new();
+        federation_data.insert(
+            "intent".to_string(),
+            serde_json::Value::String("goal_delegate".to_string()),
+        );
+        federation_data.insert(
+            "goal_id".to_string(),
+            serde_json::Value::String(goal.id.to_string()),
+        );
+        federation_data.insert(
+            "goal_name".to_string(),
+            serde_json::Value::String(goal.name.clone()),
+        );
+        federation_data.insert(
+            "goal_description".to_string(),
+            serde_json::Value::String(goal.description.clone()),
+        );
+        federation_data.insert(
+            "constraints".to_string(),
+            serde_json::to_value(&constraints_strs).unwrap_or_default(),
+        );
+        federation_data.insert(
+            "priority".to_string(),
+            serde_json::Value::String(goal.priority.as_str().to_string()),
+        );
+        federation_data.insert(
+            "convergence_contract".to_string(),
+            contract_json,
+        );
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "abathur:federation".to_string(),
+            serde_json::Value::Object(federation_data),
+        );
+
+        let params = TaskSendParams {
+            message: A2AProtocolMessage {
+                role: A2ARole::User,
+                parts: vec![
+                    A2APart::Text {
+                        text: format!("{}\n\n{}", goal.name, goal.description),
+                    },
+                    A2APart::Data {
+                        data: serde_json::json!({
+                            "goal_name": goal.name,
+                            "goal_description": goal.description,
+                            "priority": goal.priority.as_str(),
+                            "constraints": constraints_strs,
+                        }),
+                        metadata: None,
+                    },
+                ],
+                metadata: None,
+            },
+            metadata: Some(metadata),
+            history_length: None,
+            push_notification_config: None,
+        };
+
+        // 3 & 4. Send via A2A client or fall back to legacy delegation.
+        let remote_task_id = if let Some(ref a2a) = self.a2a_client {
+            if let Some(ref url) = url {
+                match a2a.send_message(url, params).await {
+                    Ok(task) => {
+                        tracing::info!(
+                            cerebrate_id = %cerebrate_id,
+                            goal_id = %goal.id,
+                            a2a_task_id = %task.id,
+                            "Goal delegated via A2A tasks/send"
+                        );
+                        task.id
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "A2A goal delegation failed for cerebrate {}: {}",
+                            cerebrate_id, e
+                        ));
+                    }
+                }
+            } else {
+                return Err(format!(
+                    "Cerebrate {} has no URL configured",
+                    cerebrate_id
+                ));
+            }
+        } else {
+            // Fall back: create a FederationTaskEnvelope and use existing delegate path
+            let mut envelope =
+                FederationTaskEnvelope::new(Uuid::new_v4(), &goal.name, &goal.description);
+            envelope.constraints = constraints_strs;
+            envelope.parent_goal_id = Some(goal.id);
+
+            let delegated_cerebrate = self.delegate_to(&envelope, cerebrate_id).await?;
+            tracing::info!(
+                cerebrate_id = %delegated_cerebrate,
+                goal_id = %goal.id,
+                task_id = %envelope.task_id,
+                "Goal delegated via legacy federation envelope"
+            );
+            envelope.task_id.to_string()
+        };
+
+        // 5. Create a FederatedGoal in the Delegated state.
+        let federated_goal = FederatedGoal::new(goal.id, cerebrate_id, &goal.description)
+            .with_convergence_contract(contract)
+            .with_remote_task_id(&remote_task_id);
+        // Override state to Delegated (FederatedGoal::new sets Pending).
+        let mut federated_goal = federated_goal;
+        federated_goal.state = FederatedGoalState::Delegated;
+        // Carry over constraints from the goal.
+        for c in &goal.constraints {
+            federated_goal.constraints.push(c.description.clone());
+        }
+
+        // 6. Emit FederatedGoalCreated event.
+        self.event_bus
+            .publish(event_factory::federation_event(
+                EventSeverity::Info,
+                None,
+                EventPayload::FederatedGoalCreated {
+                    local_goal_id: goal.id,
+                    cerebrate_id: cerebrate_id.to_string(),
+                    remote_task_id: remote_task_id.clone(),
+                },
+            ))
+            .await;
+
+        // 7. Return the FederatedGoal.
+        Ok(federated_goal)
     }
 
     /// Handle acceptance of a delegated task by a cerebrate.

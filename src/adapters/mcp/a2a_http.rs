@@ -1339,6 +1339,101 @@ async fn handle_federation_routing(
             )))
         }
 
+        "goal_delegate" => {
+            // Phase 2.4: A parent is delegating a goal to this child.
+            // We create a local A2A task in Working state to represent
+            // the delegated goal, storing the convergence contract in metadata.
+            let goal_id = federation_val
+                .get("goal_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+
+            let goal_name = federation_val
+                .get("goal_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Delegated goal");
+
+            let goal_description = federation_val
+                .get("goal_description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let priority = federation_val
+                .get("priority")
+                .and_then(|v| v.as_str())
+                .unwrap_or("normal");
+
+            let constraints: Vec<String> = federation_val
+                .get("constraints")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+
+            let convergence_contract = federation_val
+                .get("convergence_contract")
+                .cloned()
+                .unwrap_or(json!({}));
+
+            // Create a local in-memory task to track this delegated goal.
+            let task_id = Uuid::new_v4().to_string();
+            let session_id = Uuid::new_v4().to_string();
+            let now = Utc::now();
+
+            let task_metadata = json!({
+                "abathur:federation": {
+                    "intent": "goal_delegate",
+                    "goal_id": goal_id,
+                    "goal_name": goal_name,
+                    "goal_description": goal_description,
+                    "priority": priority,
+                    "constraints": constraints,
+                    "convergence_contract": convergence_contract,
+                }
+            });
+
+            let local_task = InMemoryTask {
+                id: task_id.clone(),
+                session_id: session_id.clone(),
+                state: A2ATaskState::Working,
+                history: vec![params.message.clone()],
+                artifacts: vec![],
+                metadata: Some(task_metadata.clone()),
+                created_at: now,
+                updated_at: now,
+                push_config: None,
+            };
+
+            // Store in the shared task map.
+            {
+                let mut tasks = state.tasks.write().await;
+                tasks.insert(task_id.clone(), local_task);
+            }
+
+            let response_task = A2ATask {
+                id: task_id.clone(),
+                session_id,
+                status: A2ATaskStatus {
+                    state: A2ATaskState::Working,
+                    message: Some(A2AProtocolMessage {
+                        role: "agent".to_string(),
+                        parts: vec![MessagePart::Text {
+                            text: format!(
+                                "Accepted delegated goal '{}' — now working",
+                                goal_name
+                            ),
+                        }],
+                    }),
+                    timestamp: Some(now.to_rfc3339()),
+                },
+                history: None,
+                artifacts: None,
+                metadata: Some(task_metadata),
+            };
+            Some(Json(JsonRpcResponse::success(
+                request_id.clone(),
+                serde_json::to_value(response_task).unwrap(),
+            )))
+        }
+
         // Unknown intent — fall through to normal task handling
         _ => None,
     }
