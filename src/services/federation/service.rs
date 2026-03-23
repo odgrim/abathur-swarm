@@ -235,6 +235,10 @@ pub struct FederationService {
     cerebrates: Arc<RwLock<HashMap<String, CerebrateStatus>>>,
     /// In-flight delegated tasks (task_id → cerebrate_id).
     in_flight: Arc<RwLock<HashMap<Uuid, String>>>,
+    /// Maps federation task_id → FederatedGoal.id so that result handlers
+    /// can correlate incoming results back to the federated goal that owns
+    /// the DAG node.
+    task_to_federated_goal: Arc<RwLock<HashMap<Uuid, Uuid>>>,
     /// Delegation timestamps for stall detection (task_id → last_activity_at).
     last_activity: Arc<RwLock<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>>,
     /// EventBus for emitting federation events.
@@ -267,6 +271,7 @@ impl FederationService {
             config,
             cerebrates: Arc::new(RwLock::new(HashMap::new())),
             in_flight: Arc::new(RwLock::new(HashMap::new())),
+            task_to_federated_goal: Arc::new(RwLock::new(HashMap::new())),
             last_activity: Arc::new(RwLock::new(HashMap::new())),
             event_bus,
             http_client: FederationHttpClient::new(),
@@ -929,7 +934,15 @@ impl FederationService {
             ))
             .await;
 
-        // 7. Return the FederatedGoal.
+        // 7. Record the task_id → federated_goal.id mapping so result handlers
+        //    can correlate incoming FederationResultReceived events back to the
+        //    FederatedGoal (and therefore the DAG node).
+        if let Ok(task_uuid) = remote_task_id.parse::<Uuid>() {
+            let mut map = self.task_to_federated_goal.write().await;
+            map.insert(task_uuid, federated_goal.id);
+        }
+
+        // 8. Return the FederatedGoal.
         Ok(federated_goal)
     }
 
@@ -1061,6 +1074,10 @@ impl FederationService {
                 let mut activity = self.last_activity.write().await;
                 activity.remove(&task_id);
             }
+            // Note: task_to_federated_goal is intentionally NOT cleaned up here.
+            // The FederationResultHandler needs to look up the mapping when it
+            // processes the FederationResultReceived event that we emit below.
+            // The mapping is small and bounded by the number of delegations.
 
             // Decrement active delegations only on terminal statuses
             if !cerebrate_id.is_empty() {
@@ -1217,6 +1234,17 @@ impl FederationService {
     /// Get a reference to the result processor.
     pub fn result_processor(&self) -> &dyn FederationResultProcessor {
         self.result_processor.as_ref()
+    }
+
+    /// Look up the `FederatedGoal.id` that corresponds to a given task_id.
+    ///
+    /// This is used by `FederationResultHandler` to emit
+    /// `FederatedGoalConverged` / `FederatedGoalFailed` events with the
+    /// correct ID so that `SwarmDagEventHandler` can correlate them to
+    /// DAG nodes.
+    pub async fn federated_goal_id_for_task(&self, task_id: Uuid) -> Option<Uuid> {
+        let map = self.task_to_federated_goal.read().await;
+        map.get(&task_id).copied()
     }
 
     /// Get a reference to the task transformer.

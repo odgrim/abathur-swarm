@@ -216,7 +216,44 @@ impl EventHandler for FederationResultHandler {
                     }
                 };
 
-                let events = self.reactions_to_events(&reactions, *task_id, cerebrate_id);
+                let mut events = self.reactions_to_events(&reactions, *task_id, cerebrate_id);
+
+                // Emit FederatedGoalConverged / FederatedGoalFailed events so that
+                // SwarmDagEventHandler can drive DAG nodes forward.  We look up the
+                // FederatedGoal.id via the service's task→goal mapping so that the
+                // local_goal_id in the event matches the federated_goal_id stored on
+                // the SwarmDagNode.
+                let fed_goal_id = self
+                    .federation_service
+                    .federated_goal_id_for_task(*task_id)
+                    .await;
+                if let Some(goal_id) = fed_goal_id {
+                    match status.as_str() {
+                        "completed" => {
+                            events.push(event_factory::federation_event(
+                                EventSeverity::Info,
+                                Some(*task_id),
+                                EventPayload::FederatedGoalConverged {
+                                    local_goal_id: goal_id,
+                                    cerebrate_id: cerebrate_id.clone(),
+                                },
+                            ));
+                        }
+                        "failed" => {
+                            events.push(event_factory::federation_event(
+                                EventSeverity::Warning,
+                                Some(*task_id),
+                                EventPayload::FederatedGoalFailed {
+                                    local_goal_id: goal_id,
+                                    cerebrate_id: cerebrate_id.clone(),
+                                    reason: summary.clone(),
+                                },
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+
                 if events.is_empty() {
                     Ok(Reaction::None)
                 } else {
