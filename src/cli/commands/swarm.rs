@@ -1124,7 +1124,7 @@ async fn run_swarm_foreground(
                         println!("  🌐 Progress: {} from {} — {} ({:.0}%): {}", task_id, cerebrate_id, phase, progress_pct * 100.0, summary);
                     }
                 }
-                SwarmEvent::FederationResultReceived { task_id, cerebrate_id, status, summary } => {
+                SwarmEvent::FederationResultReceived { task_id, cerebrate_id, status, summary, .. } => {
                     if !json_mode {
                         println!("  🌐 Result: {} from {} — {}: {}", task_id, cerebrate_id, status, summary);
                     }

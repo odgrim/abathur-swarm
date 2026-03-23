@@ -166,6 +166,7 @@ impl TriggerEventPayload {
                 task_id: None,
                 reason: reason.clone(),
                 urgency: "medium".to_string(),
+                questions: vec![],
                 is_blocking: false,
             },
             Self::ReconciliationRequested => EventPayload::ScheduledEventFired {

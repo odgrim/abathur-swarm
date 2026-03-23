@@ -767,7 +767,7 @@ impl<T: TaskRepository> TaskService<T> {
 
         events.push(Self::make_event(
             EventSeverity::Debug,
-            EventCategory::Memory,
+            EventCategory::Task,
             None,
             Some(task_id),
             EventPayload::TaskExecutionRecorded {
@@ -828,7 +828,7 @@ impl<T: TaskRepository> TaskService<T> {
             // Opportunistic convergence memory recording (Part 10.3).
             Self::make_event(
                 EventSeverity::Debug,
-                EventCategory::Memory,
+                EventCategory::Task,
                 None,
                 Some(task_id),
                 EventPayload::TaskExecutionRecorded {

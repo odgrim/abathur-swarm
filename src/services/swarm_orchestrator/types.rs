@@ -529,7 +529,7 @@ pub enum SwarmEvent {
     /// Progress received from a cerebrate.
     FederationProgressReceived { task_id: Uuid, cerebrate_id: String, phase: String, progress_pct: f64, summary: String },
     /// Result received from a cerebrate.
-    FederationResultReceived { task_id: Uuid, cerebrate_id: String, status: String, summary: String },
+    FederationResultReceived { task_id: Uuid, cerebrate_id: String, status: String, summary: String, artifacts: Vec<crate::domain::models::a2a::Artifact> },
     /// A cerebrate missed heartbeats.
     FederationHeartbeatMissed { cerebrate_id: String, missed_count: u32 },
     /// A cerebrate became unreachable.
@@ -621,12 +621,12 @@ impl SwarmEvent {
                 attempt: *attempt,
                 max_attempts: *max_attempts,
             }),
-            EventPayload::TaskVerified { task_id, passed, checks_passed, checks_total } => Some(SwarmEvent::TaskVerified {
+            EventPayload::TaskVerified { task_id, passed, checks_passed, checks_total, failures_summary } => Some(SwarmEvent::TaskVerified {
                 task_id: *task_id,
                 passed: *passed,
                 checks_passed: *checks_passed,
                 checks_total: *checks_total,
-                failures_summary: None, // Not available from EventPayload
+                failures_summary: failures_summary.clone(),
             }),
             EventPayload::TaskQueuedForMerge { task_id, stage } => Some(SwarmEvent::TaskQueuedForMerge {
                 task_id: *task_id,
@@ -752,11 +752,12 @@ impl SwarmEvent {
                 progress_pct: *progress_pct,
                 summary: summary.clone(),
             }),
-            EventPayload::FederationResultReceived { task_id, cerebrate_id, status, summary, .. } => Some(SwarmEvent::FederationResultReceived {
+            EventPayload::FederationResultReceived { task_id, cerebrate_id, status, summary, artifacts } => Some(SwarmEvent::FederationResultReceived {
                 task_id: *task_id,
                 cerebrate_id: cerebrate_id.clone(),
                 status: status.clone(),
                 summary: summary.clone(),
+                artifacts: artifacts.clone(),
             }),
             EventPayload::FederationHeartbeatMissed { cerebrate_id, missed_count } => Some(SwarmEvent::FederationHeartbeatMissed {
                 cerebrate_id: cerebrate_id.clone(),

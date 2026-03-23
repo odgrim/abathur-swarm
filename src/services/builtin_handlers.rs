@@ -1621,6 +1621,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
                                 task.title, runtime_secs, self.stale_task_timeout_secs
                             ),
                             urgency: "high".to_string(),
+                            questions: vec![],
                             is_blocking: false,
                         },
                     });
@@ -1722,6 +1723,7 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
                                 task.title, runtime_secs, self.stale_task_timeout_secs
                             ),
                             urgency: "high".to_string(),
+                            questions: vec![],
                             is_blocking: false,
                         },
                     });
@@ -2175,7 +2177,7 @@ impl EventHandler for A2APollHandler {
                         sequence: SequenceNumber(0),
                         timestamp: chrono::Utc::now(),
                         severity: EventSeverity::Warning,
-                        category: EventCategory::Orchestrator,
+                        category: EventCategory::Escalation,
                         goal_id: None,
                         task_id: None,
                         correlation_id: None,
@@ -2188,6 +2190,7 @@ impl EventHandler for A2APollHandler {
                                 self.a2a_gateway_url, failures
                             ),
                             urgency: "medium".to_string(),
+                            questions: vec![],
                             is_blocking: false,
                         },
                     };
@@ -2583,9 +2586,17 @@ impl<M: MemoryRepository + 'static> EventHandler for MemoryReconciliationHandler
         HandlerMetadata {
             id: HandlerId::new(),
             name: "MemoryReconciliationHandler".to_string(),
-            filter: EventFilter::new()
-                .categories(vec![EventCategory::Scheduler])
-                .payload_types(vec!["ScheduledEventFired".to_string()]),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "memory-reconciliation"
+                    )
+                })),
+                ..Default::default()
+            },
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
             critical: false,
@@ -2649,9 +2660,17 @@ impl<G: GoalRepository + 'static> EventHandler for GoalReconciliationHandler<G> 
         HandlerMetadata {
             id: HandlerId::new(),
             name: "GoalReconciliationHandler".to_string(),
-            filter: EventFilter::new()
-                .categories(vec![EventCategory::Scheduler])
-                .payload_types(vec!["ScheduledEventFired".to_string()]),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "goal-reconciliation"
+                    )
+                })),
+                ..Default::default()
+            },
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
             critical: false,
@@ -2775,9 +2794,17 @@ impl<T: TaskRepository + 'static> EventHandler for SystemStallDetectorHandler<T>
         HandlerMetadata {
             id: HandlerId::new(),
             name: "SystemStallDetectorHandler".to_string(),
-            filter: EventFilter::new()
-                .categories(vec![EventCategory::Scheduler])
-                .payload_types(vec!["ScheduledEventFired".to_string()]),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "system-stall-check"
+                    )
+                })),
+                ..Default::default()
+            },
             priority: HandlerPriority::LOW,
             error_strategy: ErrorStrategy::LogAndContinue,
             critical: false,
@@ -8763,9 +8790,17 @@ impl<T: TaskRepository + 'static> EventHandler for IngestionPollHandler<T> {
         HandlerMetadata {
             id: HandlerId::new(),
             name: "IngestionPollHandler".to_string(),
-            filter: EventFilter::new()
-                .categories(vec![EventCategory::Scheduler])
-                .payload_types(vec!["ScheduledEventFired".to_string()]),
+            filter: EventFilter {
+                categories: vec![EventCategory::Scheduler],
+                payload_types: vec!["ScheduledEventFired".to_string()],
+                custom_predicate: Some(Arc::new(|event| {
+                    matches!(
+                        &event.payload,
+                        EventPayload::ScheduledEventFired { name, .. } if name == "adapter-ingestion-poll"
+                    )
+                })),
+                ..Default::default()
+            },
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
             critical: false,

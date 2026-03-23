@@ -278,6 +278,7 @@ pub enum EventPayload {
         passed: bool,
         checks_passed: usize,
         checks_total: usize,
+        failures_summary: Option<String>,
     },
     TaskQueuedForMerge {
         task_id: Uuid,
@@ -574,6 +575,7 @@ pub enum EventPayload {
         task_id: Option<Uuid>,
         reason: String,
         urgency: String,
+        questions: Vec<String>,
         is_blocking: bool,
     },
     HumanResponseReceived {
@@ -1160,6 +1162,159 @@ impl EventPayload {
             Self::FederationReactionEmitted { .. } => "FederationReactionEmitted",
         }
     }
+
+    pub fn expected_category(&self) -> Option<EventCategory> {
+        match self {
+            Self::OrchestratorStarted
+            | Self::OrchestratorPaused
+            | Self::OrchestratorResumed
+            | Self::OrchestratorStopped
+            | Self::StatusUpdate(_)
+            | Self::ReconciliationCompleted { .. }
+            | Self::StartupCatchUpCompleted { .. } => Some(EventCategory::Orchestrator),
+
+            Self::GoalStarted { .. }
+            | Self::GoalDecomposed { .. }
+            | Self::GoalIterationCompleted { .. }
+            | Self::GoalPaused { .. }
+            | Self::ConvergenceCompleted { .. }
+            | Self::SemanticDriftDetected { .. }
+            | Self::GoalStatusChanged { .. }
+            | Self::GoalConstraintViolated { .. }
+            | Self::GoalDomainsUpdated { .. }
+            | Self::GoalDeleted { .. }
+            | Self::GoalConstraintsUpdated { .. }
+            | Self::GoalDescriptionUpdated { .. }
+            | Self::MemoryInformedGoal { .. } => Some(EventCategory::Goal),
+
+            Self::TaskSubmitted { .. }
+            | Self::TaskReady { .. }
+            | Self::TaskSpawned { .. }
+            | Self::TaskStarted { .. }
+            | Self::TaskCompleted { .. }
+            | Self::TaskCompletedWithResult { .. }
+            | Self::TaskFailed { .. }
+            | Self::TaskRetrying { .. }
+            | Self::TaskQueuedForMerge { .. }
+            | Self::TaskMerged { .. }
+            | Self::TaskClaimed { .. }
+            | Self::TaskCanceled { .. }
+            | Self::TaskValidating { .. }
+            | Self::TaskSLAWarning { .. }
+            | Self::TaskSLACritical { .. }
+            | Self::TaskSLABreached { .. }
+            | Self::TaskRunningLong { .. }
+            | Self::TaskRunningCritical { .. }
+            | Self::TaskDependencyChanged { .. }
+            | Self::TaskPriorityChanged { .. }
+            | Self::TaskDescriptionUpdated { .. }
+            | Self::WorktreeCreated { .. }
+            | Self::WorktreeDestroyed { .. }
+            | Self::PullRequestCreated { .. }
+            | Self::SubtaskMergedToFeature { .. }
+            | Self::ReviewLoopTriggered { .. } => Some(EventCategory::Task),
+
+            Self::ExecutionStarted { .. }
+            | Self::ExecutionCompleted { .. }
+            | Self::WaveStarted { .. }
+            | Self::WaveCompleted { .. }
+            | Self::RestructureTriggered { .. }
+            | Self::RestructureDecision { .. } => Some(EventCategory::Execution),
+
+            Self::AgentCreated { .. }
+            | Self::SpecialistSpawned { .. }
+            | Self::EvolutionTriggered { .. }
+            | Self::SpawnLimitExceeded { .. }
+            | Self::AgentInstanceCompleted { .. }
+            | Self::AgentTemplateRegistered { .. }
+            | Self::AgentTemplateStatusChanged { .. }
+            | Self::AgentInstanceSpawned { .. }
+            | Self::AgentInstanceAssigned { .. }
+            | Self::AgentInstanceFailed { .. } => Some(EventCategory::Agent),
+
+            Self::IntentVerificationStarted { .. }
+            | Self::IntentVerificationCompleted { .. }
+            | Self::IntentVerificationRequested { .. }
+            | Self::WaveVerificationRequested { .. }
+            | Self::WaveVerificationResult { .. }
+            | Self::BranchVerificationStarted { .. }
+            | Self::BranchVerificationRequested { .. }
+            | Self::BranchVerificationCompleted { .. }
+            | Self::BranchVerificationResult { .. }
+            | Self::GoalAlignmentEvaluated { .. }
+            | Self::TaskVerified { .. } => Some(EventCategory::Verification),
+
+            Self::HumanEscalationRequired { .. }
+            | Self::HumanEscalationNeeded { .. }
+            | Self::HumanResponseReceived { .. }
+            | Self::HumanEscalationExpired { .. } => Some(EventCategory::Escalation),
+
+            Self::MemoryStored { .. }
+            | Self::MemoryPromoted { .. }
+            | Self::MemoryPruned { .. }
+            | Self::MemoryAccessed { .. }
+            | Self::MemoryDeleted { .. }
+            | Self::MemoryConflictDetected { .. }
+            | Self::MemoryConflictResolved { .. }
+            | Self::MemoryMaintenanceCompleted { .. }
+            | Self::MemoryMaintenanceFailed { .. }
+            | Self::MemoryDaemonDegraded { .. }
+            | Self::MemoryDaemonStopped { .. } => Some(EventCategory::Memory),
+
+            Self::ScheduledEventFired { .. }
+            | Self::ScheduledEventRegistered { .. }
+            | Self::ScheduledEventCanceled { .. } => Some(EventCategory::Scheduler),
+
+            Self::ConvergenceStarted { .. }
+            | Self::ConvergenceIteration { .. }
+            | Self::ConvergenceAttractorTransition { .. }
+            | Self::ConvergenceBudgetExtension { .. }
+            | Self::ConvergenceFreshStart { .. }
+            | Self::ConvergenceTerminated { .. } => Some(EventCategory::Convergence),
+
+            Self::TaskExecutionRecorded { .. } => Some(EventCategory::Task),
+
+            Self::WorkflowEnrolled { .. }
+            | Self::WorkflowPhaseStarted { .. }
+            | Self::WorkflowGateReached { .. }
+            | Self::WorkflowGateVerdict { .. }
+            | Self::WorkflowAdvanced { .. }
+            | Self::WorkflowPhaseReady { .. }
+            | Self::WorkflowCompleted { .. }
+            | Self::WorkflowVerificationRequested { .. }
+            | Self::WorkflowVerificationCompleted { .. }
+            | Self::WorkflowPhaseRetried { .. }
+            | Self::WorkflowPhaseFailed { .. } => Some(EventCategory::Workflow),
+
+            Self::AdapterIngestionCompleted { .. }
+            | Self::AdapterIngestionFailed { .. }
+            | Self::AdapterEgressCompleted { .. }
+            | Self::AdapterEgressFailed { .. }
+            | Self::AdapterTaskIngested { .. } => Some(EventCategory::Adapter),
+
+            Self::BudgetPressureChanged { .. }
+            | Self::BudgetOpportunityDetected { .. } => Some(EventCategory::Budget),
+
+            Self::FederationCerebrateConnected { .. }
+            | Self::FederationCerebrateDisconnected { .. }
+            | Self::FederationTaskDelegated { .. }
+            | Self::FederationTaskAccepted { .. }
+            | Self::FederationTaskRejected { .. }
+            | Self::FederationProgressReceived { .. }
+            | Self::FederationResultReceived { .. }
+            | Self::FederationHeartbeatMissed { .. }
+            | Self::FederationCerebrateUnreachable { .. }
+            | Self::FederationStallDetected { .. }
+            | Self::FederationReactionEmitted { .. } => Some(EventCategory::Federation),
+
+            Self::HandlerError { .. }
+            | Self::CriticalHandlerDegraded { .. }
+            | Self::TriggerRuleCreated { .. }
+            | Self::TriggerRuleToggled { .. }
+            | Self::TriggerRuleDeleted { .. }
+            | Self::IntentVerificationResult { .. } => None,
+        }
+    }
 }
 
 /// Serializable version of SwarmStats.
@@ -1388,12 +1543,12 @@ impl From<SwarmEvent> for UnifiedEvent {
                 Some(task_id),
                 EventPayload::TaskRetrying { task_id, attempt, max_attempts },
             ),
-            SwarmEvent::TaskVerified { task_id, passed, checks_passed, checks_total, .. } => (
+            SwarmEvent::TaskVerified { task_id, passed, checks_passed, checks_total, failures_summary } => (
                 EventSeverity::Info,
                 EventCategory::Verification,
                 None,
                 Some(task_id),
-                EventPayload::TaskVerified { task_id, passed, checks_passed, checks_total },
+                EventPayload::TaskVerified { task_id, passed, checks_passed, checks_total, failures_summary },
             ),
             SwarmEvent::TaskQueuedForMerge { task_id, stage } => (
                 EventSeverity::Info,
@@ -1578,12 +1733,12 @@ impl From<SwarmEvent> for UnifiedEvent {
                 Some(task_id),
                 EventPayload::FederationProgressReceived { task_id, cerebrate_id, phase, progress_pct, summary },
             ),
-            SwarmEvent::FederationResultReceived { task_id, cerebrate_id, status, summary } => (
+            SwarmEvent::FederationResultReceived { task_id, cerebrate_id, status, summary, artifacts } => (
                 EventSeverity::Info,
                 EventCategory::Federation,
                 None,
                 Some(task_id),
-                EventPayload::FederationResultReceived { task_id, cerebrate_id, status, summary, artifacts: Vec::new() },
+                EventPayload::FederationResultReceived { task_id, cerebrate_id, status, summary, artifacts },
             ),
             SwarmEvent::FederationHeartbeatMissed { cerebrate_id, missed_count } => (
                 EventSeverity::Warning,
@@ -1742,12 +1897,12 @@ impl From<ExecutionEvent> for UnifiedEvent {
                 None,
                 EventPayload::BranchVerificationResult { branch_satisfied, confidence, gaps_count, dependents_can_proceed },
             ),
-            ExecutionEvent::HumanEscalationNeeded { goal_id, task_id, reason, urgency, is_blocking } => (
+            ExecutionEvent::HumanEscalationNeeded { goal_id, task_id, reason, urgency, questions, is_blocking } => (
                 if is_blocking { EventSeverity::Critical } else { EventSeverity::Warning },
                 EventCategory::Escalation,
                 goal_id,
                 task_id,
-                EventPayload::HumanEscalationNeeded { goal_id, task_id, reason, urgency, is_blocking },
+                EventPayload::HumanEscalationNeeded { goal_id, task_id, reason, urgency, questions, is_blocking },
             ),
         };
 
@@ -1834,6 +1989,15 @@ impl EventBus {
         if event.correlation_id.is_none() {
             let ctx = self.correlation_context.read().await;
             event.correlation_id = *ctx;
+        }
+
+        #[cfg(debug_assertions)]
+        if let Some(expected) = event.payload.expected_category() {
+            debug_assert_eq!(
+                event.category, expected,
+                "EventBus: category mismatch for payload {}: expected {:?}, got {:?}",
+                event.payload.variant_name(), expected, event.category
+            );
         }
 
         // Determine whether to persist: always persist Task and Workflow category

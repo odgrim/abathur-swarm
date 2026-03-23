@@ -160,6 +160,7 @@ pub enum ExecutionEvent {
         task_id: Option<Uuid>,
         reason: String,
         urgency: String,
+        questions: Vec<String>,
         is_blocking: bool,
     },
 }

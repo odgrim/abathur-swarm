@@ -1260,7 +1260,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         self.event_bus
             .publish(event_factory::make_event(
                 EventSeverity::Error,
-                EventCategory::Task,
+                EventCategory::Workflow,
                 None,
                 Some(parent_task_id),
                 EventPayload::WorkflowPhaseFailed {
@@ -1524,7 +1524,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 self.event_bus
                     .publish(event_factory::make_event(
                         EventSeverity::Warning,
-                        EventCategory::Task,
+                        EventCategory::Workflow,
                         None,
                         Some(parent_task_id),
                         EventPayload::WorkflowPhaseRetried {

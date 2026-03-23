@@ -714,7 +714,7 @@ where
         if matches!(&strategy, StrategyKind::ArchitectReview | StrategyKind::Decompose) {
             event_bus.publish(event_factory::make_event(
                 EventSeverity::Warning,
-                crate::services::event_bus::EventCategory::Convergence,
+                crate::services::event_bus::EventCategory::Escalation,
                 goal_id,
                 Some(task.id),
                 EventPayload::HumanEscalationNeeded {
@@ -725,6 +725,7 @@ where
                         strategy.kind_name(), task.id
                     ),
                     urgency: "medium".to_string(),
+                    questions: vec![],
                     is_blocking: false,
                 },
             )).await;
@@ -1621,7 +1622,7 @@ async fn emit_escalation_from_verification(
     );
     event_bus.publish(event_factory::make_event(
         EventSeverity::Warning,
-        crate::services::event_bus::EventCategory::Convergence,
+        crate::services::event_bus::EventCategory::Escalation,
         goal_id,
         Some(task.id),
         EventPayload::HumanEscalationNeeded {
@@ -1629,6 +1630,7 @@ async fn emit_escalation_from_verification(
             task_id: Some(task.id),
             reason: escalation.reason.clone(),
             urgency: format!("{:?}", escalation.urgency).to_lowercase(),
+            questions: escalation.questions.clone(),
             is_blocking,
         },
     )).await;

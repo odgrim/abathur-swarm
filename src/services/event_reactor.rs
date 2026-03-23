@@ -1041,6 +1041,18 @@ mod tests {
     }
 
     fn make_test_event(category: EventCategory) -> UnifiedEvent {
+        let payload = match category {
+            EventCategory::Task => EventPayload::TaskCanceled {
+                task_id: Uuid::new_v4(),
+                reason: "test".to_string(),
+            },
+            EventCategory::Goal => EventPayload::GoalStatusChanged {
+                goal_id: Uuid::new_v4(),
+                from_status: "active".to_string(),
+                to_status: "paused".to_string(),
+            },
+            _ => EventPayload::OrchestratorStarted,
+        };
         UnifiedEvent {
             id: EventId::new(),
             sequence: SequenceNumber(0),
@@ -1051,7 +1063,7 @@ mod tests {
             task_id: None,
             correlation_id: None,
             source_process_id: None,
-            payload: EventPayload::OrchestratorStarted,
+            payload,
         }
     }
 
