@@ -19,6 +19,13 @@ Bidirectional adapter for [GitHub](https://github.com) repository issues.
 4. **State** (optional): Set `config.state` to `"open"`, `"closed"`, or `"all"`
    to control which issues are polled. Defaults to `"open"`.
 
+5. **Pull Request Ingestion** (optional): Set `config.ingest_pull_requests = "true"` to
+   ingest PRs for read-only review. PR content is treated as untrusted — no build, test,
+   or shell execution is permitted. Additional PR-specific config keys:
+   - `pr_base_filter`: Comma-separated base branch names (e.g., `"main, develop"`).
+   - `pr_ignore_authors`: Comma-separated author logins to skip (e.g., `"dependabot[bot]"`).
+   - `max_diff_chars`: Maximum diff characters in the task description (default: 100000).
+
 ## Capabilities
 
 | Capability      | Direction | Description                                             |

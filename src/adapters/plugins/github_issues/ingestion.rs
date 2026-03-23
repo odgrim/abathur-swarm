@@ -1,8 +1,12 @@
 //! GitHub Issues ingestion adapter.
 //!
 //! Polls a GitHub repository for issues and maps them to [`IngestionItem`]s.
-//! Pull requests are automatically filtered out. Supports incremental
-//! polling via the `since` parameter and optional label-based filtering.
+//! When `ingest_pull_requests` is enabled, pull requests are hydrated via the
+//! pulls endpoint, filtered (draft, author, base branch), and emitted with
+//! `IngestionItemKind::PullRequest` and PR-specific metadata. When disabled
+//! (the default), pull requests are silently skipped.
+//! Supports incremental polling via the `since` parameter and optional
+//! label-based filtering.
 
 use std::sync::Arc;
 
@@ -10,12 +14,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::domain::errors::DomainResult;
-use crate::domain::models::adapter::{AdapterManifest, IngestionItem};
+use crate::domain::models::adapter::{AdapterManifest, IngestionItem, IngestionItemKind};
 use crate::domain::models::TaskPriority;
 use crate::domain::ports::adapter::IngestionAdapter;
 
 use super::client::GitHubClient;
-use super::models::GitHubIssue;
+use super::models::{GitHubIssue, GitHubPullRequestDetail};
 
 /// Adapter that ingests issues from a GitHub repository.
 ///
@@ -87,6 +91,75 @@ impl GitHubIngestionAdapter {
         }
     }
 
+    /// Whether PR ingestion is enabled. Defaults to `false` (opt-in).
+    fn ingest_pull_requests(&self) -> bool {
+        self.manifest
+            .config
+            .get("ingest_pull_requests")
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("true"))
+            .or_else(|| {
+                self.manifest
+                    .config
+                    .get("ingest_pull_requests")
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false)
+    }
+
+    /// Read the optional `pr_base_filter` list from config.
+    ///
+    /// When set, only PRs targeting one of these base branches are ingested.
+    fn pr_base_filter(&self) -> Option<Vec<&str>> {
+        let raw = self
+            .manifest
+            .config
+            .get("pr_base_filter")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())?;
+
+        let branches: Vec<&str> = raw.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+
+        if branches.is_empty() {
+            None
+        } else {
+            Some(branches)
+        }
+    }
+
+    /// Read the optional `pr_ignore_authors` list from config.
+    ///
+    /// PRs authored by any of these logins are skipped (e.g., bot accounts).
+    fn pr_ignore_authors(&self) -> Option<Vec<&str>> {
+        let raw = self
+            .manifest
+            .config
+            .get("pr_ignore_authors")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())?;
+
+        let authors: Vec<&str> = raw.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+
+        if authors.is_empty() {
+            None
+        } else {
+            Some(authors)
+        }
+    }
+
+    /// Maximum characters of diff text to include in the task description.
+    ///
+    /// Defaults to 100 000 characters. Diffs exceeding this limit are truncated
+    /// with a marker indicating the omission.
+    fn max_diff_chars(&self) -> usize {
+        self.manifest
+            .config
+            .get("max_diff_chars")
+            .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+            .map(|n| n as usize)
+            .unwrap_or(100_000)
+    }
+
     /// Map a GitHub issue's labels to a [`TaskPriority`].
     ///
     /// Recognises labels whose names contain priority keywords
@@ -116,12 +189,13 @@ impl GitHubIngestionAdapter {
         None
     }
 
-    /// Convert a [`GitHubIssue`] to an [`IngestionItem`].
+    /// Convert a [`GitHubIssue`] to an [`IngestionItem`] with `IngestionItemKind::Issue`.
     fn to_ingestion_item(issue: &GitHubIssue) -> IngestionItem {
         let external_id = issue.number.to_string();
         let description = issue.body.clone().unwrap_or_default();
 
-        let mut item = IngestionItem::new(&external_id, &issue.title, description);
+        let mut item = IngestionItem::new(&external_id, &issue.title, description)
+            .with_item_kind(IngestionItemKind::Issue);
 
         if let Some(priority) = Self::extract_priority(issue) {
             item = item.with_priority(priority);
@@ -139,6 +213,56 @@ impl GitHubIngestionAdapter {
 
         // Parse `updated_at` (ISO 8601) to `DateTime<Utc>`.
         if let Ok(dt) = issue.updated_at.parse::<DateTime<Utc>>() {
+            item = item.with_external_updated_at(dt);
+        }
+
+        item
+    }
+
+    /// Convert a [`GitHubPullRequestDetail`] and its diff to an [`IngestionItem`]
+    /// with `IngestionItemKind::PullRequest`.
+    fn to_pr_ingestion_item(
+        pr: &GitHubPullRequestDetail,
+        diff: &str,
+        max_diff_chars: usize,
+    ) -> IngestionItem {
+        let external_id = pr.number.to_string();
+
+        // Truncate diff if it exceeds the limit.
+        let truncated_diff = if diff.len() > max_diff_chars {
+            let truncated = &diff[..max_diff_chars];
+            format!(
+                "{truncated}\n\n... [diff truncated at {max_diff_chars} chars; \
+                 full diff is {} chars] ...",
+                diff.len()
+            )
+        } else {
+            diff.to_string()
+        };
+
+        let description = format!(
+            "{}\n\n## Diff\n\n```diff\n{}\n```",
+            pr.body.as_deref().unwrap_or(""),
+            truncated_diff,
+        );
+
+        let mut item = IngestionItem::new(&external_id, &pr.title, description)
+            .with_item_kind(IngestionItemKind::PullRequest);
+
+        // Store PR-specific metadata.
+        item = item.with_metadata("github_state", serde_json::json!(pr.state));
+        item = item.with_metadata("github_url", serde_json::json!(pr.html_url));
+        item = item.with_metadata("pr_head_sha", serde_json::json!(pr.head.sha));
+        item = item.with_metadata("pr_head_ref", serde_json::json!(pr.head.ref_name));
+        item = item.with_metadata("pr_base_ref", serde_json::json!(pr.base.ref_name));
+        item = item.with_metadata("pr_author", serde_json::json!(pr.user.login));
+        item = item.with_metadata("pr_draft", serde_json::json!(pr.draft));
+        if let Some(mergeable) = pr.mergeable {
+            item = item.with_metadata("pr_mergeable", serde_json::json!(mergeable));
+        }
+
+        // Parse `updated_at` (ISO 8601) to `DateTime<Utc>`.
+        if let Ok(dt) = pr.updated_at.parse::<DateTime<Utc>>() {
             item = item.with_external_updated_at(dt);
         }
 
@@ -178,31 +302,103 @@ impl IngestionAdapter for GitHubIngestionAdapter {
             "Polling GitHub Issues"
         );
 
-        let issues = self.client.list_issues(owner, repo, state, since).await?;
+        let all_items = self.client.list_issues(owner, repo, state, since).await?;
 
         let filter_labels = self.filter_labels();
+        let ingest_prs = self.ingest_pull_requests();
+        let pr_base_filter = self.pr_base_filter();
+        let pr_ignore_authors = self.pr_ignore_authors();
+        let max_diff_chars = self.max_diff_chars();
 
-        let items: Vec<IngestionItem> = issues
-            .iter()
-            // Skip pull requests — GitHub returns them from the issues endpoint.
-            .filter(|issue| issue.pull_request.is_none())
-            .filter(|issue| {
-                // If filter_labels is configured, only include matching issues.
-                if let Some(ref required) = filter_labels {
-                    issue
+        let mut items: Vec<IngestionItem> = Vec::new();
+
+        for gh_item in &all_items {
+            if gh_item.pull_request.is_some() {
+                // ── Pull request path ──────────────────────────────────────
+                if !ingest_prs {
+                    tracing::debug!(
+                        number = gh_item.number,
+                        "Skipping PR (ingest_pull_requests is disabled)"
+                    );
+                    continue;
+                }
+
+                // Hydrate full PR details from the pulls endpoint.
+                let pr = match self.client.get_pull_request(owner, repo, gh_item.number).await {
+                    Ok(pr) => pr,
+                    Err(e) => {
+                        tracing::warn!(
+                            number = gh_item.number,
+                            error = %e,
+                            "Failed to hydrate PR details, skipping"
+                        );
+                        continue;
+                    }
+                };
+
+                // Skip draft PRs.
+                if pr.draft {
+                    tracing::debug!(number = pr.number, "Skipping draft PR");
+                    continue;
+                }
+
+                // Skip ignored authors.
+                if let Some(ref ignored) = pr_ignore_authors
+                    && ignored.contains(&pr.user.login.as_str())
+                {
+                    tracing::debug!(
+                        number = pr.number,
+                        author = %pr.user.login,
+                        "Skipping PR from ignored author"
+                    );
+                    continue;
+                }
+
+                // Filter by base branch.
+                if let Some(ref allowed_bases) = pr_base_filter
+                    && !allowed_bases.contains(&pr.base.ref_name.as_str())
+                {
+                    tracing::debug!(
+                        number = pr.number,
+                        base = %pr.base.ref_name,
+                        "Skipping PR: base branch not in pr_base_filter"
+                    );
+                    continue;
+                }
+
+                // Fetch the unified diff.
+                let diff = match self.client.get_pull_request_diff(owner, repo, pr.number).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::warn!(
+                            number = pr.number,
+                            error = %e,
+                            "Failed to fetch PR diff, skipping"
+                        );
+                        continue;
+                    }
+                };
+
+                items.push(Self::to_pr_ingestion_item(&pr, &diff, max_diff_chars));
+            } else {
+                // ── Issue path (existing behavior) ─────────────────────────
+                // Apply label filter if configured.
+                if let Some(ref required) = filter_labels
+                    && !gh_item
                         .labels
                         .iter()
                         .any(|l| required.contains(&l.name.as_str()))
-                } else {
-                    true
+                {
+                    continue;
                 }
-            })
-            .map(Self::to_ingestion_item)
-            .collect();
+
+                items.push(Self::to_ingestion_item(gh_item));
+            }
+        }
 
         tracing::info!(
             count = items.len(),
-            total_fetched = issues.len(),
+            total_fetched = all_items.len(),
             "GitHub Issues ingestion poll complete"
         );
 
@@ -213,9 +409,12 @@ impl IngestionAdapter for GitHubIngestionAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::plugins::github_issues::models::{GitHubLabel, GitHubPullRequestRef};
+    use crate::adapters::plugins::github_issues::models::{
+        GitHubLabel, GitHubPullRequestRef,
+        GitHubPullRequestDetail, GitHubPullRequestHead, GitHubPullRequestBase, GitHubUser,
+    };
     use crate::domain::models::adapter::{
-        AdapterCapability, AdapterDirection, AdapterType,
+        AdapterCapability, AdapterDirection, AdapterType, IngestionItemKind,
     };
 
     fn test_manifest() -> AdapterManifest {
@@ -375,23 +574,193 @@ mod tests {
     // ── PR filtering ────────────────────────────────────────────────────────
 
     #[test]
-    fn test_pr_is_skipped() {
+    fn test_pr_is_skipped_when_ingest_disabled() {
+        // When ingest_pull_requests is not set (default=false), PRs are filtered out.
         let mut pr = make_github_issue(99, "Add feature X", vec![]);
         pr.pull_request = Some(GitHubPullRequestRef {
             url: "https://api.github.com/repos/org/repo/pulls/99".to_string(),
         });
         let regular = make_github_issue(100, "Regular issue", vec![]);
 
-        // Replicate the exact filter predicate from poll() to verify PRs are excluded
-        // from the IngestionItem output without requiring a live network call.
+        // Replicate the branching logic from poll(): when ingest_pull_requests
+        // is false, PRs are skipped — only issues go through to_ingestion_item.
         let issues = vec![pr, regular];
+        let ingest_prs = false; // default
         let items: Vec<IngestionItem> = issues
             .iter()
-            .filter(|issue| issue.pull_request.is_none())
+            .filter(|issue| {
+                if issue.pull_request.is_some() {
+                    ingest_prs
+                } else {
+                    true
+                }
+            })
             .map(GitHubIngestionAdapter::to_ingestion_item)
             .collect();
 
         assert_eq!(items.len(), 1, "Only the non-PR issue should be included");
         assert_eq!(items[0].external_id, "100", "PR issue #99 must be filtered out");
+    }
+
+    // ── to_ingestion_item sets IngestionItemKind::Issue ──────────────────
+
+    #[test]
+    fn test_to_ingestion_item_sets_issue_kind() {
+        let issue = make_github_issue(42, "Fix login bug", vec!["bug"]);
+        let item = GitHubIngestionAdapter::to_ingestion_item(&issue);
+        assert_eq!(item.item_kind, Some(IngestionItemKind::Issue));
+    }
+
+    // ── PR ingestion item ────────────────────────────────────────────────
+
+    fn make_pr_detail(number: u64, title: &str, draft: bool) -> GitHubPullRequestDetail {
+        GitHubPullRequestDetail {
+            number,
+            title: title.to_string(),
+            body: Some("PR description body".to_string()),
+            state: "open".to_string(),
+            draft,
+            mergeable: Some(true),
+            head: GitHubPullRequestHead {
+                ref_name: "feature/my-change".to_string(),
+                sha: "abc123def456".to_string(),
+            },
+            base: GitHubPullRequestBase {
+                ref_name: "main".to_string(),
+            },
+            user: GitHubUser {
+                login: "contributor".to_string(),
+            },
+            html_url: format!("https://github.com/org/repo/pull/{number}"),
+            updated_at: "2024-01-15T10:30:00Z".to_string(),
+            created_at: "2024-01-14T08:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_to_pr_ingestion_item_full() {
+        let pr = make_pr_detail(99, "Add feature X", false);
+        let diff = "diff --git a/src/main.rs b/src/main.rs\n+println!(\"hello\");\n";
+        let item = GitHubIngestionAdapter::to_pr_ingestion_item(&pr, diff, 100_000);
+
+        assert_eq!(item.external_id, "99");
+        assert_eq!(item.title, "Add feature X");
+        assert_eq!(item.item_kind, Some(IngestionItemKind::PullRequest));
+        assert!(item.description.contains("PR description body"));
+        assert!(item.description.contains("```diff"));
+        assert!(item.description.contains("println"));
+
+        // Check PR metadata.
+        assert_eq!(
+            item.metadata.get("pr_head_sha").and_then(|v| v.as_str()),
+            Some("abc123def456")
+        );
+        assert_eq!(
+            item.metadata.get("pr_head_ref").and_then(|v| v.as_str()),
+            Some("feature/my-change")
+        );
+        assert_eq!(
+            item.metadata.get("pr_base_ref").and_then(|v| v.as_str()),
+            Some("main")
+        );
+        assert_eq!(
+            item.metadata.get("pr_author").and_then(|v| v.as_str()),
+            Some("contributor")
+        );
+        assert_eq!(
+            item.metadata.get("pr_draft").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            item.metadata.get("pr_mergeable").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert!(item.external_updated_at.is_some());
+    }
+
+    #[test]
+    fn test_to_pr_ingestion_item_truncates_diff() {
+        let pr = make_pr_detail(100, "Large PR", false);
+        let diff = "x".repeat(200);
+        let item = GitHubIngestionAdapter::to_pr_ingestion_item(&pr, &diff, 50);
+
+        // The diff in the description should be truncated.
+        assert!(item.description.contains("[diff truncated at 50 chars"));
+        assert!(item.description.contains("full diff is 200 chars"));
+    }
+
+    // ── Config helpers ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_ingest_pull_requests_default_false() {
+        let manifest = test_manifest();
+        let client = Arc::new(GitHubClient::new("token".to_string()));
+        let adapter = GitHubIngestionAdapter::new(manifest, client);
+        assert!(!adapter.ingest_pull_requests());
+    }
+
+    #[test]
+    fn test_ingest_pull_requests_enabled() {
+        let manifest = test_manifest()
+            .with_config("ingest_pull_requests", serde_json::json!("true"));
+        let client = Arc::new(GitHubClient::new("token".to_string()));
+        let adapter = GitHubIngestionAdapter::new(manifest, client);
+        assert!(adapter.ingest_pull_requests());
+    }
+
+    #[test]
+    fn test_ingest_pull_requests_bool_value() {
+        let manifest = test_manifest()
+            .with_config("ingest_pull_requests", serde_json::json!(true));
+        let client = Arc::new(GitHubClient::new("token".to_string()));
+        let adapter = GitHubIngestionAdapter::new(manifest, client);
+        assert!(adapter.ingest_pull_requests());
+    }
+
+    #[test]
+    fn test_pr_base_filter_from_config() {
+        let manifest = test_manifest()
+            .with_config("pr_base_filter", serde_json::json!("main, develop"));
+        let client = Arc::new(GitHubClient::new("token".to_string()));
+        let adapter = GitHubIngestionAdapter::new(manifest, client);
+        let bases = adapter.pr_base_filter().unwrap();
+        assert!(bases.contains(&"main"));
+        assert!(bases.contains(&"develop"));
+    }
+
+    #[test]
+    fn test_pr_base_filter_absent() {
+        let manifest = test_manifest();
+        let client = Arc::new(GitHubClient::new("token".to_string()));
+        let adapter = GitHubIngestionAdapter::new(manifest, client);
+        assert!(adapter.pr_base_filter().is_none());
+    }
+
+    #[test]
+    fn test_pr_ignore_authors_from_config() {
+        let manifest = test_manifest()
+            .with_config("pr_ignore_authors", serde_json::json!("dependabot[bot], renovate[bot]"));
+        let client = Arc::new(GitHubClient::new("token".to_string()));
+        let adapter = GitHubIngestionAdapter::new(manifest, client);
+        let authors = adapter.pr_ignore_authors().unwrap();
+        assert!(authors.contains(&"dependabot[bot]"));
+        assert!(authors.contains(&"renovate[bot]"));
+    }
+
+    #[test]
+    fn test_max_diff_chars_default() {
+        let manifest = test_manifest();
+        let client = Arc::new(GitHubClient::new("token".to_string()));
+        let adapter = GitHubIngestionAdapter::new(manifest, client);
+        assert_eq!(adapter.max_diff_chars(), 100_000);
+    }
+
+    #[test]
+    fn test_max_diff_chars_from_config() {
+        let manifest = test_manifest()
+            .with_config("max_diff_chars", serde_json::json!("50000"));
+        let client = Arc::new(GitHubClient::new("token".to_string()));
+        let adapter = GitHubIngestionAdapter::new(manifest, client);
+        assert_eq!(adapter.max_diff_chars(), 50_000);
     }
 }

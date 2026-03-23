@@ -15,7 +15,7 @@ use crate::domain::errors::{DomainError, DomainResult};
 
 use super::models::{
     GitHubCommentRequest, GitHubCreateIssueRequest, GitHubCreateIssueResponse, GitHubIssue,
-    GitHubIssueUpdateRequest,
+    GitHubIssueUpdateRequest, GitHubPullRequestDetail,
 };
 
 /// Base URL for the GitHub REST API v3.
@@ -343,6 +343,104 @@ impl GitHubClient {
 
         resp.json::<GitHubCreateIssueResponse>().await.map_err(|e| {
             DomainError::ExecutionFailed(format!("GitHub create_issue parse failed: {e}"))
+        })
+    }
+
+    /// Acquire a rate-limit token and build an authorized request with a custom Accept header.
+    async fn rate_limited_request_with_accept(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        accept: &str,
+    ) -> reqwest::RequestBuilder {
+        self.rate_limiter.lock().await.acquire().await;
+        self.http
+            .request(method, url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", accept)
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "abathur-swarm")
+    }
+
+    /// Fetch full pull request details from the pulls endpoint.
+    ///
+    /// The issues endpoint only returns a stub; this hydrates the full PR
+    /// metadata (head SHA, base branch, draft status, author, etc.).
+    pub async fn get_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> DomainResult<GitHubPullRequestDetail> {
+        let url = format!(
+            "{}/repos/{}/{}/pulls/{}",
+            GITHUB_API_BASE, owner, repo, number
+        );
+
+        let resp = self
+            .rate_limited_request(reqwest::Method::GET, &url)
+            .await
+            .send()
+            .await
+            .map_err(|e| {
+                DomainError::ExecutionFailed(format!("GitHub get_pull_request failed: {e}"))
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(DomainError::ExecutionFailed(format!(
+                "GitHub get_pull_request returned {status}: {body}"
+            )));
+        }
+
+        resp.json::<GitHubPullRequestDetail>().await.map_err(|e| {
+            DomainError::ExecutionFailed(format!("GitHub get_pull_request parse failed: {e}"))
+        })
+    }
+
+    /// Fetch the unified diff for a pull request.
+    ///
+    /// Uses the `application/vnd.github.diff` Accept header to get the raw
+    /// diff text instead of JSON.
+    pub async fn get_pull_request_diff(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> DomainResult<String> {
+        let url = format!(
+            "{}/repos/{}/{}/pulls/{}",
+            GITHUB_API_BASE, owner, repo, number
+        );
+
+        let resp = self
+            .rate_limited_request_with_accept(
+                reqwest::Method::GET,
+                &url,
+                "application/vnd.github.diff",
+            )
+            .await
+            .send()
+            .await
+            .map_err(|e| {
+                DomainError::ExecutionFailed(format!(
+                    "GitHub get_pull_request_diff failed: {e}"
+                ))
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(DomainError::ExecutionFailed(format!(
+                "GitHub get_pull_request_diff returned {status}: {body}"
+            )));
+        }
+
+        resp.text().await.map_err(|e| {
+            DomainError::ExecutionFailed(format!(
+                "GitHub get_pull_request_diff body read failed: {e}"
+            ))
         })
     }
 
