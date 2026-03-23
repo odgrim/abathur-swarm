@@ -658,6 +658,10 @@ impl FederationCard {
             parent_id: None,
             hive_id: None,
             federation_role: FederationRole::Cerebrate,
+            // Default to 10 max accepted tasks. The A2A standard agent card
+            // does not include a field for max concurrent tasks, so we use a
+            // conservative default. Callers can override this after construction
+            // if the remote agent advertises capacity through other means.
             max_accepted_tasks: 10,
             heartbeat_ok: true,
         }

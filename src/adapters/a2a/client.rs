@@ -178,12 +178,17 @@ impl HttpA2AClient {
         }
 
         match body.result {
+            Some(serde_json::Value::Null) => Err(A2AWireError::Protocol {
+                code: -32603,
+                message: format!("Server returned null result for {} (HTTP {})", method, status),
+                data: None,
+            }),
             Some(result) => {
                 serde_json::from_value(result).map_err(|e| A2AWireError::Json(e))
             }
             None => Err(A2AWireError::Protocol {
                 code: -32603,
-                message: format!("Empty result from {} (HTTP {})", method, status),
+                message: format!("Response missing result field for {} (HTTP {})", method, status),
                 data: None,
             }),
         }

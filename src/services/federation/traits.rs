@@ -53,6 +53,12 @@ pub trait FederationDelegationStrategy: Send + Sync {
 }
 
 /// Default delegation strategy: selects the connected cerebrate with the lowest load.
+///
+/// TODO: Add capability matching when `FederationTaskEnvelope` gains a
+/// `required_capabilities` field. Currently the strategy only considers load
+/// because envelopes do not carry capability requirements. When that field is
+/// added, `select_cerebrate` should filter cerebrates whose `capabilities`
+/// list contains all required capabilities before ranking by load.
 pub struct DefaultDelegationStrategy;
 
 impl FederationDelegationStrategy for DefaultDelegationStrategy {
@@ -61,6 +67,8 @@ impl FederationDelegationStrategy for DefaultDelegationStrategy {
         _task: &FederationTaskEnvelope,
         cerebrates: &[CerebrateStatus],
     ) -> Option<String> {
+        // TODO: When envelopes gain capability requirements, filter cerebrates
+        // by matching capabilities before selecting by lowest load.
         cerebrates
             .iter()
             .filter(|c| c.can_accept_task())

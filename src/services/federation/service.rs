@@ -9,12 +9,12 @@ use uuid::Uuid;
 use crate::adapters::a2a::A2AClient;
 use crate::domain::models::a2a::{
     CerebrateStatus, ConnectionState, FederationCard, FederationResult, FederationTaskEnvelope,
-    FederationTaskStatus,
+    FederationTaskStatus, MessagePriority,
 };
 use crate::domain::models::a2a_protocol::{
     A2APart, A2AProtocolMessage, A2ARole, TaskSendParams,
 };
-use crate::domain::models::goal::Goal;
+use crate::domain::models::goal::{Goal, GoalPriority};
 use crate::domain::models::goal_federation::{
     ConvergenceContract, FederatedGoal, FederatedGoalState,
 };
@@ -69,7 +69,20 @@ impl FederationHttpClient {
             .await
             .map_err(|e| format!("Failed to parse discovery response: {}", e))?;
 
-        serde_json::from_value(body["result"].clone())
+        // Check for JSON-RPC error response before assuming success
+        if let Some(error) = body.get("error") {
+            let message = error
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
+            return Err(format!("Discovery returned error: {}", message));
+        }
+
+        let result = body.get("result").ok_or_else(|| {
+            "Discovery response missing 'result' field".to_string()
+        })?;
+
+        serde_json::from_value(result.clone())
             .map_err(|e| format!("Failed to parse federation card: {}", e))
     }
 
@@ -355,6 +368,12 @@ impl FederationService {
 
         // Attempt A2A discovery + registration if the cerebrate has a URL.
         // Prefer a2a_client when available; fall back to legacy http_client.
+        // When an A2A client is configured and BOTH A2A discovery and legacy
+        // register fail, the cerebrate is marked Unreachable instead of
+        // Connected (Issue #9). When only legacy HTTP is used (no A2A client),
+        // a single HTTP failure is treated as non-fatal to allow local/test
+        // connections without a real remote endpoint.
+        let mut dual_failure = false;
         if let Some(ref url) = url {
             if let Some(ref a2a) = self.a2a_client {
                 match a2a.discover(url).await {
@@ -379,8 +398,9 @@ impl FederationService {
                             tracing::warn!(
                                 cerebrate_id = %id,
                                 error = %e2,
-                                "Legacy HTTP register also failed, connecting locally"
+                                "Both A2A discovery and legacy register failed"
                             );
+                            dual_failure = true;
                         }
                     }
                 }
@@ -391,6 +411,19 @@ impl FederationService {
             {
                 tracing::warn!(cerebrate_id = %id, error = %e, "HTTP register failed, connecting locally");
             }
+        }
+
+        // If both A2A and legacy paths failed, mark Unreachable and return error
+        // instead of incorrectly transitioning to Connected.
+        if dual_failure {
+            let mut cerebrates = self.cerebrates.write().await;
+            if let Some(status) = cerebrates.get_mut(id) {
+                status.connection_state = ConnectionState::Unreachable;
+            }
+            return Err(format!(
+                "Failed to connect to cerebrate {}: both A2A and legacy register failed",
+                id
+            ));
         }
 
         // Transition to Connected
@@ -604,6 +637,11 @@ impl FederationService {
     }
 
     /// Delegate a task to a specific cerebrate.
+    ///
+    /// NOTE: The `active_delegations` counter on `CerebrateStatus` can become
+    /// stale if a cerebrate restarts or the overmind crashes mid-delegation.
+    /// The `reconcile_on_reconnect()` mechanism is designed to correct this
+    /// drift when a cerebrate reconnects after being unreachable.
     pub async fn delegate_to(
         &self,
         envelope: &FederationTaskEnvelope,
@@ -627,22 +665,9 @@ impl FederationService {
             }
         }
 
-        // Track in-flight and activity timestamp
-        {
-            let mut in_flight = self.in_flight.write().await;
-            in_flight.insert(envelope.task_id, cerebrate_id.to_string());
-        }
-        {
-            let mut activity = self.last_activity.write().await;
-            activity.insert(envelope.task_id, chrono::Utc::now());
-        }
-
-        // Increment active delegations
+        // Get the cerebrate URL before attempting to send
         let url = {
-            let mut cerebrates = self.cerebrates.write().await;
-            if let Some(status) = cerebrates.get_mut(cerebrate_id) {
-                status.active_delegations += 1;
-            }
+            let cerebrates = self.cerebrates.read().await;
             cerebrates.get(cerebrate_id).and_then(|s| s.url.clone())
         };
 
@@ -676,8 +701,17 @@ impl FederationService {
 
             if !sent_via_a2a {
                 if let Err(e) = self.http_client.delegate(url, envelope).await {
-                    // HTTP send failure is not fatal — the task is tracked in-flight
-                    // and the cerebrate may still process it (or we'll detect a stall/orphan).
+                    if self.a2a_client.is_some() {
+                        // Both A2A and legacy HTTP failed — return error to the
+                        // caller rather than silently continuing (Issue #8).
+                        return Err(format!(
+                            "Failed to delegate task {} to cerebrate {}: {}",
+                            envelope.task_id, cerebrate_id, e
+                        ));
+                    }
+                    // Legacy-only path: HTTP failure is non-fatal. The task is
+                    // tracked in-flight and the cerebrate may still process it
+                    // (e.g. local/test setups without a real HTTP endpoint).
                     tracing::warn!(
                         cerebrate_id = %cerebrate_id,
                         task_id = %envelope.task_id,
@@ -685,6 +719,23 @@ impl FederationService {
                         "HTTP delegate call failed, task tracked in-flight for monitoring"
                     );
                 }
+            }
+        }
+
+        // Track in-flight, activity timestamp, and increment active delegations
+        // AFTER the send succeeds to avoid stale counters on failure.
+        {
+            let mut in_flight = self.in_flight.write().await;
+            in_flight.insert(envelope.task_id, cerebrate_id.to_string());
+        }
+        {
+            let mut activity = self.last_activity.write().await;
+            activity.insert(envelope.task_id, chrono::Utc::now());
+        }
+        {
+            let mut cerebrates = self.cerebrates.write().await;
+            if let Some(status) = cerebrates.get_mut(cerebrate_id) {
+                status.active_delegations += 1;
             }
         }
 
@@ -834,6 +885,12 @@ impl FederationService {
                 FederationTaskEnvelope::new(Uuid::new_v4(), &goal.name, &goal.description);
             envelope.constraints = constraints_strs;
             envelope.parent_goal_id = Some(goal.id);
+            envelope.priority = match goal.priority {
+                GoalPriority::Low => MessagePriority::Low,
+                GoalPriority::Normal => MessagePriority::Normal,
+                GoalPriority::High => MessagePriority::High,
+                GoalPriority::Critical => MessagePriority::Urgent,
+            };
 
             let delegated_cerebrate = self.delegate_to(&envelope, cerebrate_id).await?;
             tracing::info!(
@@ -928,8 +985,18 @@ impl FederationService {
 
         // Build a temporary envelope for the strategy
         let envelope = FederationTaskEnvelope::new(task_id, "", "");
-        self.delegation_strategy
-            .on_rejection(&envelope, cerebrate_id, reason, &remaining)
+        let decision = self.delegation_strategy
+            .on_rejection(&envelope, cerebrate_id, reason, &remaining);
+
+        // If the strategy decides to redelegate, update in_flight to point at
+        // the new cerebrate so subsequent result/progress messages are routed
+        // correctly.
+        if let DelegationDecision::Redelegate(ref new_cerebrate_id) = decision {
+            let mut in_flight = self.in_flight.write().await;
+            in_flight.insert(task_id, new_cerebrate_id.clone());
+        }
+
+        decision
     }
 
     // ========================================================================
@@ -978,22 +1045,34 @@ impl FederationService {
             in_flight.get(&task_id).cloned().unwrap_or_default()
         };
 
-        // Remove from in-flight and activity tracking
-        {
-            let mut in_flight = self.in_flight.write().await;
-            in_flight.remove(&task_id);
-        }
-        {
-            let mut activity = self.last_activity.write().await;
-            activity.remove(&task_id);
-        }
+        let is_terminal = matches!(
+            result.status,
+            FederationTaskStatus::Completed | FederationTaskStatus::Failed
+        );
 
-        // Decrement active delegations
-        if !cerebrate_id.is_empty() {
-            let mut cerebrates = self.cerebrates.write().await;
-            if let Some(status) = cerebrates.get_mut(&cerebrate_id) {
-                status.active_delegations = status.active_delegations.saturating_sub(1);
+        // Only remove from in-flight and activity tracking on terminal statuses.
+        // Partial results mean the task is still running on the cerebrate.
+        if is_terminal {
+            {
+                let mut in_flight = self.in_flight.write().await;
+                in_flight.remove(&task_id);
             }
+            {
+                let mut activity = self.last_activity.write().await;
+                activity.remove(&task_id);
+            }
+
+            // Decrement active delegations only on terminal statuses
+            if !cerebrate_id.is_empty() {
+                let mut cerebrates = self.cerebrates.write().await;
+                if let Some(status) = cerebrates.get_mut(&cerebrate_id) {
+                    status.active_delegations = status.active_delegations.saturating_sub(1);
+                }
+            }
+        } else {
+            // Partial result: update last activity for stall detection
+            let mut activity = self.last_activity.write().await;
+            activity.insert(task_id, chrono::Utc::now());
         }
 
         // Validate against schema if specified
@@ -1353,6 +1432,7 @@ impl FederationService {
     /// 5s initial, 2x factor, 300s max. Runs until connected or explicit disconnect.
     pub async fn start_reconnect_loop(self: &Arc<Self>, cerebrate_id: String) {
         let service = Arc::clone(self);
+        // Subscribe to the shutdown channel ONCE before spawning the loop.
         let shutdown_rx = {
             let slot = self.shutdown_tx.read().await;
             slot.as_ref().map(|tx| tx.subscribe())
@@ -1363,6 +1443,7 @@ impl FederationService {
             let max_delay = Duration::from_secs(300);
             let factor = 2u32;
             let mut current_delay = initial_delay;
+            let mut shutdown_rx = shutdown_rx;
 
             loop {
                 // Check if cerebrate is still registered and not connected
@@ -1398,11 +1479,9 @@ impl FederationService {
                     "Attempting reconnection to cerebrate"
                 );
 
-                // Wait with shutdown check
-                if let Some(ref mut rx) = shutdown_rx.as_ref().and_then(|_| {
-                    // Re-subscribe each iteration is not ideal, use a flag instead
-                    service.shutdown_tx.try_read().ok().and_then(|s| s.as_ref().map(|tx| tx.subscribe()))
-                }) {
+                // Wait with shutdown check — use the single receiver subscribed
+                // before the loop to avoid re-subscribing on each iteration.
+                if let Some(ref mut rx) = shutdown_rx {
                     tokio::select! {
                         _ = tokio::time::sleep(current_delay) => {}
                         _ = rx.recv() => {
@@ -1493,6 +1572,41 @@ impl FederationService {
                                     status: "failed".to_string(),
                                     summary: "Task lost during disconnection".to_string(),
                                     artifacts: Vec::new(),
+                                },
+                            ))
+                            .await;
+                    }
+
+                    // Tasks the remote knows about but we don't track locally → rediscovered.
+                    // This can happen if the overmind restarted while the cerebrate kept working.
+                    let rediscovered: Vec<Uuid> = remote_tasks
+                        .iter()
+                        .filter(|t| !local_tasks.contains(t))
+                        .copied()
+                        .collect();
+
+                    for task_id in rediscovered {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            cerebrate_id = %cerebrate_id,
+                            "Task exists on remote cerebrate but not tracked locally, re-adding to in_flight"
+                        );
+                        {
+                            let mut in_flight = self.in_flight.write().await;
+                            in_flight.insert(task_id, cerebrate_id.to_string());
+                        }
+                        {
+                            let mut activity = self.last_activity.write().await;
+                            activity.insert(task_id, chrono::Utc::now());
+                        }
+
+                        self.event_bus
+                            .publish(event_factory::federation_event(
+                                EventSeverity::Warning,
+                                Some(task_id),
+                                EventPayload::FederationTaskAccepted {
+                                    task_id,
+                                    cerebrate_id: cerebrate_id.to_string(),
                                 },
                             ))
                             .await;
@@ -1696,7 +1810,10 @@ mod tests {
         let decision = svc.handle_reject(task_id, "c1", "too busy").await;
         assert!(matches!(decision, DelegationDecision::Redelegate(ref id) if id == "c2"));
 
-        assert_eq!(svc.in_flight_count().await, 0);
+        // After redelegate, the task should still be in-flight but mapped to the new cerebrate
+        assert_eq!(svc.in_flight_count().await, 1);
+        let in_flight = svc.in_flight.read().await;
+        assert_eq!(in_flight.get(&task_id).map(|s| s.as_str()), Some("c2"));
     }
 
     #[tokio::test]

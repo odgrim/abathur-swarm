@@ -1089,43 +1089,25 @@ async fn handle_tasks_send(
         }
     }
 
-    // Check if task exists (continue existing task) or create new
+    // Check if task exists (continue existing task) or create new.
+    // Note: session tracking is intentionally omitted here — the sessions map
+    // is not read by any handler, so populating it would be a memory leak
+    // (unbounded growth with no eviction). Session support should be added
+    // with proper lifecycle management when multi-turn conversations are needed.
     let new_task = InMemoryTask::from_params(&params);
     let task_id = new_task.id.clone();
-    let session_id = new_task.session_id.clone();
 
-    let mut tasks = state.tasks.write().await;
-    let task = if let Some(existing) = tasks.get_mut(&task_id) {
-        existing.history.push(params.message);
-        existing.state = A2ATaskState::Working;
-        existing.updated_at = Utc::now();
-        existing.clone()
-    } else {
-        tasks.insert(task_id.clone(), new_task.clone());
-
-        // Update session
-        drop(tasks);
-        let now = new_task.created_at;
-        let mut sessions = state.sessions.write().await;
-        if let Some(session) = sessions.get_mut(&session_id) {
-            if !session.task_ids.contains(&task_id) {
-                session.task_ids.push(task_id.clone());
-            }
-            session.last_activity = now;
+    let task = {
+        let mut tasks = state.tasks.write().await;
+        if let Some(existing) = tasks.get_mut(&task_id) {
+            existing.history.push(params.message);
+            existing.state = A2ATaskState::Working;
+            existing.updated_at = Utc::now();
+            existing.clone()
         } else {
-            sessions.insert(
-                session_id.clone(),
-                A2ASession {
-                    id: session_id.clone(),
-                    agent_id: String::new(),
-                    task_ids: vec![task_id.clone()],
-                    created_at: now,
-                    last_activity: now,
-                },
-            );
+            tasks.insert(task_id.clone(), new_task.clone());
+            new_task
         }
-
-        new_task
     };
 
     Json(JsonRpcResponse::success(
@@ -1139,6 +1121,13 @@ async fn handle_tasks_send(
 ///
 /// Returns `Some(Json<JsonRpcResponse>)` when the request was handled,
 /// or `None` when the caller should fall through to normal task handling.
+///
+/// NOTE: Goal existence validation (e.g., verifying that a referenced goal_id
+/// actually exists in the GoalRepository) should happen at a higher layer
+/// (FederationService or the orchestrator), not in this HTTP handler. A2AState
+/// intentionally does not hold a GoalRepository reference — adding one would
+/// require a larger refactor and would couple the transport layer to domain
+/// storage concerns.
 async fn handle_federation_routing(
     state: &Arc<A2AState>,
     request_id: &Option<Value>,
