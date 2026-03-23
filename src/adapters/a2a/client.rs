@@ -46,6 +46,9 @@ pub enum A2AWireError {
 
     #[error("Request timed out")]
     Timeout,
+
+    #[error("Client build failed: {0}")]
+    BuildError(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -106,24 +109,32 @@ pub struct HttpA2AClient {
 }
 
 impl HttpA2AClient {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self, A2AWireError> {
+        Ok(Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .build()
-                .expect("Failed to build HTTP client"),
+                .map_err(|e| A2AWireError::BuildError(e.to_string()))?,
             a2a_version: "0.3".to_string(),
-        }
+        })
     }
 
-    pub fn with_timeout(timeout: Duration) -> Self {
-        Self {
+    /// Create a new client, panicking on failure.
+    ///
+    /// Use this only in contexts where client construction is infallible
+    /// in practice (e.g., tests, static initialization).
+    pub fn new_or_panic() -> Self {
+        Self::new().expect("Failed to build HTTP client")
+    }
+
+    pub fn with_timeout(timeout: Duration) -> Result<Self, A2AWireError> {
+        Ok(Self {
             client: reqwest::Client::builder()
                 .timeout(timeout)
                 .build()
-                .expect("Failed to build HTTP client"),
+                .map_err(|e| A2AWireError::BuildError(e.to_string()))?,
             a2a_version: "0.3".to_string(),
-        }
+        })
     }
 
     /// Build a JSON-RPC 2.0 request body.
@@ -215,7 +226,7 @@ impl HttpA2AClient {
 
 impl Default for HttpA2AClient {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("Failed to build default HTTP client")
     }
 }
 
@@ -396,13 +407,13 @@ mod tests {
 
     #[test]
     fn test_http_a2a_client_new() {
-        let client = HttpA2AClient::new();
+        let client = HttpA2AClient::new().unwrap();
         assert_eq!(client.a2a_version, "0.3");
     }
 
     #[test]
     fn test_jsonrpc_request_serialization() {
-        let client = HttpA2AClient::new();
+        let client = HttpA2AClient::new().unwrap();
         let req = client.build_jsonrpc("tasks/send", serde_json::json!({"key": "value"}));
         assert_eq!(req.jsonrpc, "2.0");
         assert_eq!(req.method, "tasks/send");

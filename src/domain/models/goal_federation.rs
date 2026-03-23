@@ -66,8 +66,7 @@ impl FederatedGoalState {
             | (Self::Converging, Self::Converged)
             | (Self::Converging, Self::Active)
             | (Self::Converging, Self::Failed)
-            // Gated can return to pending or delegated once unblocked
-            | (Self::Gated, Self::Pending)
+            // Gated goes to Delegated once dependencies are met (not back to Pending)
             | (Self::Gated, Self::Delegated)
             | (Self::Gated, Self::Failed)
         )
@@ -140,7 +139,19 @@ impl Default for ConvergenceContract {
 
 impl ConvergenceContract {
     /// Check whether all required signals are satisfied by the given snapshot.
+    ///
+    /// An empty contract is trivially satisfied (by design). However, if there
+    /// are required signals but the snapshot contains no data at all, we return
+    /// `false` — the child hasn't reported yet and we must not prematurely converge.
     pub fn is_satisfied(&self, snapshot: &ConvergenceSignalSnapshot) -> bool {
+        // Guard: required signals exist but no data received yet.
+        if !self.required_signals.is_empty()
+            && snapshot.signals.is_empty()
+            && snapshot.convergence_level == 0.0
+        {
+            return false; // No data received yet
+        }
+
         self.required_signals.iter().all(|signal| {
             match signal {
                 ContractSignal::BuildPassing => {

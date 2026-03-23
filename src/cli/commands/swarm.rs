@@ -2,8 +2,11 @@
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
+use serde::Deserialize;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::adapters::sqlite::{
@@ -14,6 +17,8 @@ use crate::services::overseers::{
     BuildOverseer, CompilationOverseer, LintOverseer, OverseerClusterService,
     SecurityScanOverseer, TestSuiteOverseer, TypeCheckOverseer,
 };
+use crate::domain::models::goal_federation::{ContractSignal, ConvergenceContract};
+use crate::domain::models::swarm_dag::{SwarmDag, SwarmDagNode, SwarmDagNodeState};
 use crate::services::{SwarmConfig, SwarmOrchestrator, SwarmEvent};
 
 type CliOrchestrator = SwarmOrchestrator<
@@ -205,6 +210,24 @@ pub enum SwarmCommand {
     },
     /// Show the federation tree (hive topology)
     Hive,
+    /// Manage swarm DAGs (cross-swarm dependency pipelines)
+    Dag {
+        #[command(subcommand)]
+        command: DagCommand,
+    },
+}
+
+/// Subcommands for swarm DAG management.
+#[derive(Subcommand, Debug)]
+pub enum DagCommand {
+    /// Create a DAG from a YAML specification file
+    Create {
+        /// Path to the YAML DAG specification file
+        #[arg(long)]
+        file: String,
+    },
+    /// Show status of all DAGs
+    Status,
 }
 
 pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
@@ -261,6 +284,12 @@ pub async fn execute(args: SwarmArgs, json_mode: bool) -> Result<()> {
         }
         SwarmCommand::Hive => {
             federation_hive(json_mode).await
+        }
+        SwarmCommand::Dag { command } => {
+            match command {
+                DagCommand::Create { file } => dag_create(&file, json_mode).await,
+                DagCommand::Status => dag_status(json_mode).await,
+            }
         }
     }
 }
@@ -1861,6 +1890,232 @@ async fn federation_hive(json_mode: bool) -> Result<()> {
                 println!("    {} {} {} [{}] ({}/{})", prefix, state_icon, c.display_name, c.connection_state, c.active_delegations, c.max_concurrent_delegations);
             }
         }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// DAG YAML spec types
+// ---------------------------------------------------------------------------
+
+/// Intermediate representation for deserializing a signal from YAML.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum SignalYamlSpec {
+    BuildPassing,
+    TestsPassing {
+        #[serde(default = "default_min_pass_rate")]
+        min_pass_rate: f64,
+    },
+    ConvergenceLevel {
+        #[serde(default = "default_min_level")]
+        min_level: f64,
+    },
+    TaskCompletionThreshold {
+        min_completed: u32,
+    },
+    Custom {
+        name: String,
+        predicate: String,
+    },
+}
+
+fn default_min_pass_rate() -> f64 {
+    1.0
+}
+
+fn default_min_level() -> f64 {
+    1.0
+}
+
+impl SignalYamlSpec {
+    fn into_contract_signal(self) -> ContractSignal {
+        match self {
+            Self::BuildPassing => ContractSignal::BuildPassing,
+            Self::TestsPassing { min_pass_rate } => {
+                ContractSignal::TestsPassing { min_pass_rate }
+            }
+            Self::ConvergenceLevel { min_level } => {
+                ContractSignal::ConvergenceLevel { min_level }
+            }
+            Self::TaskCompletionThreshold { min_completed } => {
+                ContractSignal::TaskCompletionThreshold { min_completed }
+            }
+            Self::Custom { name, predicate } => {
+                ContractSignal::Custom { name, predicate }
+            }
+        }
+    }
+}
+
+/// YAML representation of a convergence contract.
+#[derive(Debug, Deserialize)]
+struct ContractYamlSpec {
+    #[serde(default = "default_poll_interval_secs")]
+    poll_interval_secs: u64,
+    #[serde(default)]
+    required_signals: Vec<SignalYamlSpec>,
+}
+
+fn default_poll_interval_secs() -> u64 {
+    60
+}
+
+/// YAML representation of a single DAG node.
+#[derive(Debug, Deserialize)]
+struct DagNodeYamlSpec {
+    label: String,
+    cerebrate: String,
+    intent: String,
+    #[serde(default)]
+    depends_on: Vec<String>,
+    contract: ContractYamlSpec,
+}
+
+/// Top-level YAML DAG specification.
+#[derive(Debug, Deserialize)]
+struct DagYamlSpec {
+    name: String,
+    nodes: Vec<DagNodeYamlSpec>,
+}
+
+impl DagYamlSpec {
+    /// Convert this YAML spec into a validated `SwarmDag`.
+    fn into_swarm_dag(self) -> Result<SwarmDag> {
+        let mut dag = SwarmDag::new(&self.name);
+
+        // First pass: assign UUIDs to labels.
+        let mut label_to_id: HashMap<String, Uuid> = HashMap::new();
+        for node_spec in &self.nodes {
+            let id = Uuid::new_v4();
+            if label_to_id.contains_key(&node_spec.label) {
+                anyhow::bail!("Duplicate node label: '{}'", node_spec.label);
+            }
+            label_to_id.insert(node_spec.label.clone(), id);
+        }
+
+        // Second pass: build nodes with resolved dependencies.
+        for node_spec in self.nodes {
+            let node_id = label_to_id[&node_spec.label];
+
+            let mut dependencies = Vec::new();
+            for dep_label in &node_spec.depends_on {
+                let dep_id = label_to_id.get(dep_label).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Node '{}' depends on unknown label '{}'",
+                        node_spec.label,
+                        dep_label
+                    )
+                })?;
+                dependencies.push(*dep_id);
+            }
+
+            let contract = ConvergenceContract {
+                poll_interval_secs: node_spec.contract.poll_interval_secs,
+                required_signals: node_spec
+                    .contract
+                    .required_signals
+                    .into_iter()
+                    .map(|s| s.into_contract_signal())
+                    .collect(),
+            };
+
+            dag.add_node(SwarmDagNode {
+                id: node_id,
+                label: node_spec.label,
+                cerebrate_id: node_spec.cerebrate,
+                intent: node_spec.intent,
+                contract,
+                dependencies,
+                federated_goal_id: None,
+                state: SwarmDagNodeState::Waiting,
+            });
+        }
+
+        // Validate the constructed DAG.
+        dag.validate().map_err(|e| anyhow::anyhow!("DAG validation failed: {}", e))?;
+
+        Ok(dag)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DAG CLI commands
+// ---------------------------------------------------------------------------
+
+async fn dag_create(file_path: &str, json_mode: bool) -> Result<()> {
+    let yaml_content = std::fs::read_to_string(file_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read DAG file '{}': {}", file_path, e))?;
+
+    let spec: DagYamlSpec = serde_yaml::from_str(&yaml_content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse DAG YAML: {}", e))?;
+
+    let dag = spec.into_swarm_dag()?;
+
+    if json_mode {
+        let output = serde_json::json!({
+            "status": "created",
+            "dag_id": dag.id.to_string(),
+            "name": dag.name,
+            "node_count": dag.nodes.len(),
+            "nodes": dag.nodes.iter().map(|n| {
+                serde_json::json!({
+                    "id": n.id.to_string(),
+                    "label": n.label,
+                    "cerebrate": n.cerebrate_id,
+                    "state": n.state.as_str(),
+                    "dependencies": n.dependencies.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+                })
+            }).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("DAG '{}' created successfully", dag.name);
+        println!("  ID: {}", dag.id);
+        println!("  Nodes: {}", dag.nodes.len());
+        println!();
+
+        // Print a visual topology.
+        for node in &dag.nodes {
+            let deps: Vec<String> = node.dependencies.iter().filter_map(|dep_id| {
+                dag.get_node(*dep_id).map(|d| d.label.clone())
+            }).collect();
+
+            let dep_str = if deps.is_empty() {
+                "(root)".to_string()
+            } else {
+                format!("depends on: [{}]", deps.join(", "))
+            };
+
+            println!(
+                "  [{}] {} -> {} {}",
+                node.state.as_str(),
+                node.label,
+                node.cerebrate_id,
+                dep_str
+            );
+        }
+
+        println!();
+        println!("DAG is validated and ready. Use 'abathur swarm start' to begin execution.");
+    }
+
+    Ok(())
+}
+
+async fn dag_status(_json_mode: bool) -> Result<()> {
+    // Placeholder: actual DAG persistence comes in a later phase.
+    if _json_mode {
+        let output = serde_json::json!({
+            "dags": [],
+            "message": "No active DAGs"
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("No active DAGs");
+        println!();
+        println!("Create a DAG with: abathur swarm dag create --file <path.yaml>");
     }
 
     Ok(())

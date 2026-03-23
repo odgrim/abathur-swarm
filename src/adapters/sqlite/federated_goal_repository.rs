@@ -87,17 +87,30 @@ impl FederatedGoalRepository for SqliteFederatedGoalRepository {
     }
 
     async fn update_state(&self, id: Uuid, state: FederatedGoalState) -> DomainResult<()> {
-        // First fetch the current goal to update the JSON data as well.
-        let existing = self.get(id).await?;
-        let Some(mut goal) = existing else {
+        // Atomic UPDATE: set both the state column and the JSON data's state/updated_at
+        // fields in a single statement to avoid fetch-modify-save race conditions.
+        let now = chrono::Utc::now();
+        let now_str = now.to_rfc3339();
+        let state_str = state.as_str();
+
+        let q = sqlx::query(
+            r#"UPDATE federated_goals
+               SET state = ?, data = json_set(data, '$.state', ?, '$.updated_at', ?), updated_at = ?
+               WHERE id = ?"#,
+        )
+        .bind(state_str)
+        .bind(state_str)
+        .bind(&now_str)
+        .bind(&now_str)
+        .bind(id.to_string());
+
+        let result = exec_tx!(&self.pool, q, execute)?;
+        if result.rows_affected() == 0 {
             return Err(DomainError::ValidationFailed(format!(
                 "Federated goal not found: {id}"
             )));
-        };
-
-        goal.state = state;
-        goal.updated_at = chrono::Utc::now();
-        self.save(&goal).await
+        }
+        Ok(())
     }
 
     async fn update_signals(
@@ -105,16 +118,29 @@ impl FederatedGoalRepository for SqliteFederatedGoalRepository {
         id: Uuid,
         signals: ConvergenceSignalSnapshot,
     ) -> DomainResult<()> {
-        let existing = self.get(id).await?;
-        let Some(mut goal) = existing else {
+        // Atomic UPDATE: set the last_signals and updated_at fields in the JSON data
+        // in a single statement to avoid fetch-modify-save race conditions.
+        let now = chrono::Utc::now();
+        let now_str = now.to_rfc3339();
+        let signals_json = serde_json::to_string(&signals)?;
+
+        let q = sqlx::query(
+            r#"UPDATE federated_goals
+               SET data = json_set(data, '$.last_signals', json(?), '$.updated_at', ?), updated_at = ?
+               WHERE id = ?"#,
+        )
+        .bind(&signals_json)
+        .bind(&now_str)
+        .bind(&now_str)
+        .bind(id.to_string());
+
+        let result = exec_tx!(&self.pool, q, execute)?;
+        if result.rows_affected() == 0 {
             return Err(DomainError::ValidationFailed(format!(
                 "Federated goal not found: {id}"
             )));
-        };
-
-        goal.last_signals = Some(signals);
-        goal.updated_at = chrono::Utc::now();
-        self.save(&goal).await
+        }
+        Ok(())
     }
 
     async fn delete(&self, id: Uuid) -> DomainResult<()> {

@@ -419,6 +419,8 @@ impl From<&FederationTaskEnvelope> for TaskSendParams {
         if !envelope.constraints.is_empty() {
             federation_data.insert(
                 "constraints".to_string(),
+                // Safety: Vec<String> serialization is infallible; unwrap_or_default
+                // is a defensive fallback that can never actually trigger.
                 serde_json::to_value(&envelope.constraints).unwrap_or_default(),
             );
         }
@@ -505,6 +507,8 @@ impl From<&FederationResult> for A2ATask {
         if !result.metrics.is_empty() {
             metadata.insert(
                 "metrics".to_string(),
+                // Safety: HashMap<String, f64> serialization is infallible;
+                // unwrap_or_default is a defensive fallback that can never actually trigger.
                 serde_json::to_value(&result.metrics).unwrap_or_default(),
             );
         }

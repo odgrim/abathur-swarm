@@ -1154,26 +1154,45 @@ async fn handle_federation_routing(
 
     match intent {
         "delegate" => {
-            // Extract fields from federation metadata to build an envelope
-            let task_id = federation_val
+            // Extract required fields from federation metadata to build an envelope.
+            // task_id and correlation_id are required — return an error if missing or invalid.
+            let task_id = match federation_val
                 .get("task_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| uuid::Uuid::parse_str(s).ok())
-                .unwrap_or_else(Uuid::new_v4);
+            {
+                Some(id) => id,
+                None => {
+                    return Some(Json(JsonRpcResponse::error(
+                        request_id.clone(),
+                        A2AErrorCode::InvalidParams,
+                        Some(json!({"message": "Missing or invalid 'task_id' in federation metadata"})),
+                    )));
+                }
+            };
 
             let parent_goal_id = federation_val
                 .get("parent_goal_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| uuid::Uuid::parse_str(s).ok());
 
-            let correlation_id = federation_val
+            let correlation_id = match federation_val
                 .get("correlation_id")
                 .and_then(|v| v.as_str())
                 .and_then(|s| uuid::Uuid::parse_str(s).ok())
-                .unwrap_or_else(Uuid::new_v4);
+            {
+                Some(id) => id,
+                None => {
+                    return Some(Json(JsonRpcResponse::error(
+                        request_id.clone(),
+                        A2AErrorCode::InvalidParams,
+                        Some(json!({"message": "Missing or invalid 'correlation_id' in federation metadata"})),
+                    )));
+                }
+            };
 
-            // Extract title and description from the message parts
-            let (title, description) = extract_title_description(&params.message);
+            // Extract title and description from federation metadata first, falling back to message parts
+            let (title, description) = extract_title_description(federation_val, &params.message);
 
             let constraints: Vec<String> = federation_val
                 .get("constraints")
@@ -1439,30 +1458,49 @@ async fn handle_federation_routing(
     }
 }
 
-/// Extract title and description from a `tasks/send` message's parts.
-fn extract_title_description(message: &A2AProtocolMessage) -> (String, String) {
-    let mut title = String::new();
-    let mut description = String::new();
+/// Extract title and description from federation metadata or message parts.
+///
+/// Prefers structured `title` and `description` fields from the federation
+/// metadata (set by `From<&FederationTaskEnvelope> for TaskSendParams`).
+/// Falls back to parsing message text if metadata doesn't have them.
+fn extract_title_description(federation_val: &Value, message: &A2AProtocolMessage) -> (String, String) {
+    // 1. Try federation metadata first (most reliable source).
+    let meta_title = federation_val.get("title").and_then(|v| v.as_str());
+    let meta_desc = federation_val.get("description").and_then(|v| v.as_str());
+
+    if let (Some(t), Some(d)) = (meta_title, meta_desc) {
+        return (t.to_string(), d.to_string());
+    }
+
+    // 2. Fall back to parsing message parts.
+    let mut title = meta_title.map(String::from).unwrap_or_default();
+    let mut description = meta_desc.map(String::from).unwrap_or_default();
 
     for part in &message.parts {
         match part {
-            MessagePart::Text { text } => {
-                // If the text has a double-newline, split into title + description
-                if let Some((t, d)) = text.split_once("\n\n") {
-                    if title.is_empty() {
+            MessagePart::Data { data, .. } => {
+                if title.is_empty() {
+                    if let Some(t) = data.get("title").and_then(|v| v.as_str()) {
                         title = t.to_string();
+                    }
+                }
+                if description.is_empty() {
+                    if let Some(d) = data.get("description").and_then(|v| v.as_str()) {
                         description = d.to_string();
                     }
-                } else if title.is_empty() {
-                    title = text.clone();
                 }
             }
-            MessagePart::Data { data, .. } => {
-                if let Some(t) = data.get("title").and_then(|v| v.as_str()) {
-                    title = t.to_string();
-                }
-                if let Some(d) = data.get("description").and_then(|v| v.as_str()) {
-                    description = d.to_string();
+            MessagePart::Text { text } => {
+                if title.is_empty() {
+                    // If the text has a double-newline, split into title + description
+                    if let Some((t, d)) = text.split_once("\n\n") {
+                        title = t.to_string();
+                        if description.is_empty() {
+                            description = d.to_string();
+                        }
+                    } else {
+                        title = text.clone();
+                    }
                 }
             }
             _ => {}
@@ -1536,7 +1574,7 @@ async fn handle_tasks_send_subscribe(
                 .and_then(|m| m.get("abathur:federation"))
             {
                 let (title, description) =
-                    extract_title_description(&params.message);
+                    extract_title_description(federation_val, &params.message);
 
                 let fed_task_id = federation_val
                     .get("task_id")

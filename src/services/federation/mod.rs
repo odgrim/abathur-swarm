@@ -14,6 +14,7 @@
 //! - Configuration types for the `[federation]` TOML section.
 
 pub mod config;
+pub mod dag_handler;
 pub mod handler;
 pub mod service;
 pub mod swarm_dag_executor;
@@ -23,6 +24,7 @@ pub use config::{
     CerebrateConfig, FederationConfig, FederationParentConfig, FederationRole as FederationConfigRole,
     FederationTlsConfig,
 };
+pub use dag_handler::SwarmDagEventHandler;
 pub use handler::FederationResultHandler;
 pub use service::{FederationHttpClient, FederationService};
 pub use swarm_dag_executor::SwarmDagExecutor;

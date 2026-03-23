@@ -849,7 +849,9 @@ impl FederationService {
         let federated_goal = FederatedGoal::new(goal.id, cerebrate_id, &goal.description)
             .with_convergence_contract(contract)
             .with_remote_task_id(&remote_task_id);
-        // Override state to Delegated (FederatedGoal::new sets Pending).
+        // State set directly: this is valid because the goal was just created above
+        // with state Pending, and Pending -> Delegated is a valid transition.
+        debug_assert!(FederatedGoalState::Pending.can_transition_to(FederatedGoalState::Delegated));
         let mut federated_goal = federated_goal;
         federated_goal.state = FederatedGoalState::Delegated;
         // Carry over constraints from the goal.
