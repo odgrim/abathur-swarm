@@ -515,13 +515,29 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                 }
             }
 
+            // Read the current verification retry count from task context so that
+            // rework attempts produce a distinct idempotency key in the handler.
+            let current_retry_count = {
+                let parent = self
+                    .task_repo
+                    .get(parent_task_id)
+                    .await?
+                    .ok_or(DomainError::TaskNotFound(parent_task_id))?;
+                parent
+                    .context
+                    .custom
+                    .get("verification_retry_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32
+            };
+
             // Transition to Verifying state
             let verifying_state = WorkflowState::Verifying {
                 workflow_name: workflow_name.clone(),
                 phase_index,
                 phase_name: phase_name.clone(),
                 subtask_ids: subtask_ids.clone(),
-                retry_count: 0,
+                retry_count: current_retry_count,
             };
             self.write_state(parent_task_id, &verifying_state).await?;
 
@@ -535,7 +551,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                         task_id: parent_task_id,
                         phase_index,
                         phase_name,
-                        retry_count: 0,
+                        retry_count: current_retry_count,
                     },
                 ))
                 .await;
