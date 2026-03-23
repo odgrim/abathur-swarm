@@ -238,7 +238,7 @@ pub struct FederationService {
     /// Maps federation task_id → FederatedGoal.id so that result handlers
     /// can correlate incoming results back to the federated goal that owns
     /// the DAG node.
-    task_to_federated_goal: Arc<RwLock<HashMap<Uuid, Uuid>>>,
+    task_to_federated_goal: Arc<RwLock<HashMap<String, Uuid>>>,
     /// Delegation timestamps for stall detection (task_id → last_activity_at).
     last_activity: Arc<RwLock<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>>,
     /// EventBus for emitting federation events.
@@ -937,9 +937,9 @@ impl FederationService {
         // 7. Record the task_id → federated_goal.id mapping so result handlers
         //    can correlate incoming FederationResultReceived events back to the
         //    FederatedGoal (and therefore the DAG node).
-        if let Ok(task_uuid) = remote_task_id.parse::<Uuid>() {
+        {
             let mut map = self.task_to_federated_goal.write().await;
-            map.insert(task_uuid, federated_goal.id);
+            map.insert(remote_task_id.clone(), federated_goal.id);
         }
 
         // 8. Return the FederatedGoal.
@@ -1244,7 +1244,7 @@ impl FederationService {
     /// DAG nodes.
     pub async fn federated_goal_id_for_task(&self, task_id: Uuid) -> Option<Uuid> {
         let map = self.task_to_federated_goal.read().await;
-        map.get(&task_id).copied()
+        map.get(&task_id.to_string()).copied()
     }
 
     /// Get a reference to the task transformer.
