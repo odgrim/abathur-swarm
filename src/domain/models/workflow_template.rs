@@ -300,20 +300,22 @@ impl WorkflowTemplate {
         }
     }
 
-    /// Returns the built-in 5-phase external workflow for adapter-sourced tasks.
+    /// Returns the built-in 6-phase external workflow for adapter-sourced tasks.
     ///
-    /// Extends the standard code workflow with a triage phase at the front.
-    /// The triage phase evaluates whether the ingested content is legitimate,
-    /// in-scope, and free from prompt injection before any work is committed.
-    /// If triage rejects the task the Overmind closes the source issue and
-    /// fails the task without proceeding to the remaining phases.
+    /// Extends the standard code workflow with triage and validation phases at
+    /// the front. The triage phase evaluates whether the ingested content is
+    /// legitimate, in-scope, and free from prompt injection. The validation
+    /// phase then checks whether the issue is still reproducible and hasn't
+    /// already been fixed. Both are gate phases — if either rejects the task
+    /// the Overmind closes the source issue without proceeding.
     pub fn external_workflow() -> Self {
         Self {
             name: "external".to_string(),
-            description: "Triage-first 5-phase workflow for adapter-sourced tasks: triage, \
-                          research, plan, implement, review. Triage gates all subsequent work \
-                          and can close the source issue if the content is out-of-scope or \
-                          adversarial."
+            description: "Triage-first 6-phase workflow for adapter-sourced tasks: triage, \
+                          validation, research, plan, implement, review. Triage gates all \
+                          subsequent work and can close the source issue if the content is \
+                          out-of-scope or adversarial. Validation checks whether the issue \
+                          is still reproducible and hasn't already been fixed."
                 .to_string(),
             phases: vec![
                 WorkflowPhase {
@@ -334,6 +336,28 @@ impl WorkflowTemplate {
                     ],
                     read_only: true,
                     dependency: PhaseDependency::Root,
+                    verify: false,
+                },
+                WorkflowPhase {
+                    name: "validation".to_string(),
+                    description: "Verify that the issue is still valid: check whether the \
+                                  described bug is reproducible on the current branch, whether \
+                                  a fix has already been merged, or whether the issue has been \
+                                  superseded. Store verdict in memory so the Overmind can decide \
+                                  whether to proceed or close the issue as already resolved."
+                        .to_string(),
+                    role: "Validation specialist that determines whether an externally-reported \
+                           issue is still current and reproducible against the latest codebase"
+                        .to_string(),
+                    tools: vec![
+                        "read".to_string(),
+                        "glob".to_string(),
+                        "grep".to_string(),
+                        "bash".to_string(),
+                        "memory".to_string(),
+                    ],
+                    read_only: true,
+                    dependency: PhaseDependency::Sequential,
                     verify: false,
                 },
                 WorkflowPhase {

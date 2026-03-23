@@ -178,12 +178,10 @@ fn list_workflows(json_mode: bool) -> Result<()> {
     let workflows: Vec<WorkflowSummary> = available
         .into_iter()
         .map(|(name, description, phase_count, is_default)| {
-            let source = if name == "code"
-                && !config.workflows.iter().any(|wf| wf.name == "code")
-            {
-                "built-in".to_string()
-            } else {
+            let source = if config.workflows.iter().any(|wf| wf.name == name) {
                 "abathur.toml".to_string()
+            } else {
+                "built-in".to_string()
             };
             WorkflowSummary {
                 name,

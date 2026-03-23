@@ -23,7 +23,7 @@ use crate::services::task_service::TaskService;
 ///
 /// Gate phases park at `PhaseGate` and require an overmind verdict.
 fn is_gate_phase(phase_name: &str) -> bool {
-    matches!(phase_name, "triage" | "review")
+    matches!(phase_name, "triage" | "validation" | "review")
 }
 
 /// Result of an `advance` call, giving the overmind enough info to fan out.
@@ -1579,6 +1579,7 @@ mod tests {
     #[test]
     fn test_is_gate_phase() {
         assert!(is_gate_phase("triage"));
+        assert!(is_gate_phase("validation"));
         assert!(is_gate_phase("review"));
         assert!(!is_gate_phase("implement"));
         assert!(!is_gate_phase("research"));
