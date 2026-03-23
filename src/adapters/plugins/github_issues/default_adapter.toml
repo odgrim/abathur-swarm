@@ -42,3 +42,8 @@ filter_labels = ""
 # status_in_progress = "open"
 # status_done = "closed"
 # status_failed = "open"
+# status_rejected = "closed"
+
+# Optional: when true, post a comment on the issue explaining why it was
+# rejected during triage or validation. Defaults to false.
+# comment_on_rejection = "true"

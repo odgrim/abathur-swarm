@@ -8767,6 +8767,8 @@ pub struct IngestionPollHandler<T: TaskRepository> {
     task_repo: Arc<T>,
     adapter_registry: Arc<crate::services::adapter_registry::AdapterRegistry>,
     command_bus: Arc<crate::services::command_bus::CommandBus>,
+    /// Maximum non-terminal adapter-sourced tasks before ingestion pauses.
+    max_pending: usize,
 }
 
 impl<T: TaskRepository> IngestionPollHandler<T> {
@@ -8775,11 +8777,13 @@ impl<T: TaskRepository> IngestionPollHandler<T> {
         task_repo: Arc<T>,
         adapter_registry: Arc<crate::services::adapter_registry::AdapterRegistry>,
         command_bus: Arc<crate::services::command_bus::CommandBus>,
+        max_pending_ingestion_tasks: usize,
     ) -> Self {
         Self {
             task_repo,
             adapter_registry,
             command_bus,
+            max_pending: max_pending_ingestion_tasks,
         }
     }
 }
@@ -8817,6 +8821,26 @@ impl<T: TaskRepository + 'static> EventHandler for IngestionPollHandler<T> {
             return Ok(Reaction::None);
         }
 
+        // Backpressure: count active (non-terminal) adapter-sourced tasks.
+        // If we're at or above the limit, skip this poll entirely.
+        let active_adapter_tasks = match self.task_repo.list_by_source("adapter").await {
+            Ok(tasks) => tasks.iter().filter(|t| !t.status.is_terminal()).count(),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to count adapter tasks for backpressure check");
+                0 // fail-open: proceed with ingestion if the check fails
+            }
+        };
+
+        if active_adapter_tasks >= self.max_pending {
+            tracing::info!(
+                active = active_adapter_tasks,
+                max = self.max_pending,
+                "Ingestion poll skipped: active adapter tasks at or above max_pending_ingestion_tasks"
+            );
+            return Ok(Reaction::None);
+        }
+
+        let remaining_capacity = self.max_pending - active_adapter_tasks;
         let mut all_events = Vec::new();
 
         for adapter_name in self.adapter_registry.ingestion_names() {
@@ -8851,6 +8875,17 @@ impl<T: TaskRepository + 'static> EventHandler for IngestionPollHandler<T> {
             let mut tasks_created: usize = 0;
 
             for item in &items {
+                // Stop creating tasks once we've filled remaining capacity.
+                if tasks_created >= remaining_capacity {
+                    tracing::info!(
+                        adapter = adapter_name,
+                        tasks_created,
+                        remaining_items = items_found - tasks_created,
+                        "Ingestion paused mid-poll: max_pending_ingestion_tasks reached"
+                    );
+                    break;
+                }
+
                 let idem_key = format!("adapter:{}:{}", adapter_name, item.external_id);
 
                 // Dedup: skip if a task with this idempotency key already exists
@@ -9204,6 +9239,161 @@ impl<T: TaskRepository> AdapterLifecycleSyncHandler<T> {
             }
         }
     }
+
+    /// Handle a gate rejection for an adapter-sourced task.
+    ///
+    /// Updates the external item's status via `status_rejected` and optionally
+    /// posts a comment with the rejection reason when `comment_on_rejection`
+    /// is set to `"true"` in the adapter manifest config.
+    async fn handle_rejection(
+        &self,
+        task_id: uuid::Uuid,
+        phase_name: &str,
+        reason: &str,
+    ) -> Result<Reaction, String> {
+        // Look up the task.
+        let task = match self.task_repo.get(task_id).await {
+            Ok(Some(t)) => t,
+            _ => return Ok(Reaction::None),
+        };
+
+        // Only act on adapter-sourced tasks.
+        let adapter_name = match &task.source {
+            TaskSource::Adapter(name) => name.clone(),
+            _ => return Ok(Reaction::None),
+        };
+
+        // Parse external_id from idempotency key.
+        let external_id = match task.idempotency_key.as_deref().and_then(parse_idempotency_key) {
+            Some((_, eid)) => eid.to_string(),
+            None => return Ok(Reaction::None),
+        };
+
+        // Look up the egress adapter.
+        let adapter = match self.adapter_registry.get_egress(&adapter_name) {
+            Some(a) => a,
+            None => return Ok(Reaction::None),
+        };
+
+        let manifest = self.adapter_registry.get_manifest(&adapter_name);
+        let mut events = Vec::new();
+
+        // --- Status update via status_rejected ---
+        let new_status = get_status_string(manifest, "status_rejected", "skip");
+        if new_status != "skip" {
+            let action = crate::domain::models::adapter::EgressAction::UpdateStatus {
+                external_id: external_id.clone(),
+                new_status,
+            };
+            match adapter.execute(&action).await {
+                Ok(result) => {
+                    tracing::info!(
+                        adapter = %adapter_name,
+                        task_id = %task_id,
+                        external_id = %external_id,
+                        success = result.success,
+                        "Rejection status sync completed"
+                    );
+                    events.push(crate::services::event_factory::make_event(
+                        EventSeverity::Info,
+                        EventCategory::Adapter,
+                        None,
+                        Some(task_id),
+                        EventPayload::AdapterEgressCompleted {
+                            adapter_name: adapter_name.clone(),
+                            task_id,
+                            action: "UpdateStatus(rejected)".to_string(),
+                            success: result.success,
+                        },
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        adapter = %adapter_name,
+                        task_id = %task_id,
+                        error = %e,
+                        "Rejection status sync failed"
+                    );
+                    events.push(crate::services::event_factory::make_event(
+                        EventSeverity::Warning,
+                        EventCategory::Adapter,
+                        None,
+                        Some(task_id),
+                        EventPayload::AdapterEgressFailed {
+                            adapter_name: adapter_name.clone(),
+                            task_id: Some(task_id),
+                            error: e.to_string(),
+                        },
+                    ));
+                }
+            }
+        }
+
+        // --- Optional rejection comment ---
+        let comment_enabled = manifest
+            .and_then(|m| m.config.get("comment_on_rejection"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if comment_enabled {
+            let body = format!(
+                "**Rejected during {phase_name}**\n\n{reason}"
+            );
+            let action = crate::domain::models::adapter::EgressAction::PostComment {
+                external_id: external_id.clone(),
+                body,
+            };
+            match adapter.execute(&action).await {
+                Ok(result) => {
+                    tracing::info!(
+                        adapter = %adapter_name,
+                        task_id = %task_id,
+                        external_id = %external_id,
+                        success = result.success,
+                        "Rejection comment posted"
+                    );
+                    events.push(crate::services::event_factory::make_event(
+                        EventSeverity::Info,
+                        EventCategory::Adapter,
+                        None,
+                        Some(task_id),
+                        EventPayload::AdapterEgressCompleted {
+                            adapter_name: adapter_name.clone(),
+                            task_id,
+                            action: "PostComment(rejection)".to_string(),
+                            success: result.success,
+                        },
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        adapter = %adapter_name,
+                        task_id = %task_id,
+                        error = %e,
+                        "Rejection comment failed"
+                    );
+                    events.push(crate::services::event_factory::make_event(
+                        EventSeverity::Warning,
+                        EventCategory::Adapter,
+                        None,
+                        Some(task_id),
+                        EventPayload::AdapterEgressFailed {
+                            adapter_name: adapter_name.clone(),
+                            task_id: Some(task_id),
+                            error: e.to_string(),
+                        },
+                    ));
+                }
+            }
+        }
+
+        if events.is_empty() {
+            Ok(Reaction::None)
+        } else {
+            Ok(Reaction::EmitEvents(events))
+        }
+    }
 }
 
 #[async_trait]
@@ -9213,12 +9403,13 @@ impl<T: TaskRepository + 'static> EventHandler for AdapterLifecycleSyncHandler<T
             id: HandlerId::new(),
             name: "AdapterLifecycleSyncHandler".to_string(),
             filter: EventFilter::new()
-                .categories(vec![EventCategory::Task, EventCategory::Adapter])
+                .categories(vec![EventCategory::Task, EventCategory::Adapter, EventCategory::Workflow])
                 .payload_types(vec![
                     "TaskClaimed".to_string(),
                     "TaskCompleted".to_string(),
                     "TaskFailed".to_string(),
                     "AdapterTaskIngested".to_string(),
+                    "WorkflowGateRejected".to_string(),
                 ]),
             priority: HandlerPriority::NORMAL,
             error_strategy: ErrorStrategy::CircuitBreak,
@@ -9239,6 +9430,9 @@ impl<T: TaskRepository + 'static> EventHandler for AdapterLifecycleSyncHandler<T
             }
             EventPayload::AdapterTaskIngested { task_id, .. } => {
                 self.handle_lifecycle(*task_id, "status_pending", "skip").await
+            }
+            EventPayload::WorkflowGateRejected { task_id, phase_name, reason, .. } => {
+                self.handle_rejection(*task_id, phase_name, reason).await
             }
             _ => Ok(Reaction::None),
         }

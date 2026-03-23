@@ -89,6 +89,12 @@ pub struct SwarmConfig {
 
     /// Override for the overmind agent's max turns (default: 50).
     pub overmind_max_turns: Option<u32>,
+
+    /// Maximum number of non-terminal adapter-sourced tasks allowed before
+    /// ingestion polling stops creating new ones. Provides backpressure so
+    /// that a large backlog of external issues does not overwhelm the swarm.
+    /// Default: 1.
+    pub max_pending_ingestion_tasks: usize,
 }
 
 /// Configurable polling intervals (seconds) for all scheduled handlers.
@@ -374,6 +380,7 @@ impl Default for SwarmConfig {
             all_workflows: vec![],
             dangerously_skip_permissions: false,
             overmind_max_turns: None,
+            max_pending_ingestion_tasks: 1,
         }
     }
 }

@@ -914,7 +914,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             DomainError::ValidationFailed(format!("Task {} has no workflow state", task_id))
         })?;
 
-        let (workflow_name, phase_index, _phase_name) = match &state {
+        let (workflow_name, phase_index, phase_name) = match &state {
             WorkflowState::PhaseGate {
                 workflow_name,
                 phase_index,
@@ -956,6 +956,24 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                     reason: rejection_reason.clone(),
                 };
                 self.write_state(task_id, &rejected).await?;
+
+                // Emit a dedicated rejection event so downstream handlers
+                // (e.g. adapter lifecycle sync) can react specifically to
+                // gate rejections rather than generic task failures.
+                self.event_bus
+                    .publish(event_factory::make_event(
+                        EventSeverity::Warning,
+                        EventCategory::Workflow,
+                        None,
+                        Some(task_id),
+                        EventPayload::WorkflowGateRejected {
+                            task_id,
+                            phase_index,
+                            phase_name: phase_name.clone(),
+                            reason: rejection_reason.clone(),
+                        },
+                    ))
+                    .await;
 
                 // Fail parent task via TaskService
                 let error_msg = format!("Workflow rejected at phase {}: {}", phase_index, rejection_reason);

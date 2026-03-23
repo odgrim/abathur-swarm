@@ -705,6 +705,7 @@ where
                         self.task_repo.clone(),
                         adapter_registry.clone(),
                         command_bus.clone(),
+                        self.config.max_pending_ingestion_tasks,
                     )))
                     .await;
             }

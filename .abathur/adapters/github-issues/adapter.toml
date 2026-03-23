@@ -42,3 +42,6 @@ filter_labels = "swarm-ingestible"
 # status_in_progress = "open"
 # status_done = "closed"
 # status_failed = "open"
+status_rejected = "closed"
+
+commont_on_rejection = "true"

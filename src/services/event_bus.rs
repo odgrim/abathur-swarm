@@ -888,6 +888,14 @@ pub enum EventPayload {
         verdict: String,
     },
 
+    /// A gate phase rejected the task (triage, validation, or review).
+    WorkflowGateRejected {
+        task_id: Uuid,
+        phase_index: usize,
+        phase_name: String,
+        reason: String,
+    },
+
     /// Workflow advanced from one phase to another.
     WorkflowAdvanced {
         task_id: Uuid,
@@ -1220,6 +1228,7 @@ impl EventPayload {
             Self::WorkflowPhaseStarted { .. } => "WorkflowPhaseStarted",
             Self::WorkflowGateReached { .. } => "WorkflowGateReached",
             Self::WorkflowGateVerdict { .. } => "WorkflowGateVerdict",
+            Self::WorkflowGateRejected { .. } => "WorkflowGateRejected",
             Self::WorkflowAdvanced { .. } => "WorkflowAdvanced",
             Self::WorkflowPhaseReady { .. } => "WorkflowPhaseReady",
             Self::WorkflowCompleted { .. } => "WorkflowCompleted",
@@ -1371,6 +1380,7 @@ impl EventPayload {
             | Self::WorkflowPhaseStarted { .. }
             | Self::WorkflowGateReached { .. }
             | Self::WorkflowGateVerdict { .. }
+            | Self::WorkflowGateRejected { .. }
             | Self::WorkflowAdvanced { .. }
             | Self::WorkflowPhaseReady { .. }
             | Self::WorkflowCompleted { .. }
