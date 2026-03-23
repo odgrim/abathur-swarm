@@ -177,7 +177,7 @@ where
         (loaded, None, bandit)
     } else {
         let submission = convergence_bridge::task_to_submission(task, goal_id);
-        let (trajectory, infrastructure) = engine.prepare(&submission).await?;
+        let (trajectory, infrastructure) = engine.prepare(&submission, task.id).await?;
 
         if let Ok(Some(mut t)) = task_repo.get(task.id).await {
             t.trajectory_id = Some(trajectory.id);
@@ -313,7 +313,7 @@ where
     // -----------------------------------------------------------------------
 
     let submission = convergence_bridge::task_to_submission(task, goal_id);
-    let (mut base_trajectory, _infrastructure) = engine.prepare(&submission).await?;
+    let (mut base_trajectory, _infrastructure) = engine.prepare(&submission, task.id).await?;
 
     // Apply SLA deadline cap (Part 8.1)
     if let Some(deadline) = deadline {
