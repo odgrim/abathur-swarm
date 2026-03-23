@@ -9426,6 +9426,16 @@ impl<T: TaskRepository + 'static> EventHandler for AdapterLifecycleSyncHandler<T
                 self.handle_lifecycle(*task_id, "status_done", "skip").await
             }
             EventPayload::TaskFailed { task_id, .. } => {
+                // If this failure was caused by a gate rejection, skip —
+                // the WorkflowGateRejected handler owns the egress for
+                // rejections and uses the separate status_rejected config.
+                if let Ok(Some(task)) = self.task_repo.get(*task_id).await {
+                    if let Some(crate::domain::models::workflow_state::WorkflowState::Rejected { .. }) =
+                        crate::services::workflow_engine::WorkflowEngine::<T>::read_state_from_task(&task)
+                    {
+                        return Ok(Reaction::None);
+                    }
+                }
                 self.handle_lifecycle(*task_id, "status_failed", "skip").await
             }
             EventPayload::AdapterTaskIngested { task_id, .. } => {
