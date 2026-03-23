@@ -16,6 +16,7 @@
 pub mod config;
 pub mod handler;
 pub mod service;
+pub mod swarm_dag_executor;
 pub mod traits;
 
 pub use config::{
@@ -24,6 +25,7 @@ pub use config::{
 };
 pub use handler::FederationResultHandler;
 pub use service::{FederationHttpClient, FederationService};
+pub use swarm_dag_executor::SwarmDagExecutor;
 pub use traits::{
     DefaultDelegationStrategy, DefaultResultProcessor, DefaultTaskTransformer,
     DelegationDecision, FederationDelegationStrategy, FederationReaction,

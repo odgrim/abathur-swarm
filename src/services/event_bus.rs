@@ -1049,6 +1049,46 @@ pub enum EventPayload {
         cerebrate_id: String,
         reason: String,
     },
+
+    // Swarm DAG lifecycle events
+
+    /// A swarm DAG was created and execution started.
+    SwarmDagCreated {
+        dag_id: Uuid,
+        dag_name: String,
+        node_count: usize,
+    },
+
+    /// A swarm DAG node was delegated to a child swarm.
+    SwarmDagNodeDelegated {
+        dag_id: Uuid,
+        node_id: Uuid,
+        node_label: String,
+        cerebrate_id: String,
+    },
+
+    /// A swarm DAG node was unblocked (dependencies met, now delegated).
+    SwarmDagNodeUnblocked {
+        dag_id: Uuid,
+        node_id: Uuid,
+        node_label: String,
+    },
+
+    /// A swarm DAG node failed.
+    SwarmDagNodeFailed {
+        dag_id: Uuid,
+        node_id: Uuid,
+        node_label: String,
+        reason: String,
+    },
+
+    /// A swarm DAG completed (all nodes terminal).
+    SwarmDagCompleted {
+        dag_id: Uuid,
+        dag_name: String,
+        converged_count: usize,
+        failed_count: usize,
+    },
 }
 
 impl EventPayload {
@@ -1193,6 +1233,11 @@ impl EventPayload {
             Self::FederatedGoalProgress { .. } => "FederatedGoalProgress",
             Self::FederatedGoalConverged { .. } => "FederatedGoalConverged",
             Self::FederatedGoalFailed { .. } => "FederatedGoalFailed",
+            Self::SwarmDagCreated { .. } => "SwarmDagCreated",
+            Self::SwarmDagNodeDelegated { .. } => "SwarmDagNodeDelegated",
+            Self::SwarmDagNodeUnblocked { .. } => "SwarmDagNodeUnblocked",
+            Self::SwarmDagNodeFailed { .. } => "SwarmDagNodeFailed",
+            Self::SwarmDagCompleted { .. } => "SwarmDagCompleted",
         }
     }
 
@@ -1348,7 +1393,12 @@ impl EventPayload {
             | Self::FederatedGoalCreated { .. }
             | Self::FederatedGoalProgress { .. }
             | Self::FederatedGoalConverged { .. }
-            | Self::FederatedGoalFailed { .. } => Some(EventCategory::Federation),
+            | Self::FederatedGoalFailed { .. }
+            | Self::SwarmDagCreated { .. }
+            | Self::SwarmDagNodeDelegated { .. }
+            | Self::SwarmDagNodeUnblocked { .. }
+            | Self::SwarmDagNodeFailed { .. }
+            | Self::SwarmDagCompleted { .. } => Some(EventCategory::Federation),
         }
     }
 }
