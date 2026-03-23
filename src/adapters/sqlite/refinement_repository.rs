@@ -97,6 +97,7 @@ fn trigger_to_str(t: &EvolutionTrigger) -> &'static str {
         EvolutionTrigger::GoalViolations => "GoalViolations",
         EvolutionTrigger::DownstreamImpact => "DownstreamImpact",
         EvolutionTrigger::Regression => "Regression",
+        EvolutionTrigger::StaleTimeout => "StaleTimeout",
     }
 }
 
@@ -109,6 +110,7 @@ fn trigger_from_str(
         "GoalViolations" => Ok(EvolutionTrigger::GoalViolations),
         "DownstreamImpact" => Ok(EvolutionTrigger::DownstreamImpact),
         "Regression" => Ok(EvolutionTrigger::Regression),
+        "StaleTimeout" => Ok(EvolutionTrigger::StaleTimeout),
         other => Err(format!("Unknown trigger: '{}'", other).into()),
     }
 }

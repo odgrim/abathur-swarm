@@ -1106,6 +1106,14 @@ pub enum EventPayload {
         converged_count: usize,
         failed_count: usize,
     },
+
+    /// A subsystem encountered an error that was isolated (not propagated).
+    /// Emitted when the main loop catches a subsystem failure to ensure
+    /// graceful degradation — no single subsystem failure halts the swarm.
+    SubsystemError {
+        subsystem: String,
+        error: String,
+    },
 }
 
 impl EventPayload {
@@ -1256,6 +1264,7 @@ impl EventPayload {
             Self::SwarmDagNodeUnblocked { .. } => "SwarmDagNodeUnblocked",
             Self::SwarmDagNodeFailed { .. } => "SwarmDagNodeFailed",
             Self::SwarmDagCompleted { .. } => "SwarmDagCompleted",
+            Self::SubsystemError { .. } => "SubsystemError",
         }
     }
 
@@ -1418,6 +1427,8 @@ impl EventPayload {
             | Self::SwarmDagNodeUnblocked { .. }
             | Self::SwarmDagNodeFailed { .. }
             | Self::SwarmDagCompleted { .. } => Some(EventCategory::Federation),
+
+            Self::SubsystemError { .. } => Some(EventCategory::Orchestrator),
         }
     }
 }
@@ -2411,5 +2422,47 @@ mod tests {
         // Only the Task event should have been persisted
         assert_eq!(appended.len(), 1);
         assert_eq!(appended[0], EventCategory::Task);
+    }
+
+    #[test]
+    fn test_subsystem_error_variant_name() {
+        let payload = EventPayload::SubsystemError {
+            subsystem: "drain_ready_tasks".into(),
+            error: "connection lost".into(),
+        };
+        assert_eq!(payload.variant_name(), "SubsystemError");
+    }
+
+    #[test]
+    fn test_subsystem_error_category() {
+        let payload = EventPayload::SubsystemError {
+            subsystem: "drain_ready_tasks".into(),
+            error: "connection lost".into(),
+        };
+        assert_eq!(payload.expected_category(), Some(EventCategory::Orchestrator));
+    }
+
+    #[tokio::test]
+    async fn test_subsystem_error_event_published() {
+        let bus = EventBus::new(EventBusConfig::default());
+        let mut rx = bus.subscribe();
+
+        let event = crate::services::event_factory::orchestrator_event(
+            EventSeverity::Error,
+            EventPayload::SubsystemError {
+                subsystem: "test_subsystem".into(),
+                error: "test error".into(),
+            },
+        );
+        bus.publish(event).await;
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received.payload.variant_name(), "SubsystemError");
+        if let EventPayload::SubsystemError { subsystem, error } = &received.payload {
+            assert_eq!(subsystem, "test_subsystem");
+            assert_eq!(error, "test error");
+        } else {
+            panic!("Expected SubsystemError payload");
+        }
     }
 }

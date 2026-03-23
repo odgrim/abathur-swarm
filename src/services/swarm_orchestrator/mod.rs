@@ -788,13 +788,40 @@ where
             // operations that require full orchestrator context.
 
             // Drain ready-task channel and spawn agents
-            self.drain_ready_tasks(&event_tx).await?;
+            if let Err(e) = self.drain_ready_tasks(&event_tx).await {
+                tracing::error!(error = %e, "drain_ready_tasks subsystem error (isolated)");
+                self.event_bus.publish(crate::services::event_factory::orchestrator_event(
+                    crate::services::event_bus::EventSeverity::Error,
+                    crate::services::event_bus::EventPayload::SubsystemError {
+                        subsystem: "drain_ready_tasks".into(),
+                        error: e.to_string(),
+                    },
+                )).await;
+            }
 
             // Drain specialist channel and process specialist triggers
-            self.drain_specialist_tasks(&event_tx).await?;
+            if let Err(e) = self.drain_specialist_tasks(&event_tx).await {
+                tracing::error!(error = %e, "drain_specialist_tasks subsystem error (isolated)");
+                self.event_bus.publish(crate::services::event_factory::orchestrator_event(
+                    crate::services::event_bus::EventSeverity::Error,
+                    crate::services::event_bus::EventPayload::SubsystemError {
+                        subsystem: "drain_specialist_tasks".into(),
+                        error: e.to_string(),
+                    },
+                )).await;
+            }
 
-            if self.config.track_evolution {
-                self.process_evolution_refinements(&event_tx).await?;
+            if self.config.track_evolution
+                && let Err(e) = self.process_evolution_refinements(&event_tx).await
+            {
+                tracing::error!(error = %e, "process_evolution_refinements subsystem error (isolated)");
+                self.event_bus.publish(crate::services::event_factory::orchestrator_event(
+                    crate::services::event_bus::EventSeverity::Error,
+                    crate::services::event_bus::EventPayload::SubsystemError {
+                        subsystem: "process_evolution_refinements".into(),
+                        error: e.to_string(),
+                    },
+                )).await;
             }
 
             // Auto-shutdown: if all goals and tasks have reached terminal state
@@ -881,10 +908,28 @@ where
         let (tx, _rx) = mpsc::channel(100);
 
         // Drain ready-task channel and spawn agents
-        self.drain_ready_tasks(&tx).await?;
+        if let Err(e) = self.drain_ready_tasks(&tx).await {
+            tracing::error!(error = %e, "tick: drain_ready_tasks subsystem error (isolated)");
+            self.event_bus.publish(crate::services::event_factory::orchestrator_event(
+                crate::services::event_bus::EventSeverity::Error,
+                crate::services::event_bus::EventPayload::SubsystemError {
+                    subsystem: "drain_ready_tasks".into(),
+                    error: e.to_string(),
+                },
+            )).await;
+        }
 
         // Update stats
-        self.update_stats(&tx).await?;
+        if let Err(e) = self.update_stats(&tx).await {
+            tracing::error!(error = %e, "tick: update_stats subsystem error (isolated)");
+            self.event_bus.publish(crate::services::event_factory::orchestrator_event(
+                crate::services::event_bus::EventSeverity::Error,
+                crate::services::event_bus::EventPayload::SubsystemError {
+                    subsystem: "update_stats".into(),
+                    error: e.to_string(),
+                },
+            )).await;
+        }
 
         Ok(self.stats().await)
     }
