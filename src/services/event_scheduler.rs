@@ -376,7 +376,7 @@ impl EventScheduler {
                                 sequence: SequenceNumber(0),
                                 timestamp: now,
                                 severity: sched.severity,
-                                category: sched.category,
+                                category: EventCategory::Scheduler,
                                 goal_id: sched.goal_id,
                                 task_id: sched.task_id,
                                 correlation_id: None,

@@ -1171,7 +1171,7 @@ mod tests {
                     sequence: SequenceNumber(0),
                     timestamp: Utc::now(),
                     severity: EventSeverity::Info,
-                    category: EventCategory::Task,
+                    category: EventCategory::Orchestrator,
                     goal_id: None,
                     task_id: None,
                     correlation_id: event.correlation_id,
