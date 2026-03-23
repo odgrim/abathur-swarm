@@ -3,6 +3,7 @@
 pub mod agent_repository;
 pub mod connection;
 pub mod event_repository;
+pub mod federated_goal_repository;
 pub mod goal_repository;
 pub mod memory_repository;
 pub mod merge_request_repository;
@@ -19,6 +20,7 @@ pub mod worktree_repository;
 pub use agent_repository::SqliteAgentRepository;
 pub use connection::{create_pool, create_test_pool, verify_connection, ConnectionError, PoolConfig};
 pub use event_repository::SqliteEventRepository;
+pub use federated_goal_repository::SqliteFederatedGoalRepository;
 pub use goal_repository::SqliteGoalRepository;
 pub use memory_repository::SqliteMemoryRepository;
 pub use merge_request_repository::SqliteMergeRequestRepository;

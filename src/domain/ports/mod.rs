@@ -3,6 +3,7 @@
 pub mod adapter;
 pub mod agent_repository;
 pub mod embedding;
+pub mod federated_goal_repository;
 pub mod goal_repository;
 pub mod memory_repository;
 pub mod merge_request_repository;
@@ -19,6 +20,7 @@ pub mod worktree_repository;
 pub use adapter::{EgressAdapter, IngestionAdapter};
 pub use agent_repository::{AgentFilter, AgentRepository};
 pub use embedding::{EmbeddingInput, EmbeddingOutput, EmbeddingProvider};
+pub use federated_goal_repository::FederatedGoalRepository;
 pub use goal_repository::{GoalFilter, GoalRepository};
 pub use memory_repository::MemoryRepository;
 pub use merge_request_repository::MergeRequestRepository;

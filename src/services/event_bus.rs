@@ -1020,6 +1020,35 @@ pub enum EventPayload {
         goal_id: Option<Uuid>,
         task_id: Option<Uuid>,
     },
+
+    // Federation goal lifecycle events
+
+    /// A federated goal was created and delegated to a child cerebrate.
+    FederatedGoalCreated {
+        local_goal_id: Uuid,
+        cerebrate_id: String,
+        remote_task_id: String,
+    },
+
+    /// Progress update received for a federated goal.
+    FederatedGoalProgress {
+        local_goal_id: Uuid,
+        convergence_level: f64,
+        signals: std::collections::HashMap<String, f64>,
+    },
+
+    /// A federated goal converged successfully.
+    FederatedGoalConverged {
+        local_goal_id: Uuid,
+        cerebrate_id: String,
+    },
+
+    /// A federated goal failed.
+    FederatedGoalFailed {
+        local_goal_id: Uuid,
+        cerebrate_id: String,
+        reason: String,
+    },
 }
 
 impl EventPayload {
@@ -1160,6 +1189,10 @@ impl EventPayload {
             Self::FederationCerebrateUnreachable { .. } => "FederationCerebrateUnreachable",
             Self::FederationStallDetected { .. } => "FederationStallDetected",
             Self::FederationReactionEmitted { .. } => "FederationReactionEmitted",
+            Self::FederatedGoalCreated { .. } => "FederatedGoalCreated",
+            Self::FederatedGoalProgress { .. } => "FederatedGoalProgress",
+            Self::FederatedGoalConverged { .. } => "FederatedGoalConverged",
+            Self::FederatedGoalFailed { .. } => "FederatedGoalFailed",
         }
     }
 
@@ -1311,7 +1344,11 @@ impl EventPayload {
             | Self::FederationHeartbeatMissed { .. }
             | Self::FederationCerebrateUnreachable { .. }
             | Self::FederationStallDetected { .. }
-            | Self::FederationReactionEmitted { .. } => Some(EventCategory::Federation),
+            | Self::FederationReactionEmitted { .. }
+            | Self::FederatedGoalCreated { .. }
+            | Self::FederatedGoalProgress { .. }
+            | Self::FederatedGoalConverged { .. }
+            | Self::FederatedGoalFailed { .. } => Some(EventCategory::Federation),
         }
     }
 }

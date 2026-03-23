@@ -49,6 +49,7 @@ pub mod cluster;
 pub mod compilation;
 pub mod lint;
 pub mod security_scan;
+pub mod swarm;
 pub mod test_suite;
 pub mod traits;
 pub mod type_check;

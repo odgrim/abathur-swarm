@@ -129,5 +129,10 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
             description: "Merge request persistence for conflict resolution".to_string(),
             sql: include_str!("../../../migrations/009_merge_requests.sql").to_string(),
         },
+        Migration {
+            version: 10,
+            description: "Federated goals for cross-swarm delegation".to_string(),
+            sql: include_str!("../../../migrations/010_federated_goals.sql").to_string(),
+        },
     ]
 }
