@@ -103,6 +103,10 @@ where
     pub(super) outbox_repo: Option<Arc<dyn crate::domain::ports::OutboxRepository>>,
     /// Optional handle to the outbox poller daemon.
     pub(super) outbox_poller_handle: Arc<RwLock<Option<crate::services::outbox_poller::OutboxPollerHandle>>>,
+    /// Optional handle to the convergence poller daemon (federation).
+    pub(super) convergence_poller_handle: Arc<RwLock<Option<crate::services::federation::ConvergencePollerHandle>>>,
+    /// Optional handle to the convergence publisher daemon (federation).
+    pub(super) convergence_publisher_handle: Arc<RwLock<Option<crate::services::federation::convergence_publisher::ConvergencePublisherHandle>>>,
     /// Optional DB pool for services that need persistence (absence timers, command dedup).
     pub(super) pool: Option<sqlx::SqlitePool>,
 
@@ -187,6 +191,8 @@ where
             command_bus: Arc::new(RwLock::new(None)),
             outbox_repo: None,
             outbox_poller_handle: Arc::new(RwLock::new(None)),
+            convergence_poller_handle: Arc::new(RwLock::new(None)),
+            convergence_publisher_handle: Arc::new(RwLock::new(None)),
             pool: None,
             overseer_cluster: None,
             trajectory_repo: None,

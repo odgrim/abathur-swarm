@@ -89,6 +89,7 @@ impl A2AErrorCode {
 pub enum A2ATaskState {
     Submitted,
     Working,
+    #[serde(rename = "input-required")]
     InputRequired,
     Completed,
     Failed,
@@ -242,6 +243,7 @@ pub struct PushNotificationConfig {
 /// Artifact structure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct A2AArtifact {
+    #[serde(rename = "artifactId")]
     pub id: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -522,7 +524,7 @@ pub struct A2AState {
     /// Registered agent cards.
     pub agent_cards: RwLock<HashMap<String, A2AAgentCard>>,
     /// In-memory tasks.
-    pub tasks: RwLock<HashMap<String, InMemoryTask>>,
+    pub tasks: Arc<RwLock<HashMap<String, InMemoryTask>>>,
     /// Sessions.
     pub sessions: RwLock<HashMap<String, A2ASession>>,
     /// Messages between agents.
@@ -533,18 +535,22 @@ pub struct A2AState {
     pub config: A2AHttpConfig,
     /// Optional federation service for inter-swarm communication.
     pub federation_service: Option<Arc<crate::services::federation::FederationService>>,
+    /// Handle for the convergence publisher daemon (lazily spawned).
+    pub convergence_publisher_handle:
+        RwLock<Option<crate::services::federation::convergence_publisher::ConvergencePublisherHandle>>,
 }
 
 impl A2AState {
     pub fn new(config: A2AHttpConfig) -> Self {
         Self {
             agent_cards: RwLock::new(HashMap::new()),
-            tasks: RwLock::new(HashMap::new()),
+            tasks: Arc::new(RwLock::new(HashMap::new())),
             sessions: RwLock::new(HashMap::new()),
             messages: RwLock::new(HashMap::new()),
             delegations: RwLock::new(HashMap::new()),
             config,
             federation_service: None,
+            convergence_publisher_handle: RwLock::new(None),
         }
     }
 
@@ -1414,6 +1420,21 @@ async fn handle_federation_routing(
             {
                 let mut tasks = state.tasks.write().await;
                 tasks.insert(task_id.clone(), local_task);
+            }
+
+            // Lazily spawn the convergence publisher on first goal_delegate.
+            {
+                let mut publisher_guard = state.convergence_publisher_handle.write().await;
+                if publisher_guard.is_none() {
+                    use crate::services::federation::convergence_publisher::ConvergencePublisher;
+                    let publisher = ConvergencePublisher::new(
+                        state.tasks.clone(),
+                        std::time::Duration::from_secs(10),
+                    );
+                    let handle = publisher.spawn();
+                    *publisher_guard = Some(handle);
+                    tracing::info!("Spawned convergence publisher for goal_delegate tasks");
+                }
             }
 
             let response_task = A2ATask {

@@ -14,6 +14,8 @@
 //! - Configuration types for the `[federation]` TOML section.
 
 pub mod config;
+pub mod convergence_poller;
+pub mod convergence_publisher;
 pub mod dag_handler;
 pub mod handler;
 pub mod service;
@@ -24,6 +26,8 @@ pub use config::{
     CerebrateConfig, FederationConfig, FederationParentConfig, FederationRole as FederationConfigRole,
     FederationTlsConfig,
 };
+pub use convergence_poller::{ConvergencePollerConfig, ConvergencePollerHandle, ConvergencePollingDaemon};
+pub use convergence_publisher::ConvergencePublisher;
 pub use dag_handler::SwarmDagEventHandler;
 pub use handler::FederationResultHandler;
 pub use service::{FederationHttpClient, FederationService};

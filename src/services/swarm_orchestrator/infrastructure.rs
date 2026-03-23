@@ -370,6 +370,97 @@ where
         }
     }
 
+    /// Start the convergence polling daemon for federation.
+    ///
+    /// Requires an A2A client and a federated goal repository. If the
+    /// federation service is not configured this is a no-op.
+    pub async fn start_convergence_poller(
+        &self,
+        a2a_client: Arc<dyn crate::adapters::a2a::A2AClient>,
+        federated_goal_repo: Arc<dyn crate::domain::ports::FederatedGoalRepository>,
+    ) -> DomainResult<()> {
+        let Some(ref federation_service) = self.federation_service else {
+            return Ok(());
+        };
+
+        use crate::services::federation::convergence_poller::{
+            ConvergencePollerConfig, ConvergencePollingDaemon,
+        };
+
+        let daemon = ConvergencePollingDaemon::new(
+            federation_service.clone(),
+            a2a_client,
+            federated_goal_repo,
+            self.event_bus.clone(),
+            ConvergencePollerConfig::default(),
+        );
+
+        let handle = daemon.start();
+
+        {
+            let mut stored = self.convergence_poller_handle.write().await;
+            *stored = Some(handle);
+        }
+
+        self.audit_log
+            .info(
+                AuditCategory::System,
+                AuditAction::SwarmStarted,
+                "Convergence polling daemon started",
+            )
+            .await;
+
+        Ok(())
+    }
+
+    /// Start the convergence publisher daemon for federation (Cerebrate role).
+    ///
+    /// The publisher periodically snapshots local convergence state and attaches
+    /// it to federated A2A tasks so the parent Overmind can poll them. Only starts
+    /// when the federation service is configured and the role is Cerebrate.
+    pub async fn start_convergence_publisher(
+        &self,
+        a2a_tasks: Arc<tokio::sync::RwLock<std::collections::HashMap<String, crate::adapters::mcp::a2a_http::InMemoryTask>>>,
+    ) -> DomainResult<()> {
+        let Some(ref federation_service) = self.federation_service else {
+            return Ok(());
+        };
+
+        use crate::services::federation::config::FederationRole;
+
+        if !matches!(federation_service.config().role, FederationRole::Cerebrate) {
+            return Ok(());
+        }
+
+        use crate::services::federation::convergence_publisher::ConvergencePublisher;
+
+        let mut publisher = ConvergencePublisher::new(
+            a2a_tasks,
+            std::time::Duration::from_secs(30),
+        );
+
+        if let Some(ref trajectory_repo) = self.trajectory_repo {
+            publisher = publisher.with_trajectory_repo(trajectory_repo.clone());
+        }
+
+        let handle = publisher.spawn();
+
+        {
+            let mut stored = self.convergence_publisher_handle.write().await;
+            *stored = Some(handle);
+        }
+
+        self.audit_log
+            .info(
+                AuditCategory::System,
+                AuditAction::SwarmStarted,
+                "Convergence publisher daemon started (Cerebrate role)",
+            )
+            .await;
+
+        Ok(())
+    }
+
     /// Start the memory decay daemon.
     pub async fn start_decay_daemon(&self) -> DomainResult<()>
     where
@@ -555,6 +646,22 @@ where
     /// Stop the outbox poller.
     pub async fn stop_outbox_poller(&self) {
         let handle = self.outbox_poller_handle.read().await;
+        if let Some(ref h) = *handle {
+            h.stop();
+        }
+    }
+
+    /// Stop the convergence poller daemon.
+    pub async fn stop_convergence_poller(&self) {
+        let handle = self.convergence_poller_handle.read().await;
+        if let Some(ref h) = *handle {
+            h.stop();
+        }
+    }
+
+    /// Stop the convergence publisher daemon.
+    pub async fn stop_convergence_publisher(&self) {
+        let handle = self.convergence_publisher_handle.read().await;
         if let Some(ref h) = *handle {
             h.stop();
         }

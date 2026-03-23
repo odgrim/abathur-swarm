@@ -430,6 +430,12 @@ impl From<&FederationTaskEnvelope> for TaskSendParams {
                 serde_json::Value::String(schema.clone()),
             );
         }
+        if !envelope.required_capabilities.is_empty() {
+            federation_data.insert(
+                "required_capabilities".to_string(),
+                serde_json::to_value(&envelope.required_capabilities).unwrap_or_default(),
+            );
+        }
 
         let mut metadata = HashMap::new();
         metadata.insert(

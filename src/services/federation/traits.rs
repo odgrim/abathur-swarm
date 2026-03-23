@@ -52,26 +52,27 @@ pub trait FederationDelegationStrategy: Send + Sync {
     ) -> DelegationDecision;
 }
 
-/// Default delegation strategy: selects the connected cerebrate with the lowest load.
-///
-/// TODO: Add capability matching when `FederationTaskEnvelope` gains a
-/// `required_capabilities` field. Currently the strategy only considers load
-/// because envelopes do not carry capability requirements. When that field is
-/// added, `select_cerebrate` should filter cerebrates whose `capabilities`
-/// list contains all required capabilities before ranking by load.
+/// Default delegation strategy: selects the connected cerebrate with the lowest load
+/// whose capabilities satisfy the task's requirements.
 pub struct DefaultDelegationStrategy;
+
+impl DefaultDelegationStrategy {
+    /// Check whether a cerebrate's capabilities satisfy all required capabilities.
+    fn has_required_capabilities(cerebrate: &CerebrateStatus, required: &[String]) -> bool {
+        required.iter().all(|req| cerebrate.capabilities.iter().any(|c| c == req))
+    }
+}
 
 impl FederationDelegationStrategy for DefaultDelegationStrategy {
     fn select_cerebrate(
         &self,
-        _task: &FederationTaskEnvelope,
+        task: &FederationTaskEnvelope,
         cerebrates: &[CerebrateStatus],
     ) -> Option<String> {
-        // TODO: When envelopes gain capability requirements, filter cerebrates
-        // by matching capabilities before selecting by lowest load.
         cerebrates
             .iter()
             .filter(|c| c.can_accept_task())
+            .filter(|c| Self::has_required_capabilities(c, &task.required_capabilities))
             .min_by(|a, b| a.load.partial_cmp(&b.load).unwrap_or(std::cmp::Ordering::Equal))
             .map(|c| c.id.clone())
     }

@@ -470,6 +470,12 @@ pub struct FederationTaskEnvelope {
     pub accept_timeout_secs: u64,
     /// Optional schema ID for the expected result format.
     pub result_schema: Option<String>,
+    /// Capabilities the target cerebrate must have for this task.
+    ///
+    /// When non-empty, the delegation strategy will filter cerebrates to
+    /// only those whose `capabilities` list contains all required entries.
+    #[serde(default)]
+    pub required_capabilities: Vec<String>,
 }
 
 impl FederationTaskEnvelope {
@@ -489,6 +495,7 @@ impl FederationTaskEnvelope {
             context: FederationTaskContext::default(),
             accept_timeout_secs: 300,
             result_schema: None,
+            required_capabilities: Vec::new(),
         }
     }
 
@@ -504,6 +511,11 @@ impl FederationTaskEnvelope {
 
     pub fn with_constraint(mut self, constraint: impl Into<String>) -> Self {
         self.constraints.push(constraint.into());
+        self
+    }
+
+    pub fn with_required_capabilities(mut self, capabilities: Vec<String>) -> Self {
+        self.required_capabilities = capabilities;
         self
     }
 
