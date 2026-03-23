@@ -1167,6 +1167,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_load_context_with_budget_prefers_high_relevance() {
+        let service = setup_service().await;
+
+        // Store 3 memories with distinct relevance to query "architecture patterns"
+        service.store(
+            "architecture_patterns_modular".to_string(),
+            "Architecture patterns for modular design enable scalable and maintainable systems through separation of concerns.".to_string(),
+            "test".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        service.store(
+            "lunch_menu_cafeteria".to_string(),
+            "The lunch menu cafeteria offerings include sandwiches, salads, and daily soup specials for employees.".to_string(),
+            "test".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        service.store(
+            "design_considerations".to_string(),
+            "Design considerations for system architecture involve trade-offs between performance and flexibility.".to_string(),
+            "test".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        // Set budget that fits 2 memories but not all 3
+        // Each memory is roughly 20-30 tokens, so ~55 tokens should fit 2
+        let results = service.load_context_with_budget(
+            "architecture patterns",
+            Some("test"),
+            55,
+            RelevanceWeights::default(),
+        ).await.unwrap();
+
+        // Collect keys of returned memories
+        let returned_keys: Vec<&str> = results.iter()
+            .map(|r| r.memory.key.as_str())
+            .collect();
+
+        // High-relevance memory about architecture patterns must be present
+        assert!(
+            returned_keys.contains(&"architecture_patterns_modular"),
+            "High-relevance memory should be included in results, got: {:?}",
+            returned_keys
+        );
+
+        // Low-relevance memory about lunch should NOT be present
+        assert!(
+            !returned_keys.contains(&"lunch_menu_cafeteria"),
+            "Low-relevance memory about lunch should be excluded when budget is tight, got: {:?}",
+            returned_keys
+        );
+    }
+
+    #[tokio::test]
     async fn test_forget() {
         let service = setup_service().await;
 

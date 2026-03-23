@@ -13,7 +13,8 @@ use tokio::time::{interval, Instant};
 
 use crate::domain::errors::DomainResult;
 use crate::domain::ports::MemoryRepository;
-use crate::services::event_bus::EventBus;
+use crate::services::event_bus::{EventBus, EventCategory, EventPayload, EventSeverity};
+use crate::services::event_factory;
 use crate::services::memory_service::{MaintenanceReport, MemoryService};
 
 /// Configuration for the memory decay daemon.
@@ -327,6 +328,22 @@ where
                     max_consecutive_failures: self.config.max_consecutive_failures,
                 }).await;
 
+                // Publish failure event to EventBus for system-wide observability
+                if let Some(ref bus) = self.event_bus {
+                    bus.publish(event_factory::make_event(
+                        EventSeverity::Warning,
+                        EventCategory::Memory,
+                        None,
+                        None,
+                        EventPayload::MemoryMaintenanceFailed {
+                            run_number,
+                            error: error_str.clone(),
+                            consecutive_failures: *consecutive_failures,
+                            max_consecutive_failures: self.config.max_consecutive_failures,
+                        },
+                    )).await;
+                }
+
                 // Emit a warning when we hit the warning threshold (exactly once).
                 if *consecutive_failures == self.config.warning_threshold
                     && self.config.warning_threshold > 0
@@ -340,8 +357,23 @@ where
                     let _ = tx.send(DecayDaemonEvent::FailureThresholdWarning {
                         consecutive_failures: *consecutive_failures,
                         max_consecutive_failures: self.config.max_consecutive_failures,
-                        latest_error: error_str,
+                        latest_error: error_str.clone(),
                     }).await;
+
+                    // Publish degraded warning to EventBus for system-wide observability
+                    if let Some(ref bus) = self.event_bus {
+                        bus.publish(event_factory::make_event(
+                            EventSeverity::Error,
+                            EventCategory::Memory,
+                            None,
+                            None,
+                            EventPayload::MemoryDaemonDegraded {
+                                consecutive_failures: *consecutive_failures,
+                                max_consecutive_failures: self.config.max_consecutive_failures,
+                                latest_error: error_str,
+                            },
+                        )).await;
+                    }
                 }
             }
         }
@@ -811,5 +843,65 @@ mod tests {
         assert_eq!(report.expired_pruned, 3);
         assert_eq!(report.decayed_pruned, 0);
         assert_eq!(report.promoted, 0);
+    }
+
+    #[tokio::test]
+    async fn test_failure_events_published_to_event_bus() {
+        use crate::services::event_bus::{EventBus, EventBusConfig, EventPayload};
+
+        let bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let mut subscriber = bus.subscribe();
+
+        // Config: warning_threshold=2, max_consecutive_failures=5
+        let config = DecayDaemonConfig {
+            maintenance_interval: Duration::from_millis(50),
+            run_on_startup: false,
+            max_consecutive_failures: 5,
+            warning_threshold: 2,
+            verbose: false,
+        };
+        let (daemon, _repo) = make_daemon(true, config);
+        let daemon = daemon.with_event_bus(bus);
+
+        let handle = daemon.handle();
+        let mut rx = daemon.run().await;
+
+        // Collect events until we see FailureThresholdWarning on the mpsc channel, then stop.
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(&event, DecayDaemonEvent::FailureThresholdWarning { .. }) {
+                    handle.stop();
+                    break;
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok(), "Test timed out waiting for events");
+
+        // Drain the EventBus subscriber and verify we received both event types
+        let mut saw_maintenance_failed = false;
+        let mut saw_daemon_degraded = false;
+
+        while let Ok(event) = subscriber.try_recv() {
+            match event.payload {
+                EventPayload::MemoryMaintenanceFailed { .. } => {
+                    saw_maintenance_failed = true;
+                }
+                EventPayload::MemoryDaemonDegraded { .. } => {
+                    saw_daemon_degraded = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_maintenance_failed,
+            "Should have received MemoryMaintenanceFailed event on EventBus"
+        );
+        assert!(
+            saw_daemon_degraded,
+            "Should have received MemoryDaemonDegraded event on EventBus"
+        );
     }
 }

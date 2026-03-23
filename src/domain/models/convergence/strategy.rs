@@ -508,16 +508,22 @@ pub fn eligible_strategies(
                 StrategyKind::Reframe,
                 StrategyKind::AlternativeApproach,
                 StrategyKind::Decompose,
+                StrategyKind::ArchitectReview,
             ]
             .into_iter()
             .filter(|s| !used_recently.contains(s.kind_name()))
             .collect();
 
-            if cands.is_empty()
-                && budget.allows_strategy_cost(&StrategyKind::Decompose) {
-                    cands.push(StrategyKind::Decompose);
+            if cands.is_empty() {
+                for fb in [StrategyKind::ArchitectReview, StrategyKind::Decompose] {
+                    if !used_recently.contains(fb.kind_name())
+                        && budget.allows_strategy_cost(&fb)
+                    {
+                        cands.push(fb);
+                    }
                 }
-                // If still empty -> Trapped (handled by loop control).
+            }
+            // If still empty -> Trapped (handled by loop control).
             cands
         }
 
@@ -843,6 +849,7 @@ impl CarryForward {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     #[test]
     fn test_strategy_kind_names_are_unique() {
@@ -992,5 +999,164 @@ mod tests {
         assert!(cf.failure_summary.is_empty());
         assert!(cf.hints.is_empty());
         assert!(cf.remaining_gaps.is_empty());
+    }
+
+    // --- LimitCycle eligible_strategies tests ---
+
+    fn make_limit_cycle_attractor(period: u32) -> AttractorState {
+        AttractorState {
+            classification: AttractorType::LimitCycle {
+                period,
+                cycle_signatures: vec!["sig_a".into(), "sig_b".into()],
+            },
+            confidence: 0.9,
+            detected_at: Some(Uuid::nil()),
+            evidence: AttractorEvidence {
+                recent_deltas: vec![],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        }
+    }
+
+    fn make_strategy_entry(kind: StrategyKind, seq: u32) -> StrategyEntry {
+        StrategyEntry {
+            strategy_kind: kind,
+            observation_sequence: seq,
+            convergence_delta_achieved: Some(0.0),
+            tokens_used: 0,
+            was_forced: false,
+            timestamp: Utc::now(),
+        }
+    }
+
+    fn generous_budget() -> ConvergenceBudget {
+        ConvergenceBudget::default()
+    }
+
+    fn has_kind(cands: &[StrategyKind], name: &str) -> bool {
+        cands.iter().any(|s| s.kind_name() == name)
+    }
+
+    #[test]
+    fn test_limit_cycle_eligible_returns_exploration_strategies() {
+        let attractor = make_limit_cycle_attractor(2);
+        let log: Vec<StrategyEntry> = vec![];
+        let budget = generous_budget();
+
+        let cands = eligible_strategies(&log, &attractor, &budget, 0, 3);
+
+        assert_eq!(cands.len(), 4);
+        assert!(has_kind(&cands, "reframe"));
+        assert!(has_kind(&cands, "alternative_approach"));
+        assert!(has_kind(&cands, "decompose"));
+        assert!(has_kind(&cands, "architect_review"));
+    }
+
+    #[test]
+    fn test_limit_cycle_filters_recently_used() {
+        let attractor = make_limit_cycle_attractor(2);
+        // Window = period * 2 = 4. Put Reframe in the window.
+        let log = vec![
+            make_strategy_entry(StrategyKind::Reframe, 1),
+        ];
+        let budget = generous_budget();
+
+        let cands = eligible_strategies(&log, &attractor, &budget, 0, 3);
+
+        assert!(!has_kind(&cands, "reframe"));
+        assert!(has_kind(&cands, "alternative_approach"));
+        assert!(has_kind(&cands, "decompose"));
+        assert!(has_kind(&cands, "architect_review"));
+    }
+
+    #[test]
+    fn test_limit_cycle_all_recently_used_no_fallback() {
+        let attractor = make_limit_cycle_attractor(2);
+        // All 4 strategies used recently within window of 4.
+        let log = vec![
+            make_strategy_entry(StrategyKind::Reframe, 1),
+            make_strategy_entry(StrategyKind::AlternativeApproach, 2),
+            make_strategy_entry(StrategyKind::Decompose, 3),
+            make_strategy_entry(StrategyKind::ArchitectReview, 4),
+        ];
+        let budget = generous_budget();
+
+        let cands = eligible_strategies(&log, &attractor, &budget, 0, 3);
+
+        // All used recently, fallback also checks used_recently → Trapped (empty).
+        assert!(cands.is_empty());
+    }
+
+    #[test]
+    fn test_limit_cycle_fallback_respects_recently_used() {
+        // Use period=1 so window=2 and only the last 2 entries matter.
+        let attractor = make_limit_cycle_attractor(1);
+        // Log has all 4 strategies, but only last 2 are in the window.
+        let log = vec![
+            make_strategy_entry(StrategyKind::Reframe, 1),
+            make_strategy_entry(StrategyKind::AlternativeApproach, 2),
+            // --- window boundary (last 2 entries) ---
+            make_strategy_entry(StrategyKind::Decompose, 3),
+            make_strategy_entry(StrategyKind::ArchitectReview, 4),
+        ];
+        let budget = generous_budget();
+
+        let cands = eligible_strategies(&log, &attractor, &budget, 0, 3);
+
+        // Only Decompose and ArchitectReview are in the recent window,
+        // so Reframe and AlternativeApproach should be returned.
+        assert!(has_kind(&cands, "reframe"));
+        assert!(has_kind(&cands, "alternative_approach"));
+        assert!(!has_kind(&cands, "decompose"));
+        assert!(!has_kind(&cands, "architect_review"));
+    }
+
+    #[test]
+    fn test_limit_cycle_excludes_exploitation_strategies() {
+        let attractor = make_limit_cycle_attractor(2);
+        let log: Vec<StrategyEntry> = vec![];
+        let budget = generous_budget();
+
+        let cands = eligible_strategies(&log, &attractor, &budget, 0, 3);
+
+        for s in &cands {
+            assert!(
+                s.is_exploration(),
+                "LimitCycle should only return exploration strategies, got: {}",
+                s.kind_name()
+            );
+            assert!(
+                !s.is_exploitation(),
+                "LimitCycle should never return exploitation strategies, got: {}",
+                s.kind_name()
+            );
+        }
+    }
+
+    #[test]
+    fn test_limit_cycle_period_affects_window() {
+        // Period=1 → window=2, period=3 → window=6.
+        let attractor_small = make_limit_cycle_attractor(1);
+        let attractor_large = make_limit_cycle_attractor(3);
+
+        let log = vec![
+            make_strategy_entry(StrategyKind::Reframe, 1),
+            make_strategy_entry(StrategyKind::AlternativeApproach, 2),
+            make_strategy_entry(StrategyKind::Decompose, 3),
+        ];
+        let budget = generous_budget();
+
+        // Period=1, window=2: only last 2 entries (AlternativeApproach, Decompose)
+        let cands_small = eligible_strategies(&log, &attractor_small, &budget, 0, 3);
+        assert!(has_kind(&cands_small, "reframe")); // outside window
+        assert!(!has_kind(&cands_small, "decompose")); // inside window
+
+        // Period=3, window=6: all 3 entries are in window
+        let cands_large = eligible_strategies(&log, &attractor_large, &budget, 0, 3);
+        assert!(!has_kind(&cands_large, "reframe")); // inside window
+        assert!(!has_kind(&cands_large, "decompose")); // inside window
+        // Only ArchitectReview remains (not used at all)
+        assert!(has_kind(&cands_large, "architect_review"));
     }
 }
