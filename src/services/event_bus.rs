@@ -1171,7 +1171,12 @@ impl EventPayload {
             | Self::OrchestratorStopped
             | Self::StatusUpdate(_)
             | Self::ReconciliationCompleted { .. }
-            | Self::StartupCatchUpCompleted { .. } => Some(EventCategory::Orchestrator),
+            | Self::StartupCatchUpCompleted { .. }
+            | Self::HandlerError { .. }
+            | Self::CriticalHandlerDegraded { .. }
+            | Self::TriggerRuleCreated { .. }
+            | Self::TriggerRuleToggled { .. }
+            | Self::TriggerRuleDeleted { .. } => Some(EventCategory::Orchestrator),
 
             Self::GoalStarted { .. }
             | Self::GoalDecomposed { .. }
@@ -1242,7 +1247,8 @@ impl EventPayload {
             | Self::BranchVerificationCompleted { .. }
             | Self::BranchVerificationResult { .. }
             | Self::GoalAlignmentEvaluated { .. }
-            | Self::TaskVerified { .. } => Some(EventCategory::Verification),
+            | Self::TaskVerified { .. }
+            | Self::IntentVerificationResult { .. } => Some(EventCategory::Verification),
 
             Self::HumanEscalationRequired { .. }
             | Self::HumanEscalationNeeded { .. }
@@ -1306,13 +1312,6 @@ impl EventPayload {
             | Self::FederationCerebrateUnreachable { .. }
             | Self::FederationStallDetected { .. }
             | Self::FederationReactionEmitted { .. } => Some(EventCategory::Federation),
-
-            Self::HandlerError { .. }
-            | Self::CriticalHandlerDegraded { .. }
-            | Self::TriggerRuleCreated { .. }
-            | Self::TriggerRuleToggled { .. }
-            | Self::TriggerRuleDeleted { .. }
-            | Self::IntentVerificationResult { .. } => None,
         }
     }
 }
@@ -1927,6 +1926,10 @@ pub struct EventBusConfig {
     /// Channel capacity for the broadcast channel.
     pub channel_capacity: usize,
     /// Whether to persist events to storage.
+    ///
+    /// Note: Task and Workflow category events are always persisted regardless
+    /// of this setting, as they are state-bearing and their loss causes
+    /// correctness issues.
     pub persist_events: bool,
 }
 
@@ -1998,6 +2001,16 @@ impl EventBus {
                 "EventBus: category mismatch for payload {}: expected {:?}, got {:?}",
                 event.payload.variant_name(), expected, event.category
             );
+        }
+
+        #[cfg(not(debug_assertions))]
+        if let Some(expected) = event.payload.expected_category() {
+            if event.category != expected {
+                tracing::warn!(
+                    "EventBus: category mismatch for payload {}: expected {:?}, got {:?}",
+                    event.payload.variant_name(), expected, event.category
+                );
+            }
         }
 
         // Determine whether to persist: always persist Task and Workflow category

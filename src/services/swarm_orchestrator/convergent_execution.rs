@@ -1596,7 +1596,7 @@ async fn emit_intent_verification_event(
     let should_continue = ivr.satisfaction.should_retry();
     event_bus.publish(event_factory::make_event(
         EventSeverity::Info,
-        crate::services::event_bus::EventCategory::Convergence,
+        crate::services::event_bus::EventCategory::Verification,
         goal_id,
         Some(task.id),
         EventPayload::IntentVerificationResult {

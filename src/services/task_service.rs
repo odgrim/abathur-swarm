@@ -213,7 +213,16 @@ impl<T: TaskRepository> TaskService<T> {
     ///
     /// Called after persisting state changes so that events are delivered
     /// even if the caller never publishes them (S7 fix).
+    ///
+    /// When executing inside a CommandBus transaction scope, the outbox path
+    /// already handles event delivery (events are inserted into the outbox
+    /// table atomically and the OutboxPoller publishes them later). Publishing
+    /// here as well would cause dual-delivery, so we skip in that case.
     async fn publish_events(&self, events: &[UnifiedEvent]) {
+        // If a transaction scope is active, the CommandBus outbox owns delivery.
+        if crate::adapters::sqlite::tx_context::try_get_tx().is_some() {
+            return;
+        }
         if let Some(ref bus) = self.event_bus {
             for evt in events {
                 bus.publish(evt.clone()).await;

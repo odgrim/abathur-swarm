@@ -230,7 +230,7 @@ impl EventStore for SqliteEventRepository {
         let cutoff_str = cutoff.to_rfc3339();
 
         let result = sqlx::query(
-            "DELETE FROM events WHERE timestamp < ? AND sequence < COALESCE((SELECT MIN(last_sequence) FROM handler_watermarks), sequence)"
+            "DELETE FROM events WHERE timestamp < ? AND sequence < COALESCE((SELECT MIN(last_sequence) FROM handler_watermarks), sequence + 1)"
         )
             .bind(cutoff_str)
             .execute(&self.pool)
