@@ -522,20 +522,22 @@ impl<R: AgentRepository> AgentService<R> {
 }
 
 #[cfg(test)]
+#[allow(unused_variables)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::{create_migrated_test_pool, SqliteAgentRepository};
+    use crate::adapters::sqlite::{create_migrated_test_pool, insert_test_task, SqliteAgentRepository};
+    use sqlx::SqlitePool;
 
-    async fn setup_service() -> AgentService<SqliteAgentRepository> {
+    async fn setup_service() -> (AgentService<SqliteAgentRepository>, SqlitePool) {
         let pool = create_migrated_test_pool().await.unwrap();
-        let repo = Arc::new(SqliteAgentRepository::new(pool));
+        let repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
         let event_bus = Arc::new(EventBus::new(crate::services::event_bus::EventBusConfig::default()));
-        AgentService::new(repo, event_bus)
+        (AgentService::new(repo, event_bus), pool)
     }
 
     #[tokio::test]
     async fn test_register_template() {
-        let service = setup_service().await;
+        let (service, pool) = setup_service().await;
 
         let template = service.register_template(
             "test-agent".to_string(),
@@ -554,7 +556,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_version_increment() {
-        let service = setup_service().await;
+        let (service, pool) = setup_service().await;
 
         // Create first version
         service.register_template(
@@ -586,7 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_spawn_instance() {
-        let service = setup_service().await;
+        let (service, pool) = setup_service().await;
 
         service.register_template(
             "spawnable".to_string(),
@@ -606,7 +608,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_instance_lifecycle() {
-        let service = setup_service().await;
+        let (service, pool) = setup_service().await;
 
         service.register_template(
             "lifecycle".to_string(),
@@ -621,6 +623,7 @@ mod tests {
 
         let instance = service.spawn_instance("lifecycle").await.unwrap();
         let task_id = Uuid::new_v4();
+        insert_test_task(&pool, task_id).await;
 
         let assigned = service.assign_task(instance.id, task_id).await.unwrap();
         assert_eq!(assigned.status, InstanceStatus::Running);
@@ -636,7 +639,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seed_baseline_agents_inserts_missing() {
-        let service = setup_service().await;
+        let (service, pool) = setup_service().await;
 
         let seeded = service.seed_baseline_agents().await.unwrap();
         assert!(seeded.contains(&"overmind".to_string()));
@@ -649,7 +652,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seed_baseline_agents_upgrades_older_version() {
-        let service = setup_service().await;
+        let (service, pool) = setup_service().await;
 
         // Insert a v1 overmind manually
         let mut old = specialist_templates::create_overmind();
@@ -666,7 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_seed_baseline_agents_no_downgrade() {
-        let service = setup_service().await;
+        let (service, pool) = setup_service().await;
 
         // Insert all baseline agents at v99 (future version) so nothing gets seeded
         for mut future in specialist_templates::create_baseline_agents() {
@@ -684,7 +687,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_disable_enable() {
-        let service = setup_service().await;
+        let (service, pool) = setup_service().await;
 
         service.register_template(
             "toggleable".to_string(),

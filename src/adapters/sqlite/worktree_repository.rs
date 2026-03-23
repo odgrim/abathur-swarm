@@ -206,17 +206,18 @@ impl TryFrom<WorktreeRow> for Worktree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::create_migrated_test_pool;
+    use crate::adapters::sqlite::{create_migrated_test_pool, insert_test_task};
 
-    async fn setup_test_repo() -> SqliteWorktreeRepository {
+    async fn setup_test_repo() -> (SqliteWorktreeRepository, SqlitePool) {
         let pool = create_migrated_test_pool().await.unwrap();
-        SqliteWorktreeRepository::new(pool)
+        (SqliteWorktreeRepository::new(pool.clone()), pool)
     }
 
     #[tokio::test]
     async fn test_create_and_get_worktree() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
         let task_id = Uuid::new_v4();
+        insert_test_task(&pool, task_id).await;
 
         let worktree = Worktree::new(task_id, "/tmp/wt", "branch", "main");
         repo.create(&worktree).await.unwrap();
@@ -228,8 +229,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_by_task() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
         let task_id = Uuid::new_v4();
+        insert_test_task(&pool, task_id).await;
 
         let worktree = Worktree::new(task_id, "/tmp/wt2", "branch2", "main");
         repo.create(&worktree).await.unwrap();
@@ -240,9 +242,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_active() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
+        let task_id = Uuid::new_v4();
+        insert_test_task(&pool, task_id).await;
 
-        let mut wt1 = Worktree::new(Uuid::new_v4(), "/tmp/wt3", "branch3", "main");
+        let mut wt1 = Worktree::new(task_id, "/tmp/wt3", "branch3", "main");
         wt1.activate();
         repo.create(&wt1).await.unwrap();
 

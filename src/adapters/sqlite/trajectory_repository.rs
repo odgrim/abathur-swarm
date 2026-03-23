@@ -523,18 +523,19 @@ impl TryFrom<TrajectoryRow> for Trajectory {
 }
 
 #[cfg(test)]
+#[allow(unused_variables)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::create_migrated_test_pool;
+    use crate::adapters::sqlite::{create_migrated_test_pool, insert_test_task};
     use crate::domain::models::{
         ArtifactReference, AttractorEvidence, ConvergenceBudget, ConvergencePhase,
         ConvergencePolicy, OverseerSignals, SpecificationEvolution, SpecificationSnapshot,
     };
     use uuid::Uuid;
 
-    async fn setup_test_repo() -> SqliteTrajectoryRepository {
+    async fn setup_test_repo() -> (SqliteTrajectoryRepository, SqlitePool) {
         let pool = create_migrated_test_pool().await.unwrap();
-        SqliteTrajectoryRepository::new(pool)
+        (SqliteTrajectoryRepository::new(pool.clone()), pool)
     }
 
     fn test_trajectory() -> Trajectory {
@@ -547,12 +548,17 @@ mod tests {
         )
     }
 
+    /// Save a trajectory, inserting its task_id into the tasks table first.
+    async fn save_with_task(repo: &SqliteTrajectoryRepository, pool: &SqlitePool, t: &Trajectory) {
+        insert_test_task(pool, t.task_id).await;
+        repo.save(t).await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_save_and_get() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
         let trajectory = test_trajectory();
-
-        repo.save(&trajectory).await.unwrap();
+        save_with_task(&repo, &pool, &trajectory).await;
 
         let retrieved = repo.get(&trajectory.id.to_string()).await.unwrap();
         assert!(retrieved.is_some());
@@ -564,14 +570,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_upsert() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
         let mut trajectory = test_trajectory();
-
-        repo.save(&trajectory).await.unwrap();
+        save_with_task(&repo, &pool, &trajectory).await;
 
         trajectory.phase = ConvergencePhase::Iterating;
         trajectory.total_fresh_starts = 2;
-        repo.save(&trajectory).await.unwrap();
+        save_with_task(&repo, &pool, &trajectory).await;
 
         let retrieved = repo.get(&trajectory.id.to_string()).await.unwrap().unwrap();
         assert_eq!(retrieved.total_fresh_starts, 2);
@@ -579,7 +584,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_by_task() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
         let task_id = Uuid::new_v4();
 
         let mut t1 = test_trajectory();
@@ -588,9 +593,9 @@ mod tests {
         t2.task_id = task_id;
         let t3 = test_trajectory(); // different task
 
-        repo.save(&t1).await.unwrap();
-        repo.save(&t2).await.unwrap();
-        repo.save(&t3).await.unwrap();
+        save_with_task(&repo, &pool, &t1).await;
+        save_with_task(&repo, &pool, &t2).await;
+        save_with_task(&repo, &pool, &t3).await;
 
         let results = repo.get_by_task(&task_id.to_string()).await.unwrap();
         assert_eq!(results.len(), 2);
@@ -598,7 +603,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_by_goal() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
         let goal_id = Uuid::new_v4();
 
         let mut t1 = test_trajectory();
@@ -606,8 +611,8 @@ mod tests {
         let mut t2 = test_trajectory();
         t2.goal_id = Some(goal_id);
 
-        repo.save(&t1).await.unwrap();
-        repo.save(&t2).await.unwrap();
+        save_with_task(&repo, &pool, &t1).await;
+        save_with_task(&repo, &pool, &t2).await;
 
         let results = repo.get_by_goal(&goal_id.to_string()).await.unwrap();
         assert_eq!(results.len(), 2);
@@ -615,10 +620,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_recent() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         for _ in 0..5 {
-            repo.save(&test_trajectory()).await.unwrap();
+            save_with_task(&repo, &pool, &test_trajectory()).await;
         }
 
         let results = repo.get_recent(3).await.unwrap();
@@ -627,10 +632,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
         let trajectory = test_trajectory();
 
-        repo.save(&trajectory).await.unwrap();
+        save_with_task(&repo, &pool, &trajectory).await;
         repo.delete(&trajectory.id.to_string()).await.unwrap();
 
         let retrieved = repo.get(&trajectory.id.to_string()).await.unwrap();
@@ -639,7 +644,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_not_found() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
         let result = repo.get(&Uuid::new_v4().to_string()).await.unwrap();
         assert!(result.is_none());
     }
@@ -702,14 +707,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_avg_iterations_by_complexity() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         // Create two converged Simple trajectories with 3 and 5 observations.
         let t1 = converged_trajectory_with_budget(Complexity::Simple, 3, vec![]);
         let t2 = converged_trajectory_with_budget(Complexity::Simple, 5, vec![]);
 
-        repo.save(&t1).await.unwrap();
-        repo.save(&t2).await.unwrap();
+        save_with_task(&repo, &pool, &t1).await;
+        save_with_task(&repo, &pool, &t2).await;
 
         let avg = repo
             .avg_iterations_by_complexity(Complexity::Simple)
@@ -726,7 +731,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_avg_iterations_no_matching_data() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         // No trajectories at all.
         let avg = repo
@@ -743,7 +748,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_strategy_effectiveness() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         // Create a trajectory with strategy log entries.
         let entries = vec![
@@ -756,7 +761,7 @@ mod tests {
         ];
 
         let t = converged_trajectory_with_budget(Complexity::Simple, 3, entries);
-        repo.save(&t).await.unwrap();
+        save_with_task(&repo, &pool, &t).await;
 
         let stats = repo
             .strategy_effectiveness(StrategyKind::RetryWithFeedback)
@@ -778,7 +783,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_strategy_effectiveness_no_uses() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         let stats = repo
             .strategy_effectiveness(StrategyKind::Decompose)
@@ -793,7 +798,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_attractor_distribution() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         // Create trajectories with different attractor types.
         let t1 = trajectory_with_attractor(AttractorType::FixedPoint {
@@ -809,9 +814,9 @@ mod tests {
             plateau_level: 0.6,
         });
 
-        repo.save(&t1).await.unwrap();
-        repo.save(&t2).await.unwrap();
-        repo.save(&t3).await.unwrap();
+        save_with_task(&repo, &pool, &t1).await;
+        save_with_task(&repo, &pool, &t2).await;
+        save_with_task(&repo, &pool, &t3).await;
 
         let dist = repo.attractor_distribution().await.unwrap();
 
@@ -823,7 +828,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_convergence_rate_by_task_type() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         // Create trajectories with "rust" in specification.
         let mut t1 = test_trajectory();
@@ -831,14 +836,14 @@ mod tests {
             SpecificationSnapshot::new("implement a rust parser".into()),
         );
         t1.phase = ConvergencePhase::Converged;
-        repo.save(&t1).await.unwrap();
+        save_with_task(&repo, &pool, &t1).await;
 
         let mut t2 = test_trajectory();
         t2.specification = SpecificationEvolution::new(
             SpecificationSnapshot::new("implement a rust formatter".into()),
         );
         t2.phase = ConvergencePhase::Exhausted;
-        repo.save(&t2).await.unwrap();
+        save_with_task(&repo, &pool, &t2).await;
 
         // One unrelated trajectory.
         let mut t3 = test_trajectory();
@@ -846,7 +851,7 @@ mod tests {
             SpecificationSnapshot::new("implement a python linter".into()),
         );
         t3.phase = ConvergencePhase::Converged;
-        repo.save(&t3).await.unwrap();
+        save_with_task(&repo, &pool, &t3).await;
 
         let rate = repo
             .convergence_rate_by_task_type("rust")
@@ -863,7 +868,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_convergence_rate_no_matching_category() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         let rate = repo
             .convergence_rate_by_task_type("nonexistent_category_xyz")
@@ -879,26 +884,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_similar_trajectories() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         // Create trajectories with varying specifications.
         let mut t1 = test_trajectory();
         t1.specification = SpecificationEvolution::new(
             SpecificationSnapshot::new("implement authentication middleware".into()),
         );
-        repo.save(&t1).await.unwrap();
+        save_with_task(&repo, &pool, &t1).await;
 
         let mut t2 = test_trajectory();
         t2.specification = SpecificationEvolution::new(
             SpecificationSnapshot::new("implement database connection pooling".into()),
         );
-        repo.save(&t2).await.unwrap();
+        save_with_task(&repo, &pool, &t2).await;
 
         let mut t3 = test_trajectory();
         t3.specification = SpecificationEvolution::new(
             SpecificationSnapshot::new("fix authentication token expiry".into()),
         );
-        repo.save(&t3).await.unwrap();
+        save_with_task(&repo, &pool, &t3).await;
 
         // Search for "authentication" related trajectories.
         let results = repo
@@ -912,19 +917,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_similar_trajectories_with_tags() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         let mut t1 = test_trajectory();
         t1.specification = SpecificationEvolution::new(
             SpecificationSnapshot::new("implement REST API endpoint".into()),
         );
-        repo.save(&t1).await.unwrap();
+        save_with_task(&repo, &pool, &t1).await;
 
         let mut t2 = test_trajectory();
         t2.specification = SpecificationEvolution::new(
             SpecificationSnapshot::new("implement GraphQL resolver".into()),
         );
-        repo.save(&t2).await.unwrap();
+        save_with_task(&repo, &pool, &t2).await;
 
         // Search with tags that match t2.
         let results = repo
@@ -944,11 +949,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_similar_trajectories_empty_terms() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         // Save some trajectories.
         for _ in 0..3 {
-            repo.save(&test_trajectory()).await.unwrap();
+            save_with_task(&repo, &pool, &test_trajectory()).await;
         }
 
         // Empty description with short words should fall back to get_recent.
@@ -962,7 +967,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_successful_strategies() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         // Create a converged trajectory with a fixed_point attractor and
         // strategy entries that have positive deltas.
@@ -989,7 +994,7 @@ mod tests {
             StrategyEntry::new(StrategyKind::RetryAugmented, 2, 20_000, false)
                 .with_delta(0.25),
         ];
-        repo.save(&t).await.unwrap();
+        save_with_task(&repo, &pool, &t).await;
 
         let attractor_type = AttractorType::FixedPoint {
             estimated_remaining_iterations: 0,
@@ -1010,7 +1015,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_successful_strategies_wrong_attractor() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         // Create a converged trajectory with fixed_point attractor.
         let mut t = test_trajectory();
@@ -1032,7 +1037,7 @@ mod tests {
             StrategyEntry::new(StrategyKind::RetryWithFeedback, 0, 10_000, false)
                 .with_delta(0.3),
         ];
-        repo.save(&t).await.unwrap();
+        save_with_task(&repo, &pool, &t).await;
 
         // Query for plateau attractor -- should find nothing because the
         // trajectory has a fixed_point attractor.

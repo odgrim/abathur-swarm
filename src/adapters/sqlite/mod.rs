@@ -101,3 +101,12 @@ pub async fn create_migrated_test_pool() -> Result<SqlitePool, DatabaseError> {
     migrator.run_embedded_migrations(all_embedded_migrations()).await?;
     Ok(pool)
 }
+
+/// Insert a minimal task row for FK constraint satisfaction in tests.
+pub async fn insert_test_task(pool: &SqlitePool, task_id: uuid::Uuid) {
+    sqlx::query("INSERT OR IGNORE INTO tasks (id, title, status) VALUES (?, 'test task', 'pending')")
+        .bind(task_id.to_string())
+        .execute(pool)
+        .await
+        .expect("Failed to insert test task");
+}

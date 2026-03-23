@@ -375,18 +375,19 @@ impl TryFrom<InstanceRow> for AgentInstance {
 }
 
 #[cfg(test)]
+#[allow(unused_variables)]
 mod tests {
     use super::*;
-    use crate::adapters::sqlite::create_migrated_test_pool;
+    use crate::adapters::sqlite::{create_migrated_test_pool, insert_test_task};
 
-    async fn setup_test_repo() -> SqliteAgentRepository {
+    async fn setup_test_repo() -> (SqliteAgentRepository, SqlitePool) {
         let pool = create_migrated_test_pool().await.unwrap();
-        SqliteAgentRepository::new(pool)
+        (SqliteAgentRepository::new(pool.clone()), pool)
     }
 
     #[tokio::test]
     async fn test_create_and_get_template() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         let template = AgentTemplate::new("test-agent", AgentTier::Worker)
             .with_description("A test agent")
@@ -401,7 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_by_name() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         let template = AgentTemplate::new("named-agent", AgentTier::Specialist)
             .with_prompt("Specialist agent");
@@ -415,7 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_by_tier() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         let worker = AgentTemplate::new("worker-1", AgentTier::Worker)
             .with_prompt("Worker");
@@ -435,7 +436,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_instance_lifecycle() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         let template = AgentTemplate::new("instance-test", AgentTier::Worker)
             .with_prompt("Test");
@@ -445,6 +446,7 @@ mod tests {
         repo.create_instance(&instance).await.unwrap();
 
         let task_id = Uuid::new_v4();
+        insert_test_task(&pool, task_id).await;
         instance.assign_task(task_id);
         repo.update_instance(&instance).await.unwrap();
 
@@ -460,7 +462,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_by_name_prefers_active_template() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         // Create version 1 (active)
         let mut v1 = AgentTemplate::new("evolving-agent", AgentTier::Worker)
@@ -494,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_revert_restores_exact_previous_version_content() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         // Create v1 with specific content
         let mut v1 = AgentTemplate::new("revert-agent", AgentTier::Worker)
@@ -536,7 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_version_history_preserved_on_refinement() {
-        let repo = setup_test_repo().await;
+        let (repo, pool) = setup_test_repo().await;
 
         // Create v1
         let mut v1 = AgentTemplate::new("history-agent", AgentTier::Worker)

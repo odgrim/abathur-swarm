@@ -4498,19 +4498,18 @@ fn worktree_create_json_output() {
 }
 
 #[test]
-fn worktree_create_nonexistent_task_accepts_any_uuid() {
+fn worktree_create_nonexistent_task_rejects_missing_task() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path();
     setup_git_repo(dir);
     init_project(dir);
 
-    // The worktree system does not validate task existence before creating;
-    // it simply creates a worktree record with the given task_id.
+    // With FK constraints on worktrees.task_id, creating a worktree for a
+    // nonexistent task should fail with a foreign key constraint error.
     abathur_cmd(dir)
         .args(["worktree", "create", "00000000-0000-0000-0000-000000000000"])
         .assert()
-        .success_without_warnings()
-        .stdout(predicates::str::contains("Worktree created at:"));
+        .failure();
 }
 
 #[test]
