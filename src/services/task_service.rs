@@ -353,11 +353,37 @@ impl<T: TaskRepository> TaskService<T> {
         Ok(count)
     }
 
+    // --- Scoring weights for classify_execution_mode ---
+    //
+    // | Signal                        | Weight | Direction   |
+    // |-------------------------------|--------|-------------|
+    // | Agent role (impl/dev/coder)   |   +2   | Convergent  |
+    // | Agent role (research/plan)    |   −2   | Direct      |
+    // | Complexity::Complex           |   +3   | Convergent  |
+    // | Complexity::Trivial / Simple  |   −3   | Direct      |
+    // | Moderate + long description   |   +2   | Convergent  |
+    // | Acceptance keywords           |   +2   | Convergent  |
+    // | Anti-pattern / constraint     |   +2   | Convergent  |
+    // | Parent is convergent          |   +3   | Convergent  |
+    // | Low priority                  |   −2   | Direct      |
+    // | **Threshold**                 | **≥3** | Convergent  |
+
+    const AGENT_ROLE_WEIGHT: i32 = 2;
+    const COMPLEXITY_COMPLEX_WEIGHT: i32 = 3;
+    const COMPLEXITY_TRIVIAL_SIMPLE_WEIGHT: i32 = 3;
+    const MODERATE_LONG_DESC_WEIGHT: i32 = 2;
+    const ACCEPTANCE_KEYWORD_WEIGHT: i32 = 2;
+    const ANTIPATTERN_HINT_WEIGHT: i32 = 2;
+    const PARENT_CONVERGENT_WEIGHT: i32 = 3;
+    const LOW_PRIORITY_WEIGHT: i32 = 2;
+    const CONVERGENT_THRESHOLD: i32 = 3;
+
     /// Classify whether a task should use Direct or Convergent execution mode.
     ///
     /// Uses a scoring heuristic based on task complexity, description content,
-    /// context hints, source lineage, and priority. A score >= 3 recommends
-    /// Convergent mode; below that, Direct mode is used.
+    /// context hints, source lineage, agent role, and priority. A score >=
+    /// [`CONVERGENT_THRESHOLD`] recommends Convergent mode; below that, Direct
+    /// mode is used. See the weight table above for the full scoring breakdown.
     ///
     /// When `default_mode` is `Some(...)`, the operator override takes precedence
     /// and the heuristic is skipped entirely (the operator's mode is returned).
@@ -385,28 +411,28 @@ impl<T: TaskRepository> TaskService<T> {
                 || lower.contains("analyst")
                 || lower.contains("architect")
             {
-                convergent_score -= 5;
+                convergent_score -= Self::AGENT_ROLE_WEIGHT;
             } else if lower.contains("implement")
                 || lower.contains("develop")
                 || lower.contains("coder")
                 || lower.contains("fixer")
             {
-                convergent_score += 5;
+                convergent_score += Self::AGENT_ROLE_WEIGHT;
             }
         }
 
         // --- Complexity signals ---
         match task.routing_hints.complexity {
-            Complexity::Complex => convergent_score += 3,
+            Complexity::Complex => convergent_score += Self::COMPLEXITY_COMPLEX_WEIGHT,
             Complexity::Moderate => {
                 // Moderate complexity with a lengthy description suggests
                 // requirements that benefit from iterative refinement.
                 if task.description.split_whitespace().count() > 200 {
-                    convergent_score += 2;
+                    convergent_score += Self::MODERATE_LONG_DESC_WEIGHT;
                 }
             }
-            Complexity::Trivial => convergent_score -= 3,
-            Complexity::Simple => convergent_score -= 3,
+            Complexity::Trivial => convergent_score -= Self::COMPLEXITY_TRIVIAL_SIMPLE_WEIGHT,
+            Complexity::Simple => convergent_score -= Self::COMPLEXITY_TRIVIAL_SIMPLE_WEIGHT,
         }
 
         // --- Description content signals ---
@@ -425,7 +451,7 @@ impl<T: TaskRepository> TaskService<T> {
             "ensure that",
         ];
         if acceptance_keywords.iter().any(|kw| desc_lower.contains(kw)) {
-            convergent_score += 2;
+            convergent_score += Self::ACCEPTANCE_KEYWORD_WEIGHT;
         }
 
         // --- Context hints signals ---
@@ -435,7 +461,7 @@ impl<T: TaskRepository> TaskService<T> {
             h.starts_with("anti-pattern:") || h.starts_with("constraint:")
         });
         if has_anti_patterns {
-            convergent_score += 2;
+            convergent_score += Self::ANTIPATTERN_HINT_WEIGHT;
         }
 
         // --- Parent inheritance ---
@@ -444,18 +470,18 @@ impl<T: TaskRepository> TaskService<T> {
         if let TaskSource::SubtaskOf(_) = &task.source
             && let Some(parent_exec_mode) = parent_mode
                 && parent_exec_mode.is_convergent() {
-                    convergent_score += 3;
+                    convergent_score += Self::PARENT_CONVERGENT_WEIGHT;
                 }
 
         // --- Priority signal ---
         // Low priority tasks are "fast-lane": favor Direct execution to
         // minimize latency and token cost.
         if task.priority == TaskPriority::Low {
-            convergent_score -= 2;
+            convergent_score -= Self::LOW_PRIORITY_WEIGHT;
         }
 
         // --- Threshold decision ---
-        if convergent_score >= 3 {
+        if convergent_score >= Self::CONVERGENT_THRESHOLD {
             ExecutionMode::Convergent { parallel_samples: None }
         } else {
             ExecutionMode::Direct
@@ -1727,6 +1753,95 @@ mod tests {
             &task, None, &default_mode,
         );
         assert!(mode.is_convergent(), "Operator default Convergent should override even for simple tasks");
+    }
+
+    // --- Agent-role signal tests ---
+
+    #[test]
+    fn test_classify_implementer_agent_moderate_with_keywords_convergent() {
+        // Agent role (+2) + acceptance keyword (+2) = 4 >= 3 → Convergent
+        let mut task = Task::new("Implement feature. Verify that tests pass.");
+        task.routing_hints.complexity = Complexity::Moderate;
+        task.agent_type = Some("implementation-specialist".to_string());
+
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        assert!(mode.is_convergent(), "Implementer agent + acceptance keyword should be Convergent");
+    }
+
+    #[test]
+    fn test_classify_researcher_agent_as_direct() {
+        // Agent role (−2) + moderate complexity (0) = −2 < 3 → Direct
+        let mut task = Task::new("Research best practices for error handling");
+        task.routing_hints.complexity = Complexity::Moderate;
+        task.agent_type = Some("researcher".to_string());
+
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        assert!(mode.is_direct(), "Researcher agent on moderate task should be Direct");
+    }
+
+    #[test]
+    fn test_classify_agent_role_does_not_override_complexity() {
+        // Researcher agent (−2) + Complex (+3) = 1 < 3 → Direct
+        // Previously with weight ±5: −5 + 3 = −2, also Direct but for wrong reason.
+        // Now the complexity signal is not entirely drowned out.
+        let mut task = Task::new("Research and analyze complex architecture");
+        task.routing_hints.complexity = Complexity::Complex;
+        task.agent_type = Some("researcher".to_string());
+
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        // Score: −2 + 3 = 1 < 3 → Direct (complexity partially counters role)
+        assert!(mode.is_direct(), "Researcher on complex task: role tempers complexity but doesn't dominate");
+
+        // With an additional acceptance keyword, it should flip to Convergent
+        task.description = "Research and analyze complex architecture. Verify that the design holds.".to_string();
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        // Score: −2 + 3 + 2 = 3 >= 3 → Convergent
+        assert!(mode.is_convergent(), "Researcher on complex task with acceptance keywords should be Convergent");
+    }
+
+    #[test]
+    fn test_classify_implementer_on_trivial_stays_direct() {
+        // Agent role (+2) + Trivial (−3) = −1 < 3 → Direct
+        // Previously with weight ±5: 5 − 3 = 2 < 3 → also Direct,
+        // but barely. Now it's clearly Direct.
+        let mut task = Task::new("Rename a variable");
+        task.routing_hints.complexity = Complexity::Trivial;
+        task.agent_type = Some("implementer".to_string());
+
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        assert!(mode.is_direct(), "Implementer on trivial task should stay Direct");
+    }
+
+    #[test]
+    fn test_classify_agent_role_partial_match() {
+        // "developer" contains "develop" → +2
+        let mut task = Task::new("Build the feature");
+        task.routing_hints.complexity = Complexity::Moderate;
+        task.agent_type = Some("senior-developer".to_string());
+
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        // Score: +2 (agent) + 0 (moderate, short) = 2 < 3 → Direct
+        assert!(mode.is_direct(), "Developer agent alone on moderate task should be Direct");
+
+        // Add acceptance criteria to push over
+        task.description = "Build the feature. Must pass integration tests.".to_string();
+        let mode = TaskService::<SqliteTaskRepository>::classify_execution_mode(
+            &task, None, &None,
+        );
+        // Score: +2 (agent) + 2 (acceptance) = 4 >= 3 → Convergent
+        assert!(mode.is_convergent(), "Developer agent + acceptance criteria should be Convergent");
     }
 
     // --- Trajectory-aware retry tests ---

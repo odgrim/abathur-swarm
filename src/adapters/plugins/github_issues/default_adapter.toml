@@ -47,3 +47,23 @@ filter_labels = ""
 # Optional: when true, post a comment on the issue explaining why it was
 # rejected during triage or validation. Defaults to false.
 # comment_on_rejection = "true"
+
+# ── Pull request ingestion ──────────────────────────────────────────────
+#
+# When enabled, pull requests from the issues endpoint are hydrated via the
+# pulls API, filtered, and ingested as read-only review tasks. PR content is
+# treated as untrusted — no build, test, or shell execution is permitted.
+# Default: false (opt-in).
+# ingest_pull_requests = "false"
+
+# Optional: Comma-separated list of base branch names. Only PRs targeting one
+# of these branches are ingested. Leave empty to ingest PRs against any base.
+# pr_base_filter = "main, develop"
+
+# Optional: Comma-separated list of author logins to ignore (e.g., bot accounts).
+# PRs authored by any of these logins are silently skipped.
+# pr_ignore_authors = "dependabot[bot], renovate[bot]"
+
+# Optional: Maximum characters of unified diff to include in the task description.
+# Diffs exceeding this limit are truncated with a marker. Default: 100000.
+# max_diff_chars = "100000"

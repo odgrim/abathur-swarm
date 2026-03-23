@@ -617,7 +617,7 @@ impl Config {
         }
 
         // Verify default_workflow references a known workflow (user-defined or a built-in).
-        let builtin_names = ["code", "analysis", "docs", "review"];
+        let builtin_names = ["code", "analysis", "docs", "review", "pr-review"];
         if !builtin_names.contains(&self.default_workflow.as_str())
             && !self.workflows.iter().any(|wf| wf.name == self.default_workflow)
         {
@@ -656,6 +656,7 @@ impl Config {
             "analysis" => Some(WorkflowTemplate::analysis_workflow()),
             "docs" => Some(WorkflowTemplate::docs_workflow()),
             "review" => Some(WorkflowTemplate::review_only_workflow()),
+            "pr-review" => Some(WorkflowTemplate::pr_review_workflow()),
             "external" => Some(WorkflowTemplate::external_workflow()),
             _ => None,
         }
@@ -677,12 +678,13 @@ impl Config {
 
         // Add each built-in workflow unless shadowed by a user-defined one.
         type BuiltinEntry = (&'static str, fn() -> WorkflowTemplate);
-        let builtins: [BuiltinEntry; 5] = [
-            ("code",     WorkflowTemplate::default_code_workflow),
-            ("analysis", WorkflowTemplate::analysis_workflow),
-            ("docs",     WorkflowTemplate::docs_workflow),
-            ("review",   WorkflowTemplate::review_only_workflow),
-            ("external", WorkflowTemplate::external_workflow),
+        let builtins: [BuiltinEntry; 6] = [
+            ("code",      WorkflowTemplate::default_code_workflow),
+            ("analysis",  WorkflowTemplate::analysis_workflow),
+            ("docs",      WorkflowTemplate::docs_workflow),
+            ("review",    WorkflowTemplate::review_only_workflow),
+            ("pr-review", WorkflowTemplate::pr_review_workflow),
+            ("external",  WorkflowTemplate::external_workflow),
         ];
         for (name, constructor) in &builtins {
             if !self.workflows.iter().any(|wf| wf.name == *name) {

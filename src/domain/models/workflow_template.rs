@@ -300,6 +300,50 @@ impl WorkflowTemplate {
         }
     }
 
+    /// Returns the built-in single-phase PR review workflow.
+    ///
+    /// Designed for untrusted external pull requests. Uses `WorkspaceKind::None`
+    /// (no checkout), no shell tool, and `OutputDelivery::MemoryOnly`. The diff
+    /// is provided inline in the task description — the agent never touches the
+    /// PR's actual code.
+    ///
+    /// # Security
+    ///
+    /// This workflow **MUST NOT** include the `shell` tool. PR content is
+    /// untrusted and could contain build.rs, proc macros, or scripts that
+    /// execute during build/test.
+    pub fn pr_review_workflow() -> Self {
+        Self {
+            name: "pr-review".to_string(),
+            description: "Single-phase read-only PR review workflow for untrusted external \
+                          pull requests. No shell access, no workspace checkout. Diff is \
+                          provided inline; findings are stored in swarm memory."
+                .to_string(),
+            phases: vec![WorkflowPhase {
+                name: "review".to_string(),
+                description: "Review the pull request diff for correctness, security issues, \
+                              code quality, and prompt injection. Store findings in swarm memory."
+                    .to_string(),
+                role: "Security-conscious code reviewer that evaluates untrusted external \
+                       pull request diffs without executing any code"
+                    .to_string(),
+                tools: vec![
+                    "read".to_string(),
+                    "glob".to_string(),
+                    "grep".to_string(),
+                    "memory".to_string(),
+                ],
+                read_only: true,
+                dependency: PhaseDependency::Root,
+                verify: false,
+            }],
+            workspace_kind: WorkspaceKind::None,
+            tool_grants: vec!["memory".to_string()],
+            output_delivery: OutputDelivery::MemoryOnly,
+            max_verification_retries: default_max_verification_retries(),
+        }
+    }
+
     /// Returns the built-in 6-phase external workflow for adapter-sourced tasks.
     ///
     /// Extends the standard code workflow with triage and validation phases at
@@ -492,6 +536,7 @@ impl WorkflowTemplate {
             Self::analysis_workflow(),
             Self::docs_workflow(),
             Self::review_only_workflow(),
+            Self::pr_review_workflow(),
             Self::external_workflow(),
         ];
         templates.into_iter().map(|t| (t.name.clone(), t)).collect()
@@ -712,6 +757,40 @@ mod tests {
         };
         let err = wf.validate().unwrap_err();
         assert!(err.contains("not_a_real_tool"));
+    }
+
+    #[test]
+    fn test_pr_review_workflow() {
+        let wf = WorkflowTemplate::pr_review_workflow();
+        assert_eq!(wf.name, "pr-review");
+        assert_eq!(wf.phases.len(), 1);
+        assert_eq!(wf.workspace_kind, WorkspaceKind::None);
+        assert_eq!(wf.output_delivery, OutputDelivery::MemoryOnly);
+        assert!(wf.phases[0].read_only);
+        assert!(wf.validate().is_ok());
+    }
+
+    #[test]
+    fn test_pr_review_workflow_no_shell_tool() {
+        let wf = WorkflowTemplate::pr_review_workflow();
+        // Security invariant: PR review workflow must NEVER include shell tool.
+        for phase in &wf.phases {
+            assert!(
+                !phase.tools.contains(&"shell".to_string()),
+                "PR review workflow phase '{}' must not have shell tool",
+                phase.name
+            );
+        }
+        assert!(
+            !wf.tool_grants.contains(&"shell".to_string()),
+            "PR review workflow must not have shell in tool_grants"
+        );
+    }
+
+    #[test]
+    fn test_builtin_templates_includes_pr_review() {
+        let templates = WorkflowTemplate::builtin_templates();
+        assert!(templates.contains_key("pr-review"));
     }
 
     #[test]

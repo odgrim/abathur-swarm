@@ -394,7 +394,7 @@ async fn test_task_dag_with_dependencies() {
 /// Test agent template registration and instance spawning.
 #[tokio::test]
 async fn test_agent_template_and_instance_management() {
-    let (_, _, _, agent_repo, _) = setup_test_environment().await;
+    let (_, task_repo, _, agent_repo, _) = setup_test_environment().await;
 
     let event_bus = Arc::new(abathur::services::event_bus::EventBus::new(abathur::services::event_bus::EventBusConfig::default()));
     let agent_service = AgentService::new(agent_repo.clone(), event_bus.clone());
@@ -457,8 +457,11 @@ async fn test_agent_template_and_instance_management() {
     use abathur::domain::models::InstanceStatus;
     assert_eq!(worker_instance.status, InstanceStatus::Idle);
 
-    // Assign a task to make it running
-    let task_id = uuid::Uuid::new_v4();
+    // Create a task so FK constraint is satisfied, then assign it
+    let task = Task::with_title("Agent test task", "Task for agent instance test")
+        .with_source(TaskSource::Human);
+    task_repo.create(&task).await.expect("Failed to create task for agent assignment");
+    let task_id = task.id;
     let running_instance = agent_service
         .assign_task(worker_instance.id, task_id)
         .await

@@ -48,11 +48,73 @@ pub struct GitHubLabel {
 
 /// Reference object present on pull requests (absent on plain issues).
 ///
-/// Ingestion uses this to filter out PRs from the issue list.
+/// The issues endpoint returns this stub for PRs. Use [`GitHubPullRequestDetail`]
+/// (fetched via `GET /pulls/{n}`) for full PR metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitHubPullRequestRef {
     /// API URL of the pull request resource.
     pub url: String,
+}
+
+/// A GitHub user (author, assignee, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubUser {
+    /// The user's login handle (e.g., "octocat").
+    pub login: String,
+}
+
+/// The head (source) branch of a pull request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubPullRequestHead {
+    /// Head branch name (e.g., "feature/my-change").
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+    /// The SHA at the tip of the head branch.
+    pub sha: String,
+}
+
+/// The base (target) branch of a pull request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubPullRequestBase {
+    /// Base branch name (e.g., "main").
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+}
+
+/// Full pull request detail from `GET /repos/{owner}/{repo}/pulls/{number}`.
+///
+/// The issues endpoint only returns a [`GitHubPullRequestRef`] stub; this struct
+/// carries the additional metadata needed for review: branch info, merge state,
+/// draft status, and author.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubPullRequestDetail {
+    /// PR number within the repository.
+    pub number: u64,
+    /// PR title.
+    pub title: String,
+    /// PR body text (may be absent or null).
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Current state: "open" or "closed".
+    pub state: String,
+    /// Whether this PR is a draft.
+    #[serde(default)]
+    pub draft: bool,
+    /// Whether the PR is mergeable (null when unknown/computing).
+    #[serde(default)]
+    pub mergeable: Option<bool>,
+    /// The head (source) branch.
+    pub head: GitHubPullRequestHead,
+    /// The base (target) branch.
+    pub base: GitHubPullRequestBase,
+    /// The PR author.
+    pub user: GitHubUser,
+    /// URL to view the PR in the GitHub UI.
+    pub html_url: String,
+    /// ISO 8601 timestamp of the last update.
+    pub updated_at: String,
+    /// ISO 8601 timestamp of creation.
+    pub created_at: String,
 }
 
 /// Request body for posting a comment on an issue.
@@ -191,6 +253,53 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("\"body\""));
         assert!(!json.contains("\"labels\""));
+    }
+
+    #[test]
+    fn test_pull_request_detail_deserialization() {
+        let json = r#"{
+            "number": 99,
+            "title": "Add feature X",
+            "body": "This PR adds feature X.",
+            "state": "open",
+            "draft": false,
+            "mergeable": true,
+            "head": { "ref": "feature/x", "sha": "abc123" },
+            "base": { "ref": "main" },
+            "user": { "login": "octocat" },
+            "html_url": "https://github.com/org/repo/pull/99",
+            "updated_at": "2024-01-16T12:00:00Z",
+            "created_at": "2024-01-15T09:00:00Z"
+        }"#;
+        let pr: super::GitHubPullRequestDetail = serde_json::from_str(json).unwrap();
+        assert_eq!(pr.number, 99);
+        assert_eq!(pr.title, "Add feature X");
+        assert!(!pr.draft);
+        assert_eq!(pr.mergeable, Some(true));
+        assert_eq!(pr.head.sha, "abc123");
+        assert_eq!(pr.head.ref_name, "feature/x");
+        assert_eq!(pr.base.ref_name, "main");
+        assert_eq!(pr.user.login, "octocat");
+    }
+
+    #[test]
+    fn test_pull_request_detail_draft_default() {
+        let json = r#"{
+            "number": 1,
+            "title": "Draft PR",
+            "state": "open",
+            "head": { "ref": "feature/y", "sha": "def456" },
+            "base": { "ref": "main" },
+            "user": { "login": "dev" },
+            "html_url": "https://github.com/org/repo/pull/1",
+            "updated_at": "2024-01-16T12:00:00Z",
+            "created_at": "2024-01-15T09:00:00Z"
+        }"#;
+        let pr: super::GitHubPullRequestDetail = serde_json::from_str(json).unwrap();
+        // draft defaults to false, mergeable defaults to None
+        assert!(!pr.draft);
+        assert!(pr.mergeable.is_none());
+        assert!(pr.body.is_none());
     }
 
     #[test]

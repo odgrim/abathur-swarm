@@ -395,6 +395,25 @@ impl EgressResult {
     }
 }
 
+/// The kind of item ingested from an external system.
+///
+/// The security boundary depends on never misclassifying a PR as an issue.
+/// This is a type-level guarantee, not a metadata convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IngestionItemKind {
+    /// A standard issue / work item.
+    Issue,
+    /// A pull request — content is untrusted and must never be executed.
+    PullRequest,
+}
+
+impl Default for IngestionItemKind {
+    fn default() -> Self {
+        Self::Issue
+    }
+}
+
 /// An item ingested from an external system.
 ///
 /// This is the normalized representation of work items pulled in by
@@ -415,6 +434,9 @@ pub struct IngestionItem {
     pub metadata: HashMap<String, serde_json::Value>,
     /// When this item was last updated in the external system.
     pub external_updated_at: Option<DateTime<Utc>>,
+    /// What kind of item this is (issue vs pull request).
+    #[serde(default)]
+    pub item_kind: Option<IngestionItemKind>,
 }
 
 impl IngestionItem {
@@ -431,6 +453,7 @@ impl IngestionItem {
             priority: None,
             metadata: HashMap::new(),
             external_updated_at: None,
+            item_kind: None,
         }
     }
 
@@ -449,6 +472,12 @@ impl IngestionItem {
     /// Add a metadata entry.
     pub fn with_metadata(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.metadata.insert(key.into(), value);
+        self
+    }
+
+    /// Set the item kind (issue vs pull request).
+    pub fn with_item_kind(mut self, kind: IngestionItemKind) -> Self {
+        self.item_kind = Some(kind);
         self
     }
 }
@@ -716,6 +745,43 @@ mod tests {
         .with_capability(AdapterCapability::UpdateStatus);
 
         assert_eq!(manifest.capabilities.len(), 1);
+    }
+
+    #[test]
+    fn test_ingestion_item_kind_default() {
+        assert_eq!(IngestionItemKind::default(), IngestionItemKind::Issue);
+    }
+
+    #[test]
+    fn test_ingestion_item_kind_serde() {
+        let issue_json = serde_json::to_string(&IngestionItemKind::Issue).unwrap();
+        assert_eq!(issue_json, "\"issue\"");
+        let pr_json = serde_json::to_string(&IngestionItemKind::PullRequest).unwrap();
+        assert_eq!(pr_json, "\"pull_request\"");
+
+        let roundtrip: IngestionItemKind = serde_json::from_str(&pr_json).unwrap();
+        assert_eq!(roundtrip, IngestionItemKind::PullRequest);
+    }
+
+    #[test]
+    fn test_ingestion_item_with_item_kind() {
+        let item = IngestionItem::new("42", "PR Title", "Description")
+            .with_item_kind(IngestionItemKind::PullRequest);
+        assert_eq!(item.item_kind, Some(IngestionItemKind::PullRequest));
+    }
+
+    #[test]
+    fn test_ingestion_item_kind_defaults_to_none() {
+        let item = IngestionItem::new("1", "Issue", "Body");
+        assert!(item.item_kind.is_none());
+    }
+
+    #[test]
+    fn test_ingestion_item_serde_backward_compat() {
+        // Old items without item_kind should deserialize fine (defaults to None).
+        let json = r#"{"external_id":"1","title":"Test","description":"Body","metadata":{}}"#;
+        let item: IngestionItem = serde_json::from_str(json).unwrap();
+        assert!(item.item_kind.is_none());
     }
 
     #[test]

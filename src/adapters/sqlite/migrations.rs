@@ -134,5 +134,10 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
             description: "Federated goals for cross-swarm delegation".to_string(),
             sql: include_str!("../../../migrations/010_federated_goals.sql").to_string(),
         },
+        Migration {
+            version: 11,
+            description: "Add FK constraints on task_id columns".to_string(),
+            sql: include_str!("../../../migrations/011_add_task_fk_constraints.sql").to_string(),
+        },
     ]
 }

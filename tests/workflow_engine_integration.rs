@@ -1378,7 +1378,7 @@ async fn test_provide_verdict_approve_mid_workflow() {
     let (service, engine, repo, _) = setup().await;
 
     // Submit an adapter-sourced task — enrolls in the "external" workflow
-    // (triage[0] -> research[1] -> plan[2] -> implement[3] -> review[4])
+    // (triage[0] -> validation[1] -> research[2] -> plan[3] -> implement[4] -> review[5])
     let (task, _) = service
         .submit_task(
             Some("Mid-workflow approve test".to_string()),
@@ -1447,7 +1447,7 @@ async fn test_provide_verdict_approve_mid_workflow() {
             phase_name,
         }) => {
             assert_eq!(phase_index, 1, "Should advance to phase 1");
-            assert_eq!(phase_name, "research", "Next phase should be research");
+            assert_eq!(phase_name, "validation", "Next phase should be validation");
         }
         other => panic!(
             "Approve at mid-workflow gate should return Some(PhaseReady); got {:?}",
@@ -1455,7 +1455,7 @@ async fn test_provide_verdict_approve_mid_workflow() {
         ),
     }
 
-    // Verify state is now PhaseReady at research
+    // Verify state is now PhaseReady at validation
     let reloaded = repo.get(task.id).await.unwrap().unwrap();
     let ws: WorkflowState =
         serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
@@ -1466,8 +1466,8 @@ async fn test_provide_verdict_approve_mid_workflow() {
             ..
         } => {
             assert_eq!(phase_index, 1);
-            assert_eq!(phase_name, "research");
+            assert_eq!(phase_name, "validation");
         }
-        other => panic!("Expected PhaseReady at research, got {:?}", other),
+        other => panic!("Expected PhaseReady at validation, got {:?}", other),
     }
 }
