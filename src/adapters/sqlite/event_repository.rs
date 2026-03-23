@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use std::time::Duration;
 
+use crate::services::crypto::SecretEncryptor;
 use crate::services::event_bus::{
     EventCategory, EventId, EventPayload, EventSeverity, SequenceNumber, UnifiedEvent,
 };
@@ -14,11 +15,12 @@ use crate::services::event_store::{CircuitBreakerRecord, DeadLetterEntry, EventQ
 #[derive(Clone)]
 pub struct SqliteEventRepository {
     pool: SqlitePool,
+    encryptor: Option<SecretEncryptor>,
 }
 
 impl SqliteEventRepository {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(pool: SqlitePool, encryptor: Option<SecretEncryptor>) -> Self {
+        Self { pool, encryptor }
     }
 
     fn severity_to_string(severity: EventSeverity) -> &'static str {
@@ -613,6 +615,15 @@ impl EventStore for SqliteEventRepository {
         max_failures: u32,
         created_at: &str,
     ) -> Result<(), EventStoreError> {
+        let encrypted_secret = match (&self.encryptor, secret) {
+            (Some(enc), Some(s)) => Some(
+                enc.encrypt(s)
+                    .map_err(|e| EventStoreError::QueryError(e.to_string()))?,
+            ),
+            (None, s) => s.map(String::from),
+            (Some(_), None) => None,
+        };
+
         sqlx::query(
             r#"
             INSERT INTO webhook_subscriptions (id, url, secret, filter_json, active, max_failures, failure_count, last_delivered_sequence, created_at, updated_at)
@@ -621,7 +632,7 @@ impl EventStore for SqliteEventRepository {
         )
         .bind(id)
         .bind(url)
-        .bind(secret)
+        .bind(encrypted_secret.as_deref())
         .bind(filter_json)
         .bind(max_failures as i64)
         .bind(created_at)
@@ -641,7 +652,7 @@ impl EventStore for SqliteEventRepository {
         .await
         .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
 
-        Ok(rows.into_iter().map(|r| r.into()).collect())
+        rows.into_iter().map(|r| self.convert_webhook_row(r)).collect()
     }
 
     async fn get_webhook(&self, id: &str) -> Result<Option<WebhookSubscription>, EventStoreError> {
@@ -653,7 +664,7 @@ impl EventStore for SqliteEventRepository {
         .await
         .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
 
-        Ok(row.map(|r| r.into()))
+        row.map(|r| self.convert_webhook_row(r)).transpose()
     }
 
     async fn delete_webhook(&self, id: &str) -> Result<(), EventStoreError> {
@@ -680,7 +691,7 @@ impl EventStore for SqliteEventRepository {
         .await
         .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
 
-        Ok(rows.into_iter().map(|r| r.into()).collect())
+        rows.into_iter().map(|r| self.convert_webhook_row(r)).collect()
     }
 
     async fn record_webhook_failure(&self, id: &str) -> Result<(), EventStoreError> {
@@ -795,23 +806,71 @@ struct WebhookRow {
     created_at: String,
 }
 
-impl From<WebhookRow> for WebhookSubscription {
-    fn from(row: WebhookRow) -> Self {
+impl SqliteEventRepository {
+    fn convert_webhook_row(&self, row: WebhookRow) -> Result<WebhookSubscription, EventStoreError> {
         let filter_category = serde_json::from_str::<serde_json::Value>(&row.filter_json)
             .ok()
             .and_then(|v| v.get("category").and_then(|c| c.as_str().map(String::from)));
 
-        WebhookSubscription {
+        let secret = match (&self.encryptor, row.secret) {
+            (Some(enc), Some(s)) => Some(
+                enc.decrypt(&s)
+                    .map_err(|e| EventStoreError::QueryError(e.to_string()))?,
+            ),
+            (_, s) => s,
+        };
+
+        Ok(WebhookSubscription {
             id: row.id,
             url: row.url,
-            secret: row.secret,
+            secret,
             filter_category,
             active: row.active != 0,
             failure_count: row.failure_count as u32,
             max_failures: row.max_failures as u32,
             last_delivered_sequence: row.last_delivered_sequence as u64,
             created_at: row.created_at,
+        })
+    }
+
+    /// Migrate existing plaintext webhook secrets to encrypted storage.
+    ///
+    /// Finds all secrets that don't have the `ENC:v1:` prefix and encrypts them
+    /// in-place. Returns the number of secrets migrated. No-op if no encryptor is set.
+    pub async fn migrate_plaintext_secrets(&self) -> Result<u32, EventStoreError> {
+        let Some(ref enc) = self.encryptor else {
+            return Ok(0);
+        };
+
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, secret FROM webhook_subscriptions WHERE secret IS NOT NULL AND secret NOT LIKE 'ENC:v1:%'",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+
+        let mut count = 0u32;
+        for (id, secret) in rows {
+            let encrypted = enc
+                .encrypt(&secret)
+                .map_err(|e| EventStoreError::QueryError(e.to_string()))?;
+            sqlx::query("UPDATE webhook_subscriptions SET secret = ? WHERE id = ?")
+                .bind(&encrypted)
+                .bind(&id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| EventStoreError::DatabaseError(e.to_string()))?;
+            count += 1;
         }
+
+        if count > 0 {
+            tracing::info!(
+                "Migrated {} plaintext webhook secrets to encrypted storage",
+                count
+            );
+        }
+
+        Ok(count)
     }
 }
 
@@ -879,7 +938,7 @@ mod tests {
     #[tokio::test]
     async fn test_sqlite_event_store_append_and_query() {
         let pool = setup_test_db().await;
-        let store = SqliteEventRepository::new(pool);
+        let store = SqliteEventRepository::new(pool, None);
 
         store.append(&make_test_event(0)).await.unwrap();
         store.append(&make_test_event(1)).await.unwrap();
@@ -892,7 +951,7 @@ mod tests {
     #[tokio::test]
     async fn test_sqlite_event_store_count_and_latest() {
         let pool = setup_test_db().await;
-        let store = SqliteEventRepository::new(pool);
+        let store = SqliteEventRepository::new(pool, None);
 
         assert_eq!(store.count().await.unwrap(), 0);
 
@@ -909,7 +968,7 @@ mod tests {
     #[tokio::test]
     async fn test_sqlite_event_store_filter_by_sequence() {
         let pool = setup_test_db().await;
-        let store = SqliteEventRepository::new(pool);
+        let store = SqliteEventRepository::new(pool, None);
 
         for i in 0..10 {
             store.append(&make_test_event(i)).await.unwrap();

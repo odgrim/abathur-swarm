@@ -382,7 +382,7 @@ async fn test_command_bus_routes_and_emits() {
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
     let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
     let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-    let event_store: Arc<dyn EventStore> = Arc::new(SqliteEventRepository::new(pool.clone()));
+    let event_store: Arc<dyn EventStore> = Arc::new(SqliteEventRepository::new(pool.clone(), None));
 
     let event_bus = Arc::new(
         EventBus::new(EventBusConfig {
@@ -451,7 +451,7 @@ async fn test_e2e_mutation_persist_react() {
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
     let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
     let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
-    let event_store: Arc<dyn EventStore> = Arc::new(SqliteEventRepository::new(pool.clone()));
+    let event_store: Arc<dyn EventStore> = Arc::new(SqliteEventRepository::new(pool.clone(), None));
 
     let event_bus = Arc::new(
         EventBus::new(EventBusConfig {
@@ -530,7 +530,7 @@ async fn test_e2e_mutation_persist_react() {
 #[tokio::test]
 async fn test_watermark_tracking() {
     let pool = create_migrated_test_pool().await.expect("test pool");
-    let store = SqliteEventRepository::new(pool);
+    let store = SqliteEventRepository::new(pool, None);
 
     // No watermark initially
     let wm = store.get_watermark("test-handler").await.expect("get wm");
