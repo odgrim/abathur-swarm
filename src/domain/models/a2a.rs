@@ -630,6 +630,38 @@ impl FederationCard {
         self.hive_id = Some(hive_id.into());
         self
     }
+
+    /// Build a FederationCard from an A2A standard agent card.
+    ///
+    /// Used when the A2A discovery path succeeds and we need to convert
+    /// the wire-format card into the internal federation representation.
+    pub fn from_a2a_agent_card(
+        a2a_card: &super::a2a_protocol::A2AStandardAgentCard,
+    ) -> Self {
+        let card = A2AAgentCard {
+            agent_id: a2a_card.id.clone(),
+            display_name: a2a_card.name.clone(),
+            description: a2a_card.description.clone(),
+            tier: "federation".to_string(),
+            capabilities: a2a_card
+                .skills
+                .iter()
+                .map(|s| s.name.clone())
+                .collect(),
+            accepts: vec![],
+            handoff_targets: vec![],
+            available: true,
+            load: 0.0,
+        };
+        Self {
+            card,
+            parent_id: None,
+            hive_id: None,
+            federation_role: FederationRole::Cerebrate,
+            max_accepted_tasks: 10,
+            heartbeat_ok: true,
+        }
+    }
 }
 
 /// Status of a connected cerebrate as tracked by the overmind.

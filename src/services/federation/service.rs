@@ -6,10 +6,12 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::adapters::a2a::A2AClient;
 use crate::domain::models::a2a::{
     CerebrateStatus, ConnectionState, FederationCard, FederationResult, FederationTaskEnvelope,
     FederationTaskStatus,
 };
+use crate::domain::models::a2a_protocol::TaskSendParams;
 use crate::services::event_bus::{EventBus, EventPayload, EventSeverity};
 use crate::services::event_factory;
 
@@ -230,6 +232,9 @@ pub struct FederationService {
     schemas: Arc<RwLock<HashMap<String, Arc<dyn ResultSchema>>>>,
     /// Shutdown signal for background tasks.
     shutdown_tx: Arc<RwLock<Option<tokio::sync::broadcast::Sender<()>>>>,
+    /// Optional A2A wire-protocol client for outbound federation calls.
+    /// When set, preferred over `http_client` for `delegate_to()` and `connect()`.
+    a2a_client: Option<Arc<dyn A2AClient>>,
 }
 
 impl FederationService {
@@ -251,7 +256,18 @@ impl FederationService {
             task_transformer: Arc::new(DefaultTaskTransformer),
             schemas: Arc::new(RwLock::new(schemas)),
             shutdown_tx: Arc::new(RwLock::new(None)),
+            a2a_client: None,
         }
+    }
+
+    /// Set an A2A wire-protocol client for outbound federation calls.
+    ///
+    /// When set, `delegate_to()` and `connect()` prefer this client over
+    /// the bespoke `FederationHttpClient`. Both paths coexist — the A2A
+    /// client is tried first and falls back to the legacy client on error.
+    pub fn with_a2a_client(mut self, client: Arc<dyn A2AClient>) -> Self {
+        self.a2a_client = Some(client);
+        self
     }
 
     /// Replace the delegation strategy.
@@ -331,14 +347,44 @@ impl FederationService {
             status.url.clone()
         };
 
-        // Attempt HTTP registration if the cerebrate has a URL
-        if let Some(ref url) = url
-            && let Err(e) = self
+        // Attempt A2A discovery + registration if the cerebrate has a URL.
+        // Prefer a2a_client when available; fall back to legacy http_client.
+        if let Some(ref url) = url {
+            if let Some(ref a2a) = self.a2a_client {
+                match a2a.discover(url).await {
+                    Ok(card) => {
+                        tracing::info!(
+                            cerebrate_id = %id,
+                            agent_name = %card.name,
+                            "A2A discovery succeeded"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            cerebrate_id = %id,
+                            error = %e,
+                            "A2A discover failed, falling back to legacy register"
+                        );
+                        if let Err(e2) = self
+                            .http_client
+                            .register(url, &self.config.swarm_id, "")
+                            .await
+                        {
+                            tracing::warn!(
+                                cerebrate_id = %id,
+                                error = %e2,
+                                "Legacy HTTP register also failed, connecting locally"
+                            );
+                        }
+                    }
+                }
+            } else if let Err(e) = self
                 .http_client
                 .register(url, &self.config.swarm_id, "")
                 .await
-        {
-            tracing::warn!(cerebrate_id = %id, error = %e, "HTTP register failed, connecting locally");
+            {
+                tracing::warn!(cerebrate_id = %id, error = %e, "HTTP register failed, connecting locally");
+            }
         }
 
         // Transition to Connected
@@ -428,9 +474,32 @@ impl FederationService {
 
     /// Discover a remote cerebrate by URL, returning its federation card.
     ///
-    /// Makes an HTTP call to `{url}/federation/discover` and returns the
-    /// card describing the remote swarm's capabilities and identity.
+    /// When an A2A client is configured, first tries standard A2A discovery
+    /// (`/.well-known/agent.json`). Falls back to the legacy
+    /// `{url}/federation/discover` endpoint.
     pub async fn discover(&self, url: &str) -> Result<FederationCard, String> {
+        // Try A2A standard discovery first when available
+        if let Some(ref a2a) = self.a2a_client {
+            match a2a.discover(url).await {
+                Ok(card) => {
+                    tracing::info!(
+                        agent_id = %card.id,
+                        agent_name = %card.name,
+                        "Discovered remote agent via A2A"
+                    );
+                    // We return a FederationCard built from the A2A card.
+                    // The caller gets a usable card; detailed mapping is best-effort.
+                    return Ok(FederationCard::from_a2a_agent_card(&card));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        url = %url,
+                        error = %e,
+                        "A2A discover failed, falling back to legacy federation/discover"
+                    );
+                }
+            }
+        }
         self.http_client.discover(url).await
     }
 
@@ -571,18 +640,46 @@ impl FederationService {
             cerebrates.get(cerebrate_id).and_then(|s| s.url.clone())
         };
 
-        // Send the envelope via HTTP to the remote cerebrate
-        if let Some(ref url) = url
-            && let Err(e) = self.http_client.delegate(url, envelope).await
-        {
-            // HTTP send failure is not fatal — the task is tracked in-flight
-            // and the cerebrate may still process it (or we'll detect a stall/orphan).
-            tracing::warn!(
-                cerebrate_id = %cerebrate_id,
-                task_id = %envelope.task_id,
-                error = %e,
-                "HTTP delegate call failed, task tracked in-flight for monitoring"
-            );
+        // Send the envelope to the remote cerebrate.
+        // Prefer a2a_client when available; fall back to legacy http_client.
+        if let Some(ref url) = url {
+            let mut sent_via_a2a = false;
+
+            if let Some(ref a2a) = self.a2a_client {
+                let params = TaskSendParams::from(envelope);
+                match a2a.send_message(url, params).await {
+                    Ok(task) => {
+                        tracing::info!(
+                            cerebrate_id = %cerebrate_id,
+                            task_id = %envelope.task_id,
+                            a2a_task_id = %task.id,
+                            "Delegated via A2A tasks/send"
+                        );
+                        sent_via_a2a = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            cerebrate_id = %cerebrate_id,
+                            task_id = %envelope.task_id,
+                            error = %e,
+                            "A2A delegate failed, falling back to legacy HTTP"
+                        );
+                    }
+                }
+            }
+
+            if !sent_via_a2a {
+                if let Err(e) = self.http_client.delegate(url, envelope).await {
+                    // HTTP send failure is not fatal — the task is tracked in-flight
+                    // and the cerebrate may still process it (or we'll detect a stall/orphan).
+                    tracing::warn!(
+                        cerebrate_id = %cerebrate_id,
+                        task_id = %envelope.task_id,
+                        error = %e,
+                        "HTTP delegate call failed, task tracked in-flight for monitoring"
+                    );
+                }
+            }
         }
 
         self.event_bus
