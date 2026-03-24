@@ -251,21 +251,40 @@ pub struct MergeQueueStats {
 /// Extract conflicting file paths from `git merge-tree --write-tree` output.
 ///
 /// When `git merge-tree --write-tree` exits with code 1, its stdout contains
-/// informational messages like:
-///   `CONFLICT (content): Merge conflict in <path>`
+/// informational messages in various formats:
+///   - `CONFLICT (content): Merge conflict in <path>`
+///   - `CONFLICT (rename/delete): <path> renamed to <path> in ..., deleted in ...`
+///   - `CONFLICT (modify/delete): <path> deleted in ... and modified in ...`
+///   - `CONFLICT (add/add): Merge conflict in <path>`
 ///
-/// This function parses those lines and returns unique file paths.
+/// This function parses all CONFLICT lines and returns unique file paths.
 fn extract_conflict_files(merge_tree_stdout: &str) -> Vec<String> {
     let mut conflicts = Vec::new();
     for line in merge_tree_stdout.lines() {
-        if let Some(path) = line
-            .strip_prefix("CONFLICT ")
-            .and_then(|rest| rest.split("Merge conflict in ").nth(1))
+        let Some(rest) = line.strip_prefix("CONFLICT ") else {
+            continue;
+        };
+        // Skip past the conflict type in parentheses, e.g. "(content): "
+        let after_type = match rest.find("): ") {
+            Some(idx) => &rest[idx + 3..],
+            None => continue,
+        };
+        // Try the common "Merge conflict in <path>" pattern first
+        if let Some(path) = after_type
+            .strip_prefix("Merge conflict in ")
             .map(str::trim)
             .filter(|p| !p.is_empty())
         {
             let path = path.to_string();
             if !conflicts.contains(&path) {
+                conflicts.push(path);
+            }
+        } else {
+            // For rename/delete, modify/delete, etc., extract the first file path
+            // which appears as the first whitespace-delimited token after "): "
+            let token = after_type.split_whitespace().next().unwrap_or("");
+            let path = token.trim().to_string();
+            if !path.is_empty() && !conflicts.contains(&path) {
                 conflicts.push(path);
             }
         }
@@ -678,14 +697,23 @@ where
                 .output()
                 .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
 
-            let has_conflicts = !output.status.success();
-
-            if has_conflicts {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let conflicts = extract_conflict_files(&stdout);
-                Ok((conflicts, true))
-            } else {
-                Ok((vec![], false))
+            // Exit code 0 = clean merge, 1 = conflicts, ≥2 = git error.
+            // Requires Git 2.38+ for --write-tree support.
+            match output.status.code() {
+                Some(0) => Ok((vec![], false)),
+                Some(1) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let conflicts = extract_conflict_files(&stdout);
+                    Ok((conflicts, true))
+                }
+                _ => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    Err(DomainError::ValidationFailed(format!(
+                        "git merge-tree failed (exit {:?}): {}",
+                        output.status.code(),
+                        stderr
+                    )))
+                }
             }
         })
         .await
@@ -1066,6 +1094,42 @@ CONFLICT (content): Merge conflict in src/main.rs\n\
 CONFLICT (content): Merge conflict in src/main.rs\n";
         let files = extract_conflict_files(output);
         assert_eq!(files, vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn test_extract_conflict_files_rename_delete() {
+        let output = "\
+CONFLICT (rename/delete): old_name.rs renamed to new_name.rs in HEAD, deleted in feature\n";
+        let files = extract_conflict_files(output);
+        assert_eq!(files, vec!["old_name.rs"]);
+    }
+
+    #[test]
+    fn test_extract_conflict_files_modify_delete_alternate() {
+        let output = "\
+CONFLICT (modify/delete): src/config.rs deleted in HEAD and modified in feature\n";
+        let files = extract_conflict_files(output);
+        assert_eq!(files, vec!["src/config.rs"]);
+    }
+
+    #[test]
+    fn test_extract_conflict_files_mixed_types() {
+        let output = "\
+abc123def456\n\
+CONFLICT (content): Merge conflict in src/main.rs\n\
+CONFLICT (rename/delete): old.rs renamed to new.rs in HEAD, deleted in feature\n\
+CONFLICT (modify/delete): src/config.rs deleted in HEAD and modified in feature\n\
+CONFLICT (add/add): Merge conflict in src/both_added.rs\n";
+        let files = extract_conflict_files(output);
+        assert_eq!(
+            files,
+            vec![
+                "src/main.rs",
+                "old.rs",
+                "src/config.rs",
+                "src/both_added.rs"
+            ]
+        );
     }
 
     #[test]
