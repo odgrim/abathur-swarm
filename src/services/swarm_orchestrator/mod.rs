@@ -83,6 +83,8 @@ where
     pub(super) active_goals_cache: Arc<RwLock<Vec<Goal>>>,
     pub(super) restructure_service: Arc<tokio::sync::Mutex<DagRestructureService>>,
     pub(super) guardrails: Arc<Guardrails>,
+    /// Cancellation token for the hourly token-counter reset daemon.
+    pub(super) hourly_reset_cancel: Arc<RwLock<Option<tokio_util::sync::CancellationToken>>>,
     pub(super) mcp_shutdown_tx: Arc<RwLock<Option<tokio::sync::broadcast::Sender<()>>>>,
     pub(super) intent_verifier: Option<Arc<IntentVerifierService<G, T>>>,
     pub(super) overmind: Option<Arc<crate::services::OvermindService>>,
@@ -173,6 +175,7 @@ where
             active_goals_cache: Arc::new(RwLock::new(Vec::new())),
             restructure_service: Arc::new(tokio::sync::Mutex::new(DagRestructureService::with_defaults())),
             guardrails: Arc::new(Guardrails::with_defaults()),
+            hourly_reset_cancel: Arc::new(RwLock::new(None)),
             mcp_shutdown_tx: Arc::new(RwLock::new(None)),
             intent_verifier: None,
             overmind: None,
@@ -549,6 +552,14 @@ where
                 ).await;
             }
 
+        // Start hourly token counter reset task
+        {
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let _hourly_reset_handle = self.guardrails.spawn_hourly_reset(cancel.clone());
+            *self.hourly_reset_cancel.write().await = Some(cancel);
+            tracing::info!("hourly token reset daemon started");
+        }
+
         // Start outbox poller for reliable event delivery
         self.start_outbox_poller().await;
 
@@ -888,6 +899,12 @@ where
             AuditAction::SwarmStopped,
             "Swarm orchestrator stopped",
         ).await;
+
+        // Stop hourly token reset daemon if running
+        if let Some(cancel) = self.hourly_reset_cancel.read().await.as_ref() {
+            cancel.cancel();
+            tracing::info!("hourly token reset daemon stopped");
+        }
 
         // Stop decay daemon if running
         self.stop_decay_daemon().await;

@@ -12,7 +12,9 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 /// Configuration for guardrails.
 #[derive(Debug, Clone)]
@@ -409,6 +411,42 @@ impl Guardrails {
         &self.metrics
     }
 
+    /// Get a clone of the shared metrics Arc.
+    pub fn metrics_arc(&self) -> Arc<RuntimeMetrics> {
+        Arc::clone(&self.metrics)
+    }
+
+    /// Spawn a background task that resets the hourly token counter every 60 minutes.
+    ///
+    /// The task runs until the provided `cancel` token is cancelled, enabling
+    /// graceful shutdown.  Returns a `JoinHandle` so the caller can await
+    /// completion if desired.
+    pub fn spawn_hourly_reset(
+        &self,
+        cancel: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        let metrics = Arc::clone(&self.metrics);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(3600));
+            // The first tick completes immediately — consume it so we don't
+            // reset at startup.
+            interval.tick().await;
+
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        tracing::info!("hourly token reset task shutting down");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        metrics.reset_hourly();
+                        tracing::info!("hourly token counter reset");
+                    }
+                }
+            }
+        })
+    }
+
     /// Simple glob-style pattern matching for file paths.
     ///
     /// Supported patterns:
@@ -447,6 +485,70 @@ impl Guardrails {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_reset_hourly_clears_token_counter() {
+        let metrics = RuntimeMetrics::default();
+        metrics.record_tokens(5000);
+        assert_eq!(metrics.get_tokens_this_hour(), 5000);
+
+        metrics.reset_hourly();
+        assert_eq!(metrics.get_tokens_this_hour(), 0);
+
+        // Total tokens should remain unchanged
+        assert_eq!(metrics.get_total_tokens(), 5000);
+    }
+
+    #[tokio::test]
+    async fn test_spawn_hourly_reset_responds_to_cancellation() {
+        let guardrails = Guardrails::new(GuardrailsConfig::default());
+        let cancel = CancellationToken::new();
+        let handle = guardrails.spawn_hourly_reset(cancel.clone());
+
+        // The task should be running
+        assert!(!handle.is_finished());
+
+        // Cancel and verify graceful shutdown
+        cancel.cancel();
+        // The task should finish promptly after cancellation
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("hourly reset task did not shut down in time")
+            .expect("hourly reset task panicked");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_hourly_reset_resets_counter() {
+        // Use a short interval by directly testing the metrics reset mechanism
+        // (we can't easily wait 60 minutes in a test)
+        let guardrails = Guardrails::new(GuardrailsConfig {
+            max_tokens_per_hour: 10_000,
+            ..Default::default()
+        });
+
+        // Record some tokens
+        guardrails.record_tokens(5000);
+        assert_eq!(guardrails.get_metrics().get_tokens_this_hour(), 5000);
+
+        // Simulate what the background task does
+        guardrails.get_metrics().reset_hourly();
+        assert_eq!(guardrails.get_metrics().get_tokens_this_hour(), 0);
+
+        // Token check should now pass again
+        assert!(guardrails.check_tokens(5000).is_allowed());
+    }
+
+    #[tokio::test]
+    async fn test_metrics_arc_returns_shared_reference() {
+        let guardrails = Guardrails::new(GuardrailsConfig::default());
+        let metrics = guardrails.metrics_arc();
+
+        guardrails.record_tokens(1000);
+        assert_eq!(metrics.get_tokens_this_hour(), 1000);
+
+        metrics.reset_hourly();
+        assert_eq!(guardrails.get_metrics().get_tokens_this_hour(), 0);
+    }
 
     #[tokio::test]
     async fn test_task_limit() {
