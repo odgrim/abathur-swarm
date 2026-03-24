@@ -103,6 +103,57 @@ impl RuntimeMetrics {
         self.total_tokens_used.fetch_add(tokens, Ordering::Relaxed);
     }
 
+    /// Atomically check whether `requested` tokens fit within `max_tokens_per_hour`
+    /// and, if so, reserve them in a single CAS operation.
+    ///
+    /// Returns `Ok(previous_value)` when the reservation succeeded, or
+    /// `Err(current_value)` when the limit would be exceeded.
+    pub fn check_and_record_tokens(
+        &self,
+        requested: u64,
+        max_tokens_per_hour: u64,
+    ) -> Result<u64, u64> {
+        let result = self.tokens_used_this_hour.fetch_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |current| {
+                if current.checked_add(requested)? <= max_tokens_per_hour {
+                    Some(current + requested)
+                } else {
+                    None
+                }
+            },
+        );
+        if result.is_ok() {
+            // Also bump the lifetime counter (best-effort, no CAS needed).
+            self.total_tokens_used.fetch_add(requested, Ordering::Relaxed);
+        }
+        result
+    }
+
+    /// Atomically check whether `additional_hundredths` fits within
+    /// `limit_hundredths` and, if so, reserve it in a single CAS operation.
+    ///
+    /// Returns `Ok(previous_value)` on success, `Err(current_value)` on
+    /// budget exhaustion.
+    pub fn check_and_record_cost_hundredths(
+        &self,
+        additional_hundredths: u64,
+        limit_hundredths: u64,
+    ) -> Result<u64, u64> {
+        self.cost_hundredths.fetch_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |current| {
+                if current.checked_add(additional_hundredths)? <= limit_hundredths {
+                    Some(current + additional_hundredths)
+                } else {
+                    None
+                }
+            },
+        )
+    }
+
     pub fn record_task_started(&self) {
         self.tasks_started.fetch_add(1, Ordering::Relaxed);
     }
@@ -340,7 +391,11 @@ impl Guardrails {
         GuardrailResult::Allowed
     }
 
-    /// Check token usage.
+    /// Check token usage (read-only — does NOT reserve tokens).
+    ///
+    /// Prefer [`check_and_record_tokens`] for callers that intend to
+    /// consume the tokens immediately after the check, since that method
+    /// performs the check and reservation atomically.
     pub fn check_tokens(&self, requested: u64) -> GuardrailResult {
         let current = self.metrics.get_tokens_this_hour();
         if current + requested > self.config.max_tokens_per_hour {
@@ -364,7 +419,56 @@ impl Guardrails {
         GuardrailResult::Allowed
     }
 
-    /// Check budget.
+    /// Atomically check **and** reserve `requested` tokens against the
+    /// hourly limit.
+    ///
+    /// This combines the read + write into a single lock-free CAS loop so
+    /// concurrent callers cannot collectively exceed the quota.
+    pub fn check_and_record_tokens(&self, requested: u64) -> GuardrailResult {
+        match self
+            .metrics
+            .check_and_record_tokens(requested, self.config.max_tokens_per_hour)
+        {
+            Ok(prev) => {
+                let new_total = prev + requested;
+                tracing::debug!(requested, new_total, "atomically reserved tokens");
+
+                // Emit a warning if we crossed the 80 % threshold.
+                let warn_threshold = (self.config.max_tokens_per_hour * 80) / 100;
+                if new_total > warn_threshold {
+                    tracing::warn!(
+                        requested,
+                        current = new_total,
+                        max = self.config.max_tokens_per_hour,
+                        "token usage warning: approaching limit"
+                    );
+                    return GuardrailResult::Warning(format!(
+                        "Approaching token limit: {}/{} used",
+                        new_total, self.config.max_tokens_per_hour
+                    ));
+                }
+
+                GuardrailResult::Allowed
+            }
+            Err(current) => {
+                tracing::warn!(
+                    requested,
+                    current,
+                    max = self.config.max_tokens_per_hour,
+                    "token usage blocked: limit would be exceeded"
+                );
+                GuardrailResult::Blocked(format!(
+                    "Token limit ({}/hour) would be exceeded",
+                    self.config.max_tokens_per_hour
+                ))
+            }
+        }
+    }
+
+    /// Check budget (read-only — does NOT reserve spend).
+    ///
+    /// Prefer [`check_and_record_cost`] for callers that intend to record
+    /// the cost immediately after the check.
     pub fn check_budget(&self, additional_cents: f64) -> GuardrailResult {
         if !self.config.enforce_budget {
             return GuardrailResult::Allowed;
@@ -380,6 +484,48 @@ impl Guardrails {
         }
 
         GuardrailResult::Allowed
+    }
+
+    /// Atomically check **and** reserve `additional_cents` against the
+    /// budget limit.
+    ///
+    /// Returns [`GuardrailResult::Allowed`] when budget is not enforced.
+    pub fn check_and_record_cost(&self, additional_cents: f64) -> GuardrailResult {
+        if !self.config.enforce_budget {
+            // Still record the cost for observability, even though we don't enforce.
+            self.metrics.record_cost(additional_cents);
+            return GuardrailResult::Allowed;
+        }
+
+        if additional_cents < 0.0 || additional_cents.is_nan() {
+            return GuardrailResult::Allowed;
+        }
+
+        let additional_hundredths = (additional_cents * 100.0).round() as u64;
+        let limit_hundredths = (self.config.budget_limit_cents * 100.0).round() as u64;
+
+        match self
+            .metrics
+            .check_and_record_cost_hundredths(additional_hundredths, limit_hundredths)
+        {
+            Ok(_prev) => {
+                tracing::debug!(additional_cents, "atomically reserved budget");
+                GuardrailResult::Allowed
+            }
+            Err(current_hundredths) => {
+                let current_cents = current_hundredths as f64 / 100.0;
+                tracing::warn!(
+                    additional_cents,
+                    current_cents,
+                    limit_cents = self.config.budget_limit_cents,
+                    "budget blocked: limit would be exceeded"
+                );
+                GuardrailResult::Blocked(format!(
+                    "Budget limit (${:.2}) would be exceeded",
+                    self.config.budget_limit_cents / 100.0
+                ))
+            }
+        }
     }
 
     /// Check decomposition depth.
@@ -824,5 +970,206 @@ mod tests {
             }
             other => panic!("Expected Warning, got {:?}", other),
         }
+    }
+
+    // ------- Atomic check-and-record tests -------
+
+    #[test]
+    fn test_check_and_record_tokens_basic() {
+        let config = GuardrailsConfig {
+            max_tokens_per_hour: 1000,
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        // Should succeed and actually reserve
+        assert!(guardrails.check_and_record_tokens(500).is_allowed());
+        assert_eq!(guardrails.get_metrics().get_tokens_this_hour(), 500);
+        assert_eq!(guardrails.get_metrics().get_total_tokens(), 500);
+
+        // Should succeed again (total 900)
+        assert!(guardrails.check_and_record_tokens(400).is_allowed());
+        assert_eq!(guardrails.get_metrics().get_tokens_this_hour(), 900);
+
+        // Should block (would exceed 1000)
+        assert!(guardrails.check_and_record_tokens(200).is_blocked());
+        // Counter should not have changed
+        assert_eq!(guardrails.get_metrics().get_tokens_this_hour(), 900);
+    }
+
+    #[test]
+    fn test_check_and_record_tokens_warns_at_80_percent() {
+        let config = GuardrailsConfig {
+            max_tokens_per_hour: 1000,
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        // 850 tokens = 85% — should warn
+        match guardrails.check_and_record_tokens(850) {
+            GuardrailResult::Warning(msg) => {
+                assert!(msg.contains("Approaching"), "Unexpected message: {msg}");
+            }
+            other => panic!("Expected Warning, got {:?}", other),
+        }
+        // Tokens should still be reserved despite the warning
+        assert_eq!(guardrails.get_metrics().get_tokens_this_hour(), 850);
+    }
+
+    #[test]
+    fn test_check_and_record_tokens_concurrent_never_exceeds_limit() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let max_tokens: u64 = 10_000;
+        let config = GuardrailsConfig {
+            max_tokens_per_hour: max_tokens,
+            ..Default::default()
+        };
+        let guardrails = Arc::new(Guardrails::new(config));
+
+        let num_threads = 20;
+        let tokens_per_request: u64 = 100;
+        let requests_per_thread = 50;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|_| {
+                let g = Arc::clone(&guardrails);
+                thread::spawn(move || {
+                    let mut allowed = 0u64;
+                    for _ in 0..requests_per_thread {
+                        if g.check_and_record_tokens(tokens_per_request).is_allowed()
+                            || matches!(
+                                g.check_and_record_tokens(0),
+                                GuardrailResult::Warning(_) | GuardrailResult::Allowed
+                            )
+                        {
+                            // Count only the first call's result
+                        }
+                        // We just care that the counter never exceeds max.
+                        if g.check_and_record_tokens(tokens_per_request).is_allowed() {
+                            allowed += tokens_per_request;
+                        }
+                    }
+                    allowed
+                })
+            })
+            .collect();
+
+        let _total_allowed: u64 = handles.into_iter().map(|h| h.join().unwrap()).sum();
+        let final_tokens = guardrails.get_metrics().get_tokens_this_hour();
+
+        // The critical invariant: the counter must never exceed the limit.
+        assert!(
+            final_tokens <= max_tokens,
+            "Token counter ({final_tokens}) exceeded limit ({max_tokens})!"
+        );
+    }
+
+    #[test]
+    fn test_check_and_record_cost_basic() {
+        let config = GuardrailsConfig {
+            enforce_budget: true,
+            budget_limit_cents: 100.0, // $1.00
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        assert!(guardrails.check_and_record_cost(50.0).is_allowed());
+        assert!((guardrails.get_metrics().get_cost_cents() - 50.0).abs() < 0.1);
+
+        assert!(guardrails.check_and_record_cost(40.0).is_allowed());
+        assert!((guardrails.get_metrics().get_cost_cents() - 90.0).abs() < 0.1);
+
+        // Should block (would exceed 100)
+        assert!(guardrails.check_and_record_cost(20.0).is_blocked());
+        // Counter should not have changed
+        assert!((guardrails.get_metrics().get_cost_cents() - 90.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_check_and_record_cost_skips_when_not_enforced() {
+        let config = GuardrailsConfig {
+            enforce_budget: false,
+            budget_limit_cents: 100.0,
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        // Should always allow and still record
+        assert!(guardrails.check_and_record_cost(200.0).is_allowed());
+        assert!(guardrails.get_metrics().get_cost_cents() > 100.0);
+    }
+
+    #[test]
+    fn test_check_and_record_cost_concurrent_never_exceeds_limit() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let limit_cents: f64 = 100.0;
+        let config = GuardrailsConfig {
+            enforce_budget: true,
+            budget_limit_cents: limit_cents,
+            ..Default::default()
+        };
+        let guardrails = Arc::new(Guardrails::new(config));
+
+        let num_threads = 20;
+        let cost_per_request: f64 = 1.0;
+        let requests_per_thread = 50;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|_| {
+                let g = Arc::clone(&guardrails);
+                thread::spawn(move || {
+                    for _ in 0..requests_per_thread {
+                        let _ = g.check_and_record_cost(cost_per_request);
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let final_cost = guardrails.get_metrics().get_cost_cents();
+        assert!(
+            final_cost <= limit_cents + 0.1, // small float tolerance
+            "Cost ({final_cost}) exceeded limit ({limit_cents})!"
+        );
+    }
+
+    #[test]
+    fn test_atomic_metrics_check_and_record_tokens() {
+        let metrics = RuntimeMetrics::default();
+
+        // Basic success
+        assert!(metrics.check_and_record_tokens(500, 1000).is_ok());
+        assert_eq!(metrics.get_tokens_this_hour(), 500);
+        assert_eq!(metrics.get_total_tokens(), 500);
+
+        // Exactly at limit
+        assert!(metrics.check_and_record_tokens(500, 1000).is_ok());
+        assert_eq!(metrics.get_tokens_this_hour(), 1000);
+
+        // Over limit
+        assert!(metrics.check_and_record_tokens(1, 1000).is_err());
+        assert_eq!(metrics.get_tokens_this_hour(), 1000); // unchanged
+    }
+
+    #[test]
+    fn test_atomic_metrics_check_and_record_cost_hundredths() {
+        let metrics = RuntimeMetrics::default();
+
+        assert!(metrics.check_and_record_cost_hundredths(5000, 10000).is_ok());
+        assert_eq!(metrics.cost_hundredths.load(Ordering::Relaxed), 5000);
+
+        assert!(metrics.check_and_record_cost_hundredths(5000, 10000).is_ok());
+        assert_eq!(metrics.cost_hundredths.load(Ordering::Relaxed), 10000);
+
+        // Over limit
+        assert!(metrics.check_and_record_cost_hundredths(1, 10000).is_err());
+        assert_eq!(metrics.cost_hundredths.load(Ordering::Relaxed), 10000);
     }
 }

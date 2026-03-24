@@ -1033,11 +1033,23 @@ where
                     );
                 }
 
-                // Record tokens with guardrails
+                // Record tokens and cost atomically with guardrails.
+                // We use check_and_record_* so the reservation is atomic;
+                // for post-hoc recording (tokens already consumed) we still
+                // want to track them even if the limit is exceeded, so we
+                // fall back to plain record_* when the atomic check rejects.
                 if let Some(ref g) = guardrails {
-                    g.record_tokens(tokens_used);
+                    if g.check_and_record_tokens(tokens_used).is_blocked() {
+                        // Tokens were already consumed by the LLM call, so
+                        // record them anyway for accurate accounting.
+                        g.record_tokens(tokens_used);
+                        tracing::warn!(tokens_used, "token guardrail exceeded post-hoc; recorded for accounting");
+                    }
                     if let Some(cost_cents) = estimated_cost_cents {
-                        g.record_cost(cost_cents);
+                        if g.check_and_record_cost(cost_cents).is_blocked() {
+                            g.record_cost(cost_cents);
+                            tracing::warn!(cost_cents, "budget guardrail exceeded post-hoc; recorded for accounting");
+                        }
                     }
                 }
 
