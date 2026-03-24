@@ -440,6 +440,54 @@ impl TaskRepository for SqliteTaskRepository {
             _ => Ok(None),
         }
     }
+
+    async fn calculate_depth(&self, task_id: Uuid) -> DomainResult<u32> {
+        let result: (i64,) = sqlx::query_as(
+            r#"WITH RECURSIVE ancestors AS (
+                SELECT parent_id, 0 AS depth FROM tasks WHERE id = ?
+                UNION ALL
+                SELECT t.parent_id, a.depth + 1
+                FROM tasks t INNER JOIN ancestors a ON t.id = a.parent_id
+                WHERE a.parent_id IS NOT NULL
+            )
+            SELECT COALESCE(MAX(depth), 0) FROM ancestors"#
+        )
+        .bind(task_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(result.0 as u32)
+    }
+
+    async fn find_root_task_id(&self, task_id: Uuid) -> DomainResult<Uuid> {
+        let result: (String,) = sqlx::query_as(
+            r#"WITH RECURSIVE ancestors AS (
+                SELECT id, parent_id FROM tasks WHERE id = ?
+                UNION ALL
+                SELECT t.id, t.parent_id
+                FROM tasks t INNER JOIN ancestors a ON t.id = a.parent_id
+                WHERE a.parent_id IS NOT NULL
+            )
+            SELECT id FROM ancestors WHERE parent_id IS NULL LIMIT 1"#
+        )
+        .bind(task_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+
+        Uuid::parse_str(&result.0)
+            .map_err(|e| DomainError::SerializationError(e.to_string()))
+    }
+
+    async fn count_children(&self, task_id: Uuid) -> DomainResult<u32> {
+        let result: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM tasks WHERE parent_id = ?"
+        )
+        .bind(task_id.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(result.0 as u32)
+    }
 }
 
 impl SqliteTaskRepository {
@@ -922,5 +970,100 @@ mod tests {
 
         let claimed = repo.claim_task_atomic(task.id, "overmind").await.unwrap().unwrap();
         assert_eq!(claimed.version, original_version + 1);
+    }
+
+    #[tokio::test]
+    async fn test_calculate_depth_root_task() {
+        let repo = setup_test_repo().await;
+        let root = Task::with_title("Root", "Desc");
+        repo.create(&root).await.unwrap();
+
+        let depth = repo.calculate_depth(root.id).await.unwrap();
+        assert_eq!(depth, 0);
+    }
+
+    #[tokio::test]
+    async fn test_calculate_depth_nested() {
+        let repo = setup_test_repo().await;
+
+        let root = Task::with_title("Root", "Desc");
+        let child = Task::with_title("Child", "Desc").with_parent(root.id);
+        let grandchild = Task::with_title("Grandchild", "Desc").with_parent(child.id);
+
+        repo.create(&root).await.unwrap();
+        repo.create(&child).await.unwrap();
+        repo.create(&grandchild).await.unwrap();
+
+        assert_eq!(repo.calculate_depth(root.id).await.unwrap(), 0);
+        assert_eq!(repo.calculate_depth(child.id).await.unwrap(), 1);
+        assert_eq!(repo.calculate_depth(grandchild.id).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_find_root_task_id_root() {
+        let repo = setup_test_repo().await;
+        let root = Task::with_title("Root", "Desc");
+        repo.create(&root).await.unwrap();
+
+        let found = repo.find_root_task_id(root.id).await.unwrap();
+        assert_eq!(found, root.id);
+    }
+
+    #[tokio::test]
+    async fn test_find_root_task_id_nested() {
+        let repo = setup_test_repo().await;
+
+        let root = Task::with_title("Root", "Desc");
+        let child = Task::with_title("Child", "Desc").with_parent(root.id);
+        let grandchild = Task::with_title("Grandchild", "Desc").with_parent(child.id);
+
+        repo.create(&root).await.unwrap();
+        repo.create(&child).await.unwrap();
+        repo.create(&grandchild).await.unwrap();
+
+        assert_eq!(repo.find_root_task_id(grandchild.id).await.unwrap(), root.id);
+        assert_eq!(repo.find_root_task_id(child.id).await.unwrap(), root.id);
+    }
+
+    #[tokio::test]
+    async fn test_count_children() {
+        let repo = setup_test_repo().await;
+
+        let parent = Task::with_title("Parent", "Desc");
+        let child1 = Task::with_title("Child 1", "Desc").with_parent(parent.id);
+        let child2 = Task::with_title("Child 2", "Desc").with_parent(parent.id);
+        let grandchild = Task::with_title("Grandchild", "Desc").with_parent(child1.id);
+
+        repo.create(&parent).await.unwrap();
+        repo.create(&child1).await.unwrap();
+        repo.create(&child2).await.unwrap();
+        repo.create(&grandchild).await.unwrap();
+
+        // Direct children only, not grandchildren
+        assert_eq!(repo.count_children(parent.id).await.unwrap(), 2);
+        assert_eq!(repo.count_children(child1.id).await.unwrap(), 1);
+        assert_eq!(repo.count_children(child2.id).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_count_descendants_recursive() {
+        let repo = setup_test_repo().await;
+
+        let root = Task::with_title("Root", "Desc");
+        let child1 = Task::with_title("Child 1", "Desc").with_parent(root.id);
+        let child2 = Task::with_title("Child 2", "Desc").with_parent(root.id);
+        let grandchild = Task::with_title("Grandchild", "Desc").with_parent(child1.id);
+
+        repo.create(&root).await.unwrap();
+        repo.create(&child1).await.unwrap();
+        repo.create(&child2).await.unwrap();
+        repo.create(&grandchild).await.unwrap();
+
+        // All descendants: child1, child2, grandchild = 3
+        assert_eq!(repo.count_descendants(root.id).await.unwrap(), 3);
+        // child1 has one descendant: grandchild
+        assert_eq!(repo.count_descendants(child1.id).await.unwrap(), 1);
+        // Leaf has no descendants
+        assert_eq!(repo.count_descendants(grandchild.id).await.unwrap(), 0);
     }
 }

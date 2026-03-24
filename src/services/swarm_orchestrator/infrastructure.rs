@@ -813,19 +813,9 @@ where
         }
     }
 
-    /// Walk up the parent_id chain to find the root ancestor task.
+    /// Find the root ancestor of a task using a single recursive CTE query.
     pub(super) async fn find_root_ancestor(&self, task_id: Uuid) -> Uuid {
-        let mut current = task_id;
-        for _ in 0..50 {
-            match self.task_repo.get(current).await {
-                Ok(Some(task)) => match task.parent_id {
-                    Some(pid) => current = pid,
-                    None => return current,
-                },
-                _ => return current,
-            }
-        }
-        current
+        self.task_repo.find_root_task_id(task_id).await.unwrap_or(task_id)
     }
 
     /// Update statistics.

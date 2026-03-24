@@ -295,72 +295,28 @@ impl<T: TaskRepository> TaskService<T> {
 
     /// Calculate the depth of a task in the hierarchy (0 = root).
     ///
-    /// Uses lightweight `get_parent_id` queries to traverse the ancestry chain
-    /// without loading full `Task` structs at each level.
+    /// Delegates to a single recursive CTE query in the repository layer,
+    /// eliminating the N+1 query pattern of walking up one parent at a time.
     async fn calculate_depth(&self, task: &Task) -> DomainResult<u32> {
-        let mut depth = 0;
-        let mut current_parent = task.parent_id;
-
-        while let Some(pid) = current_parent {
-            depth += 1;
-            if depth > 100 {
-                // Safety limit to prevent infinite loops
-                break;
-            }
-            current_parent = self.task_repo.get_parent_id(pid).await?;
-        }
-
-        Ok(depth)
+        self.task_repo.calculate_depth(task.id).await
     }
 
-    /// Count direct subtasks of a task.
+    /// Count direct subtasks of a task (single COUNT query, no row loading).
     async fn count_direct_subtasks(&self, parent_id: Uuid) -> DomainResult<u32> {
-        let filter = TaskFilter {
-            parent_id: Some(parent_id),
-            ..Default::default()
-        };
-        let subtasks = self.task_repo.list(filter).await?;
-        Ok(subtasks.len() as u32)
+        self.task_repo.count_children(parent_id).await
     }
 
     /// Find the root task (task with no parent).
     ///
-    /// Uses lightweight `get_parent_id` queries to walk up the task tree
-    /// without allocating full `Task` structs at each level.
+    /// Delegates to a single recursive CTE query in the repository layer,
+    /// eliminating the N+1 query pattern of walking up one parent at a time.
     async fn find_root_task(&self, task: &Task) -> DomainResult<Uuid> {
-        let mut current_id = task.id;
-
-        while let Some(pid) = self.task_repo.get_parent_id(current_id).await? {
-            current_id = pid;
-        }
-
-        Ok(current_id)
+        self.task_repo.find_root_task_id(task.id).await
     }
 
-    /// Count all descendants of a task using iterative BFS.
+    /// Count all descendants of a task using a single recursive CTE query.
     async fn count_all_descendants(&self, task_id: Uuid) -> DomainResult<u32> {
-        let mut count = 0u32;
-        let mut queue = vec![task_id];
-
-        while let Some(current_id) = queue.pop() {
-            let filter = TaskFilter {
-                parent_id: Some(current_id),
-                ..Default::default()
-            };
-            let children = self.task_repo.list(filter).await?;
-
-            count += children.len() as u32;
-            for child in children {
-                queue.push(child.id);
-            }
-
-            // Safety limit
-            if count > 10000 {
-                break;
-            }
-        }
-
-        Ok(count)
+        Ok(self.task_repo.count_descendants(task_id).await? as u32)
     }
 
     // --- Scoring weights for classify_execution_mode ---

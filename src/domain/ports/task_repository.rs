@@ -86,4 +86,18 @@ pub trait TaskRepository: Send + Sync {
     /// This is used for lightweight ancestry traversal (depth calculation,
     /// root-finding) to avoid cloning entire `Task` structs at each level.
     async fn get_parent_id(&self, task_id: Uuid) -> DomainResult<Option<Uuid>>;
+
+    /// Calculate the depth of a task in the hierarchy using a single recursive query.
+    ///
+    /// Returns 0 for root tasks (no parent). Traverses the ancestor chain
+    /// in a single SQL CTE instead of N individual queries.
+    async fn calculate_depth(&self, task_id: Uuid) -> DomainResult<u32>;
+
+    /// Find the root ancestor of a task using a single recursive query.
+    ///
+    /// Returns the task's own ID if it has no parent.
+    async fn find_root_task_id(&self, task_id: Uuid) -> DomainResult<Uuid>;
+
+    /// Count direct children of a task (single query, no full row loading).
+    async fn count_children(&self, task_id: Uuid) -> DomainResult<u32>;
 }

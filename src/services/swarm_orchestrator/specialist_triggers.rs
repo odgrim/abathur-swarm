@@ -499,17 +499,8 @@ where
             allow_limit_extensions: self.config.spawn_limits.allow_limit_extensions,
         };
 
-        // Check subtask depth by traversing up the tree
-        let mut depth = 0u32;
-        let mut current = parent_task.clone();
-        while let Some(pid) = current.parent_id {
-            depth += 1;
-            if depth > 100 { break; }
-            match self.task_repo.get(pid).await? {
-                Some(p) => current = p,
-                None => break,
-            }
-        }
+        // Check subtask depth using a single recursive CTE query
+        let depth = self.task_repo.calculate_depth(parent_id).await?;
 
         if depth >= spawn_limits.max_subtask_depth {
             if spawn_limits.allow_limit_extensions {
@@ -535,12 +526,8 @@ where
             return Ok(false);
         }
 
-        // Check direct subtasks count
-        let filter = crate::domain::ports::TaskFilter {
-            parent_id: Some(parent_id),
-            ..Default::default()
-        };
-        let direct_subtasks = self.task_repo.list(filter).await?.len() as u32;
+        // Check direct subtasks count using a single COUNT query
+        let direct_subtasks = self.task_repo.count_children(parent_id).await?;
 
         if direct_subtasks >= spawn_limits.max_subtasks_per_task {
             if spawn_limits.allow_limit_extensions {

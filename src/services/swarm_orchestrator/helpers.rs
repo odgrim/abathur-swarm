@@ -253,20 +253,12 @@ enum MergeBackOutcome {
     ConflictQueued,
 }
 
-/// Walk up the parent_id chain to find the root ancestor task.
+/// Find the root ancestor of a task using a single recursive CTE query.
+///
 /// Standalone helper for use by both infrastructure.rs and helpers.rs.
+/// Falls back to returning `task_id` itself if the query fails.
 pub async fn find_root_ancestor_id<T: TaskRepository>(task_id: Uuid, task_repo: &T) -> Uuid {
-    let mut current = task_id;
-    for _ in 0..50 {
-        match task_repo.get(current).await {
-            Ok(Some(task)) => match task.parent_id {
-                Some(pid) => current = pid,
-                None => return current,
-            },
-            _ => return current,
-        }
-    }
-    current
+    task_repo.find_root_task_id(task_id).await.unwrap_or(task_id)
 }
 
 /// Helper function to run post-completion workflow (verification and merging).
