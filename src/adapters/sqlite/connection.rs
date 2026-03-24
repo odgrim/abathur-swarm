@@ -57,7 +57,7 @@ pub async fn create_pool(database_url: &str, config: Option<PoolConfig>) -> Resu
         .map_err(ConnectionError::PoolCreationFailed)?;
 
     #[cfg(unix)]
-    check_database_permissions(database_url);
+    enforce_database_permissions(database_url);
 
     Ok(pool)
 }
@@ -96,7 +96,7 @@ fn ensure_database_directory(database_url: &str) -> Result<(), ConnectionError> 
 }
 
 #[cfg(unix)]
-fn check_database_permissions(database_url: &str) {
+fn enforce_database_permissions(database_url: &str) {
     use std::os::unix::fs::PermissionsExt;
     let path = database_url
         .strip_prefix("sqlite://")
@@ -110,12 +110,22 @@ fn check_database_permissions(database_url: &str) {
     if let Ok(metadata) = std::fs::metadata(path) {
         let mode = metadata.permissions().mode();
         if mode & 0o077 != 0 {
-            tracing::warn!(
-                "Database file {} has permissions {:o} — recommended: 0600. \
-                 Other users may be able to read webhook secrets.",
-                path,
-                mode & 0o777
-            );
+            let mut perms = metadata.permissions();
+            perms.set_mode(mode & 0o7700);
+            if let Err(e) = std::fs::set_permissions(path, perms) {
+                tracing::warn!(
+                    "Could not restrict database file permissions for {}: {}",
+                    path,
+                    e
+                );
+            } else {
+                tracing::info!(
+                    "Restricted database file {} permissions from {:o} to {:o}",
+                    path,
+                    mode & 0o777,
+                    mode & 0o7700 & 0o777
+                );
+            }
         }
     }
 }
