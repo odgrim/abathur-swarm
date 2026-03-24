@@ -423,11 +423,15 @@ where
             &request.target_branch,
         ).await?;
 
-        if !conflict_check.0.is_empty() {
+        if conflict_check.1 {
             tracing::warn!(task_id = %request.task_id, conflict_count = conflict_check.0.len(), "stage 1 merge: conflicts detected");
             request.status = MergeStatus::Conflict;
             request.conflict_files = conflict_check.0.clone();
-            request.error = Some(format!("Merge conflicts in: {}", conflict_check.0.join(", ")));
+            request.error = Some(if conflict_check.0.is_empty() {
+                "Merge conflicts detected".to_string()
+            } else {
+                format!("Merge conflicts in: {}", conflict_check.0.join(", "))
+            });
             request.updated_at = Utc::now();
 
             return Ok(MergeResult {
@@ -644,29 +648,31 @@ where
         tokio::task::spawn_blocking(move || {
             let _span = tracing::info_span!("git_merge_tree", %workdir).entered();
 
-            // Use git merge-tree to check for conflicts without modifying worktree
+            // Use git merge-tree --write-tree (Git 2.38+) to check for conflicts
+            // without modifying the worktree. Exit code 1 indicates conflicts.
             let output = Command::new("git")
-                .args(["merge-tree", &target, &source])
+                .args(["merge-tree", "--write-tree", &target, &source])
                 .current_dir(&workdir)
                 .output()
                 .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
 
-            let stdout = String::from_utf8_lossy(&output.stdout);
-
-            // Look for conflict markers
-            let has_conflicts = stdout.contains("<<<<<<<") || stdout.contains(">>>>>>>");
+            let has_conflicts = !output.status.success();
 
             if has_conflicts {
-                // Extract conflicting file names
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // Extract conflicting file names from CONFLICT lines, e.g.:
+                //   CONFLICT (content): Merge conflict in <file>
                 let mut conflicts = Vec::new();
                 for line in stdout.lines() {
-                    // merge-tree output format includes file paths
-                    if (line.starts_with("+++") || line.starts_with("---"))
-                        && let Some(path) = line.split_whitespace().nth(1)
-                            && !path.starts_with("a/") && !path.starts_with("b/")
-                                && !conflicts.contains(&path.to_string()) {
-                                    conflicts.push(path.to_string());
-                                }
+                    if let Some(rest) = line.strip_prefix("CONFLICT ") {
+                        // Extract file path from "Merge conflict in <path>" pattern
+                        if let Some(path) = rest.split("Merge conflict in ").nth(1) {
+                            let path = path.trim();
+                            if !path.is_empty() && !conflicts.contains(&path.to_string()) {
+                                conflicts.push(path.to_string());
+                            }
+                        }
+                    }
                 }
                 Ok((conflicts, true))
             } else {
