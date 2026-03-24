@@ -409,18 +409,38 @@ impl Guardrails {
         &self.metrics
     }
 
-    /// Simple pattern matching for file paths.
+    /// Simple glob-style pattern matching for file paths.
+    ///
+    /// Supported patterns:
+    /// - `**/dir/**` — matches if `dir` appears as a path segment anywhere
+    /// - `**/name`   — matches if the last path segment equals `name`
+    /// - `*.ext`     — matches if the file ends with `.ext`
+    /// - `literal`   — exact match on the filename component (last segment)
     fn matches_pattern(path: &str, pattern: &str) -> bool {
         if let Some(suffix) = pattern.strip_prefix("**/") {
-            // Match anywhere in path
-            path.contains(suffix.trim_start_matches('*'))
-        } else if pattern.starts_with("*.") {
-            // Extension match
-            path.ends_with(&pattern[1..])
+            if let Some(inner) = suffix.strip_suffix("/**") {
+                // Pattern: **/dir/** — match if `dir` appears as a complete path segment
+                path.split('/').any(|seg| seg == inner)
+            } else if suffix.contains('/') {
+                // Pattern: **/a/b — match if path ends with /a/b or equals a/b
+                path == suffix || path.ends_with(&format!("/{suffix}"))
+            } else {
+                // Pattern: **/name — match if the filename equals `name`
+                Self::filename(path) == suffix
+            }
+        } else if let Some(ext) = pattern.strip_prefix("*.") {
+            // Extension match: *.key matches any file ending in .key
+            path.ends_with(&format!(".{ext}"))
         } else {
-            // Exact match or contains
-            path == pattern || path.ends_with(pattern)
+            // Exact filename match: ".env" matches only ".env" as the filename
+            // component, not "production.env"
+            Self::filename(path) == pattern
         }
+    }
+
+    /// Extract the filename component (last path segment) from a path.
+    fn filename(path: &str) -> &str {
+        path.rsplit('/').next().unwrap_or(path)
     }
 }
 
@@ -475,6 +495,71 @@ mod tests {
         assert!(guardrails.check_file_path("src/main.rs").is_allowed());
         assert!(guardrails.check_file_path(".env").is_blocked());
         assert!(guardrails.check_file_path("config/secrets/api.key").is_blocked());
+    }
+
+    #[test]
+    fn test_double_star_secrets_pattern() {
+        // **/secrets/** should match paths containing "secrets" as a directory segment
+        let config = GuardrailsConfig {
+            blocked_files: vec!["**/secrets/**".to_string()],
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        // Should block
+        assert!(guardrails.check_file_path("config/secrets/api.key").is_blocked());
+        assert!(guardrails.check_file_path("secrets/password.txt").is_blocked());
+        assert!(guardrails.check_file_path("a/b/secrets/c/d.txt").is_blocked());
+
+        // Should allow — "secrets" is not a standalone segment
+        assert!(guardrails.check_file_path("my-secrets-file.txt").is_allowed());
+        assert!(guardrails.check_file_path("nosecrets/file.txt").is_allowed());
+    }
+
+    #[test]
+    fn test_env_exact_match() {
+        // ".env" should match only the exact filename, not partial matches
+        let config = GuardrailsConfig {
+            blocked_files: vec![".env".to_string()],
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        // Should block
+        assert!(guardrails.check_file_path(".env").is_blocked());
+        assert!(guardrails.check_file_path("config/.env").is_blocked());
+
+        // Should allow — these are different filenames
+        assert!(guardrails.check_file_path("production.env").is_allowed());
+        assert!(guardrails.check_file_path("some.env").is_allowed());
+        assert!(guardrails.check_file_path(".env.local").is_allowed());
+    }
+
+    #[test]
+    fn test_extension_pattern() {
+        let config = GuardrailsConfig {
+            blocked_files: vec!["*.key".to_string(), "*.pem".to_string()],
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        assert!(guardrails.check_file_path("server.key").is_blocked());
+        assert!(guardrails.check_file_path("path/to/cert.pem").is_blocked());
+        assert!(guardrails.check_file_path("not-a-key.txt").is_allowed());
+    }
+
+    #[test]
+    fn test_double_star_filename_pattern() {
+        // **/name should match the filename in any directory
+        let config = GuardrailsConfig {
+            blocked_files: vec!["**/.gitignore".to_string()],
+            ..Default::default()
+        };
+        let guardrails = Guardrails::new(config);
+
+        assert!(guardrails.check_file_path(".gitignore").is_blocked());
+        assert!(guardrails.check_file_path("sub/dir/.gitignore").is_blocked());
+        assert!(guardrails.check_file_path("not-gitignore").is_allowed());
     }
 
     #[test]

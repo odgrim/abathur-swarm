@@ -139,5 +139,10 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
             description: "Add FK constraints on task_id columns".to_string(),
             sql: include_str!("../../../migrations/011_add_task_fk_constraints.sql").to_string(),
         },
+        Migration {
+            version: 12,
+            description: "Add composite indexes for task queries".to_string(),
+            sql: include_str!("../../../migrations/012_add_task_composite_indexes.sql").to_string(),
+        },
     ]
 }
