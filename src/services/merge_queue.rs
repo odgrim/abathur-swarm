@@ -500,33 +500,112 @@ where
             }
         }
 
-        // Check for conflicts
-        let conflict_check = self.check_merge_conflicts(
-            &self.config.repo_path,
-            &request.source_branch,
-            &request.target_branch,
-        ).await?;
+        // Use git plumbing commands to merge without touching the working tree.
+        // This avoids checkout + merge in the main worktree which can leave
+        // uncommitted changes on failure or race conditions.
+        let repo_path = self.config.repo_path.clone();
+        let source = request.source_branch.clone();
+        let target = request.target_branch.clone();
 
-        if !conflict_check.0.is_empty() {
-            tracing::warn!(task_id = %request.task_id, conflict_count = conflict_check.0.len(), "stage 2 merge: conflicts detected");
-            request.status = MergeStatus::Conflict;
-            request.conflict_files = conflict_check.0.clone();
-            request.error = Some(format!("Merge conflicts in: {}", conflict_check.0.join(", ")));
-            request.updated_at = Utc::now();
+        let plumbing_result = tokio::task::spawn_blocking(move || {
+            // merge-tree --write-tree creates the merged tree without modifying any worktree.
+            // Exit 0 = clean merge (stdout = tree SHA), exit 1 = conflicts.
+            let merge_tree = Command::new("git")
+                .args(["merge-tree", "--write-tree", &target, &source])
+                .current_dir(&repo_path)
+                .output()
+                .map_err(|e| DomainError::ValidationFailed(format!("git merge-tree failed to run: {}", e)))?;
 
-            return Ok(MergeResult {
-                request_id: request.id,
-                success: false,
-                commit_sha: None,
-                error: request.error.clone(),
-                had_conflicts: true,
-                conflict_files: conflict_check.0,
-            });
-        }
+            let stdout = String::from_utf8_lossy(&merge_tree.stdout).to_string();
 
-        // Perform the merge to main
-        match self.git_merge(&self.config.repo_path, &request.source_branch, &request.target_branch).await {
-            Ok(commit_sha) => {
+            if merge_tree.status.code() == Some(1) {
+                // Conflicts detected — extract file names from CONFLICT lines
+                let conflict_files: Vec<String> = stdout.lines()
+                    .filter(|line| line.starts_with("CONFLICT"))
+                    .filter_map(|line| line.rsplit(" in ").next().map(|s| s.trim().to_string()))
+                    .collect();
+                return Ok((None, conflict_files));
+            }
+
+            if !merge_tree.status.success() {
+                let stderr = String::from_utf8_lossy(&merge_tree.stderr);
+                return Err(DomainError::ValidationFailed(format!("git merge-tree failed: {}", stderr)));
+            }
+
+            let tree_sha = stdout.lines().next().unwrap_or("").trim().to_string();
+
+            // Resolve parent commit SHAs
+            let target_sha = {
+                let out = Command::new("git")
+                    .args(["rev-parse", &target])
+                    .current_dir(&repo_path)
+                    .output()
+                    .map_err(|e| DomainError::ValidationFailed(format!("rev-parse target: {}", e)))?;
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            };
+            let source_sha = {
+                let out = Command::new("git")
+                    .args(["rev-parse", &source])
+                    .current_dir(&repo_path)
+                    .output()
+                    .map_err(|e| DomainError::ValidationFailed(format!("rev-parse source: {}", e)))?;
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            };
+
+            // Create merge commit from the tree
+            let merge_msg = format!("Merge {} into {}", source, target);
+            let commit = Command::new("git")
+                .args(["commit-tree", &tree_sha, "-p", &target_sha, "-p", &source_sha, "-m", &merge_msg])
+                .current_dir(&repo_path)
+                .output()
+                .map_err(|e| DomainError::ValidationFailed(format!("git commit-tree failed: {}", e)))?;
+
+            if !commit.status.success() {
+                let stderr = String::from_utf8_lossy(&commit.stderr);
+                return Err(DomainError::ValidationFailed(format!("git commit-tree: {}", stderr)));
+            }
+
+            let commit_sha = String::from_utf8_lossy(&commit.stdout).trim().to_string();
+
+            // Atomically update the branch ref (CAS prevents races)
+            let update = Command::new("git")
+                .args(["update-ref", &format!("refs/heads/{}", target), &commit_sha, &target_sha])
+                .current_dir(&repo_path)
+                .output()
+                .map_err(|e| DomainError::ValidationFailed(format!("git update-ref failed: {}", e)))?;
+
+            if !update.status.success() {
+                let stderr = String::from_utf8_lossy(&update.stderr);
+                return Err(DomainError::ValidationFailed(format!("git update-ref: {}", stderr)));
+            }
+
+            // Sync main worktree to match the updated branch tip
+            let _ = Command::new("git")
+                .args(["reset", "--hard", "HEAD"])
+                .current_dir(&repo_path)
+                .output();
+
+            Ok((Some(commit_sha), vec![]))
+        }).await.map_err(|e| DomainError::ValidationFailed(format!("spawn_blocking panicked: {}", e)))??;
+
+        match plumbing_result {
+            (None, conflict_files) => {
+                tracing::warn!(task_id = %request.task_id, conflict_count = conflict_files.len(), "stage 2 merge: conflicts detected");
+                request.status = MergeStatus::Conflict;
+                request.conflict_files = conflict_files.clone();
+                request.error = Some(format!("Merge conflicts in: {}", conflict_files.join(", ")));
+                request.updated_at = Utc::now();
+
+                Ok(MergeResult {
+                    request_id: request.id,
+                    success: false,
+                    commit_sha: None,
+                    error: request.error.clone(),
+                    had_conflicts: true,
+                    conflict_files,
+                })
+            }
+            (Some(commit_sha), _) => {
                 tracing::info!(task_id = %request.task_id, %commit_sha, "stage 2 merge to main completed successfully");
                 request.status = MergeStatus::Completed;
                 request.commit_sha = Some(commit_sha.clone());
@@ -543,21 +622,6 @@ where
                     success: true,
                     commit_sha: Some(commit_sha),
                     error: None,
-                    had_conflicts: false,
-                    conflict_files: vec![],
-                })
-            }
-            Err(e) => {
-                tracing::error!(task_id = %request.task_id, error = %e, "stage 2 merge to main failed");
-                request.status = MergeStatus::Failed;
-                request.error = Some(e.to_string());
-                request.updated_at = Utc::now();
-
-                Ok(MergeResult {
-                    request_id: request.id,
-                    success: false,
-                    commit_sha: None,
-                    error: request.error.clone(),
                     had_conflicts: false,
                     conflict_files: vec![],
                 })

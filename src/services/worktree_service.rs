@@ -312,47 +312,98 @@ impl<W: WorktreeRepository> WorktreeService<W> {
     }
 
     async fn git_merge_branch(&self, branch: &str, target: &str) -> DomainResult<String> {
-        // Checkout target branch in main repo
-        let checkout = Command::new("git")
-            .args(["checkout", target])
+        // Use git plumbing commands to merge without touching the working tree.
+        // This avoids checkout + merge in the main worktree which can leave
+        // uncommitted changes on failure or race conditions.
+
+        // merge-tree --write-tree creates the merged tree without modifying any worktree
+        let merge_tree = Command::new("git")
+            .args(["merge-tree", "--write-tree", target, branch])
             .current_dir(&self.config.repo_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+            .map_err(|e| DomainError::ValidationFailed(format!("git merge-tree failed to run: {}", e)))?;
 
-        if !checkout.status.success() {
-            let stderr = String::from_utf8_lossy(&checkout.stderr);
-            return Err(DomainError::ValidationFailed(format!("Git checkout failed: {}", stderr)));
+        if !merge_tree.status.success() {
+            let stdout = String::from_utf8_lossy(&merge_tree.stdout);
+            let stderr = String::from_utf8_lossy(&merge_tree.stderr);
+            return Err(DomainError::ValidationFailed(
+                format!("Git merge failed (conflicts or error): {}{}", stdout.trim(), stderr.trim())
+            ));
         }
 
-        // Merge the branch
-        let merge = Command::new("git")
-            .args(["merge", "--no-ff", branch, "-m", &format!("Merge {} into {}", branch, target)])
+        let tree_sha = String::from_utf8_lossy(&merge_tree.stdout)
+            .lines().next().unwrap_or("").trim().to_string();
+
+        // Resolve parent commit SHAs
+        let target_sha = {
+            let out = Command::new("git")
+                .args(["rev-parse", target])
+                .current_dir(&self.config.repo_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+                .map_err(|e| DomainError::ValidationFailed(format!("Failed to rev-parse {}: {}", target, e)))?;
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let source_sha = {
+            let out = Command::new("git")
+                .args(["rev-parse", branch])
+                .current_dir(&self.config.repo_path)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+                .map_err(|e| DomainError::ValidationFailed(format!("Failed to rev-parse {}: {}", branch, e)))?;
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        // Create merge commit from the tree
+        let merge_msg = format!("Merge {} into {}", branch, target);
+        let commit = Command::new("git")
+            .args(["commit-tree", &tree_sha, "-p", &target_sha, "-p", &source_sha, "-m", &merge_msg])
             .current_dir(&self.config.repo_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+            .map_err(|e| DomainError::ValidationFailed(format!("git commit-tree failed: {}", e)))?;
 
-        if !merge.status.success() {
-            let stderr = String::from_utf8_lossy(&merge.stderr);
-            return Err(DomainError::ValidationFailed(format!("Git merge failed: {}", stderr)));
+        if !commit.status.success() {
+            let stderr = String::from_utf8_lossy(&commit.stderr);
+            return Err(DomainError::ValidationFailed(format!("git commit-tree: {}", stderr)));
         }
 
-        // Get the merge commit SHA
-        let rev_parse = Command::new("git")
-            .args(["rev-parse", "HEAD"])
+        let commit_sha = String::from_utf8_lossy(&commit.stdout).trim().to_string();
+
+        // Atomically update the branch ref (CAS prevents races)
+        let update = Command::new("git")
+            .args(["update-ref", &format!("refs/heads/{}", target), &commit_sha, &target_sha])
             .current_dir(&self.config.repo_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|e| DomainError::ValidationFailed(format!("Failed to run git: {}", e)))?;
+            .map_err(|e| DomainError::ValidationFailed(format!("git update-ref failed: {}", e)))?;
 
-        let commit_sha = String::from_utf8_lossy(&rev_parse.stdout).trim().to_string();
+        if !update.status.success() {
+            let stderr = String::from_utf8_lossy(&update.stderr);
+            return Err(DomainError::ValidationFailed(format!("git update-ref: {}", stderr)));
+        }
+
+        // Sync main worktree to match the updated branch tip
+        let _ = Command::new("git")
+            .args(["reset", "--hard", "HEAD"])
+            .current_dir(&self.config.repo_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await;
+
         Ok(commit_sha)
     }
 
