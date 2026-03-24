@@ -382,13 +382,9 @@ fn generate_workflow_prompt_section(template: &WorkflowTemplate) -> String {
                  **After the triage subtask completes** (gate notification), retrieve the verdict with \
                  `memory_search` (query: `\"triage verdict\"`) and act on it:\n\
                  - **APPROVED** → call `workflow_gate` with `approve` to advance.\n\
-                 - **REJECTED** →\n\
-                   1. Parse adapter name and `external_id` from the \
-                      `[Ingested from <adapter> — <external_id>]` header.\n\
-                   2. Call `egress_publish` to post a comment explaining the rejection reason.\n\
-                   3. Call `egress_publish` with `action: update_status`, \
-                      `new_status: \"wontfix\"` to close the issue.\n\
-                   4. Call `workflow_gate` with `reject` to terminate the workflow.\n",
+                 - **REJECTED** → call `workflow_gate` with `reject` and include the \
+                   rejection reason. The system automatically closes the external issue \
+                   and posts a comment explaining the rejection.\n",
             );
         }
     }

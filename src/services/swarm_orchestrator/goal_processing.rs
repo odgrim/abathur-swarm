@@ -1625,6 +1625,11 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     status = ?completed_task.status,
                                     "Skipping task transition — already terminal (completed via MCP)"
                                 );
+                                // Re-emit WorkflowGateRejected on the main event bus so
+                                // AdapterLifecycleSyncHandler can close/comment on the
+                                // external issue. The original event was published on the
+                                // MCP session's local bus which has no handlers.
+                                replay_gate_rejection_event(&completed_task, &event_bus).await;
                             }
 
                             // Record success with circuit breaker
