@@ -248,6 +248,31 @@ pub struct MergeQueueStats {
     pub stage2_completed: usize,
 }
 
+/// Extract conflicting file paths from `git merge-tree --write-tree` output.
+///
+/// When `git merge-tree --write-tree` exits with code 1, its stdout contains
+/// informational messages like:
+///   `CONFLICT (content): Merge conflict in <path>`
+///
+/// This function parses those lines and returns unique file paths.
+fn extract_conflict_files(merge_tree_stdout: &str) -> Vec<String> {
+    let mut conflicts = Vec::new();
+    for line in merge_tree_stdout.lines() {
+        if let Some(path) = line
+            .strip_prefix("CONFLICT ")
+            .and_then(|rest| rest.split("Merge conflict in ").nth(1))
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            let path = path.to_string();
+            if !conflicts.contains(&path) {
+                conflicts.push(path);
+            }
+        }
+    }
+    conflicts
+}
+
 /// Two-Stage Merge Queue Service.
 ///
 /// Persists merge requests to a `MergeRequestRepository` so that conflict
@@ -524,10 +549,7 @@ where
 
             if merge_tree.status.code() == Some(1) {
                 // Conflicts detected — extract file names from CONFLICT lines
-                let conflict_files: Vec<String> = stdout.lines()
-                    .filter(|line| line.starts_with("CONFLICT"))
-                    .filter_map(|line| line.rsplit(" in ").next().map(|s| s.trim().to_string()))
-                    .collect();
+                let conflict_files = extract_conflict_files(&stdout);
                 return Ok((None, conflict_files));
             }
 
@@ -660,20 +682,7 @@ where
 
             if has_conflicts {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                // Extract conflicting file names from CONFLICT lines, e.g.:
-                //   CONFLICT (content): Merge conflict in <file>
-                let mut conflicts = Vec::new();
-                for line in stdout.lines() {
-                    if let Some(rest) = line.strip_prefix("CONFLICT ") {
-                        // Extract file path from "Merge conflict in <path>" pattern
-                        if let Some(path) = rest.split("Merge conflict in ").nth(1) {
-                            let path = path.trim();
-                            if !path.is_empty() && !conflicts.contains(&path.to_string()) {
-                                conflicts.push(path.to_string());
-                            }
-                        }
-                    }
-                }
+                let conflicts = extract_conflict_files(&stdout);
                 Ok((conflicts, true))
             } else {
                 Ok((vec![], false))
@@ -805,14 +814,12 @@ where
     /// Cancel a queued merge request.
     pub async fn cancel(&self, id: Uuid) -> DomainResult<bool> {
         tracing::info!(merge_request_id = %id, "cancelling merge request");
-        if let Some(mut req) = self.merge_repo.get(id).await? {
-            if req.status == MergeStatus::Queued {
-                req.status = MergeStatus::Failed;
-                req.error = Some("Cancelled".to_string());
-                req.updated_at = Utc::now();
-                self.merge_repo.update(&req).await?;
-                return Ok(true);
-            }
+        if let Some(mut req) = self.merge_repo.get(id).await?.filter(|r| r.status == MergeStatus::Queued) {
+            req.status = MergeStatus::Failed;
+            req.error = Some("Cancelled".to_string());
+            req.updated_at = Utc::now();
+            self.merge_repo.update(&req).await?;
+            return Ok(true);
         }
         Ok(false)
     }
@@ -1017,6 +1024,48 @@ mod tests {
         assert!(!MergeStatus::Queued.is_terminal());
         assert!(!MergeStatus::InProgress.is_terminal());
         assert!(!MergeStatus::Conflict.is_terminal());
+    }
+
+    #[test]
+    fn test_extract_conflict_files_single() {
+        let output = "\
+abc123def456\n\
+CONFLICT (content): Merge conflict in src/main.rs\n";
+        let files = extract_conflict_files(output);
+        assert_eq!(files, vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn test_extract_conflict_files_multiple() {
+        let output = "\
+abc123def456\n\
+CONFLICT (content): Merge conflict in src/main.rs\n\
+CONFLICT (content): Merge conflict in src/lib.rs\n\
+CONFLICT (modify/delete): Merge conflict in docs/README.md\n";
+        let files = extract_conflict_files(output);
+        assert_eq!(files, vec!["src/main.rs", "src/lib.rs", "docs/README.md"]);
+    }
+
+    #[test]
+    fn test_extract_conflict_files_no_conflicts() {
+        let output = "abc123def456\n";
+        let files = extract_conflict_files(output);
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_extract_conflict_files_empty_input() {
+        let files = extract_conflict_files("");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_extract_conflict_files_deduplicates() {
+        let output = "\
+CONFLICT (content): Merge conflict in src/main.rs\n\
+CONFLICT (content): Merge conflict in src/main.rs\n";
+        let files = extract_conflict_files(output);
+        assert_eq!(files, vec!["src/main.rs"]);
     }
 
     #[test]
