@@ -329,8 +329,8 @@ fn parse_sse_stream(
                 Some(Ok(chunk)) => {
                     buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                    // Process complete lines in the buffer
-                    while let Some(event) = try_extract_sse_event(&mut buffer) {
+                    // Process the next complete event in the buffer
+                    if let Some(event) = try_extract_sse_event(&mut buffer) {
                         match serde_json::from_str::<A2AStreamEvent>(&event) {
                             Ok(parsed) => {
                                 return Some((Ok(parsed), (byte_stream, buffer)));

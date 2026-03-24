@@ -159,6 +159,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
     pub async fn prepare(
         &self,
         submission: &TaskSubmission,
+        task_id: Uuid,
     ) -> DomainResult<(Trajectory, ConvergenceInfrastructure)> {
         // 1. Estimate basin width
         let infra = &submission.discovered_infrastructure;
@@ -206,7 +207,6 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             ));
         }
 
-        let task_id = Uuid::new_v4(); // In production, this comes from the task service
         let mut trajectory = Trajectory::new(
             task_id,
             submission.goal_id,
@@ -321,7 +321,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                 parallel_samples: Some(initial_samples),
             };
             return self
-                .converge_parallel(&submission, initial_samples)
+                .converge_parallel(&submission, initial_samples, trajectory.task_id)
                 .await;
         }
 
@@ -983,8 +983,9 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
         &self,
         submission: &TaskSubmission,
         sample_count: u32,
+        task_id: Uuid,
     ) -> DomainResult<ConvergenceOutcome> {
-        let (base_trajectory, _infrastructure) = self.prepare(submission).await?;
+        let (base_trajectory, _infrastructure) = self.prepare(submission, task_id).await?;
 
         self.emit_event(ConvergenceEvent::ParallelConvergenceStarted {
             trajectory_id: base_trajectory.id.to_string(),
@@ -3615,7 +3616,7 @@ mod tests {
             "Implement user authentication with bcrypt password hashing and JWT tokens for session management".to_string(),
         );
 
-        let (trajectory, infra) = engine.prepare(&submission).await.unwrap();
+        let (trajectory, infra) = engine.prepare(&submission, Uuid::new_v4()).await.unwrap();
 
         assert_eq!(trajectory.phase, ConvergencePhase::Preparing);
         assert!(trajectory.observations.is_empty());
@@ -3633,7 +3634,7 @@ mod tests {
         );
         submission.priority_hint = Some(PriorityHint::Fast);
 
-        let (trajectory, _) = engine.prepare(&submission).await.unwrap();
+        let (trajectory, _) = engine.prepare(&submission, Uuid::new_v4()).await.unwrap();
 
         assert!(
             (trajectory.policy.acceptance_threshold - 0.85).abs() < f64::EPSILON,
@@ -3653,7 +3654,7 @@ mod tests {
             "Must validate all inputs".to_string(),
         ];
 
-        let (trajectory, _) = engine.prepare(&submission).await.unwrap();
+        let (trajectory, _) = engine.prepare(&submission, Uuid::new_v4()).await.unwrap();
 
         assert_eq!(trajectory.specification.amendments.len(), 2);
         assert!(trajectory

@@ -56,6 +56,9 @@ pub async fn create_pool(database_url: &str, config: Option<PoolConfig>) -> Resu
         .await
         .map_err(ConnectionError::PoolCreationFailed)?;
 
+    #[cfg(unix)]
+    check_database_permissions(database_url);
+
     Ok(pool)
 }
 
@@ -90,6 +93,31 @@ fn ensure_database_directory(database_url: &str) -> Result<(), ConnectionError> 
             std::fs::create_dir_all(parent).map_err(ConnectionError::DirectoryCreationFailed)?;
         }
     Ok(())
+}
+
+#[cfg(unix)]
+fn check_database_permissions(database_url: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = database_url
+        .strip_prefix("sqlite://")
+        .or_else(|| database_url.strip_prefix("sqlite:"))
+        .unwrap_or(database_url);
+
+    if path == ":memory:" || path.is_empty() {
+        return;
+    }
+
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let mode = metadata.permissions().mode();
+        if mode & 0o077 != 0 {
+            tracing::warn!(
+                "Database file {} has permissions {:o} — recommended: 0600. \
+                 Other users may be able to read webhook secrets.",
+                path,
+                mode & 0o777
+            );
+        }
+    }
 }
 
 pub async fn verify_connection(pool: &SqlitePool) -> Result<(), ConnectionError> {

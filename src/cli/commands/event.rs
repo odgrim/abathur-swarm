@@ -274,7 +274,7 @@ pub async fn execute(args: EventArgs, json_mode: bool) -> Result<()> {
         .await
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
-    let store = Arc::new(SqliteEventRepository::new(pool.clone()));
+    let store = Arc::new(SqliteEventRepository::new(pool.clone(), crate::services::crypto::load_encryptor_from_env()));
 
     match args.command {
         EventCommands::Stats => {

@@ -154,6 +154,8 @@ pub enum EvolutionTrigger {
     DownstreamImpact,
     /// Regression after version change.
     Regression,
+    /// Stale refinement request expired.
+    StaleTimeout,
 }
 
 /// Evolution event for audit/logging.
@@ -177,6 +179,8 @@ pub enum EvolutionAction {
     Reverted { from_version: u32, to_version: u32 },
     /// No action taken (informational).
     NoAction { reason: String },
+    /// Stale refinement request expired without completion.
+    StaleExpired { request_id: Uuid },
 }
 
 /// Severity of refinement needed.
@@ -387,7 +391,19 @@ impl EvolutionLoop {
 
     /// Evaluate templates and trigger evolution if needed.
     pub async fn evaluate(&self) -> Vec<EvolutionEvent> {
-        self.expire_stale_refinements().await;
+        let stale_expired = self.expire_stale_refinements().await;
+        let mut stale_events: Vec<EvolutionEvent> = stale_expired
+            .into_iter()
+            .map(|(template_name, template_version, request_id)| EvolutionEvent {
+                id: Uuid::new_v4(),
+                template_name: template_name.clone(),
+                template_version,
+                trigger: EvolutionTrigger::StaleTimeout,
+                stats_at_trigger: TemplateStats::new(template_name, template_version),
+                action_taken: EvolutionAction::StaleExpired { request_id },
+                occurred_at: Utc::now(),
+            })
+            .collect();
         let mut new_requests: Vec<RefinementRequest> = Vec::new();
         // Collect revert instructions: (template_name, to_version) to execute
         // outside the write lock since agent_repo calls are async.
@@ -596,7 +612,8 @@ impl EvolutionLoop {
             }
         }
 
-        events
+        stale_events.extend(events);
+        stale_events
     }
 
     /// Get stats for a template.
@@ -664,14 +681,14 @@ impl EvolutionLoop {
     ///
     /// Returns the number of requests that were expired.
     /// Returns 0 immediately if the timeout is configured as 0 (disabled).
-    pub async fn expire_stale_refinements(&self) -> usize {
+    pub async fn expire_stale_refinements(&self) -> Vec<(String, u32, Uuid)> {
         if self.config.stale_refinement_timeout_hours == 0 {
-            return 0;
+            return Vec::new();
         }
 
         let cutoff =
             Utc::now() - Duration::hours(self.config.stale_refinement_timeout_hours);
-        let mut expired_ids: Vec<Uuid> = Vec::new();
+        let mut expired: Vec<(String, u32, Uuid)> = Vec::new();
 
         {
             let mut state = self.state.write().await;
@@ -682,13 +699,17 @@ impl EvolutionLoop {
                 ) && request.created_at < cutoff
                 {
                     request.status = RefinementStatus::Failed;
-                    expired_ids.push(request.id);
+                    expired.push((
+                        request.template_name.clone(),
+                        request.template_version,
+                        request.id,
+                    ));
                 }
             }
         }
 
         if let Some(ref repo) = self.refinement_repo {
-            for id in &expired_ids {
+            for (_, _, id) in &expired {
                 if let Err(e) = repo
                     .update_status(*id, RefinementStatus::Failed)
                     .await
@@ -702,15 +723,15 @@ impl EvolutionLoop {
             }
         }
 
-        if !expired_ids.is_empty() {
+        if !expired.is_empty() {
             tracing::info!(
                 "Expired {} stale refinement request(s) older than {}h",
-                expired_ids.len(),
+                expired.len(),
                 self.config.stale_refinement_timeout_hours
             );
         }
 
-        expired_ids.len()
+        expired
     }
 
     /// Mark a refinement request as completed.
@@ -1559,7 +1580,10 @@ mod tests {
         }
 
         let expired = evolution.expire_stale_refinements().await;
-        assert_eq!(expired, 1, "only the 3h-old request should be expired");
+        assert_eq!(expired.len(), 1, "only the 3h-old request should be expired");
+        assert_eq!(expired[0].0, "stale-agent");
+        assert_eq!(expired[0].1, 1);
+        assert_eq!(expired[0].2, old_request.id);
 
         let state = evolution.state.read().await;
         let old = state
@@ -1606,7 +1630,7 @@ mod tests {
         }
 
         let expired = evolution.expire_stale_refinements().await;
-        assert_eq!(expired, 0, "expiry disabled when timeout=0");
+        assert_eq!(expired.len(), 0, "expiry disabled when timeout=0");
 
         let state = evolution.state.read().await;
         let req = state
@@ -1619,6 +1643,54 @@ mod tests {
             RefinementStatus::Pending,
             "request must remain Pending when expiry is disabled"
         );
+    }
+
+    #[tokio::test]
+    async fn test_evaluate_emits_events_for_stale_expirations() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            refinement_threshold: 0.80,
+            stale_refinement_timeout_hours: 2,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // Insert a stale Pending refinement request
+        let stale_request = RefinementRequest {
+            id: Uuid::new_v4(),
+            template_name: "stale-agent".to_string(),
+            template_version: 3,
+            severity: RefinementSeverity::Minor,
+            trigger: EvolutionTrigger::LowSuccessRate,
+            stats: TemplateStats::new("stale-agent".to_string(), 3),
+            failed_task_ids: vec![],
+            created_at: Utc::now() - Duration::hours(5),
+            status: RefinementStatus::Pending,
+        };
+
+        {
+            let mut state = evolution.state.write().await;
+            state.refinement_queue.push(stale_request.clone());
+        }
+
+        let events = evolution.evaluate().await;
+
+        // Should have exactly one StaleExpired event
+        let stale_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.action_taken, EvolutionAction::StaleExpired { .. }))
+            .collect();
+        assert_eq!(stale_events.len(), 1, "should emit one StaleExpired event");
+
+        let event = stale_events[0];
+        assert_eq!(event.template_name, "stale-agent");
+        assert_eq!(event.template_version, 3);
+        assert_eq!(event.trigger, EvolutionTrigger::StaleTimeout);
+        if let EvolutionAction::StaleExpired { request_id } = &event.action_taken {
+            assert_eq!(*request_id, stale_request.id);
+        } else {
+            panic!("Expected StaleExpired action");
+        }
     }
 
     /// A mock agent repository that records update_template calls for verification.

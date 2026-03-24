@@ -13,7 +13,7 @@ use crate::adapters::plugins::{find_known_adapter, KnownAdapter, KNOWN_ADAPTERS}
 use crate::cli::display::{
     list_table, output, render_list, truncate_ellipsis, CommandOutput, DetailView,
 };
-use crate::domain::models::adapter::AdapterManifest;
+use crate::domain::models::adapter::{AdapterManifest, EgressAction, EgressResult};
 use crate::services::adapter_loader::find_missing_env_vars;
 use crate::services::config::AdapterConfig;
 
@@ -52,6 +52,13 @@ pub enum AdapterCommands {
     Doctor {
         /// Adapter name (omit to check all enabled adapters)
         name: Option<String>,
+    },
+    /// Publish an egress action through an adapter (e.g., update status, post comment)
+    Publish {
+        /// Adapter name (e.g., "github-issues", "clickup")
+        adapter: String,
+        /// Action as JSON (e.g., '{"action":"post_comment","external_id":"42","body":"Done"}')
+        action: String,
     },
 }
 
@@ -235,6 +242,40 @@ impl CommandOutput for AdapterDoctorOutput {
     }
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct AdapterPublishOutput {
+    pub success: bool,
+    pub adapter: String,
+    pub external_id: Option<String>,
+    pub external_url: Option<String>,
+    pub error: Option<String>,
+}
+
+impl CommandOutput for AdapterPublishOutput {
+    fn to_human(&self) -> String {
+        if self.success {
+            let mut msg = format!("Action published via '{}'.", self.adapter);
+            if let Some(id) = &self.external_id {
+                msg.push_str(&format!("\n  External ID: {}", id));
+            }
+            if let Some(url) = &self.external_url {
+                msg.push_str(&format!("\n  URL: {}", url));
+            }
+            msg
+        } else {
+            format!(
+                "Publish via '{}' failed: {}",
+                self.adapter,
+                self.error.as_deref().unwrap_or("unknown error")
+            )
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Execute
 // ---------------------------------------------------------------------------
@@ -253,6 +294,9 @@ pub async fn execute(args: AdapterArgs, json_mode: bool) -> Result<()> {
         AdapterCommands::Info { name } => cmd_info(&adapters_dir, &name, json_mode).await,
         AdapterCommands::Doctor { name } => {
             cmd_doctor(&adapters_dir, name.as_deref(), json_mode).await
+        }
+        AdapterCommands::Publish { adapter, action } => {
+            cmd_publish(&adapters_dir, &adapter, &action, json_mode).await
         }
     }
 }
@@ -589,6 +633,59 @@ async fn cmd_doctor(
     Ok(())
 }
 
+async fn cmd_publish(
+    adapters_dir: &Path,
+    adapter_name: &str,
+    action_json: &str,
+    json_mode: bool,
+) -> Result<()> {
+    // Parse the action JSON into an EgressAction
+    let action: EgressAction = serde_json::from_str(action_json)
+        .with_context(|| "Failed to parse action JSON. Expected format: {\"action\":\"update_status\",\"external_id\":\"...\",\"new_status\":\"...\"}".to_string())?;
+
+    // Load the adapter registry
+    let loaded_adapters =
+        crate::services::adapter_loader::load_adapters(adapters_dir.parent().unwrap_or(adapters_dir)).await;
+    let prompt_content =
+        crate::services::adapter_loader::collect_prompt_content(&loaded_adapters);
+    let registry = crate::services::adapter_registry::AdapterRegistry::from_loaded(
+        loaded_adapters,
+        prompt_content,
+    );
+
+    // Look up the egress adapter
+    let egress = registry.get_egress(adapter_name).ok_or_else(|| {
+        let available = registry.egress_names();
+        if available.is_empty() {
+            anyhow::anyhow!(
+                "No egress adapters loaded. Enable an adapter first with: abathur adapter enable <name>"
+            )
+        } else {
+            anyhow::anyhow!(
+                "Adapter '{}' not found or does not support egress. Available egress adapters: {}",
+                adapter_name,
+                available.join(", ")
+            )
+        }
+    })?;
+
+    // Execute the action
+    let result: EgressResult = egress
+        .execute(&action)
+        .await
+        .with_context(|| format!("Failed to execute action via adapter '{}'", adapter_name))?;
+
+    let out = AdapterPublishOutput {
+        success: result.success,
+        adapter: adapter_name.to_string(),
+        external_id: result.external_id,
+        external_url: result.external_url,
+        error: result.error,
+    };
+    output(&out, json_mode);
+    Ok(())
+}
+
 fn run_doctor_checks(adapters_dir: &Path, name: &str) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     let adapter_dir = adapters_dir.join(name);
@@ -901,5 +998,72 @@ mod tests {
         };
         let json = out.to_json();
         assert!(json["adapters"][0]["name"] == "clickup");
+    }
+
+    #[test]
+    fn test_publish_output_success_human() {
+        let out = AdapterPublishOutput {
+            success: true,
+            adapter: "github-issues".to_string(),
+            external_id: Some("42".to_string()),
+            external_url: Some("https://github.com/org/repo/issues/42".to_string()),
+            error: None,
+        };
+        let human = out.to_human();
+        assert!(human.contains("github-issues"), "got: {}", human);
+        assert!(human.contains("42"), "got: {}", human);
+        assert!(human.contains("https://github.com"), "got: {}", human);
+    }
+
+    #[test]
+    fn test_publish_output_failure_human() {
+        let out = AdapterPublishOutput {
+            success: false,
+            adapter: "clickup".to_string(),
+            external_id: None,
+            external_url: None,
+            error: Some("API rate limited".to_string()),
+        };
+        let human = out.to_human();
+        assert!(human.contains("failed"), "got: {}", human);
+        assert!(human.contains("API rate limited"), "got: {}", human);
+    }
+
+    #[test]
+    fn test_publish_output_json() {
+        let out = AdapterPublishOutput {
+            success: true,
+            adapter: "clickup".to_string(),
+            external_id: Some("abc123".to_string()),
+            external_url: None,
+            error: None,
+        };
+        let json = out.to_json();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["adapter"], "clickup");
+        assert_eq!(json["external_id"], "abc123");
+    }
+
+    #[tokio::test]
+    async fn test_publish_invalid_json_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = cmd_publish(dir.path(), "clickup", "not valid json", false).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Failed to parse action JSON"), "got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn test_publish_no_egress_adapter_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let action_json = r#"{"action":"post_comment","external_id":"42","body":"hello"}"#;
+        let result = cmd_publish(dir.path(), "nonexistent", action_json, false).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("No egress adapters loaded") || err.contains("not found"),
+            "got: {}",
+            err
+        );
     }
 }
