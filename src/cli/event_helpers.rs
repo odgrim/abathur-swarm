@@ -21,7 +21,7 @@ use crate::services::event_store::EventStore;
 /// Initializes the sequence counter from the store so that new events
 /// receive sequence numbers that don't collide with already-persisted events.
 pub async fn create_persistent_event_bus(pool: SqlitePool) -> Arc<EventBus> {
-    let event_store = Arc::new(SqliteEventRepository::new(pool));
+    let event_store = Arc::new(SqliteEventRepository::new(pool, crate::services::crypto::load_encryptor_from_env()));
     let bus = Arc::new(
         EventBus::new(EventBusConfig {
             persist_events: true,

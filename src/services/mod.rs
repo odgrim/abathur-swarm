@@ -9,6 +9,7 @@ pub mod circuit_breaker;
 pub mod cold_start;
 pub mod command_bus;
 pub mod config;
+pub mod crypto;
 pub mod context_truncation;
 pub mod context_window;
 pub mod cost_tracker;

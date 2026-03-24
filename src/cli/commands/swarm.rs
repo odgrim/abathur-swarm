@@ -66,7 +66,7 @@ async fn build_cli_orchestrator(config: SwarmConfig) -> Result<CliOrchestrator> 
         Arc::from(SubstrateRegistry::mock_substrate());
 
     let event_store: Arc<dyn crate::services::event_store::EventStore> =
-        Arc::new(crate::adapters::sqlite::SqliteEventRepository::new(pool.clone()));
+        Arc::new(crate::adapters::sqlite::SqliteEventRepository::new(pool.clone(), crate::services::crypto::load_encryptor_from_env()));
     let event_bus = Arc::new(
         EventBus::new(EventBusConfig { persist_events: true, ..Default::default() })
             .with_store(event_store.clone()),
@@ -725,7 +725,7 @@ async fn run_swarm_foreground(
 
     // Create shared EventBus with persistence for reactive event system
     let event_store: Arc<dyn crate::services::event_store::EventStore> =
-        Arc::new(crate::adapters::sqlite::SqliteEventRepository::new(pool.clone()));
+        Arc::new(crate::adapters::sqlite::SqliteEventRepository::new(pool.clone(), crate::services::crypto::load_encryptor_from_env()));
     let event_bus = Arc::new(
         crate::services::EventBus::new(crate::services::EventBusConfig {
             persist_events: true,
@@ -1467,7 +1467,7 @@ async fn start_mcp_servers(
     // Start Events HTTP server
     if let Some(ref url) = urls.events_server {
         let port = extract_port(url).unwrap_or(9102);
-        let event_store = Arc::new(SqliteEventRepository::new(pool.clone()));
+        let event_store = Arc::new(SqliteEventRepository::new(pool.clone(), crate::services::crypto::load_encryptor_from_env()));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()).with_store(event_store.clone()));
         let config = EventsHttpConfig {
             port,
