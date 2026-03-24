@@ -1296,4 +1296,280 @@ mod tests {
         assert_eq!(promoted.tier, MemoryTier::Episodic, "Multiple distinct accessors should enable promotion");
         assert!(promoted.distinct_accessor_count() >= 2, "Should have at least 2 distinct accessors");
     }
+
+    #[tokio::test]
+    async fn test_detect_conflicts_groups_by_namespace_and_key() {
+        let service = setup_service().await;
+
+        // Store 2 memories with the same namespace+key but different content
+        service.store(
+            "shared_key".to_string(),
+            "alpha bravo charlie delta echo foxtrot".to_string(),
+            "ns1".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        service.store(
+            "shared_key".to_string(),
+            "golf hotel india juliet kilo lima".to_string(),
+            "ns1".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        // Store 1 memory with a different key in the same namespace
+        service.store(
+            "other_key".to_string(),
+            "mike november oscar papa quebec romeo".to_string(),
+            "ns1".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        let all = service.repository.list_by_tier(MemoryTier::Working).await.unwrap();
+        let conflicts = service.detect_conflicts(&all);
+
+        // Only the 2 memories sharing (ns1, shared_key) should conflict
+        assert_eq!(conflicts.len(), 1, "Expected exactly 1 conflict, got {}", conflicts.len());
+        assert!(conflicts[0].key.contains("shared_key"));
+    }
+
+    #[tokio::test]
+    async fn test_conflict_no_conflict_above_0_9_similarity() {
+        let service = setup_service().await;
+
+        // Nearly identical content — Jaccard > 0.9
+        service.store(
+            "same_key".to_string(),
+            "the quick brown fox jumps over the lazy dog".to_string(),
+            "ns".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        service.store(
+            "same_key".to_string(),
+            "the quick brown fox jumps over the lazy dog today".to_string(),
+            "ns".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        let all = service.repository.list_by_tier(MemoryTier::Working).await.unwrap();
+        let conflicts = service.detect_conflicts(&all);
+
+        assert_eq!(conflicts.len(), 0, "Nearly identical content (>0.9 Jaccard) should not be flagged");
+    }
+
+    #[tokio::test]
+    async fn test_conflict_flagged_for_review_below_0_3() {
+        let service = setup_service().await;
+
+        // Completely different content — Jaccard < 0.3
+        service.store(
+            "conflict_key".to_string(),
+            "alpha bravo charlie delta echo foxtrot golf".to_string(),
+            "ns".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        service.store(
+            "conflict_key".to_string(),
+            "one two three four five six seven eight nine ten".to_string(),
+            "ns".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        let all = service.repository.list_by_tier(MemoryTier::Working).await.unwrap();
+        let conflicts = service.detect_conflicts(&all);
+
+        assert_eq!(conflicts.len(), 1);
+        assert!(
+            matches!(conflicts[0].resolution, Some(ConflictResolution::FlaggedForReview)),
+            "Completely different content should be FlaggedForReview, got {:?}",
+            conflicts[0].resolution
+        );
+    }
+
+    #[tokio::test]
+    async fn test_conflict_soft_merge_0_3_to_0_7_same_tier() {
+        let service = setup_service().await;
+
+        // ~50% word overlap to land in 0.3..0.7 Jaccard range
+        // Shared: "rust error handling uses result" (5 words)
+        // A unique: "types for safety and correctness" (5 words)
+        // B unique: "option enum provides null safety" (5 words)
+        // Union = 15, Intersection = 5, Jaccard = 5/15 ≈ 0.33
+        service.store(
+            "merge_key".to_string(),
+            "rust error handling uses result types for safety and correctness".to_string(),
+            "ns".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        service.store(
+            "merge_key".to_string(),
+            "rust error handling uses result option enum provides null safety".to_string(),
+            "ns".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        let all = service.repository.list_by_tier(MemoryTier::Working).await.unwrap();
+        let conflicts = service.detect_conflicts(&all);
+
+        assert_eq!(conflicts.len(), 1);
+        let sim = conflicts[0].similarity;
+        assert!(
+            (0.3..0.7).contains(&sim),
+            "Similarity should be in 0.3..0.7 range, got {}",
+            sim
+        );
+        assert!(
+            matches!(conflicts[0].resolution, Some(ConflictResolution::SoftMerge { .. })),
+            "Same-tier memories with 0.3-0.7 similarity should SoftMerge, got {:?}",
+            conflicts[0].resolution
+        );
+    }
+
+    #[tokio::test]
+    async fn test_conflict_prefer_newer_0_7_to_0_9_same_tier() {
+        let service = setup_service().await;
+
+        // ~80% overlap to land in 0.7..0.9 Jaccard range
+        // Shared: "the quick brown fox jumps over the lazy" (8 unique words)
+        // A unique: "dog" (1 word) → 9 unique in A
+        // B unique: "cat today" (2 words) → 10 unique in B
+        // Union = 11, Intersection = 8, Jaccard = 8/11 ≈ 0.727
+        service.store(
+            "newer_key".to_string(),
+            "the quick brown fox jumps over the lazy dog".to_string(),
+            "ns".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        service.store(
+            "newer_key".to_string(),
+            "the quick brown fox jumps over the lazy cat today".to_string(),
+            "ns".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        let all = service.repository.list_by_tier(MemoryTier::Working).await.unwrap();
+        let conflicts = service.detect_conflicts(&all);
+
+        assert_eq!(conflicts.len(), 1);
+        let sim = conflicts[0].similarity;
+        assert!(
+            (0.7..0.9).contains(&sim),
+            "Similarity should be in 0.7..0.9 range, got {}",
+            sim
+        );
+        assert!(
+            matches!(conflicts[0].resolution, Some(ConflictResolution::PreferNewer { .. })),
+            "Same-tier memories with 0.7-0.9 similarity should PreferNewer, got {:?}",
+            conflicts[0].resolution
+        );
+    }
+
+    #[tokio::test]
+    async fn test_conflict_prefer_higher_confidence_different_tiers() {
+        let service = setup_service().await;
+
+        // Working tier memory
+        service.store(
+            "tier_key".to_string(),
+            "alpha bravo charlie delta echo foxtrot golf hotel".to_string(),
+            "ns".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        // Episodic tier memory (higher confidence) with moderate overlap
+        // Shared: "alpha bravo charlie delta" (4 words)
+        // Working unique: "echo foxtrot golf hotel" (4 words)
+        // Episodic unique: "india juliet kilo lima" (4 words)
+        // Union = 12, Intersection = 4, Jaccard = 4/12 ≈ 0.33
+        service.store(
+            "tier_key".to_string(),
+            "alpha bravo charlie delta india juliet kilo lima".to_string(),
+            "ns".to_string(),
+            MemoryTier::Episodic,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        // Gather both tiers like auto_resolve_conflicts does
+        let working = service.repository.list_by_tier(MemoryTier::Working).await.unwrap();
+        let episodic = service.repository.list_by_tier(MemoryTier::Episodic).await.unwrap();
+        let all: Vec<Memory> = working.into_iter().chain(episodic.into_iter()).collect();
+
+        let conflicts = service.detect_conflicts(&all);
+
+        assert_eq!(conflicts.len(), 1);
+        match &conflicts[0].resolution {
+            Some(ConflictResolution::PreferHigherConfidence { kept_id, .. }) => {
+                // The episodic memory should be kept
+                let episodic_mems = service.repository.list_by_tier(MemoryTier::Episodic).await.unwrap();
+                assert_eq!(*kept_id, episodic_mems[0].id, "Should keep the higher-tier (Episodic) memory");
+            }
+            other => panic!("Different tiers should resolve to PreferHigherConfidence, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auto_resolve_conflicts_end_to_end() {
+        let service = setup_service().await;
+
+        // Create two Working-tier memories with same key and ~80% overlap (PreferNewer)
+        let (older, _) = service.store(
+            "e2e_key".to_string(),
+            "the quick brown fox jumps over the lazy dog".to_string(),
+            "ns".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        let (_newer, _) = service.store(
+            "e2e_key".to_string(),
+            "the quick brown fox jumps over the lazy cat today".to_string(),
+            "ns".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        // Run auto-resolve
+        let (resolved_count, events) = service.auto_resolve_conflicts().await.unwrap();
+
+        assert!(resolved_count >= 1, "Should resolve at least 1 conflict");
+        assert!(!events.is_empty(), "Should emit events for conflict detection and resolution");
+
+        // The older memory should now be tagged as "superseded"
+        let deprecated = service.repository.get(older.id).await.unwrap().unwrap();
+        assert!(
+            deprecated.metadata.tags.contains(&"superseded".to_string()),
+            "Deprecated memory should be tagged 'superseded', got tags: {:?}",
+            deprecated.metadata.tags
+        );
+    }
 }

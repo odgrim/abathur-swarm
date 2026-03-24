@@ -959,6 +959,27 @@ impl<T: TaskRepository> TaskService<T> {
             }
         }
 
+        // Clear verification and workflow state so a retried task starts
+        // with fresh idempotency keys.  Without this, the idempotency guard
+        // in WorkflowVerificationHandler will match the old verification
+        // task and silently skip, leaving the task stuck in Verifying.
+        task.context.custom.remove("verification_retry_count");
+        task.context.custom.remove("verification_feedback");
+        task.context.custom.remove("verification_idempotency_key");
+        task.context.custom.remove("verification_phase_context");
+        task.context.custom.remove("verification_aggregation_summary");
+
+        // Reset workflow_state to Pending so the workflow restarts from
+        // phase 0.  The workflow_name is preserved via routing_hints.
+        if let Some(ref wf_name) = task.routing_hints.workflow_name {
+            let wf_state = WorkflowState::Pending {
+                workflow_name: wf_name.clone(),
+            };
+            if let Ok(val) = serde_json::to_value(&wf_state) {
+                task.context.custom.insert("workflow_state".to_string(), val);
+            }
+        }
+
         task.retry().map_err(DomainError::ValidationFailed)?;
         self.task_repo.update(&task).await?;
         tracing::info!(%task_id, attempt = task.retry_count, max_retries = task.max_retries, "task retry initiated");
@@ -1894,6 +1915,68 @@ mod tests {
             retried.context.hints.iter().any(|h| h == "convergence:fresh_start"),
             "Retrying a trapped convergent task should add convergence:fresh_start hint"
         );
+    }
+
+    #[tokio::test]
+    async fn test_retry_clears_verification_state() {
+        let service = setup_service().await;
+
+        let (task, _) = service.submit_task(
+            Some("Workflow Task".to_string()),
+            "Desc".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        // Simulate a task that went through workflow verification
+        let mut task_updated = service.get_task(task.id).await.unwrap().unwrap();
+        task_updated.status = TaskStatus::Ready;
+        task_updated.routing_hints.workflow_name = Some("code".to_string());
+        task_updated.context.custom.insert(
+            "workflow_state".to_string(),
+            serde_json::json!({"state": "verifying", "workflow_name": "code", "phase_index": 2, "phase_name": "implement", "subtask_ids": [], "retry_count": 2}),
+        );
+        task_updated.context.custom.insert("verification_retry_count".to_string(), serde_json::json!(2));
+        task_updated.context.custom.insert("verification_feedback".to_string(), serde_json::json!(["partial"]));
+        task_updated.context.custom.insert("verification_idempotency_key".to_string(), serde_json::json!("wf-verify:old-key"));
+        task_updated.context.custom.insert("verification_phase_context".to_string(), serde_json::json!("phase 3"));
+        task_updated.context.custom.insert("verification_aggregation_summary".to_string(), serde_json::json!("summary"));
+        service.task_repo.update(&task_updated).await.unwrap();
+
+        service.claim_task(task.id, "test-agent").await.unwrap();
+        service.fail_task(task.id, Some("stale-timeout".to_string())).await.unwrap();
+
+        let (retried, _) = service.retry_task(task.id).await.unwrap();
+
+        assert_eq!(retried.status, TaskStatus::Ready);
+        assert!(!retried.context.custom.contains_key("verification_retry_count"),
+            "verification_retry_count must be cleared on retry");
+        assert!(!retried.context.custom.contains_key("verification_feedback"),
+            "verification_feedback must be cleared on retry");
+        assert!(!retried.context.custom.contains_key("verification_idempotency_key"),
+            "verification_idempotency_key must be cleared on retry");
+        assert!(!retried.context.custom.contains_key("verification_phase_context"),
+            "verification_phase_context must be cleared on retry");
+        assert!(!retried.context.custom.contains_key("verification_aggregation_summary"),
+            "verification_aggregation_summary must be cleared on retry");
+
+        // workflow_state should be reset to Pending
+        let ws = retried.context.custom.get("workflow_state").unwrap();
+        let ws: WorkflowState = serde_json::from_value(ws.clone()).unwrap();
+        match ws {
+            WorkflowState::Pending { workflow_name } => {
+                assert_eq!(workflow_name, "code", "workflow_state must reset to Pending with original workflow name");
+            }
+            other => panic!("Expected Pending workflow_state, got {:?}", other),
+        }
     }
 
     // --- Opportunistic memory recording tests ---
