@@ -644,6 +644,15 @@ impl<T: TaskRepository + 'static> EventHandler for TaskFailedRetryHandler<T> {
             return Ok(Reaction::None);
         }
 
+        // Skip gate-rejected tasks — retrying would race with the orchestrator's
+        // replay_gate_rejection_event which re-emits WorkflowGateRejected for
+        // adapter lifecycle sync. The rejection is final.
+        if let Some(crate::domain::models::workflow_state::WorkflowState::Rejected { .. }) =
+            crate::services::workflow_engine::WorkflowEngine::<T>::read_state_from_task(&task)
+        {
+            return Ok(Reaction::None);
+        }
+
         let is_max_turns = error.starts_with("error_max_turns");
 
         // Circuit-break: tasks that repeatedly exhaust their turn budget should not retry
