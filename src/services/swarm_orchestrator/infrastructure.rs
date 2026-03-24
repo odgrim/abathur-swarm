@@ -307,13 +307,18 @@ where
             }
         });
 
+        let user_prompt = format!(
+            "Your task ID is `{}`. Use this ID when calling task_update_status.\n\n{}",
+            task.id, task.description
+        );
+
         let request = crate::domain::models::SubstrateRequest::new(
             task.id,
             &triage_template.name,
             &triage_template.system_prompt,
-            &task.description,
+            &user_prompt,
         ).with_config(crate::domain::models::SubstrateConfig {
-            max_turns: 10,
+            max_turns: 12,
             working_dir: Some(self.config.repo_path.to_string_lossy().to_string()),
             model: triage_template.preferred_model.clone(),
             mcp_servers: vec![mcp_config.to_string()],
