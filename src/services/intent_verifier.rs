@@ -55,7 +55,7 @@ pub struct IntentVerifierConfig {
 impl Default for IntentVerifierConfig {
     fn default() -> Self {
         Self {
-            max_turns: 25,
+            max_turns: 50,
             convergence: ConvergenceConfig::default(),
             include_artifacts: true,
             include_task_output: true,
@@ -1528,7 +1528,7 @@ mod tests {
     #[test]
     fn test_intent_verifier_config_default() {
         let config = IntentVerifierConfig::default();
-        assert_eq!(config.max_turns, 25);
+        assert_eq!(config.max_turns, 50);
         assert_eq!(config.verifier_agent_type, "intent-verifier");
         assert!(config.include_artifacts);
     }

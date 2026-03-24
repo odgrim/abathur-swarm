@@ -1516,7 +1516,7 @@ fn stop_mcp_servers(handles: McpServerHandles) {
 async fn show_status(json_mode: bool) -> Result<()> {
     use crate::adapters::sqlite::create_pool;
     use crate::domain::models::{GoalStatus, TaskStatus, WorktreeStatus};
-    use crate::domain::ports::{GoalRepository, GoalFilter, TaskRepository, WorktreeRepository};
+    use crate::domain::ports::{AgentFilter, AgentRepository, GoalRepository, GoalFilter, MemoryRepository, TaskRepository, WorktreeRepository};
 
     // Check if swarm is running
     let (swarm_running, swarm_pid) = match check_existing_swarm() {
@@ -1529,12 +1529,29 @@ async fn show_status(json_mode: bool) -> Result<()> {
     let goal_repo = Arc::new(SqliteGoalRepository::new(pool.clone()));
     let task_repo = Arc::new(SqliteTaskRepository::new(pool.clone()));
     let worktree_repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
+    let memory_repo = Arc::new(SqliteMemoryRepository::new(pool.clone()));
+    let agent_repo = Arc::new(SqliteAgentRepository::new(pool.clone()));
 
     // Get counts
     let active_goals = goal_repo.list(GoalFilter { status: Some(GoalStatus::Active), ..Default::default() }).await?.len();
     let pending_tasks = task_repo.list_by_status(TaskStatus::Pending).await?.len();
     let running_tasks = task_repo.list_by_status(TaskStatus::Running).await?.len();
     let active_worktrees = worktree_repo.list_by_status(WorktreeStatus::Active).await?.len();
+
+    // Task breakdown
+    let ready_tasks = task_repo.list_by_status(TaskStatus::Ready).await?.len();
+    let complete_tasks = task_repo.list_by_status(TaskStatus::Complete).await?.len();
+    let failed_tasks = task_repo.list_by_status(TaskStatus::Failed).await?.len();
+
+    // Memory health
+    let memory_tier_counts = memory_repo.count_by_tier().await.unwrap_or_default();
+    let working_memories = memory_tier_counts.get(&crate::domain::models::MemoryTier::Working).copied().unwrap_or(0);
+    let episodic_memories = memory_tier_counts.get(&crate::domain::models::MemoryTier::Episodic).copied().unwrap_or(0);
+    let semantic_memories = memory_tier_counts.get(&crate::domain::models::MemoryTier::Semantic).copied().unwrap_or(0);
+    let total_memories = working_memories + episodic_memories + semantic_memories;
+
+    // Agent templates
+    let agent_templates = agent_repo.list_templates(AgentFilter::default()).await.map(|t| t.len()).unwrap_or(0);
 
     let status = if swarm_running { "running" } else { "stopped" };
 
@@ -1570,7 +1587,21 @@ async fn show_status(json_mode: bool) -> Result<()> {
             "active_goals": active_goals,
             "pending_tasks": pending_tasks,
             "running_tasks": running_tasks,
-            "active_worktrees": active_worktrees
+            "active_worktrees": active_worktrees,
+            "tasks": {
+                "ready": ready_tasks,
+                "complete": complete_tasks,
+                "failed": failed_tasks,
+                "pending": pending_tasks,
+                "running": running_tasks
+            },
+            "memory": {
+                "working": working_memories,
+                "episodic": episodic_memories,
+                "semantic": semantic_memories,
+                "total": total_memories
+            },
+            "agent_templates": agent_templates
         });
         if let Some(pid) = swarm_pid {
             output["pid"] = serde_json::json!(pid);
@@ -1594,6 +1625,21 @@ async fn show_status(json_mode: bool) -> Result<()> {
         println!("Pending tasks:    {}", pending_tasks);
         println!("Running tasks:    {}", running_tasks);
         println!("Active worktrees: {}", active_worktrees);
+        println!();
+        println!("Task Breakdown");
+        println!("--------------");
+        println!("Ready:            {}", ready_tasks);
+        println!("Complete:         {}", complete_tasks);
+        println!("Failed:           {}", failed_tasks);
+        println!();
+        println!("Memory Health");
+        println!("-------------");
+        println!("Working:          {}", working_memories);
+        println!("Episodic:         {}", episodic_memories);
+        println!("Semantic:         {}", semantic_memories);
+        println!("Total:            {}", total_memories);
+        println!();
+        println!("Agent Templates:  {}", agent_templates);
         if let Some((role, cerebrate_count)) = federation_info {
             println!("Federation:       {} ({} cerebrates)", role, cerebrate_count);
         }
