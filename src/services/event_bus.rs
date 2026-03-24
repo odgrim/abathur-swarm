@@ -240,7 +240,7 @@ pub enum EventPayload {
     TaskSubmitted {
         task_id: Uuid,
         task_title: String,
-        goal_id: Uuid,
+        goal_id: Option<Uuid>,
     },
     TaskReady {
         task_id: Uuid,
@@ -1620,7 +1620,7 @@ impl From<SwarmEvent> for UnifiedEvent {
             SwarmEvent::TaskSubmitted { task_id, task_title, goal_id } => (
                 EventSeverity::Info,
                 EventCategory::Task,
-                Some(goal_id),
+                goal_id,
                 Some(task_id),
                 EventPayload::TaskSubmitted { task_id, task_title, goal_id },
             ),

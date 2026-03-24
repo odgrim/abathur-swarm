@@ -198,6 +198,16 @@ impl<T: TaskRepository> TaskService<T> {
         None
     }
 
+    /// Extract the goal_id from a task's context custom data.
+    ///
+    /// The goal_id is stored as a JSON string in `task.context.custom["goal_id"]`.
+    /// Returns `None` if the key is missing or the value is not a valid UUID.
+    fn extract_goal_id(task: &Task) -> Option<Uuid> {
+        task.context.custom.get("goal_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+    }
+
     /// Helper to build a UnifiedEvent with standard fields.
     fn make_event(
         severity: EventSeverity,
@@ -654,11 +664,11 @@ impl<T: TaskRepository> TaskService<T> {
         task.loaded_version.set(task.version);
 
         // Collect TaskSubmitted event
-        let goal_id = task.parent_id.unwrap_or_else(Uuid::new_v4);
+        let goal_id = Self::extract_goal_id(&task);
         events.push(Self::make_event(
             EventSeverity::Info,
             EventCategory::Task,
-            Some(goal_id),
+            goal_id,
             Some(task.id),
             EventPayload::TaskSubmitted {
                 task_id: task.id,
@@ -673,7 +683,7 @@ impl<T: TaskRepository> TaskService<T> {
                 events.push(Self::make_event(
                     EventSeverity::Info,
                     EventCategory::Workflow,
-                    Some(goal_id),
+                    goal_id,
                     Some(task.id),
                     EventPayload::WorkflowEnrolled {
                         task_id: task.id,
@@ -687,7 +697,7 @@ impl<T: TaskRepository> TaskService<T> {
             events.push(Self::make_event(
                 EventSeverity::Debug,
                 EventCategory::Task,
-                Some(goal_id),
+                goal_id,
                 Some(task.id),
                 EventPayload::TaskReady {
                     task_id: task.id,
@@ -740,10 +750,11 @@ impl<T: TaskRepository> TaskService<T> {
         self.task_repo.update(&task).await?;
         tracing::info!(%task_id, agent_type, "task claimed successfully");
 
+        let goal_id = Self::extract_goal_id(&task);
         let events = vec![Self::make_event(
             EventSeverity::Info,
             EventCategory::Task,
-            None,
+            goal_id,
             Some(task_id),
             EventPayload::TaskClaimed {
                 task_id,
@@ -778,10 +789,11 @@ impl<T: TaskRepository> TaskService<T> {
         self.task_repo.update(&task).await?;
         tracing::info!(%task_id, execution_mode = ?task.execution_mode, "task completed successfully");
 
+        let goal_id = Self::extract_goal_id(&task);
         let mut events = vec![Self::make_event(
             EventSeverity::Info,
             EventCategory::Task,
-            None,
+            goal_id,
             Some(task_id),
             EventPayload::TaskCompleted {
                 task_id,
@@ -803,7 +815,7 @@ impl<T: TaskRepository> TaskService<T> {
         events.push(Self::make_event(
             EventSeverity::Debug,
             EventCategory::Task,
-            None,
+            goal_id,
             Some(task_id),
             EventPayload::TaskExecutionRecorded {
                 task_id,
@@ -848,11 +860,12 @@ impl<T: TaskRepository> TaskService<T> {
         };
         let complexity_str = format!("{:?}", task.routing_hints.complexity).to_lowercase();
 
+        let goal_id = Self::extract_goal_id(&task);
         let events = vec![
             Self::make_event(
                 EventSeverity::Error,
                 EventCategory::Task,
-                None,
+                goal_id,
                 Some(task_id),
                 EventPayload::TaskFailed {
                     task_id,
@@ -864,7 +877,7 @@ impl<T: TaskRepository> TaskService<T> {
             Self::make_event(
                 EventSeverity::Debug,
                 EventCategory::Task,
-                None,
+                goal_id,
                 Some(task_id),
                 EventPayload::TaskExecutionRecorded {
                     task_id,
@@ -906,10 +919,11 @@ impl<T: TaskRepository> TaskService<T> {
         self.task_repo.update(&task).await?;
         tracing::debug!(%task_id, "task transitioned to ready");
 
+        let goal_id = Self::extract_goal_id(&task);
         let events = vec![Self::make_event(
             EventSeverity::Debug,
             EventCategory::Task,
-            None,
+            goal_id,
             Some(task_id),
             EventPayload::TaskReady {
                 task_id,
@@ -993,10 +1007,11 @@ impl<T: TaskRepository> TaskService<T> {
         self.task_repo.update(&task).await?;
         tracing::info!(%task_id, attempt = task.retry_count, max_retries = task.max_retries, "task retry initiated");
 
+        let goal_id = Self::extract_goal_id(&task);
         let events = vec![Self::make_event(
             EventSeverity::Warning,
             EventCategory::Task,
-            None,
+            goal_id,
             Some(task_id),
             EventPayload::TaskRetrying {
                 task_id,
@@ -1095,10 +1110,11 @@ impl<T: TaskRepository> TaskService<T> {
         self.task_repo.update(&task).await?;
         tracing::debug!(%task_id, "task transitioned to validating");
 
+        let goal_id = Self::extract_goal_id(&task);
         let events = vec![Self::make_event(
             EventSeverity::Info,
             EventCategory::Task,
-            None,
+            goal_id,
             Some(task_id),
             EventPayload::TaskValidating { task_id },
         )];
@@ -1152,10 +1168,11 @@ impl<T: TaskRepository> TaskService<T> {
         self.task_repo.update(&task).await?;
         tracing::info!(%task_id, reason, "task cancelled successfully");
 
+        let goal_id = Self::extract_goal_id(&task);
         let events = vec![Self::make_event(
             EventSeverity::Warning,
             EventCategory::Task,
-            None,
+            goal_id,
             Some(task_id),
             EventPayload::TaskCanceled {
                 task_id,
@@ -1424,10 +1441,11 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                     _ => None,
                 };
                 if let Some(payload) = payload {
+                    let goal_id = Self::extract_goal_id(&task);
                     events.push(Self::make_event(
                         EventSeverity::Info,
                         EventCategory::Task,
-                        None,
+                        goal_id,
                         Some(task_id),
                         payload,
                     ));

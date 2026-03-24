@@ -207,7 +207,7 @@ async fn test_reactor_dispatches_to_handler() {
         payload: EventPayload::TaskSubmitted {
             task_id: Uuid::new_v4(),
             task_title: "test task".to_string(),
-            goal_id: Uuid::nil(),
+            goal_id: None,
         },
     };
     event_bus.publish(event).await;
@@ -350,7 +350,7 @@ async fn test_replay_missed_events_catches_up() {
             payload: EventPayload::TaskSubmitted {
                 task_id,
                 task_title: format!("task-{}", i),
-                goal_id: Uuid::nil(),
+                goal_id: None,
             },
         };
         store.append(&event).await.expect("append event");
