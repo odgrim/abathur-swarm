@@ -25,11 +25,50 @@ use crate::services::{
     command_bus::{CommandEnvelope, CommandSource, DomainCommand, TaskCommand},
 };
 
+use crate::domain::models::workflow_state::WorkflowState;
 use crate::domain::models::workflow_template::WorkflowTemplate;
 
 use super::helpers::{auto_commit_worktree, run_post_completion_workflow};
 use super::types::SwarmEvent;
 use super::SwarmOrchestrator;
+
+/// Re-emit `WorkflowGateRejected` for tasks that were rejected via MCP.
+///
+/// When an overmind agent calls `workflow_gate(reject)`, the event is emitted
+/// on the MCP session's local event bus (no handlers). The orchestrator must
+/// re-emit it so `AdapterLifecycleSyncHandler` can fire egress actions.
+async fn replay_gate_rejection_event(
+    task: &Task,
+    event_bus: &crate::services::event_bus::EventBus,
+) {
+    let state = match task.context.custom.get("workflow_state")
+        .and_then(|v| serde_json::from_value::<WorkflowState>(v.clone()).ok())
+    {
+        Some(s) => s,
+        None => return,
+    };
+
+    if let WorkflowState::Rejected { workflow_name, phase_index, reason } = state {
+        let phase_name = WorkflowTemplate::builtin_templates()
+            .get(&workflow_name)
+            .and_then(|t| t.phases.get(phase_index))
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| format!("phase_{}", phase_index));
+
+        event_bus.publish(crate::services::event_factory::make_event(
+            crate::services::event_bus::EventSeverity::Warning,
+            crate::services::event_bus::EventCategory::Workflow,
+            None,
+            Some(task.id),
+            crate::services::event_bus::EventPayload::WorkflowGateRejected {
+                task_id: task.id,
+                phase_index,
+                phase_name,
+                reason,
+            },
+        )).await;
+    }
+}
 
 /// Map agent template tool names (lowercase YAML) to Claude Code CLI tool names.
 ///
@@ -1704,6 +1743,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     error = %error_msg,
                                     "Skipping task failure — already terminal (completed via MCP)"
                                 );
+                                replay_gate_rejection_event(&completed_task, &event_bus).await;
                                 false
                             } else if is_max_turns_auto_completable(&error_msg) {
                                 // Agent exhausted max_turns but its last output says "completed".
@@ -1899,6 +1939,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     error = %error_msg,
                                     "Skipping task failure — already terminal (completed via MCP)"
                                 );
+                                replay_gate_rejection_event(&completed_task, &event_bus).await;
                             } else {
                                 // Fail task via CommandBus (transitions + journals event)
                                 if let Some(ref cb) = command_bus {

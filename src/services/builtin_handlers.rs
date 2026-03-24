@@ -1494,15 +1494,27 @@ pub struct ReconciliationHandler<T: TaskRepository> {
     task_repo: Arc<T>,
     /// Tasks stuck in Running longer than this are considered stale (seconds).
     stale_task_timeout_secs: u64,
+    /// Tasks stuck in Validating longer than this are considered stale (seconds).
+    /// Shorter than Running timeout because Validating should resolve quickly.
+    stale_validating_timeout_secs: u64,
 }
 
 impl<T: TaskRepository> ReconciliationHandler<T> {
     pub fn new(task_repo: Arc<T>) -> Self {
-        Self { task_repo, stale_task_timeout_secs: 7200 } // 2 hours default
+        Self {
+            task_repo,
+            stale_task_timeout_secs: 7200,           // 2 hours default
+            stale_validating_timeout_secs: 1800,     // 30 minutes default
+        }
     }
 
     pub fn with_stale_timeout(mut self, secs: u64) -> Self {
         self.stale_task_timeout_secs = secs;
+        self
+    }
+
+    pub fn with_stale_validating_timeout(mut self, secs: u64) -> Self {
+        self.stale_validating_timeout_secs = secs;
         self
     }
 }
@@ -1647,105 +1659,108 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
             }
         }
 
-        // Stale-task detection: tasks stuck in Validating for > stale_task_timeout_secs
-        // Uses the same tiered warning pattern as Running staleness above.
+        // Stale-task detection: tasks stuck in Validating for > stale_validating_timeout_secs
+        // Uses updated_at (when the task entered Validating) instead of started_at
+        // (when the agent first spawned), since Validating should resolve quickly.
         let validating = self.task_repo.list_by_status(TaskStatus::Validating).await
             .map_err(|e| format!("Failed to list validating tasks: {}", e))?;
 
+        let validating_timeout = chrono::Duration::seconds(self.stale_validating_timeout_secs as i64);
+        let validating_warning = chrono::Duration::seconds((self.stale_validating_timeout_secs as f64 * 0.5) as i64);
+        let validating_critical = chrono::Duration::seconds((self.stale_validating_timeout_secs as f64 * 0.8) as i64);
+
         for task in &validating {
-            if let Some(started_at) = task.started_at {
-                let elapsed = now - started_at;
-                let runtime_secs = elapsed.num_seconds().max(0) as u64;
+            let elapsed = now - task.updated_at;
+            let validating_secs = elapsed.num_seconds().max(0) as u64;
 
-                if elapsed > timeout {
-                    // 100% — fail the task
-                    let mut updated = task.clone();
-                    updated.retry_count += 1;
-                    if updated.transition_to(TaskStatus::Failed).is_ok()
-                        && try_update_task(&*self.task_repo, &updated, "validating stale->failed").await?
-                    {
-                        corrections += 1;
+            if elapsed > validating_timeout {
+                // 100% — fail the task
+                let mut updated = task.clone();
+                updated.retry_count += 1;
+                if updated.transition_to(TaskStatus::Failed).is_ok()
+                    && try_update_task(&*self.task_repo, &updated, "validating stale->failed").await?
+                {
+                    corrections += 1;
 
-                        new_events.push(UnifiedEvent {
-                            id: EventId::new(),
-                            sequence: SequenceNumber(0),
-                            timestamp: chrono::Utc::now(),
-                            severity: EventSeverity::Warning,
-                            category: EventCategory::Task,
-                            goal_id: None,
-                            task_id: Some(task.id),
-                            correlation_id: event.correlation_id,
-                            source_process_id: None,
-                            payload: EventPayload::TaskFailed {
-                                task_id: task.id,
-                                error: format!("stale-timeout: task validating for > {}s", self.stale_task_timeout_secs),
-                                retry_count: updated.retry_count,
-                            },
-                        });
-
-                        tracing::warn!(
-                            "ReconciliationHandler: stale validating task {} failed after {}s (started: {})",
-                            task.id, self.stale_task_timeout_secs, started_at
-                        );
-                    }
-                } else if elapsed > critical_threshold {
-                    // 80% — critical warning + escalation
                     new_events.push(UnifiedEvent {
                         id: EventId::new(),
                         sequence: SequenceNumber(0),
-                        timestamp: now,
+                        timestamp: chrono::Utc::now(),
                         severity: EventSeverity::Warning,
                         category: EventCategory::Task,
                         goal_id: None,
                         task_id: Some(task.id),
                         correlation_id: event.correlation_id,
                         source_process_id: None,
-                        payload: EventPayload::TaskRunningCritical {
+                        payload: EventPayload::TaskFailed {
                             task_id: task.id,
-                            runtime_secs,
+                            error: format!("stale-timeout: task validating for > {}s", self.stale_validating_timeout_secs),
+                            retry_count: updated.retry_count,
                         },
                     });
 
-                    new_events.push(UnifiedEvent {
-                        id: EventId::new(),
-                        sequence: SequenceNumber(0),
-                        timestamp: now,
-                        severity: EventSeverity::Warning,
-                        category: EventCategory::Escalation,
-                        goal_id: None,
-                        task_id: Some(task.id),
-                        correlation_id: event.correlation_id,
-                        source_process_id: None,
-                        payload: EventPayload::HumanEscalationNeeded {
-                            goal_id: None,
-                            task_id: Some(task.id),
-                            reason: format!(
-                                "Task '{}' validating for {}s (80% of {}s timeout)",
-                                task.title, runtime_secs, self.stale_task_timeout_secs
-                            ),
-                            urgency: "high".to_string(),
-                            questions: vec![],
-                            is_blocking: false,
-                        },
-                    });
-                } else if elapsed > warning_threshold {
-                    // 50% — early warning
-                    new_events.push(UnifiedEvent {
-                        id: EventId::new(),
-                        sequence: SequenceNumber(0),
-                        timestamp: now,
-                        severity: EventSeverity::Info,
-                        category: EventCategory::Task,
-                        goal_id: None,
-                        task_id: Some(task.id),
-                        correlation_id: event.correlation_id,
-                        source_process_id: None,
-                        payload: EventPayload::TaskRunningLong {
-                            task_id: task.id,
-                            runtime_secs,
-                        },
-                    });
+                    tracing::warn!(
+                        "ReconciliationHandler: stale validating task {} failed after {}s (updated_at: {})",
+                        task.id, validating_secs, task.updated_at
+                    );
                 }
+            } else if elapsed > validating_critical {
+                // 80% — critical warning + escalation
+                new_events.push(UnifiedEvent {
+                    id: EventId::new(),
+                    sequence: SequenceNumber(0),
+                    timestamp: now,
+                    severity: EventSeverity::Warning,
+                    category: EventCategory::Task,
+                    goal_id: None,
+                    task_id: Some(task.id),
+                    correlation_id: event.correlation_id,
+                    source_process_id: None,
+                    payload: EventPayload::TaskRunningCritical {
+                        task_id: task.id,
+                        runtime_secs: validating_secs,
+                    },
+                });
+
+                new_events.push(UnifiedEvent {
+                    id: EventId::new(),
+                    sequence: SequenceNumber(0),
+                    timestamp: now,
+                    severity: EventSeverity::Warning,
+                    category: EventCategory::Escalation,
+                    goal_id: None,
+                    task_id: Some(task.id),
+                    correlation_id: event.correlation_id,
+                    source_process_id: None,
+                    payload: EventPayload::HumanEscalationNeeded {
+                        goal_id: None,
+                        task_id: Some(task.id),
+                        reason: format!(
+                            "Task '{}' validating for {}s (80% of {}s timeout)",
+                            task.title, validating_secs, self.stale_validating_timeout_secs
+                        ),
+                        urgency: "high".to_string(),
+                        questions: vec![],
+                        is_blocking: false,
+                    },
+                });
+            } else if elapsed > validating_warning {
+                // 50% — early warning
+                new_events.push(UnifiedEvent {
+                    id: EventId::new(),
+                    sequence: SequenceNumber(0),
+                    timestamp: now,
+                    severity: EventSeverity::Info,
+                    category: EventCategory::Task,
+                    goal_id: None,
+                    task_id: Some(task.id),
+                    correlation_id: event.correlation_id,
+                    source_process_id: None,
+                    payload: EventPayload::TaskRunningLong {
+                        task_id: task.id,
+                        runtime_secs: validating_secs,
+                    },
+                });
             }
         }
 
@@ -10617,16 +10632,16 @@ mod reconciliation_handler_tests {
     #[tokio::test]
     async fn test_reconciliation_stale_validating_task_fails() {
         let repo = setup_task_repo().await;
-        // Use a 100s timeout so anything older than 100s gets failed
-        let handler = ReconciliationHandler::new(repo.clone()).with_stale_timeout(100);
+        // Use a 100s validating timeout so anything older than 100s gets failed
+        let handler = ReconciliationHandler::new(repo.clone()).with_stale_validating_timeout(100);
 
         // Create a task stuck in Validating for longer than the timeout
         let mut task = Task::new("Stuck validating task");
         task.transition_to(TaskStatus::Ready).unwrap();
         task.transition_to(TaskStatus::Running).unwrap();
         task.transition_to(TaskStatus::Validating).unwrap();
-        // Set started_at to 200 seconds ago (well past 100s timeout)
-        task.started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(200));
+        // Set updated_at to 200 seconds ago (well past 100s timeout)
+        task.updated_at = chrono::Utc::now() - chrono::Duration::seconds(200);
         repo.create(&task).await.unwrap();
 
         let event = make_reconciliation_event();

@@ -793,6 +793,10 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             // Failed with retries remaining — auto-rework
             self.store_verification_feedback(parent_task_id, summary).await?;
 
+            // Transition parent TaskStatus: Validating -> Running via TaskService
+            // (mirrors the satisfied branch above)
+            let _ = self.task_service.transition_to_running(parent_task_id).await?;
+
             // Reset state so advance() re-creates the phase subtask
             if phase_index == 0 {
                 let pending = WorkflowState::Pending {
@@ -868,6 +872,10 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         } else {
             // Retries exhausted — escalate to PhaseGate for overmind decision
             self.store_verification_feedback(parent_task_id, summary).await?;
+
+            // Transition parent TaskStatus: Validating -> Running via TaskService
+            // (mirrors the satisfied branch above)
+            let _ = self.task_service.transition_to_running(parent_task_id).await?;
 
             let gate_state = WorkflowState::PhaseGate {
                 workflow_name,
