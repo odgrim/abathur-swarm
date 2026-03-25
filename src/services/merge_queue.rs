@@ -6,6 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use tracing::instrument;
@@ -200,6 +201,10 @@ pub struct MergeQueueConfig {
     pub max_retries: u32,
     /// Whether to route conflicts to specialist agents.
     pub route_conflicts_to_specialist: bool,
+    /// Allowed base directory for worktree working directories.
+    /// All workdir paths must resolve to a subdirectory of this path
+    /// (joined with `repo_path`) to prevent path traversal attacks.
+    pub allowed_workdir_base: String,
 }
 
 impl Default for MergeQueueConfig {
@@ -211,6 +216,88 @@ impl Default for MergeQueueConfig {
             auto_retry: true,
             max_retries: 3,
             route_conflicts_to_specialist: true,
+            allowed_workdir_base: ".abathur/worktrees".to_string(),
+        }
+    }
+}
+
+/// Validate that a working directory path is under the allowed base directory.
+///
+/// This prevents path traversal attacks where a malicious or corrupted database
+/// entry could cause git commands to execute in arbitrary directories (e.g.,
+/// `/etc`, `/home/user/.ssh`).
+///
+/// The function canonicalizes both the workdir and the allowed base path, then
+/// checks that the workdir is a subdirectory of the base. If the workdir does
+/// not yet exist on disk, it falls back to canonicalizing the parent directory
+/// and checking that the constructed path would be under the base.
+pub fn validate_workdir(workdir: &str, repo_path: &str, allowed_base: &str) -> DomainResult<()> {
+    let repo = Path::new(repo_path);
+    let base = repo.join(allowed_base);
+
+    // Canonicalize the base path — it must exist.
+    let canonical_base = base.canonicalize().map_err(|e| {
+        DomainError::ValidationFailed(format!(
+            "Cannot canonicalize allowed workdir base '{}': {}",
+            base.display(),
+            e
+        ))
+    })?;
+
+    // Try to canonicalize the workdir directly (works if it exists).
+    let workdir_path = Path::new(workdir);
+    let canonical_workdir = if workdir_path.is_absolute() {
+        workdir_path.canonicalize()
+    } else {
+        repo.join(workdir).canonicalize()
+    };
+
+    match canonical_workdir {
+        Ok(cwd) => {
+            if !cwd.starts_with(&canonical_base) {
+                return Err(DomainError::ValidationFailed(format!(
+                    "Path traversal detected: workdir '{}' resolves to '{}' which is outside allowed base '{}'",
+                    workdir,
+                    cwd.display(),
+                    canonical_base.display()
+                )));
+            }
+            Ok(())
+        }
+        Err(_) => {
+            // Path doesn't exist yet — canonicalize the parent and check.
+            let full_path = if workdir_path.is_absolute() {
+                workdir_path.to_path_buf()
+            } else {
+                repo.join(workdir)
+            };
+
+            if let Some(parent) = full_path.parent()
+                && let Ok(canonical_parent) = parent.canonicalize()
+            {
+                let file_name = full_path.file_name().unwrap_or_default();
+                let reconstructed = canonical_parent.join(file_name);
+                if !reconstructed.starts_with(&canonical_base) {
+                    return Err(DomainError::ValidationFailed(format!(
+                        "Path traversal detected: workdir '{}' would resolve outside allowed base '{}'",
+                        workdir,
+                        canonical_base.display()
+                    )));
+                }
+                return Ok(());
+            }
+
+            // If we can't resolve the parent either, do a textual check as a
+            // last-resort defense. Reject anything with `..` components.
+            let normalized = full_path.to_string_lossy();
+            if normalized.contains("..") {
+                return Err(DomainError::ValidationFailed(format!(
+                    "Path traversal detected: workdir '{}' contains '..' components",
+                    workdir
+                )));
+            }
+
+            Ok(())
         }
     }
 }
@@ -345,6 +432,9 @@ where
                 format!("No worktree found for task {}", task_id)
             ))?;
 
+        // Validate workdir is under the allowed base to prevent path traversal
+        validate_workdir(&worktree.path, &self.config.repo_path, &self.config.allowed_workdir_base)?;
+
         let request = MergeRequest::new_stage1(
             task_id,
             agent_branch.to_string(),
@@ -367,6 +457,10 @@ where
         target_workdir: &str,
     ) -> DomainResult<Uuid> {
         tracing::info!(%task_id, %source_branch, %target_branch, "queueing merge-back: subtask → feature branch");
+
+        // Validate workdir is under the allowed base to prevent path traversal
+        validate_workdir(target_workdir, &self.config.repo_path, &self.config.allowed_workdir_base)?;
+
         let request = MergeRequest::new_stage1(
             task_id,
             source_branch.to_string(),
@@ -387,6 +481,9 @@ where
             .ok_or_else(|| DomainError::ValidationFailed(
                 format!("No worktree found for task {}", task_id)
             ))?;
+
+        // Validate workdir is under the allowed base to prevent path traversal
+        validate_workdir(&worktree.path, &self.config.repo_path, &self.config.allowed_workdir_base)?;
 
         let request = MergeRequest::new_stage2(
             task_id,
@@ -444,6 +541,9 @@ where
     /// Process a Stage 1 merge (agent → task branch).
     #[instrument(skip(self, request), fields(task_id = %request.task_id, source = %request.source_branch, target = %request.target_branch))]
     async fn process_stage1(&self, request: &mut MergeRequest) -> DomainResult<MergeResult> {
+        // Validate workdir is under the allowed base to prevent path traversal
+        validate_workdir(&request.workdir, &self.config.repo_path, &self.config.allowed_workdir_base)?;
+
         // Verify workdir still exists
         if !std::path::Path::new(&request.workdir).exists() {
             tracing::error!(task_id = %request.task_id, workdir = %request.workdir, "workdir does not exist");
@@ -1142,5 +1242,92 @@ CONFLICT (add/add): Merge conflict in src/both_added.rs\n";
         );
         assert!(req.conflict_files.is_empty());
         assert_eq!(req.attempts, 0);
+    }
+
+    #[test]
+    fn test_validate_workdir_rejects_dotdot_traversal() {
+        // Create a temporary directory structure so the base path exists
+        let tmp = std::env::temp_dir().join("abathur_test_validate_dotdot");
+        let base = tmp.join(".abathur/worktrees");
+        std::fs::create_dir_all(&base).ok();
+
+        let result = validate_workdir(
+            ".abathur/worktrees/../../etc/passwd",
+            tmp.to_str().unwrap(),
+            ".abathur/worktrees",
+        );
+
+        // Cleanup
+        std::fs::remove_dir_all(&tmp).ok();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Path traversal detected"),
+            "Expected path traversal error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_workdir_rejects_absolute_outside_base() {
+        let result = validate_workdir(
+            "/etc/passwd",
+            ".",
+            ".abathur/worktrees",
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Path traversal detected") || err.contains("Cannot canonicalize"),
+            "Expected path traversal or canonicalize error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_workdir_accepts_valid_relative_path() {
+        // Create a temporary directory structure to test with
+        let tmp = std::env::temp_dir().join("abathur_test_validate_workdir");
+        let base = tmp.join(".abathur/worktrees");
+        std::fs::create_dir_all(&base).ok();
+        let task_dir = base.join("task-abc12345");
+        std::fs::create_dir_all(&task_dir).ok();
+
+        let result = validate_workdir(
+            ".abathur/worktrees/task-abc12345",
+            tmp.to_str().unwrap(),
+            ".abathur/worktrees",
+        );
+
+        // Cleanup
+        std::fs::remove_dir_all(&tmp).ok();
+
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_validate_workdir_accepts_nonexistent_safe_path() {
+        // Test with a path that doesn't exist yet but whose parent is valid
+        let tmp = std::env::temp_dir().join("abathur_test_validate_nonexist");
+        let base = tmp.join(".abathur/worktrees");
+        std::fs::create_dir_all(&base).ok();
+
+        let result = validate_workdir(
+            ".abathur/worktrees/task-new12345",
+            tmp.to_str().unwrap(),
+            ".abathur/worktrees",
+        );
+
+        // Cleanup
+        std::fs::remove_dir_all(&tmp).ok();
+
+        assert!(result.is_ok(), "Expected Ok for safe non-existent path, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_merge_queue_config_default_has_allowed_base() {
+        let config = MergeQueueConfig::default();
+        assert_eq!(config.allowed_workdir_base, ".abathur/worktrees");
     }
 }

@@ -104,8 +104,9 @@ impl<R: MemoryRepository> MemoryService<R> {
             memory.metadata = meta;
         }
 
-        // Auto-increment version when a memory with the same key+namespace already exists
-        if let Some(existing) = self.repository.get_by_key(&memory.key, &memory.namespace).await? {
+        // Auto-increment version when storing a memory with an existing
+        // (namespace, key) pair so the UNIQUE constraint is not violated.
+        if let Ok(Some(existing)) = self.repository.get_by_key(&memory.key, &memory.namespace).await {
             memory.version = existing.version + 1;
         }
 
@@ -1348,11 +1349,10 @@ mod tests {
         let service = setup_service().await;
 
         // Nearly identical content — Jaccard > 0.9
-        // Use many unique words so 1 addition keeps Jaccard above 0.9
-        // A has 20 unique words, B adds 1 more → intersection=20, union=21, Jaccard=20/21≈0.952
+        // 10 unique words shared, 1 extra word → Jaccard = 10/11 ≈ 0.909
         service.store(
             "same_key".to_string(),
-            "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango".to_string(),
+            "alpha bravo charlie delta echo foxtrot golf hotel india juliet".to_string(),
             "ns".to_string(),
             MemoryTier::Working,
             MemoryType::Fact,
@@ -1361,7 +1361,7 @@ mod tests {
 
         service.store(
             "same_key".to_string(),
-            "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform".to_string(),
+            "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo".to_string(),
             "ns".to_string(),
             MemoryTier::Working,
             MemoryType::Fact,
