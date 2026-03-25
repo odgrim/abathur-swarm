@@ -40,6 +40,7 @@ use crate::domain::models::task::Task;
 use crate::domain::models::{SubstrateConfig, SubstrateRequest};
 use crate::domain::ports::{MemoryRepository, Substrate, TaskRepository, TrajectoryRepository};
 use crate::services::convergence_bridge;
+use super::helpers::remove_transient_artifacts;
 use crate::services::convergence_engine::{ConvergenceEngine, OverseerMeasurer};
 use crate::services::event_bus::{EventBus, EventPayload, EventSeverity};
 use crate::services::event_factory;
@@ -1648,6 +1649,16 @@ async fn emit_escalation_from_verification(
 /// context in the prompt provides the agent with learnings from previous
 /// attempts.
 async fn reset_worktree(worktree_path: &str) -> DomainResult<()> {
+    // Defense-in-depth: remove transient artifacts before resetting
+    let removed = remove_transient_artifacts(worktree_path);
+    if !removed.is_empty() {
+        tracing::info!(
+            worktree = %worktree_path,
+            files = ?removed,
+            "cleaned transient artifacts during worktree reset"
+        );
+    }
+
     let checkout = tokio::process::Command::new("git")
         .args(["checkout", "--", "."])
         .current_dir(worktree_path)

@@ -3,6 +3,7 @@
 //! Top-level utility functions used by spawned tasks that don't have access
 //! to the orchestrator instance (e.g., auto-commit, post-completion workflow).
 
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -20,10 +21,51 @@ use crate::services::event_bus::EventBus;
 
 use super::types::SwarmEvent;
 
+/// Known transient markdown filenames that agents may generate during execution.
+/// These must never be committed or left in the working tree.
+pub const TRANSIENT_ARTIFACT_FILENAMES: &[&str] = &[
+    "REVIEW.md",
+    "PLAN.md",
+    "NOTES.md",
+    "SUMMARY.md",
+    "RESEARCH.md",
+    "TODO.md",
+    "SCRATCH.md",
+];
+
+/// Remove any known transient workflow artifacts from the given worktree path.
+/// Returns the list of filenames that were actually deleted.
+pub fn remove_transient_artifacts(worktree_path: &str) -> Vec<String> {
+    let base = Path::new(worktree_path);
+    let mut removed = Vec::new();
+    for &name in TRANSIENT_ARTIFACT_FILENAMES {
+        let path = base.join(name);
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(file = %name, error = %e, "failed to remove transient artifact");
+            } else {
+                tracing::info!(file = %name, worktree = %worktree_path, "removed transient artifact");
+                removed.push(name.to_string());
+            }
+        }
+    }
+    removed
+}
+
 /// Auto-commit any uncommitted changes in a worktree as a safety net.
 /// Returns true if a commit was made, false if the worktree was clean.
 pub async fn auto_commit_worktree(worktree_path: &str, task_id: Uuid) -> bool {
     use tokio::process::Command;
+
+    // Remove transient workflow artifacts before committing
+    let removed = remove_transient_artifacts(worktree_path);
+    if !removed.is_empty() {
+        tracing::info!(
+            task_id = %task_id,
+            files = ?removed,
+            "cleaned transient artifacts before auto-commit"
+        );
+    }
 
     // Check if there are any uncommitted changes
     let status = match Command::new("git")
@@ -1435,5 +1477,41 @@ mod tests {
         // First paragraph is all headers; after filtering, it's empty.
         // Falls back to first non-header, non-empty line from the full description.
         assert!(!result.starts_with('#'));
+    }
+
+    #[test]
+    fn remove_transient_artifacts_deletes_known_files_preserves_readme() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        // Create some transient artifacts
+        std::fs::write(base.join("PLAN.md"), "scratch").unwrap();
+        std::fs::write(base.join("REVIEW.md"), "scratch").unwrap();
+        std::fs::write(base.join("NOTES.md"), "scratch").unwrap();
+        // Create a legitimate file that must NOT be removed
+        std::fs::write(base.join("README.md"), "keep me").unwrap();
+
+        let removed = remove_transient_artifacts(base.to_str().unwrap());
+
+        assert!(removed.contains(&"PLAN.md".to_string()));
+        assert!(removed.contains(&"REVIEW.md".to_string()));
+        assert!(removed.contains(&"NOTES.md".to_string()));
+        assert_eq!(removed.len(), 3);
+
+        // Transient files should be gone
+        assert!(!base.join("PLAN.md").exists());
+        assert!(!base.join("REVIEW.md").exists());
+        assert!(!base.join("NOTES.md").exists());
+        // README.md must still exist
+        assert!(base.join("README.md").exists());
+    }
+
+    #[test]
+    fn remove_transient_artifacts_noop_when_no_files_exist() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let removed = remove_transient_artifacts(dir.path().to_str().unwrap());
+        assert!(removed.is_empty());
     }
 }
