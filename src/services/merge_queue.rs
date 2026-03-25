@@ -302,6 +302,43 @@ pub fn validate_workdir(workdir: &str, repo_path: &str, allowed_base: &str) -> D
     }
 }
 
+/// Validate a branch name to prevent git flag injection.
+///
+/// Branch names must:
+/// - Not be empty
+/// - Start with an ASCII alphanumeric character (prevents `-` prefix flag injection)
+/// - Contain only `[a-zA-Z0-9/_.\-]` characters
+///
+/// This is intentionally conservative — it rejects names that git itself might
+/// allow (e.g. names with `~`, `^`, `:`), but the restricted set is sufficient
+/// for all branches created by the Abathur system.
+pub fn validate_branch_name(name: &str) -> DomainResult<()> {
+    if name.is_empty() {
+        return Err(DomainError::ValidationFailed(
+            "Branch name must not be empty".to_string(),
+        ));
+    }
+
+    let first = name.as_bytes()[0];
+    if !(first.is_ascii_alphanumeric()) {
+        return Err(DomainError::ValidationFailed(format!(
+            "Branch name must start with an alphanumeric character, got: '{}'",
+            name
+        )));
+    }
+
+    for ch in name.chars() {
+        if !(ch.is_ascii_alphanumeric() || ch == '/' || ch == '_' || ch == '.' || ch == '-') {
+            return Err(DomainError::ValidationFailed(format!(
+                "Branch name contains invalid character '{}': '{}'",
+                ch, name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Information about a merge conflict that needs specialist resolution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConflictResolutionRequest {
@@ -435,6 +472,10 @@ where
         // Validate workdir is under the allowed base to prevent path traversal
         validate_workdir(&worktree.path, &self.config.repo_path, &self.config.allowed_workdir_base)?;
 
+        // Validate branch names to prevent git flag injection
+        validate_branch_name(agent_branch)?;
+        validate_branch_name(task_branch)?;
+
         let request = MergeRequest::new_stage1(
             task_id,
             agent_branch.to_string(),
@@ -461,6 +502,10 @@ where
         // Validate workdir is under the allowed base to prevent path traversal
         validate_workdir(target_workdir, &self.config.repo_path, &self.config.allowed_workdir_base)?;
 
+        // Validate branch names to prevent git flag injection
+        validate_branch_name(source_branch)?;
+        validate_branch_name(target_branch)?;
+
         let request = MergeRequest::new_stage1(
             task_id,
             source_branch.to_string(),
@@ -484,6 +529,10 @@ where
 
         // Validate workdir is under the allowed base to prevent path traversal
         validate_workdir(&worktree.path, &self.config.repo_path, &self.config.allowed_workdir_base)?;
+
+        // Validate branch names to prevent git flag injection
+        validate_branch_name(&worktree.branch)?;
+        validate_branch_name(&self.config.main_branch)?;
 
         let request = MergeRequest::new_stage2(
             task_id,
@@ -1329,5 +1378,77 @@ CONFLICT (add/add): Merge conflict in src/both_added.rs\n";
     fn test_merge_queue_config_default_has_allowed_base() {
         let config = MergeQueueConfig::default();
         assert_eq!(config.allowed_workdir_base, ".abathur/worktrees");
+    }
+
+    // --- validate_branch_name tests ---
+
+    #[test]
+    fn test_validate_branch_name_accepts_simple() {
+        assert!(validate_branch_name("main").is_ok());
+        assert!(validate_branch_name("feature-branch").is_ok());
+        assert!(validate_branch_name("release/v1.2.3").is_ok());
+    }
+
+    #[test]
+    fn test_validate_branch_name_accepts_complex_valid() {
+        assert!(validate_branch_name("task/abc_123.fix").is_ok());
+        assert!(validate_branch_name("a").is_ok());
+        assert!(validate_branch_name("A0-b1_c2/d3.e4").is_ok());
+    }
+
+    #[test]
+    fn test_validate_branch_name_rejects_empty() {
+        let result = validate_branch_name("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn test_validate_branch_name_rejects_leading_hyphen() {
+        let result = validate_branch_name("-Xours");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must start with an alphanumeric"));
+    }
+
+    #[test]
+    fn test_validate_branch_name_rejects_double_hyphen_flag() {
+        let result = validate_branch_name("--strategy=recursive");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must start with an alphanumeric"));
+    }
+
+    #[test]
+    fn test_validate_branch_name_rejects_leading_dot() {
+        let result = validate_branch_name(".hidden");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must start with an alphanumeric"));
+    }
+
+    #[test]
+    fn test_validate_branch_name_rejects_leading_slash() {
+        let result = validate_branch_name("/absolute");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must start with an alphanumeric"));
+    }
+
+    #[test]
+    fn test_validate_branch_name_rejects_special_chars() {
+        let result = validate_branch_name("branch~1");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid character"));
+    }
+
+    #[test]
+    fn test_validate_branch_name_rejects_spaces() {
+        let result = validate_branch_name("my branch");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid character"));
+    }
+
+    #[test]
+    fn test_validate_branch_name_rejects_colon() {
+        let result = validate_branch_name("refs:heads");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid character"));
     }
 }
