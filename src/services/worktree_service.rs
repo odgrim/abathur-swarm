@@ -102,6 +102,11 @@ impl<W: WorktreeRepository> WorktreeService<W> {
             task_id,
         );
 
+        // Validate the generated path is under the configured base_path to
+        // prevent path traversal (defense-in-depth: path_for_task should
+        // always produce safe paths, but we verify anyway).
+        self.validate_worktree_path(&path)?;
+
         // Create worktree record in creating state
         let mut worktree = Worktree::new(task_id, &path, &branch, base);
         self.repo.create(&worktree).await?;
@@ -263,6 +268,81 @@ impl<W: WorktreeRepository> WorktreeService<W> {
         worktree.fail(error);
         self.repo.update(&worktree).await?;
         Ok(worktree)
+    }
+
+    /// Validate that a worktree path is under the configured base_path.
+    ///
+    /// Prevents path traversal by ensuring the worktree directory will be
+    /// created inside the expected base directory. Uses canonicalization
+    /// when possible, with a textual fallback for not-yet-created paths.
+    fn validate_worktree_path(&self, path: &str) -> DomainResult<()> {
+        let full_path = self.config.repo_path.join(path);
+        let base_path = self.config.repo_path.join(&self.config.base_path);
+
+        // Reject absolute paths that clearly lie outside the base directory
+        if Path::new(path).is_absolute() && !full_path.starts_with(&base_path) {
+            return Err(DomainError::ValidationFailed(format!(
+                "Path traversal detected: worktree path '{}' is an absolute path outside base '{}'",
+                path,
+                self.config.base_path.display()
+            )));
+        }
+
+        // Attempt to canonicalize the base path
+        let canonical_base = match base_path.canonicalize() {
+            Ok(p) => p,
+            Err(_) => {
+                // Base path doesn't exist yet — fall back to textual check
+                let normalized = full_path.to_string_lossy();
+                if normalized.contains("..") {
+                    return Err(DomainError::ValidationFailed(format!(
+                        "Path traversal detected: worktree path '{}' contains '..' components",
+                        path
+                    )));
+                }
+                return Ok(());
+            }
+        };
+
+        // Try to canonicalize the full path
+        match full_path.canonicalize() {
+            Ok(canonical) => {
+                if !canonical.starts_with(&canonical_base) {
+                    return Err(DomainError::ValidationFailed(format!(
+                        "Path traversal detected: worktree path '{}' resolves outside base '{}'",
+                        path,
+                        self.config.base_path.display()
+                    )));
+                }
+            }
+            Err(_) => {
+                // Path doesn't exist yet — check the parent
+                if let Some(parent) = full_path.parent()
+                    && let Ok(canonical_parent) = parent.canonicalize()
+                {
+                    let file_name = full_path.file_name().unwrap_or_default();
+                    let reconstructed = canonical_parent.join(file_name);
+                    if !reconstructed.starts_with(&canonical_base) {
+                        return Err(DomainError::ValidationFailed(format!(
+                            "Path traversal detected: worktree path '{}' would resolve outside base '{}'",
+                            path,
+                            self.config.base_path.display()
+                        )));
+                    }
+                }
+
+                // Textual fallback
+                let normalized = full_path.to_string_lossy();
+                if normalized.contains("..") {
+                    return Err(DomainError::ValidationFailed(format!(
+                        "Path traversal detected: worktree path '{}' contains '..' components",
+                        path
+                    )));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     // Git operations
@@ -493,5 +573,37 @@ mod tests {
         let service = setup_service().await;
         let stats = service.get_stats().await.unwrap();
         assert_eq!(stats.total(), 0);
+    }
+
+    #[test]
+    fn test_validate_worktree_path_rejects_traversal() {
+        let config = WorktreeConfig {
+            base_path: PathBuf::from(".abathur/worktrees"),
+            repo_path: std::env::current_dir().unwrap(),
+            ..Default::default()
+        };
+        let repo = Arc::new(
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(async {
+                    let pool = crate::adapters::sqlite::create_migrated_test_pool().await.unwrap();
+                    crate::adapters::sqlite::SqliteWorktreeRepository::new(pool)
+                }),
+        );
+        let service = WorktreeService::new(repo, config);
+
+        // Path with ".." should be rejected
+        let result = service.validate_worktree_path("../../etc/passwd");
+        assert!(result.is_err(), "Path traversal with '..' should be rejected");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Path traversal"), "Error should mention path traversal: {err_msg}");
+
+        // Absolute path outside base should be rejected
+        let result = service.validate_worktree_path("/tmp/evil");
+        assert!(result.is_err(), "Absolute path outside base should be rejected");
+
+        // Valid relative path under base should be accepted
+        let result = service.validate_worktree_path(".abathur/worktrees/task-abc123");
+        assert!(result.is_ok(), "Valid path under base should be accepted: {:?}", result.err());
     }
 }
