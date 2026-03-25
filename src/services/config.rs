@@ -715,3 +715,15 @@ impl Config {
         toml::to_string_pretty(&Config::default()).unwrap_or_default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config_validates() {
+        let config = Config::default();
+        assert_eq!(config.limits.max_depth, 5);
+        assert_eq!(config.memory.decay_rate, 0.05);
+    }
+}
