@@ -104,8 +104,8 @@ impl<R: MemoryRepository> MemoryService<R> {
             memory.metadata = meta;
         }
 
-        // Auto-increment version when storing a memory with an existing
-        // (namespace, key) pair so the UNIQUE constraint is not violated.
+        // Auto-increment version when a memory with the same (namespace, key) already exists
+        // to avoid UNIQUE constraint violations and support conflict detection.
         if let Ok(Some(existing)) = self.repository.get_by_key(&memory.key, &memory.namespace).await {
             memory.version = existing.version + 1;
         }
@@ -1349,7 +1349,7 @@ mod tests {
         let service = setup_service().await;
 
         // Nearly identical content — Jaccard > 0.9
-        // 10 unique words shared, 1 extra word → Jaccard = 10/11 ≈ 0.909
+        // 10 unique words shared, 1 extra → Jaccard = 10/11 ≈ 0.91
         service.store(
             "same_key".to_string(),
             "alpha bravo charlie delta echo foxtrot golf hotel india juliet".to_string(),

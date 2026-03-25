@@ -236,6 +236,16 @@ impl RefinementRequest {
     }
 }
 
+/// Record of a template version change for persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionChangeRecord {
+    pub template_name: String,
+    pub from_version: u32,
+    pub to_version: u32,
+    pub previous_stats: TemplateStats,
+    pub changed_at: DateTime<Utc>,
+}
+
 /// Repository trait for persisting refinement requests across process restarts.
 ///
 /// Defined here (not in domain/ports) to avoid circular imports: adapters can
@@ -269,6 +279,58 @@ pub trait RefinementRepository: Send + Sync {
     async fn reset_in_progress_to_pending(
         &self,
     ) -> Result<Vec<RefinementRequest>, Box<dyn std::error::Error + Send + Sync>>;
+
+    // ── Template stats persistence (default no-ops for backward compat) ──
+
+    /// Persist or update template stats.
+    async fn save_stats(
+        &self,
+        _stats: &TemplateStats,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+
+    /// Load all persisted template stats.
+    async fn load_all_stats(
+        &self,
+    ) -> Result<Vec<TemplateStats>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Vec::new())
+    }
+
+    /// Persist a single task execution record.
+    async fn save_execution(
+        &self,
+        _execution: &TaskExecution,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+
+    /// Load execution records for a given template.
+    async fn load_executions(
+        &self,
+        _template_name: &str,
+    ) -> Result<Vec<TaskExecution>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Vec::new())
+    }
+
+    /// Persist a version change record (previous stats snapshot).
+    async fn save_version_change(
+        &self,
+        _template_name: &str,
+        _from_version: u32,
+        _to_version: u32,
+        _previous_stats: &TemplateStats,
+        _changed_at: DateTime<Utc>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
+
+    /// Load version change records for all templates.
+    async fn load_version_changes(
+        &self,
+    ) -> Result<Vec<VersionChangeRecord>, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Vec::new())
+    }
 }
 
 /// In-memory state for the evolution loop.
@@ -343,50 +405,99 @@ impl EvolutionLoop {
 
     /// Record a task execution.
     pub async fn record_execution(&self, execution: TaskExecution) {
-        let mut state = self.state.write().await;
+        // Capture data needed for persistence before taking the lock
+        let mut version_change_info: Option<(String, u32, u32, TemplateStats, DateTime<Utc>)> =
+            None;
 
-        // Check if we need to handle version change first
-        let needs_version_reset = if let Some(stats) = state.stats.get(&execution.template_name) {
-            stats.template_version != execution.template_version
-        } else {
-            false
+        let updated_stats = {
+            let mut state = self.state.write().await;
+
+            // Check if we need to handle version change first
+            let needs_version_reset =
+                if let Some(stats) = state.stats.get(&execution.template_name) {
+                    stats.template_version != execution.template_version
+                } else {
+                    false
+                };
+
+            if needs_version_reset {
+                // Clone previous stats for regression detection
+                if let Some(prev_stats) = state.stats.get(&execution.template_name).cloned() {
+                    let change_time = Utc::now();
+                    version_change_info = Some((
+                        execution.template_name.clone(),
+                        prev_stats.template_version,
+                        execution.template_version,
+                        prev_stats.clone(),
+                        change_time,
+                    ));
+                    state
+                        .previous_version_stats
+                        .insert(execution.template_name.clone(), prev_stats);
+                }
+                state.version_change_times.insert(
+                    execution.template_name.clone(),
+                    (execution.template_version, Utc::now()),
+                );
+                // Remove old stats so we can insert fresh ones
+                state.stats.remove(&execution.template_name);
+            }
+
+            // Update or create stats
+            let stats = state
+                .stats
+                .entry(execution.template_name.clone())
+                .or_insert_with(|| {
+                    TemplateStats::new(
+                        execution.template_name.clone(),
+                        execution.template_version,
+                    )
+                });
+
+            stats.update(&execution);
+            let updated = stats.clone();
+
+            // Store execution
+            state
+                .executions
+                .entry(execution.template_name.clone())
+                .or_default()
+                .push(execution.clone());
+
+            updated
         };
 
-        if needs_version_reset {
-            // Clone previous stats for regression detection
-            if let Some(prev_stats) = state.stats.get(&execution.template_name).cloned() {
-                state.previous_version_stats.insert(
-                    execution.template_name.clone(),
-                    prev_stats,
+        // Persist to DB (fire-and-forget with warning on error)
+        if let Some(ref repo) = self.refinement_repo {
+            if let Err(e) = repo.save_execution(&execution).await {
+                tracing::warn!(
+                    "Failed to persist execution for {}: {}",
+                    execution.template_name,
+                    e
                 );
             }
-            state.version_change_times.insert(
-                execution.template_name.clone(),
-                (execution.template_version, Utc::now()),
-            );
-            // Remove old stats so we can insert fresh ones
-            state.stats.remove(&execution.template_name);
+            if let Err(e) = repo.save_stats(&updated_stats).await {
+                tracing::warn!(
+                    "Failed to persist stats for {}: {}",
+                    execution.template_name,
+                    e
+                );
+            }
+            if let Some((ref name, from_v, to_v, ref prev_stats, changed_at)) =
+                version_change_info
+            {
+                if let Err(e) = repo
+                    .save_version_change(name, from_v, to_v, prev_stats, changed_at)
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to persist version change for {}: {}",
+                        name,
+                        e
+                    );
+                }
+            }
         }
-
-        // Update or create stats
-        let stats = state
-            .stats
-            .entry(execution.template_name.clone())
-            .or_insert_with(|| {
-                TemplateStats::new(
-                    execution.template_name.clone(),
-                    execution.template_version,
-                )
-            });
-
-        stats.update(&execution);
-
-        // Store execution
-        state
-            .executions
-            .entry(execution.template_name.clone())
-            .or_default()
-            .push(execution);
     }
 
     /// Evaluate templates and trigger evolution if needed.
@@ -781,6 +892,54 @@ impl EvolutionLoop {
             template_name.to_string(),
             (new_version, Utc::now()),
         );
+    }
+
+    /// Load persisted template stats and version changes from the repository.
+    ///
+    /// Called on startup after `recover_in_progress_refinements()` to restore
+    /// in-memory evolution state from the database so stats survive restarts.
+    pub async fn load_persisted_state(&self) {
+        let Some(ref repo) = self.refinement_repo else {
+            return;
+        };
+
+        // Load template stats
+        match repo.load_all_stats().await {
+            Ok(all_stats) => {
+                let mut state = self.state.write().await;
+                for stats in all_stats {
+                    // Only insert if not already present (in-memory takes precedence)
+                    state
+                        .stats
+                        .entry(stats.template_name.clone())
+                        .or_insert(stats);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load persisted template stats: {}", e);
+            }
+        }
+
+        // Load version changes to restore previous_version_stats and version_change_times
+        match repo.load_version_changes().await {
+            Ok(changes) => {
+                let mut state = self.state.write().await;
+                for change in changes {
+                    // Only insert the most recent change per template (they are ordered DESC)
+                    state
+                        .previous_version_stats
+                        .entry(change.template_name.clone())
+                        .or_insert(change.previous_stats.clone());
+                    state
+                        .version_change_times
+                        .entry(change.template_name.clone())
+                        .or_insert((change.to_version, change.changed_at));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load persisted version changes: {}", e);
+            }
+        }
     }
 
     /// Load pending refinement requests from the repository into in-memory state.

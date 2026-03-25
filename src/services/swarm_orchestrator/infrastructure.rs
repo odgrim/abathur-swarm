@@ -1055,6 +1055,9 @@ where
         // Recover InProgress refinement requests from previous process run
         self.evolution_loop.recover_in_progress_refinements().await;
 
+        // Restore persisted template stats and version changes
+        self.evolution_loop.load_persisted_state().await;
+
         Ok(corrections)
     }
 }

@@ -144,5 +144,10 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
             description: "Add composite indexes for task queries".to_string(),
             sql: include_str!("../../../migrations/012_add_task_composite_indexes.sql").to_string(),
         },
+        Migration {
+            version: 13,
+            description: "Template stats persistence for evolution loop".to_string(),
+            sql: include_str!("../../../migrations/013_template_stats.sql").to_string(),
+        },
     ]
 }
