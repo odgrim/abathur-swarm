@@ -54,10 +54,6 @@ impl CommandOutput for InitOutput {
 }
 
 pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
-    // Validate required environment variables before doing any work
-    crate::services::config::validate_required_env_vars()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
     let target_path = if args.path.is_absolute() {
         args.path.clone()
     } else {
