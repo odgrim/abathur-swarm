@@ -542,27 +542,6 @@ impl Default for AdapterConfig {
     }
 }
 
-/// Validate that all required environment variables are set and non-empty.
-///
-/// Currently checks:
-/// - `ANTHROPIC_API_KEY`: Required for all LLM API calls via the Anthropic substrate.
-///
-/// Returns `Ok(())` if all required variables are present, or a [`ConfigError::ValidationError`]
-/// with a user-friendly message if any are missing.
-pub fn validate_required_env_vars() -> Result<(), ConfigError> {
-    let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-    if key.trim().is_empty() {
-        return Err(ConfigError::ValidationError {
-            field: "ANTHROPIC_API_KEY".to_string(),
-            reason: "ANTHROPIC_API_KEY is not set. Please set it with:\n  \
-                     export ANTHROPIC_API_KEY=your-key-here\n\
-                     Get your key at: https://console.anthropic.com/"
-                .to_string(),
-        });
-    }
-    Ok(())
-}
-
 impl Config {
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
@@ -740,73 +719,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-
-    // SAFETY: These tests manipulate environment variables which is unsafe in
-    // multi-threaded contexts. We run with --test-threads=1 to avoid races.
-
-    #[test]
-    fn test_validate_required_env_vars_missing() {
-        let original = env::var("ANTHROPIC_API_KEY").ok();
-        // SAFETY: single-threaded test execution
-        unsafe { env::remove_var("ANTHROPIC_API_KEY"); }
-
-        let result = validate_required_env_vars();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("ANTHROPIC_API_KEY"), "Error should mention the variable name: {msg}");
-        assert!(msg.contains("console.anthropic.com"), "Error should include help URL: {msg}");
-
-        if let Some(val) = original {
-            unsafe { env::set_var("ANTHROPIC_API_KEY", val); }
-        }
-    }
-
-    #[test]
-    fn test_validate_required_env_vars_empty() {
-        let original = env::var("ANTHROPIC_API_KEY").ok();
-        unsafe { env::set_var("ANTHROPIC_API_KEY", ""); }
-
-        let result = validate_required_env_vars();
-        assert!(result.is_err(), "Empty string should fail validation");
-
-        if let Some(val) = original {
-            unsafe { env::set_var("ANTHROPIC_API_KEY", val); }
-        } else {
-            unsafe { env::remove_var("ANTHROPIC_API_KEY"); }
-        }
-    }
-
-    #[test]
-    fn test_validate_required_env_vars_whitespace_only() {
-        let original = env::var("ANTHROPIC_API_KEY").ok();
-        unsafe { env::set_var("ANTHROPIC_API_KEY", "   "); }
-
-        let result = validate_required_env_vars();
-        assert!(result.is_err(), "Whitespace-only string should fail validation");
-
-        if let Some(val) = original {
-            unsafe { env::set_var("ANTHROPIC_API_KEY", val); }
-        } else {
-            unsafe { env::remove_var("ANTHROPIC_API_KEY"); }
-        }
-    }
-
-    #[test]
-    fn test_validate_required_env_vars_set() {
-        let original = env::var("ANTHROPIC_API_KEY").ok();
-        unsafe { env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-key-12345"); }
-
-        let result = validate_required_env_vars();
-        assert!(result.is_ok(), "Valid key should pass validation");
-
-        if let Some(val) = original {
-            unsafe { env::set_var("ANTHROPIC_API_KEY", val); }
-        } else {
-            unsafe { env::remove_var("ANTHROPIC_API_KEY"); }
-        }
-    }
 
     #[test]
     fn test_default_config_validates() {

@@ -54,11 +54,6 @@ impl CommandOutput for InitOutput {
 }
 
 pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
-    // Validate required environment variables early so users get a clear error
-    // before any filesystem or database work happens.
-    crate::services::config::validate_required_env_vars()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-
     let target_path = if args.path.is_absolute() {
         args.path.clone()
     } else {

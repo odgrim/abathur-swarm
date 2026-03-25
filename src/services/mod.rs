@@ -55,7 +55,7 @@ pub use circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerSe
 pub use command_bus::{CommandBus, CommandEnvelope, CommandError, CommandId, CommandOutcome, CommandResult, CommandSource, DomainCommand, GoalCommand, GoalCommandHandler, MemoryCommand, MemoryCommandHandler, TaskCommand, TaskCommandHandler};
 pub use cold_start::{ColdStartConfig, ColdStartReport, ColdStartService, Convention, ConventionCategory, Dependency, ProjectType};
 pub use convergence_engine::ConvergenceEngine;
-pub use config::{BudgetConfig, Config, ConfigError, A2AFederationConfig, TrustedSwarmConfig, TrustLevel, FederationAuthMethod, SwarmIdentityConfig, validate_required_env_vars};
+pub use config::{BudgetConfig, Config, ConfigError, A2AFederationConfig, TrustedSwarmConfig, TrustLevel, FederationAuthMethod, SwarmIdentityConfig};
 pub use context_truncation::{TruncationConfig, estimate_tokens, truncate_section, truncate_to_token_budget, truncate_context_sections};
 pub use context_window::{ContextWindowGuard, ContextWindowGuardConfig, ContextWindowCheck, model_context_window};
 pub use cost_tracker::{CostTracker, CostSummary, ModelPricing, get_model_pricing, estimate_cost, estimate_cost_cents};

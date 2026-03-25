@@ -394,12 +394,6 @@ async fn start_swarm(
     no_worktrees: bool,
     dag: Option<String>,
 ) -> Result<()> {
-    // Validate required environment variables before doing any work
-    if !dry_run {
-        crate::services::config::validate_required_env_vars()
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-    }
-
     // Check if swarm is already running
     if let Some(pid) = check_existing_swarm() {
         if json_mode {
