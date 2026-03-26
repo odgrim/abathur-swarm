@@ -10498,6 +10498,7 @@ mod goal_stagnation_detector_tests {
         create_migrated_test_pool, goal_repository::SqliteGoalRepository,
     };
     use crate::domain::models::GoalPriority;
+    use crate::domain::ports::goal_repository::GoalRepository;
     use std::sync::Arc;
 
     async fn setup_goal_repo() -> Arc<SqliteGoalRepository> {
@@ -10602,6 +10603,117 @@ mod goal_stagnation_detector_tests {
 
         let reaction = handler.handle(&event, &ctx).await.unwrap();
         assert!(matches!(reaction, Reaction::None), "New goal within grace period should not trigger alert");
+    }
+
+    #[tokio::test]
+    async fn test_dedup_prevents_repeated_alerts() {
+        let repo = setup_goal_repo().await;
+        // Very short threshold so goal is immediately stagnant
+        let handler = GoalStagnationDetectorHandler::new(repo.clone(), 1);
+
+        let mut goal = Goal::new("Stagnant Goal", "Will alert once")
+            .with_priority(GoalPriority::High);
+        goal.created_at = chrono::Utc::now() - chrono::Duration::seconds(100);
+        repo.create(&goal).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let event = make_stall_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        // First call should emit an escalation
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::EmitEvents(_)), "First call should emit escalation");
+
+        // Second call immediately after should be deduped (within threshold window)
+        let reaction2 = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction2, Reaction::None), "Second call should be deduped to Reaction::None");
+    }
+
+    #[tokio::test]
+    async fn test_recently_checked_goal_not_stagnant() {
+        let repo = setup_goal_repo().await;
+        // Threshold is 3600 seconds (1 hour)
+        let handler = GoalStagnationDetectorHandler::new(repo.clone(), 3600);
+
+        let mut goal = Goal::new("Active Goal", "Recently checked")
+            .with_priority(GoalPriority::Normal);
+        goal.created_at = chrono::Utc::now() - chrono::Duration::seconds(7200);
+        repo.create(&goal).await.unwrap();
+        // Last convergence check was 10 seconds ago — well within threshold
+        repo.update_last_check(goal.id, chrono::Utc::now() - chrono::Duration::seconds(10)).await.unwrap();
+
+        let event = make_stall_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::None), "Recently checked goal should not trigger alert");
+    }
+
+    #[tokio::test]
+    async fn test_multiple_goals_only_stagnant_ones_alert() {
+        let repo = setup_goal_repo().await;
+        // Short threshold so stagnant goals trigger immediately
+        let handler = GoalStagnationDetectorHandler::new(repo.clone(), 1);
+
+        // Stagnant goal: old, never checked
+        let mut stagnant = Goal::new("Stagnant Goal", "Old and unchecked")
+            .with_priority(GoalPriority::High);
+        stagnant.created_at = chrono::Utc::now() - chrono::Duration::seconds(200);
+        repo.create(&stagnant).await.unwrap();
+
+        // Fresh goal: recently checked
+        let mut fresh = Goal::new("Fresh Goal", "Just checked")
+            .with_priority(GoalPriority::Normal);
+        fresh.created_at = chrono::Utc::now() - chrono::Duration::seconds(200);
+        repo.create(&fresh).await.unwrap();
+        repo.update_last_check(fresh.id, chrono::Utc::now()).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let event = make_stall_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        match reaction {
+            Reaction::EmitEvents(events) => {
+                assert_eq!(events.len(), 1, "Should emit exactly one escalation for the stagnant goal only");
+                match &events[0].payload {
+                    EventPayload::HumanEscalationRequired { reason, .. } => {
+                        assert!(reason.contains("Stagnant Goal"), "Alert should be for the stagnant goal");
+                    }
+                    _ => panic!("Expected HumanEscalationRequired payload"),
+                }
+            }
+            Reaction::None => panic!("Expected escalation event for stagnant goal"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_non_scheduled_payload_returns_none() {
+        let repo = setup_goal_repo().await;
+        let handler = GoalStagnationDetectorHandler::new(repo, 3600);
+
+        // Use a completely different payload type (not ScheduledEventFired)
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Task,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::TaskCompleted {
+                task_id: uuid::Uuid::new_v4(),
+                tokens_used: 0,
+            },
+        };
+
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(matches!(reaction, Reaction::None), "Non-ScheduledEventFired should return None");
     }
 }
 

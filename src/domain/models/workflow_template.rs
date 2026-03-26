@@ -12,6 +12,7 @@ const VALID_TOOLS: &[&str] = &[
     "write",
     "edit",
     "shell",
+    "bash",
     "glob",
     "grep",
     "memory",
@@ -799,5 +800,19 @@ mod tests {
         assert_eq!(kind, WorkspaceKind::Worktree);
         let delivery: OutputDelivery = Default::default();
         assert_eq!(delivery, OutputDelivery::PullRequest);
+    }
+
+    #[test]
+    fn test_all_builtin_templates_validate() {
+        let templates = WorkflowTemplate::builtin_templates();
+        assert!(
+            !templates.is_empty(),
+            "builtin_templates() must return at least one template"
+        );
+        for (name, template) in &templates {
+            template.validate().unwrap_or_else(|e| {
+                panic!("Built-in template '{}' failed validation: {}", name, e);
+            });
+        }
     }
 }

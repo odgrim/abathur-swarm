@@ -1134,6 +1134,242 @@ mod tests {
         }
     }
 
+    // --- FixedPoint eligible_strategies tests ---
+
+    fn make_fixed_point_attractor(estimated_remaining_iterations: u32) -> AttractorState {
+        AttractorState {
+            classification: AttractorType::FixedPoint {
+                estimated_remaining_iterations,
+                estimated_remaining_tokens: 50_000,
+            },
+            confidence: 0.9,
+            detected_at: Some(Uuid::nil()),
+            evidence: AttractorEvidence {
+                recent_deltas: vec![],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        }
+    }
+
+    fn make_divergent_attractor(cause: DivergenceCause) -> AttractorState {
+        AttractorState {
+            classification: AttractorType::Divergent {
+                divergence_rate: -0.3,
+                probable_cause: cause,
+            },
+            confidence: 0.85,
+            detected_at: Some(Uuid::nil()),
+            evidence: AttractorEvidence {
+                recent_deltas: vec![],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        }
+    }
+
+    fn make_plateau_attractor(stall_duration: u32, plateau_level: f64) -> AttractorState {
+        AttractorState {
+            classification: AttractorType::Plateau {
+                stall_duration,
+                plateau_level,
+            },
+            confidence: 0.8,
+            detected_at: Some(Uuid::nil()),
+            evidence: AttractorEvidence {
+                recent_deltas: vec![],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        }
+    }
+
+    fn make_indeterminate_attractor() -> AttractorState {
+        AttractorState {
+            classification: AttractorType::Indeterminate {
+                tendency: ConvergenceTendency::Improving,
+            },
+            confidence: 0.5,
+            detected_at: Some(Uuid::nil()),
+            evidence: AttractorEvidence {
+                recent_deltas: vec![],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        }
+    }
+
+    // --- FixedPoint tests ---
+
+    #[test]
+    fn test_fixed_point_near_convergence_exploitation_only() {
+        // estimated_remaining_iterations <= 2 → narrow exploitation set
+        let attractor = make_fixed_point_attractor(1);
+        let budget = generous_budget();
+        let cands = eligible_strategies(&[], &attractor, &budget, 0, 3);
+
+        assert_eq!(cands.len(), 2);
+        assert!(has_kind(&cands, "retry_with_feedback"));
+        assert!(has_kind(&cands, "incremental_refinement"));
+        // No exploration strategies
+        for s in &cands {
+            assert!(s.is_exploitation(), "near-convergence FixedPoint should only return exploitation, got: {}", s.kind_name());
+        }
+    }
+
+    #[test]
+    fn test_fixed_point_far_convergence_wider_exploitation() {
+        // estimated_remaining_iterations > 2 → wider exploitation set
+        let attractor = make_fixed_point_attractor(5);
+        let budget = generous_budget();
+        let cands = eligible_strategies(&[], &attractor, &budget, 0, 3);
+
+        assert_eq!(cands.len(), 4);
+        assert!(has_kind(&cands, "retry_with_feedback"));
+        assert!(has_kind(&cands, "focused_repair"));
+        assert!(has_kind(&cands, "incremental_refinement"));
+        assert!(has_kind(&cands, "retry_augmented"));
+    }
+
+    #[test]
+    fn test_fixed_point_exploitation_only_no_exploration() {
+        for remaining in [1, 2, 5, 10] {
+            let attractor = make_fixed_point_attractor(remaining);
+            let budget = generous_budget();
+            let cands = eligible_strategies(&[], &attractor, &budget, 0, 3);
+            for s in &cands {
+                assert!(
+                    !s.is_exploration(),
+                    "FixedPoint(remaining={}) should never return exploration strategy, got: {}",
+                    remaining,
+                    s.kind_name()
+                );
+            }
+        }
+    }
+
+    // --- Divergent tests ---
+
+    #[test]
+    fn test_divergent_specification_ambiguity() {
+        let attractor = make_divergent_attractor(DivergenceCause::SpecificationAmbiguity);
+        let budget = generous_budget();
+        let cands = eligible_strategies(&[], &attractor, &budget, 0, 3);
+
+        assert!(has_kind(&cands, "architect_review"));
+        assert!(has_kind(&cands, "reframe"));
+        assert_eq!(cands.len(), 2);
+    }
+
+    #[test]
+    fn test_divergent_wrong_approach() {
+        let attractor = make_divergent_attractor(DivergenceCause::WrongApproach);
+        let budget = generous_budget();
+        let cands = eligible_strategies(&[], &attractor, &budget, 0, 3);
+
+        assert!(has_kind(&cands, "alternative_approach"));
+        assert!(has_kind(&cands, "reframe"));
+        assert_eq!(cands.len(), 2);
+    }
+
+    #[test]
+    fn test_divergent_accumulated_regression() {
+        let attractor = make_divergent_attractor(DivergenceCause::AccumulatedRegression);
+        let budget = generous_budget();
+        let cands = eligible_strategies(&[], &attractor, &budget, 0, 3);
+
+        assert!(has_kind(&cands, "revert_and_branch"));
+        assert_eq!(cands.len(), 1);
+    }
+
+    #[test]
+    fn test_divergent_unknown_cause() {
+        let attractor = make_divergent_attractor(DivergenceCause::Unknown);
+        let budget = generous_budget();
+        let cands = eligible_strategies(&[], &attractor, &budget, 0, 3);
+
+        assert!(has_kind(&cands, "reframe"));
+        assert!(has_kind(&cands, "alternative_approach"));
+        assert_eq!(cands.len(), 2);
+    }
+
+    // --- Plateau tests ---
+
+    #[test]
+    fn test_plateau_long_stall_with_fresh_starts() {
+        // stall_duration >= 3, fresh starts remaining → FreshStart
+        let attractor = make_plateau_attractor(4, 0.6);
+        let budget = generous_budget();
+        let cands = eligible_strategies(&[], &attractor, &budget, 0, 3);
+
+        assert!(has_kind(&cands, "fresh_start"));
+        assert_eq!(cands.len(), 1);
+    }
+
+    #[test]
+    fn test_plateau_long_stall_no_fresh_starts() {
+        // stall_duration >= 3, no fresh starts remaining → escalation strategies
+        let attractor = make_plateau_attractor(5, 0.6);
+        let budget = generous_budget();
+        let cands = eligible_strategies(&[], &attractor, &budget, 3, 3); // all used up
+
+        assert!(has_kind(&cands, "decompose"));
+        assert!(has_kind(&cands, "alternative_approach"));
+        assert!(has_kind(&cands, "architect_review"));
+        assert_eq!(cands.len(), 3);
+    }
+
+    #[test]
+    fn test_plateau_high_level_focused_repair() {
+        // stall_duration < 3, plateau_level > 0.8 → focused exploitation
+        let attractor = make_plateau_attractor(2, 0.9);
+        let budget = generous_budget();
+        let cands = eligible_strategies(&[], &attractor, &budget, 0, 3);
+
+        assert!(has_kind(&cands, "focused_repair"));
+        assert!(has_kind(&cands, "incremental_refinement"));
+        assert_eq!(cands.len(), 2);
+    }
+
+    #[test]
+    fn test_plateau_mid_level_exploration() {
+        // stall_duration < 3, 0.5 < plateau_level <= 0.8 → exploration
+        let attractor = make_plateau_attractor(2, 0.65);
+        let budget = generous_budget();
+        let cands = eligible_strategies(&[], &attractor, &budget, 0, 3);
+
+        assert!(has_kind(&cands, "alternative_approach"));
+        assert!(has_kind(&cands, "reframe"));
+        assert!(has_kind(&cands, "decompose"));
+        assert_eq!(cands.len(), 3);
+    }
+
+    #[test]
+    fn test_plateau_low_level_escalation() {
+        // stall_duration < 3, plateau_level <= 0.5 → decompose/architect
+        let attractor = make_plateau_attractor(1, 0.3);
+        let budget = generous_budget();
+        let cands = eligible_strategies(&[], &attractor, &budget, 0, 3);
+
+        assert!(has_kind(&cands, "decompose"));
+        assert!(has_kind(&cands, "architect_review"));
+        assert_eq!(cands.len(), 2);
+    }
+
+    // --- Indeterminate tests ---
+
+    #[test]
+    fn test_indeterminate_default_exploitation() {
+        let attractor = make_indeterminate_attractor();
+        let budget = generous_budget();
+        let cands = eligible_strategies(&[], &attractor, &budget, 0, 3);
+
+        assert!(has_kind(&cands, "retry_augmented"));
+        assert!(has_kind(&cands, "retry_with_feedback"));
+        assert!(has_kind(&cands, "focused_repair"));
+        assert_eq!(cands.len(), 3);
+    }
+
     #[test]
     fn test_limit_cycle_period_affects_window() {
         // Period=1 → window=2, period=3 → window=6.
