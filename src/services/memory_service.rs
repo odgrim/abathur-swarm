@@ -1234,6 +1234,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_load_context_with_budget_zero_returns_empty() {
+        let service = setup_service().await;
+
+        service.store(
+            "some_memory".to_string(),
+            "This memory has content that takes tokens.".to_string(),
+            "test".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        let results = service.load_context_with_budget(
+            "memory",
+            Some("test"),
+            0,
+            RelevanceWeights::default(),
+        ).await.unwrap();
+
+        assert!(results.is_empty(), "Zero budget should return no memories, got {}", results.len());
+    }
+
+    #[tokio::test]
+    async fn test_load_context_with_budget_large_returns_all() {
+        let service = setup_service().await;
+
+        service.store(
+            "mem_a".to_string(),
+            "First memory entry.".to_string(),
+            "test".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        service.store(
+            "mem_b".to_string(),
+            "Second memory entry.".to_string(),
+            "test".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        service.store(
+            "mem_c".to_string(),
+            "Third memory entry.".to_string(),
+            "test".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        let results = service.load_context_with_budget(
+            "memory entry",
+            Some("test"),
+            100_000, // very large budget
+            RelevanceWeights::default(),
+        ).await.unwrap();
+
+        assert_eq!(results.len(), 3, "Large budget should return all 3 memories, got {}", results.len());
+    }
+
+    #[tokio::test]
+    async fn test_load_context_with_budget_greedy_skip_then_fit() {
+        let service = setup_service().await;
+
+        // Store a large memory that will be highest relevance but too big
+        service.store(
+            "big_architecture".to_string(),
+            "Architecture ".repeat(50).to_string(), // ~50+ tokens
+            "test".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        // Store a small memory that is lower relevance but fits
+        service.store(
+            "small_architecture".to_string(),
+            "Architecture notes.".to_string(), // ~4 tokens
+            "test".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        // Budget large enough for the small memory but not the big one
+        let results = service.load_context_with_budget(
+            "architecture",
+            Some("test"),
+            15,
+            RelevanceWeights::default(),
+        ).await.unwrap();
+
+        let returned_keys: Vec<&str> = results.iter()
+            .map(|r| r.memory.key.as_str())
+            .collect();
+
+        // The small memory should fit within budget
+        assert!(
+            returned_keys.contains(&"small_architecture"),
+            "Small memory should be included when big one is skipped, got: {:?}",
+            returned_keys
+        );
+
+        // Total tokens must be within budget
+        let total_tokens: usize = results.iter()
+            .map(|r| r.memory.estimated_tokens())
+            .sum();
+        assert!(total_tokens <= 15, "Total tokens {} should be within budget of 15", total_tokens);
+    }
+
+    #[tokio::test]
     async fn test_forget() {
         let service = setup_service().await;
 

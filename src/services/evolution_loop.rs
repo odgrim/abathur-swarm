@@ -1204,6 +1204,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_refinement_lifecycle_failed_path() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            refinement_threshold: 0.80,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // Record a failure to trigger refinement
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+        evolution.evaluate().await;
+
+        let pending = evolution.get_pending_refinements().await;
+        assert_eq!(pending.len(), 1);
+        let request_id = pending[0].id;
+
+        // Start refinement
+        assert!(evolution.start_refinement(request_id).await);
+
+        // Complete refinement with failure (success = false)
+        evolution.complete_refinement(request_id, false).await;
+
+        // Should no longer be pending (Failed is a terminal state)
+        let pending = evolution.get_pending_refinements().await;
+        assert!(pending.is_empty(), "Failed refinement should not appear in pending list");
+
+        // A new evaluation should be able to create a new refinement request
+        // since the previous one reached a terminal state (Failed)
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+        evolution.evaluate().await;
+
+        let pending = evolution.get_pending_refinements().await;
+        assert_eq!(
+            pending.len(), 1,
+            "New refinement should be created after previous one failed"
+        );
+    }
+
+    #[tokio::test]
     async fn test_events_history() {
         let config = EvolutionConfig {
             min_tasks_for_evaluation: 1,
