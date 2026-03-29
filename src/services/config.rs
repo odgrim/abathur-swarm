@@ -53,6 +53,9 @@ pub struct Config {
     /// User-defined workflow templates.
     #[serde(default)]
     pub workflows: Vec<WorkflowTemplate>,
+    /// Cost-control scheduling configuration (quiet hours).
+    #[serde(default)]
+    pub scheduling: SchedulingConfig,
 }
 
 impl Default for Config {
@@ -74,6 +77,7 @@ impl Default for Config {
             overmind: OvermindTomlConfig::default(),
             default_workflow: default_workflow_name(),
             workflows: Vec::new(),
+            scheduling: SchedulingConfig::default(),
         }
     }
 }
@@ -540,6 +544,46 @@ impl Default for AdapterConfig {
             default_poll_interval_secs: 300,
         }
     }
+}
+
+/// Configuration for cost-control scheduling (quiet hours).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SchedulingConfig {
+    /// Whether quiet-window enforcement is enabled.
+    pub quiet_hours_enabled: bool,
+    /// How often to re-evaluate quiet window status (seconds).
+    pub check_interval_secs: u64,
+    /// Default IANA timezone for quiet windows when not specified.
+    pub default_timezone: String,
+}
+
+impl Default for SchedulingConfig {
+    fn default() -> Self {
+        Self {
+            quiet_hours_enabled: false,
+            check_interval_secs: 60,
+            default_timezone: "UTC".to_string(),
+        }
+    }
+}
+
+/// Configuration for a quiet window defined in the TOML config file.
+///
+/// These are static window definitions that can be loaded at startup
+/// in addition to windows stored in the database.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuietWindowConfig {
+    /// Human-readable name (must be unique across all windows).
+    pub name: String,
+    /// Cron expression for window start (5-field: min hour dom month dow).
+    pub start_cron: String,
+    /// Cron expression for window end.
+    pub end_cron: String,
+    /// IANA timezone (defaults to scheduling.default_timezone).
+    pub timezone: Option<String>,
+    /// Optional description.
+    pub description: Option<String>,
 }
 
 impl Config {

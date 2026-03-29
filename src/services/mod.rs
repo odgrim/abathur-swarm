@@ -13,6 +13,7 @@ pub mod crypto;
 pub mod context_truncation;
 pub mod context_window;
 pub mod cost_tracker;
+pub mod cost_window_service;
 pub mod dag_executor;
 pub mod dag_restructure;
 pub mod embedding_service;
@@ -59,6 +60,7 @@ pub use config::{BudgetConfig, Config, ConfigError, A2AFederationConfig, Trusted
 pub use context_truncation::{TruncationConfig, estimate_tokens, truncate_section, truncate_to_token_budget, truncate_context_sections};
 pub use context_window::{ContextWindowGuard, ContextWindowGuardConfig, ContextWindowCheck, model_context_window};
 pub use cost_tracker::{CostTracker, CostSummary, ModelPricing, get_model_pricing, estimate_cost, estimate_cost_cents};
+pub use cost_window_service::{CostWindowService, QuietWindowCheck};
 pub use model_router::{ModelRouter, ModelRoutingConfig, ModelSelection, AgentTierHint};
 pub use dag_executor::{DagExecutor, ExecutorConfig, ExecutionEvent, ExecutionResults, ExecutionStatus, TaskResult};
 pub use dag_restructure::{DagRestructureService, FailedAttempt, NewTaskSpec, RestructureConfig, RestructureContext, RestructureDecision, RestructureTrigger, TaskPriorityModifier};

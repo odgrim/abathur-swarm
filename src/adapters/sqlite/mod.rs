@@ -16,6 +16,7 @@ pub mod trajectory_repository;
 pub mod tx_context;
 pub mod trigger_rule_repository;
 pub mod worktree_repository;
+pub mod quiet_window_repository;
 
 pub use agent_repository::SqliteAgentRepository;
 pub use connection::{create_pool, create_test_pool, verify_connection, ConnectionError, PoolConfig};
@@ -32,6 +33,7 @@ pub use trajectory_repository::SqliteTrajectoryRepository;
 pub use task_schedule_repository::SqliteTaskScheduleRepository;
 pub use trigger_rule_repository::SqliteTriggerRuleRepository;
 pub use worktree_repository::SqliteWorktreeRepository;
+pub use quiet_window_repository::SqliteQuietWindowRepository;
 
 use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;

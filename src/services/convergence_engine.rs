@@ -92,6 +92,11 @@ pub struct ConvergenceEngine<T: TrajectoryRepository, M: MemoryRepository, O: Ov
     /// of each iteration and terminates early with `BudgetDenied` if the
     /// pressure level is Critical (>95% consumed).
     budget_tracker: Option<Arc<BudgetTracker>>,
+    /// Optional cost-window service for quiet-hours scheduling.
+    ///
+    /// When set, the convergence loop checks whether we are inside a quiet window
+    /// at the start of each iteration and terminates early to avoid dispatching work.
+    cost_window_service: Option<Arc<crate::services::cost_window_service::CostWindowService>>,
     /// Tracks actual token usage per complexity tier for budget calibration.
     calibration_tracker: Mutex<BudgetCalibrationTracker>,
 }
@@ -116,6 +121,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
             overseer_measurer,
             config,
             budget_tracker: None,
+            cost_window_service: None,
             calibration_tracker: Mutex::new(BudgetCalibrationTracker::default()),
         }
     }
@@ -127,6 +133,11 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
     /// is Critical.
     pub fn set_budget_tracker(&mut self, tracker: Arc<BudgetTracker>) {
         self.budget_tracker = Some(tracker);
+    }
+
+    /// Set the cost-window service for quiet-hours dispatch gating.
+    pub fn set_cost_window_service(&mut self, service: Arc<crate::services::cost_window_service::CostWindowService>) {
+        self.cost_window_service = Some(service);
     }
 
     /// Returns any calibration alerts where P95 token usage exceeds the

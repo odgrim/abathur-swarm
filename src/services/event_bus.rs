@@ -1114,6 +1114,20 @@ pub enum EventPayload {
         subsystem: String,
         error: String,
     },
+
+    // Quiet window (cost-control scheduling) events
+
+    /// Emitted when the swarm enters a quiet window — dispatch is suppressed.
+    QuietWindowEntered {
+        window_id: Uuid,
+        window_name: String,
+    },
+
+    /// Emitted when the swarm exits a quiet window — dispatch resumes.
+    QuietWindowExited {
+        window_id: Uuid,
+        window_name: String,
+    },
 }
 
 impl EventPayload {
@@ -1265,6 +1279,8 @@ impl EventPayload {
             Self::SwarmDagNodeFailed { .. } => "SwarmDagNodeFailed",
             Self::SwarmDagCompleted { .. } => "SwarmDagCompleted",
             Self::SubsystemError { .. } => "SubsystemError",
+            Self::QuietWindowEntered { .. } => "QuietWindowEntered",
+            Self::QuietWindowExited { .. } => "QuietWindowExited",
         }
     }
 
@@ -1429,6 +1445,8 @@ impl EventPayload {
             | Self::SwarmDagCompleted { .. } => Some(EventCategory::Federation),
 
             Self::SubsystemError { .. } => Some(EventCategory::Orchestrator),
+            Self::QuietWindowEntered { .. }
+            | Self::QuietWindowExited { .. } => Some(EventCategory::Scheduler),
         }
     }
 }

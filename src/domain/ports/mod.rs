@@ -16,6 +16,7 @@ pub mod trajectory_repository;
 pub mod trigger_rule_repository;
 pub mod outbox_repository;
 pub mod worktree_repository;
+pub mod quiet_window_repository;
 
 pub use adapter::{EgressAdapter, IngestionAdapter};
 pub use agent_repository::{AgentFilter, AgentRepository};
@@ -33,3 +34,4 @@ pub use task_schedule_repository::{TaskScheduleFilter, TaskScheduleRepository};
 pub use trigger_rule_repository::TriggerRuleRepository;
 pub use outbox_repository::OutboxRepository;
 pub use worktree_repository::WorktreeRepository;
+pub use quiet_window_repository::{QuietWindowFilter, QuietWindowRepository};

@@ -348,6 +348,19 @@ where
             return Ok(());
         }
 
+        // Quiet-window gate: suppress all dispatch during quiet hours
+        if let Some(ref cws) = self.cost_window_service {
+            let check = cws.is_in_quiet_window().await;
+            if check.is_quiet {
+                tracing::info!(
+                    task_id = %task.id,
+                    window_name = ?check.active_window_name,
+                    "spawn_task_agent: deferring task — inside quiet window"
+                );
+                return Ok(());
+            }
+        }
+
         // Budget gate: defer low-priority tasks under elevated pressure
         if let Some(ref bt) = self.budget_tracker
             && !bt.should_dispatch_task(task.priority).await {

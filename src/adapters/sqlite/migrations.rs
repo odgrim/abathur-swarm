@@ -149,5 +149,10 @@ pub fn all_embedded_migrations() -> Vec<Migration> {
             description: "Template stats persistence for evolution loop".to_string(),
             sql: include_str!("../../../migrations/013_template_stats.sql").to_string(),
         },
+        Migration {
+            version: 14,
+            description: "Quiet windows for cost-control scheduling".to_string(),
+            sql: include_str!("../../../migrations/014_quiet_windows.sql").to_string(),
+        },
     ]
 }

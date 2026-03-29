@@ -127,6 +127,9 @@ where
 
     /// Optional budget tracker for budget-aware scheduling.
     pub(super) budget_tracker: Option<Arc<crate::services::budget_tracker::BudgetTracker>>,
+
+    /// Optional cost-window service for quiet-hours scheduling.
+    pub(super) cost_window_service: Option<Arc<crate::services::cost_window_service::CostWindowService>>,
 }
 
 // ============================================================================
@@ -202,6 +205,7 @@ where
             convergence_engine_config: None,
             adapter_registry: None,
             budget_tracker: None,
+            cost_window_service: None,
         }
     }
 
@@ -427,6 +431,14 @@ where
     /// When present, the orchestrator will gate task dispatching based on
     /// the current budget pressure level and emit budget events through the
     /// event bus.
+    pub fn with_cost_window_service(
+        mut self,
+        service: Arc<crate::services::cost_window_service::CostWindowService>,
+    ) -> Self {
+        self.cost_window_service = Some(service);
+        self
+    }
+
     pub fn with_budget_tracker(
         mut self,
         tracker: Arc<crate::services::budget_tracker::BudgetTracker>,

@@ -19,6 +19,7 @@ pub mod task_schedule;
 pub mod workflow_state;
 pub mod workflow_template;
 pub mod worktree;
+pub mod quiet_window;
 
 pub use a2a::*;
 pub use a2a_protocol::*;
@@ -39,3 +40,4 @@ pub use task_schedule::*;
 pub use workflow_state::*;
 pub use workflow_template::*;
 pub use worktree::*;
+pub use quiet_window::*;
