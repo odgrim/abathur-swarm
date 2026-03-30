@@ -970,7 +970,18 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     // to the EventBus, so WorkflowSubtaskCompletionHandler
                                     // never fires and the workflow stalls.
                                     let target_status = if verify_on_completion && !intent_satisfied {
-                                        TaskStatus::Validating
+                                        // Don't auto-complete to Validating if the task
+                                        // has a non-terminal workflow — that creates an
+                                        // illegal Validating+PhaseReady deadlock.
+                                        if current_task.as_ref().is_some_and(|t| !can_safely_auto_complete(t)) {
+                                            tracing::warn!(
+                                                task_id = %task_id,
+                                                "Overmind exhausted turns mid-workflow — failing instead of auto-completing to Validating"
+                                            );
+                                            TaskStatus::Failed
+                                        } else {
+                                            TaskStatus::Validating
+                                        }
                                     } else {
                                         TaskStatus::Complete
                                     };
@@ -1579,9 +1590,21 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                             // the TaskCompleted event was already published and
                             // downstream handlers have already reacted.
                             if !completed_task.status.is_terminal() {
-                                // Transition task via CommandBus (journals event)
-                                let target_status = if verify_on_completion {
+                                // Transition task via CommandBus (journals event).
+                                // Guard: if verify_on_completion would set Validating but
+                                // the task has a non-terminal workflow state that isn't
+                                // Verifying, skip Validating to avoid a deadlock. The
+                                // centralized guard in transition_to_validating() catches
+                                // the CommandBus path, but the fallback paths below bypass
+                                // it, so we also guard here at the decision point.
+                                let target_status = if verify_on_completion && can_safely_auto_complete(&completed_task) {
                                     TaskStatus::Validating
+                                } else if verify_on_completion && !can_safely_auto_complete(&completed_task) {
+                                    tracing::warn!(
+                                        task_id = %task_id,
+                                        "Skipping Validating transition for task with active workflow — completing directly"
+                                    );
+                                    TaskStatus::Complete
                                 } else {
                                     TaskStatus::Complete
                                 };
@@ -1770,6 +1793,17 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 // Agent exhausted max_turns but its last output says "completed".
                                 // Auto-complete instead of failing — the agent finished its work
                                 // but the session didn't end cleanly.
+                                //
+                                // However, if the task has a non-terminal workflow, don't auto-complete
+                                // to Validating — that creates an illegal Validating+PhaseReady deadlock.
+                                if !can_safely_auto_complete(&completed_task) {
+                                    tracing::warn!(
+                                        task_id = %task_id,
+                                        error = %error_msg,
+                                        "Overmind exhausted turns mid-workflow — failing instead of auto-completing"
+                                    );
+                                    false
+                                } else {
                                 tracing::warn!(
                                     task_id = %task_id,
                                     error = %error_msg,
@@ -1824,6 +1858,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     }
                                 }
                                 true
+                                } // end else (can_safely_auto_complete)
                             } else {
                                 // Fail task via CommandBus (transitions + journals event)
                                 if let Some(ref cb) = command_bus {
@@ -2061,6 +2096,22 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
 
 }
 
+/// Checks whether a task can safely be auto-completed (to Validating or Complete).
+///
+/// Returns `false` if the task has a non-terminal `WorkflowState` in `context.custom`,
+/// because auto-completing a workflow parent mid-workflow (e.g. while PhaseReady)
+/// can create an illegal Validating+PhaseReady combination that causes a deadlock.
+pub(crate) fn can_safely_auto_complete(task: &Task) -> bool {
+    if let Some(ws_val) = task.context.custom.get("workflow_state") {
+        if let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_val.clone()) {
+            if !ws.is_terminal() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Checks if an error message represents a max-turns exhaustion where the agent's
 /// last output indicates it believed it had completed successfully. In this case,
 /// the task can be auto-completed instead of failed, since the agent did finish
@@ -2241,5 +2292,50 @@ mod tests {
     fn test_auto_completable_task_update_status() {
         let msg = "error_max_turns: agent exhausted 31 turns without completing. Last output: task_update_status";
         assert!(is_max_turns_auto_completable(msg));
+    }
+
+    // --- can_safely_auto_complete tests (Fix 2 / Fix 8) ---
+
+    #[test]
+    fn test_can_safely_auto_complete_no_workflow_state() {
+        let task = Task::new("Simple task without workflow");
+        assert!(
+            can_safely_auto_complete(&task),
+            "Task with no workflow state should be safely auto-completable"
+        );
+    }
+
+    #[test]
+    fn test_can_safely_auto_complete_terminal_workflow_state() {
+        let mut task = Task::new("Task with completed workflow");
+        let ws = WorkflowState::Completed {
+            workflow_name: "code".to_string(),
+        };
+        task.context.custom.insert(
+            "workflow_state".to_string(),
+            serde_json::to_value(&ws).unwrap(),
+        );
+        assert!(
+            can_safely_auto_complete(&task),
+            "Task with terminal workflow state should be safely auto-completable"
+        );
+    }
+
+    #[test]
+    fn test_can_safely_auto_complete_non_terminal_workflow_state() {
+        let mut task = Task::new("Task with active workflow");
+        let ws = WorkflowState::PhaseReady {
+            workflow_name: "code".to_string(),
+            phase_index: 1,
+            phase_name: "implement".to_string(),
+        };
+        task.context.custom.insert(
+            "workflow_state".to_string(),
+            serde_json::to_value(&ws).unwrap(),
+        );
+        assert!(
+            !can_safely_auto_complete(&task),
+            "Task with non-terminal workflow state should NOT be safely auto-completable"
+        );
     }
 }

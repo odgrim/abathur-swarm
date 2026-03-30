@@ -1683,35 +1683,212 @@ impl<T: TaskRepository + 'static> EventHandler for ReconciliationHandler<T> {
             let validating_secs = elapsed.num_seconds().max(0) as u64;
 
             if elapsed > validating_timeout {
-                // 100% — fail the task
-                let mut updated = task.clone();
-                updated.retry_count += 1;
-                if updated.transition_to(TaskStatus::Failed).is_ok()
-                    && try_update_task(&*self.task_repo, &updated, "validating stale->failed").await?
-                {
-                    corrections += 1;
+                // 100% — workflow-aware action
+                let ws = task.context.custom.get("workflow_state")
+                    .and_then(|v| serde_json::from_value::<WorkflowState>(v.clone()).ok());
 
-                    new_events.push(UnifiedEvent {
-                        id: EventId::new(),
-                        sequence: SequenceNumber(0),
-                        timestamp: chrono::Utc::now(),
-                        severity: EventSeverity::Warning,
-                        category: EventCategory::Task,
-                        goal_id: None,
-                        task_id: Some(task.id),
-                        correlation_id: event.correlation_id,
-                        source_process_id: None,
-                        payload: EventPayload::TaskFailed {
-                            task_id: task.id,
-                            error: format!("stale-timeout: task validating for > {}s", self.stale_validating_timeout_secs),
-                            retry_count: updated.retry_count,
-                        },
-                    });
+                match ws {
+                    Some(WorkflowState::Verifying { phase_index, ref phase_name, retry_count, .. }) => {
+                        // Re-trigger verification instead of failing
+                        tracing::warn!(
+                            "ReconciliationHandler: stale validating task {} has WorkflowState::Verifying — re-triggering verification after {}s (updated_at: {})",
+                            task.id, validating_secs, task.updated_at
+                        );
 
-                    tracing::warn!(
-                        "ReconciliationHandler: stale validating task {} failed after {}s (updated_at: {})",
-                        task.id, validating_secs, task.updated_at
-                    );
+                        // Clear verification idempotency keys so the handler doesn't dedup
+                        let mut updated = task.clone();
+                        updated.context.custom.remove("verification_retry_count");
+                        updated.context.custom.remove("verification_idempotency_key");
+                        updated.updated_at = chrono::Utc::now();
+                        let _ = try_update_task(&*self.task_repo, &updated, "validating stale: clear verification keys for retry").await;
+
+                        new_events.push(UnifiedEvent {
+                            id: EventId::new(),
+                            sequence: SequenceNumber(0),
+                            timestamp: chrono::Utc::now(),
+                            severity: EventSeverity::Warning,
+                            category: EventCategory::Workflow,
+                            goal_id: None,
+                            task_id: Some(task.id),
+                            correlation_id: event.correlation_id,
+                            source_process_id: None,
+                            payload: EventPayload::WorkflowVerificationRequested {
+                                task_id: task.id,
+                                phase_index,
+                                phase_name: phase_name.clone(),
+                                retry_count,
+                            },
+                        });
+                    }
+
+                    Some(WorkflowState::PhaseReady { ref workflow_name, .. }) => {
+                        // Inconsistent state: Validating + PhaseReady is a deadlock
+                        let mut updated = task.clone();
+                        updated.retry_count += 1;
+                        let failed_ws = WorkflowState::Failed {
+                            workflow_name: workflow_name.clone(),
+                            error: "Stale validation timeout: state inconsistency (Validating+PhaseReady)".to_string(),
+                        };
+                        updated.context.custom.insert(
+                            "workflow_state".to_string(),
+                            serde_json::to_value(&failed_ws).unwrap_or_default(),
+                        );
+                        if updated.transition_to(TaskStatus::Failed).is_ok()
+                            && try_update_task(&*self.task_repo, &updated, "validating stale: state inconsistency (Validating+PhaseReady)").await?
+                        {
+                            corrections += 1;
+
+                            new_events.push(UnifiedEvent {
+                                id: EventId::new(),
+                                sequence: SequenceNumber(0),
+                                timestamp: chrono::Utc::now(),
+                                severity: EventSeverity::Warning,
+                                category: EventCategory::Task,
+                                goal_id: None,
+                                task_id: Some(task.id),
+                                correlation_id: event.correlation_id,
+                                source_process_id: None,
+                                payload: EventPayload::TaskFailed {
+                                    task_id: task.id,
+                                    error: "Validation timed out: state inconsistency (Validating+PhaseReady)".to_string(),
+                                    retry_count: updated.retry_count,
+                                },
+                            });
+
+                            tracing::warn!(
+                                "ReconciliationHandler: stale validating task {} failed after {}s — state inconsistency (Validating+PhaseReady)",
+                                task.id, validating_secs
+                            );
+                        }
+                    }
+
+                    Some(ref ws) if ws.is_terminal() => {
+                        // Terminal workflow state but task still Validating — align task status
+                        let target_status = match ws {
+                            WorkflowState::Completed { .. } => TaskStatus::Complete,
+                            WorkflowState::Failed { .. } | WorkflowState::Rejected { .. } => TaskStatus::Failed,
+                            _ => TaskStatus::Failed, // shouldn't happen, but safe fallback
+                        };
+
+                        let mut updated = task.clone();
+                        let transition_ok = if target_status == TaskStatus::Complete {
+                            updated.transition_to(TaskStatus::Complete).is_ok()
+                        } else {
+                            updated.retry_count += 1;
+                            updated.transition_to(TaskStatus::Failed).is_ok()
+                        };
+
+                        if transition_ok
+                            && try_update_task(&*self.task_repo, &updated, &format!("validating stale: terminal workflow_state -> {:?}", target_status)).await?
+                        {
+                            corrections += 1;
+
+                            let payload = if target_status == TaskStatus::Complete {
+                                EventPayload::TaskCompleted {
+                                    task_id: task.id,
+                                    tokens_used: 0,
+                                }
+                            } else {
+                                EventPayload::TaskFailed {
+                                    task_id: task.id,
+                                    error: format!("stale-timeout: terminal workflow_state ({:?}) but task stuck in Validating for > {}s", ws, self.stale_validating_timeout_secs),
+                                    retry_count: updated.retry_count,
+                                }
+                            };
+
+                            new_events.push(UnifiedEvent {
+                                id: EventId::new(),
+                                sequence: SequenceNumber(0),
+                                timestamp: chrono::Utc::now(),
+                                severity: EventSeverity::Warning,
+                                category: EventCategory::Task,
+                                goal_id: None,
+                                task_id: Some(task.id),
+                                correlation_id: event.correlation_id,
+                                source_process_id: None,
+                                payload,
+                            });
+
+                            tracing::warn!(
+                                "ReconciliationHandler: stale validating task {} aligned to {:?} after {}s — terminal workflow_state {:?}",
+                                task.id, target_status, validating_secs, ws
+                            );
+                        }
+                    }
+
+                    None => {
+                        // No workflow state (standalone task) — fail as before
+                        let mut updated = task.clone();
+                        updated.retry_count += 1;
+                        if updated.transition_to(TaskStatus::Failed).is_ok()
+                            && try_update_task(&*self.task_repo, &updated, "validating stale->failed").await?
+                        {
+                            corrections += 1;
+
+                            new_events.push(UnifiedEvent {
+                                id: EventId::new(),
+                                sequence: SequenceNumber(0),
+                                timestamp: chrono::Utc::now(),
+                                severity: EventSeverity::Warning,
+                                category: EventCategory::Task,
+                                goal_id: None,
+                                task_id: Some(task.id),
+                                correlation_id: event.correlation_id,
+                                source_process_id: None,
+                                payload: EventPayload::TaskFailed {
+                                    task_id: task.id,
+                                    error: format!("stale-timeout: task validating for > {}s", self.stale_validating_timeout_secs),
+                                    retry_count: updated.retry_count,
+                                },
+                            });
+
+                            tracing::warn!(
+                                "ReconciliationHandler: stale validating task {} failed after {}s (standalone, no workflow_state)",
+                                task.id, validating_secs
+                            );
+                        }
+                    }
+
+                    Some(ref other_ws) => {
+                        // Other non-terminal workflow states (e.g. PhaseRunning, FanningOut, etc.) — fail
+                        let mut updated = task.clone();
+                        updated.retry_count += 1;
+                        let failed_ws = WorkflowState::Failed {
+                            workflow_name: other_ws.workflow_name().to_string(),
+                            error: format!("Stale validation timeout: task validating for > {}s", self.stale_validating_timeout_secs),
+                        };
+                        updated.context.custom.insert(
+                            "workflow_state".to_string(),
+                            serde_json::to_value(&failed_ws).unwrap_or_default(),
+                        );
+                        if updated.transition_to(TaskStatus::Failed).is_ok()
+                            && try_update_task(&*self.task_repo, &updated, "validating stale->failed").await?
+                        {
+                            corrections += 1;
+
+                            new_events.push(UnifiedEvent {
+                                id: EventId::new(),
+                                sequence: SequenceNumber(0),
+                                timestamp: chrono::Utc::now(),
+                                severity: EventSeverity::Warning,
+                                category: EventCategory::Task,
+                                goal_id: None,
+                                task_id: Some(task.id),
+                                correlation_id: event.correlation_id,
+                                source_process_id: None,
+                                payload: EventPayload::TaskFailed {
+                                    task_id: task.id,
+                                    error: format!("stale-timeout: task validating for > {}s", self.stale_validating_timeout_secs),
+                                    retry_count: updated.retry_count,
+                                },
+                            });
+
+                            tracing::warn!(
+                                "ReconciliationHandler: stale validating task {} failed after {}s (updated_at: {})",
+                                task.id, validating_secs, task.updated_at
+                            );
+                        }
+                    }
                 }
             } else if elapsed > validating_critical {
                 // 80% — critical warning + escalation
@@ -4881,7 +5058,14 @@ impl<T: TaskRepository + 'static> EventHandler for ConvergenceCoordinationHandle
                     if task.status != TaskStatus::Running {
                         return Ok(false); // parent already transitioned
                     }
-                    // Go through Validating then Complete in one mutation
+                    // Go through Validating then Complete in one mutation.
+                    // Safety (validation deadlock fix): this is safe because both
+                    // transitions happen atomically in a single update_with_retry
+                    // closure — the task never persists in Validating state. This
+                    // path is for decomposed (convergent) parent tasks whose
+                    // children have all completed, NOT for workflow-managed tasks.
+                    // Workflow parents use transition_to_validating() which has its
+                    // own WorkflowState guard.
                     task.transition_to(TaskStatus::Validating)
                         .map_err(|e| format!("transition to Validating failed: {}", e))?;
                     task.transition_to(TaskStatus::Complete)
@@ -5962,6 +6146,34 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowSubtaskCompletionHand
 
         if !parent.context.custom.contains_key("workflow_state") {
             return Ok(Reaction::None);
+        }
+
+        // Fix 3: If parent is Validating but workflow state is NOT Verifying,
+        // the parent is stuck in an inconsistent state. Transition it back to
+        // Running so the workflow engine can drive it forward.
+        if parent.status == TaskStatus::Validating {
+            let ws = parent.context.custom.get("workflow_state")
+                .and_then(|v| serde_json::from_value::<WorkflowState>(v.clone()).ok());
+            let is_verifying = matches!(&ws, Some(WorkflowState::Verifying { .. }));
+            if !is_verifying {
+                tracing::warn!(
+                    parent_id = %parent_id,
+                    subtask_id = %subtask_id,
+                    parent_status = ?parent.status,
+                    workflow_state = ?ws,
+                    "WorkflowSubtaskCompletionHandler: inconsistent state — \
+                     parent is Validating but workflow state is not Verifying, \
+                     transitioning parent to Running"
+                );
+                let ts = crate::services::task_service::TaskService::new(self.task_repo.clone());
+                if let Err(e) = ts.transition_to_running(parent_id).await {
+                    tracing::warn!(
+                        parent_id = %parent_id,
+                        "WorkflowSubtaskCompletionHandler: failed to transition parent to Running: {}",
+                        e
+                    );
+                }
+            }
         }
 
         // Delegate to workflow engine (via TaskService for all mutations).

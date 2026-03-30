@@ -1078,6 +1078,34 @@ impl<T: TaskRepository> TaskService<T> {
             return Ok((task, Vec::new()));
         }
 
+        // Guard: refuse to transition to Validating if the task has a WorkflowState
+        // of PhaseReady or PhaseGate. These states mean the overmind should be driving
+        // the workflow, and setting Validating here creates a deadlock.
+        //
+        // Note: we allow Aggregating, PhaseRunning, FanningOut because the normal
+        // workflow flow calls transition_to_validating() BEFORE updating WorkflowState
+        // to Verifying (the workflow engine does: transition_to_validating → write_state(Verifying)).
+        if let Some(ws_value) = task.context.custom.get("workflow_state") {
+            if let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_value.clone()) {
+                if matches!(ws, WorkflowState::PhaseReady { .. } | WorkflowState::PhaseGate { .. }) {
+                    tracing::warn!(
+                        %task_id,
+                        workflow_state = ?ws,
+                        "Refusing to transition task to Validating — workflow state is {:?}, which would cause a deadlock",
+                        ws
+                    );
+                    return Err(DomainError::InvalidStateTransition {
+                        from: task.status.as_str().to_string(),
+                        to: "validating".to_string(),
+                        reason: format!(
+                            "task has workflow state {:?} which is not compatible with Validating — transitioning would cause a deadlock",
+                            ws
+                        ),
+                    });
+                }
+            }
+        }
+
         task.transition_to(TaskStatus::Validating).map_err(|e| DomainError::InvalidStateTransition {
             from: task.status.as_str().to_string(),
             to: "validating".to_string(),
@@ -1156,6 +1184,107 @@ impl<T: TaskRepository> TaskService<T> {
                 reason: reason.to_string(),
             },
         )];
+
+        self.publish_events(&events).await;
+        Ok((task, events))
+    }
+
+    /// Force-transition a task to a new status, bypassing valid_transitions checks.
+    ///
+    /// This is an administrative escape hatch for unsticking tasks that are
+    /// deadlocked (e.g. stuck in Validating with no verifier running).
+    /// Updates the workflow_state in context.custom to match the new status
+    /// when applicable.
+    pub async fn force_transition(&self, task_id: Uuid, new_status: TaskStatus, reason: &str) -> DomainResult<(Task, Vec<UnifiedEvent>)> {
+        let mut task = self.task_repo.get(task_id).await?
+            .ok_or(DomainError::TaskNotFound(task_id))?;
+
+        let old_status = task.status;
+
+        // Bypass valid_transitions — set status directly
+        task.status = new_status;
+        task.updated_at = chrono::Utc::now();
+        task.version += 1;
+
+        // Update timestamps
+        match new_status {
+            TaskStatus::Running => task.started_at = Some(chrono::Utc::now()),
+            TaskStatus::Complete | TaskStatus::Failed | TaskStatus::Canceled => {
+                task.completed_at = Some(chrono::Utc::now());
+            }
+            _ => {}
+        }
+
+        // Update workflow_state in context.custom if present
+        if let Some(ws_value) = task.context.custom.get("workflow_state") {
+            if let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_value.clone()) {
+                let workflow_name = ws.workflow_name().to_string();
+                let new_ws = match new_status {
+                    TaskStatus::Complete => Some(WorkflowState::Completed { workflow_name }),
+                    TaskStatus::Failed => Some(WorkflowState::Failed {
+                        workflow_name,
+                        error: reason.to_string(),
+                    }),
+                    TaskStatus::Canceled => Some(WorkflowState::Failed {
+                        workflow_name,
+                        error: "canceled".to_string(),
+                    }),
+                    // For Running (retry), leave workflow_state as-is
+                    _ => None,
+                };
+                if let Some(new_ws) = new_ws {
+                    task.context.custom.insert(
+                        "workflow_state".to_string(),
+                        serde_json::to_value(&new_ws).unwrap_or_default(),
+                    );
+                }
+            }
+        }
+
+        self.task_repo.update(&task).await?;
+
+        tracing::warn!(
+            %task_id,
+            old_status = old_status.as_str(),
+            new_status = new_status.as_str(),
+            reason,
+            "Force-transitioned task {} from {} to {}: {}",
+            task_id, old_status.as_str(), new_status.as_str(), reason
+        );
+
+        let goal_id = Self::extract_goal_id(&task);
+        let mut events = Vec::new();
+
+        let payload = match new_status {
+            TaskStatus::Complete => Some(EventPayload::TaskCompleted {
+                task_id,
+                tokens_used: 0,
+            }),
+            TaskStatus::Failed => Some(EventPayload::TaskFailed {
+                task_id,
+                error: reason.to_string(),
+                retry_count: task.retry_count,
+            }),
+            TaskStatus::Canceled => Some(EventPayload::TaskCanceled {
+                task_id,
+                reason: reason.to_string(),
+            }),
+            TaskStatus::Ready => Some(EventPayload::TaskReady {
+                task_id,
+                task_title: task.title.clone(),
+            }),
+            _ => None,
+        };
+
+        if let Some(payload) = payload {
+            events.push(Self::make_event(
+                EventSeverity::Warning,
+                EventCategory::Task,
+                goal_id,
+                Some(task_id),
+                payload,
+            ));
+        }
 
         self.publish_events(&events).await;
         Ok((task, events))
@@ -1386,6 +1515,34 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                     .get(task_id)
                     .await?
                     .ok_or(DomainError::TaskNotFound(task_id))?;
+
+                // Guard: refuse Validating transition if workflow state is not
+                // Verifying (same check as transition_to_validating). This path
+                // is used by goal_processing direct execution when
+                // verify_on_completion is set.
+                if new_status == TaskStatus::Validating {
+                    if let Some(ws_value) = task.context.custom.get("workflow_state") {
+                        if let Ok(ws) = serde_json::from_value::<WorkflowState>(ws_value.clone()) {
+                            if matches!(ws, WorkflowState::PhaseReady { .. } | WorkflowState::PhaseGate { .. }) {
+                                tracing::warn!(
+                                    %task_id,
+                                    workflow_state = ?ws,
+                                    "Refusing Transition command to Validating — workflow state is {:?}, which would cause a deadlock",
+                                    ws
+                                );
+                                return Err(DomainError::InvalidStateTransition {
+                                    from: task.status.as_str().to_string(),
+                                    to: "validating".to_string(),
+                                    reason: format!(
+                                        "task has workflow state {:?} which is not compatible with Validating — transitioning would cause a deadlock",
+                                        ws
+                                    ),
+                                }.into());
+                            }
+                        }
+                    }
+                }
+
                 task.transition_to(new_status).map_err(|e| {
                     DomainError::InvalidStateTransition {
                         from: task.status.as_str().to_string(),
@@ -1428,6 +1585,14 @@ impl<T: TaskRepository + 'static> TaskCommandHandler for TaskService<T> {
                     ));
                 }
 
+                Ok(CommandOutcome { result: CommandResult::Task(task), events })
+            }
+            TaskCommand::ForceTransition {
+                task_id,
+                new_status,
+                reason,
+            } => {
+                let (task, events) = self.force_transition(task_id, new_status, &reason).await?;
                 Ok(CommandOutcome { result: CommandResult::Task(task), events })
             }
         }
@@ -2389,6 +2554,180 @@ mod tests {
         assert!(
             matches!(result.unwrap_err(), DomainError::DependencyCycle(_)),
             "Expected DependencyCycle error for transitive cycle via submit_task"
+        );
+    }
+
+    // --- transition_to_validating guard tests (Fix 3 / Fix 8) ---
+
+    #[tokio::test]
+    async fn test_transition_to_validating_refused_when_workflow_not_verifying() {
+        let service = setup_service().await;
+
+        // Create and claim a task so it's Running
+        let (task, _) = service.submit_task(
+            Some("Test".to_string()),
+            "Desc".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+        service.claim_task(task.id, "test-agent").await.unwrap();
+
+        // Set workflow state to PhaseReady (not Verifying)
+        let ws = WorkflowState::PhaseReady {
+            workflow_name: "code".to_string(),
+            phase_index: 0,
+            phase_name: "implement".to_string(),
+        };
+        let mut running_task = service.get_task(task.id).await.unwrap().unwrap();
+        running_task.context.custom.insert(
+            "workflow_state".to_string(),
+            serde_json::to_value(&ws).unwrap(),
+        );
+        service.task_repo.update(&running_task).await.unwrap();
+
+        // transition_to_validating should fail
+        let result = service.transition_to_validating(task.id).await;
+        assert!(
+            result.is_err(),
+            "transition_to_validating should refuse when workflow state is PhaseReady"
+        );
+        let err = format!("{:?}", result.unwrap_err());
+        assert!(
+            err.contains("deadlock") || err.contains("Verifying"),
+            "Error should mention deadlock or Verifying, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transition_to_validating_succeeds_when_workflow_is_verifying() {
+        let service = setup_service().await;
+
+        // Create and claim a task so it's Running
+        let (task, _) = service.submit_task(
+            Some("Test".to_string()),
+            "Desc".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+        service.claim_task(task.id, "test-agent").await.unwrap();
+
+        // Set workflow state to Verifying
+        let ws = WorkflowState::Verifying {
+            workflow_name: "code".to_string(),
+            phase_index: 0,
+            phase_name: "implement".to_string(),
+            subtask_ids: vec![],
+            retry_count: 0,
+        };
+        let mut running_task = service.get_task(task.id).await.unwrap().unwrap();
+        running_task.context.custom.insert(
+            "workflow_state".to_string(),
+            serde_json::to_value(&ws).unwrap(),
+        );
+        service.task_repo.update(&running_task).await.unwrap();
+
+        // transition_to_validating should succeed
+        let result = service.transition_to_validating(task.id).await;
+        assert!(
+            result.is_ok(),
+            "transition_to_validating should succeed when workflow state is Verifying: {:?}",
+            result.err()
+        );
+        let (updated, _) = result.unwrap();
+        assert_eq!(updated.status, TaskStatus::Validating);
+    }
+
+    // --- force_transition tests (Fix 4 / Fix 8) ---
+
+    #[tokio::test]
+    async fn test_force_transition_updates_status_and_workflow_state() {
+        let service = setup_service().await;
+
+        // Create and claim a task so it's Running
+        let (task, _) = service.submit_task(
+            Some("Test".to_string()),
+            "Desc".to_string(),
+            None,
+            TaskPriority::Normal,
+            None,
+            vec![],
+            None,
+            None,
+            TaskSource::Human,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+        service.claim_task(task.id, "test-agent").await.unwrap();
+
+        // Set workflow state to Verifying so we can transition to Validating
+        let verifying_ws = WorkflowState::Verifying {
+            workflow_name: "code".to_string(),
+            phase_index: 0,
+            phase_name: "implement".to_string(),
+            subtask_ids: vec![],
+            retry_count: 0,
+        };
+        let mut running_task = service.get_task(task.id).await.unwrap().unwrap();
+        running_task.context.custom.insert(
+            "workflow_state".to_string(),
+            serde_json::to_value(&verifying_ws).unwrap(),
+        );
+        service.task_repo.update(&running_task).await.unwrap();
+
+        // Transition to Validating (allowed because workflow state is Verifying)
+        service.transition_to_validating(task.id).await.unwrap();
+
+        // Now overwrite with a PhaseReady workflow state on the Validating task
+        // (simulating the inconsistent state force_transition is meant to fix)
+        let ws = WorkflowState::PhaseReady {
+            workflow_name: "code".to_string(),
+            phase_index: 0,
+            phase_name: "implement".to_string(),
+        };
+        let mut validating_task = service.get_task(task.id).await.unwrap().unwrap();
+        validating_task.context.custom.insert(
+            "workflow_state".to_string(),
+            serde_json::to_value(&ws).unwrap(),
+        );
+        service.task_repo.update(&validating_task).await.unwrap();
+
+        // Force transition to Failed
+        let result = service.force_transition(task.id, TaskStatus::Failed, "test reason").await;
+        assert!(
+            result.is_ok(),
+            "force_transition should succeed: {:?}",
+            result.err()
+        );
+
+        let (updated, _) = result.unwrap();
+        assert_eq!(updated.status, TaskStatus::Failed, "Task status should be Failed after force_transition");
+
+        // Verify workflow state was also updated to Failed
+        let ws_val = updated.context.custom.get("workflow_state")
+            .expect("workflow_state should still be present");
+        let updated_ws: WorkflowState = serde_json::from_value(ws_val.clone()).unwrap();
+        assert!(
+            matches!(updated_ws, WorkflowState::Failed { .. }),
+            "WorkflowState should be Failed after force_transition to Failed, got {:?}",
+            updated_ws
         );
     }
 }

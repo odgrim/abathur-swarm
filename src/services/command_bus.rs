@@ -165,6 +165,13 @@ pub enum TaskCommand {
         task_id: Uuid,
         agent_type: String,
     },
+    /// Force-transition a task to a new status, bypassing valid_transitions checks.
+    /// Used to unstick tasks stuck in deadlocked states (e.g. Validating with no verifier).
+    ForceTransition {
+        task_id: Uuid,
+        new_status: TaskStatus,
+        reason: String,
+    },
 }
 
 /// Goal mutation commands.

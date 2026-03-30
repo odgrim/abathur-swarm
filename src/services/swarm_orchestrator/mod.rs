@@ -520,6 +520,9 @@ where
             format!("Swarm orchestrator started with max {} agents", self.config.max_agents),
         ).await;
 
+        // Check for origin remote — warn early if running without one
+        self.check_remote_at_startup();
+
         // Run cold start if memory is empty (populates initial project context)
         if self.memory_repo.is_some() {
             match self.cold_start().await {

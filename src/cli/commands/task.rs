@@ -125,6 +125,39 @@ Examples:
     },
     /// Show task status summary
     Status,
+    /// Force-transition a task to a new status (bypasses state machine checks)
+    #[command(after_help = "\
+Examples:
+  abathur task force-transition --id abc123 --status failed --reason \"stuck in validating\"
+  abathur task force-transition --id abc123 --status complete --reason \"manually verified\"
+  abathur task force-transition --id abc123 --status running --reason \"resume after deadlock\"
+")]
+    ForceTransition {
+        /// Task ID (UUID or prefix)
+        #[arg(long)]
+        id: String,
+        /// Target status: pending, ready, blocked, running, validating, complete, failed, canceled
+        #[arg(long)]
+        status: String,
+        /// Reason for the force transition
+        #[arg(long)]
+        reason: String,
+    },
+    /// Unstick a task that is stuck in an intermediate state (e.g. Validating deadlock)
+    #[command(after_help = "\
+Examples:
+  abathur task unstick --id abc123
+  abathur task unstick --id abc123 --strategy complete
+  abathur task unstick --id abc123 --strategy retry
+")]
+    Unstick {
+        /// Task ID (UUID or prefix)
+        #[arg(long)]
+        id: String,
+        /// Strategy: fail (default), complete, or retry
+        #[arg(long, default_value = "fail")]
+        strategy: String,
+    },
     /// Prune (delete) old or terminal tasks
     #[command(after_help = "\
 Examples:
@@ -732,6 +765,89 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                 pruned_ids: all_pruned_ids,
                 skipped: all_skipped,
                 dry_run,
+            };
+            output(&out, json_mode);
+        }
+
+        TaskCommands::ForceTransition { id, status, reason } => {
+            let uuid = resolve_task_id(&pool, &id).await?;
+            let new_status = TaskStatus::from_str(&status)
+                .ok_or_else(|| anyhow::anyhow!(
+                    "unknown status '{}'. Valid: pending, ready, blocked, running, validating, complete, failed, canceled",
+                    status
+                ))?;
+
+            let cmd = DomainCommand::Task(TaskCommand::ForceTransition {
+                task_id: uuid,
+                new_status,
+                reason: reason.clone(),
+            });
+
+            let result = dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let task = match result {
+                CommandResult::Task(t) => t,
+                _ => anyhow::bail!("Unexpected command result"),
+            };
+
+            let out = TaskActionOutput {
+                success: true,
+                message: format!(
+                    "Force-transitioned task {} to {}: {}",
+                    task.id, task.status.as_str(), reason
+                ),
+                task: Some(TaskOutput::from(&task)),
+            };
+            output(&out, json_mode);
+        }
+
+        TaskCommands::Unstick { id, strategy } => {
+            let uuid = resolve_task_id(&pool, &id).await?;
+
+            let task = service.get_task(uuid).await?
+                .ok_or_else(|| anyhow::anyhow!("Task not found: {}", id))?;
+
+            let (new_status, reason) = match strategy.as_str() {
+                "fail" => (
+                    TaskStatus::Failed,
+                    format!("unstick(fail): task was stuck in {} state", task.status.as_str()),
+                ),
+                "complete" => (
+                    TaskStatus::Complete,
+                    format!("unstick(complete): task was stuck in {} state", task.status.as_str()),
+                ),
+                "retry" => (
+                    TaskStatus::Running,
+                    format!("unstick(retry): task was stuck in {} state, resuming", task.status.as_str()),
+                ),
+                _ => anyhow::bail!(
+                    "unknown strategy '{}'. Valid: fail, complete, retry",
+                    strategy
+                ),
+            };
+
+            let cmd = DomainCommand::Task(TaskCommand::ForceTransition {
+                task_id: uuid,
+                new_status,
+                reason: reason.clone(),
+            });
+
+            let result = dispatcher.dispatch(cmd).await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            let task = match result {
+                CommandResult::Task(t) => t,
+                _ => anyhow::bail!("Unexpected command result"),
+            };
+
+            let out = TaskActionOutput {
+                success: true,
+                message: format!(
+                    "Unstuck task {} -> {}: {}",
+                    task.id, task.status.as_str(), reason
+                ),
+                task: Some(TaskOutput::from(&task)),
             };
             output(&out, json_mode);
         }

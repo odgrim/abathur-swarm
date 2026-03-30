@@ -233,10 +233,28 @@ where
         Ok(Some(report))
     }
 
+    /// Check whether an 'origin' remote is configured for the repository.
+    ///
+    /// Logs a prominent warning when no remote is found so operators are
+    /// aware the swarm is running in local-only mode.  Remote sync and push
+    /// operations will individually short-circuit when they detect no remote,
+    /// but this startup check makes the situation immediately visible.
+    pub fn check_remote_at_startup(&self) {
+        if !crate::services::worktree_service::check_remote_available(&self.config.repo_path) {
+            tracing::warn!(
+                path = %self.config.repo_path.display(),
+                "No 'origin' remote configured for repository at {} — \
+                 operating in local-only mode. Remote sync and push operations will be skipped.",
+                self.config.repo_path.display()
+            );
+        }
+    }
+
     /// Run startup codebase triage if no codebase profile exists in memory.
     ///
     /// Returns `Ok(true)` if triage ran and stored a profile, `Ok(false)` if
     /// a profile already existed (idempotency check), or an error on failure.
+    ///
     /// This is a blocking startup step — the swarm should not accept user tasks
     /// until triage completes.
     ///
@@ -1049,6 +1067,214 @@ where
                     } else {
                         corrections += 1;
                     }
+                }
+            }
+        }
+
+        // 4. Fix stale Validating tasks based on workflow_state and staleness.
+        //    Uses updated_at against stale_validating_timeout_secs (default 1800s / 30min).
+        //    - Stale + PhaseReady → transition to Running (overmind can retry)
+        //    - Stale + terminal workflow_state → force-transition to match terminal state
+        //    - Stale + no workflow_state → fail (standalone task lost its validator)
+        //    - Stale + Verifying → leave alone (ReconciliationHandler handles at runtime)
+        //    - Not stale → leave alone
+        //    Inconsistent states (e.g. Validating + PhaseReady) are always fixed
+        //    regardless of staleness, since they represent deadlocks.
+        let validating_tasks = self.task_repo.list(crate::domain::ports::TaskFilter {
+            status: Some(TaskStatus::Validating),
+            ..Default::default()
+        }).await?;
+
+        let now = chrono::Utc::now();
+        // Default 1800s (30 minutes); matches ReconciliationHandler default
+        let stale_validating_timeout = chrono::Duration::seconds(1800);
+
+        for task in &validating_tasks {
+            use crate::domain::models::workflow_state::WorkflowState;
+
+            let elapsed = now - task.updated_at;
+            let is_stale = elapsed > stale_validating_timeout;
+
+            let ws = task.context.custom.get("workflow_state")
+                .and_then(|v| serde_json::from_value::<WorkflowState>(v.clone()).ok());
+
+            match ws {
+                Some(WorkflowState::Verifying { .. }) => {
+                    // Verifying is the expected state during validation — leave alone.
+                    // The ReconciliationHandler will handle re-triggering if stale at runtime.
+                    continue;
+                }
+
+                Some(ref ws) if ws.is_terminal() => {
+                    // Terminal workflow state but task stuck in Validating — always fix (deadlock).
+                    let target_status = match ws {
+                        WorkflowState::Completed { .. } => TaskStatus::Complete,
+                        WorkflowState::Failed { .. } | WorkflowState::Rejected { .. } => TaskStatus::Failed,
+                        _ => TaskStatus::Failed,
+                    };
+                    tracing::warn!(
+                        "Startup reconciliation: Validating task {} ('{}') has terminal workflow_state {:?} — force-transitioning to {:?}",
+                        task.id, task.title, ws, target_status
+                    );
+                    if let Some(ref cb) = cb {
+                        let envelope = CommandEnvelope::new(
+                            CommandSource::System,
+                            DomainCommand::Task(TaskCommand::ForceTransition {
+                                task_id: task.id,
+                                new_status: target_status,
+                                reason: format!("Startup reconciliation: terminal workflow_state {:?} but task stuck in Validating", ws),
+                            }),
+                        );
+                        match cb.dispatch(envelope).await {
+                            Ok(_) => { corrections += 1; }
+                            Err(e) => {
+                                tracing::warn!("CommandBus failed to reconcile task {}, falling back to direct write: {}", task.id, e);
+                                let mut task = task.clone();
+                                task.status = target_status;
+                                if let Err(e) = self.task_repo.update(&task).await {
+                                    tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                                } else {
+                                    corrections += 1;
+                                }
+                            }
+                        }
+                    } else {
+                        let mut task = task.clone();
+                        task.status = target_status;
+                        if let Err(e) = self.task_repo.update(&task).await {
+                            tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                        } else {
+                            corrections += 1;
+                        }
+                    }
+                }
+
+                Some(WorkflowState::PhaseReady { .. }) => {
+                    // PhaseReady + Validating is always a deadlock — fix regardless of staleness.
+                    // Transition to Running so the overmind can resume driving the workflow.
+                    tracing::warn!(
+                        "Startup reconciliation: Validating task {} ('{}') has WorkflowState::PhaseReady — transitioning to Running (deadlock fix)",
+                        task.id, task.title
+                    );
+                    if let Some(ref cb) = cb {
+                        let envelope = CommandEnvelope::new(
+                            CommandSource::System,
+                            DomainCommand::Task(TaskCommand::ForceTransition {
+                                task_id: task.id,
+                                new_status: TaskStatus::Running,
+                                reason: "Startup reconciliation: Validating+PhaseReady deadlock — resuming as Running".to_string(),
+                            }),
+                        );
+                        match cb.dispatch(envelope).await {
+                            Ok(_) => { corrections += 1; }
+                            Err(e) => {
+                                tracing::warn!("CommandBus failed to reconcile task {}, falling back to direct write: {}", task.id, e);
+                                let mut task = task.clone();
+                                task.status = TaskStatus::Running;
+                                if let Err(e) = self.task_repo.update(&task).await {
+                                    tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                                } else {
+                                    corrections += 1;
+                                }
+                            }
+                        }
+                    } else {
+                        let mut task = task.clone();
+                        task.status = TaskStatus::Running;
+                        if let Err(e) = self.task_repo.update(&task).await {
+                            tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                        } else {
+                            corrections += 1;
+                        }
+                    }
+                }
+
+                None if is_stale => {
+                    // No workflow state (standalone task) and stale — fail it.
+                    tracing::warn!(
+                        "Startup reconciliation: stale Validating task {} ('{}') has no workflow_state — failing (stale {}s)",
+                        task.id, task.title, elapsed.num_seconds()
+                    );
+                    if let Some(ref cb) = cb {
+                        let envelope = CommandEnvelope::new(
+                            CommandSource::System,
+                            DomainCommand::Task(TaskCommand::Fail {
+                                task_id: task.id,
+                                error: Some("Stale validating task with no workflow_state detected during startup reconciliation".to_string()),
+                            }),
+                        );
+                        match cb.dispatch(envelope).await {
+                            Ok(_) => { corrections += 1; }
+                            Err(e) => {
+                                tracing::warn!("CommandBus failed to reconcile task {}, falling back to direct write: {}", task.id, e);
+                                let mut task = task.clone();
+                                task.status = TaskStatus::Failed;
+                                if let Err(e) = self.task_repo.update(&task).await {
+                                    tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                                } else {
+                                    corrections += 1;
+                                }
+                            }
+                        }
+                    } else {
+                        let mut task = task.clone();
+                        task.status = TaskStatus::Failed;
+                        if let Err(e) = self.task_repo.update(&task).await {
+                            tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                        } else {
+                            corrections += 1;
+                        }
+                    }
+                }
+
+                Some(_) if is_stale => {
+                    // Other non-terminal workflow states (PhaseRunning, FanningOut, etc.) and stale —
+                    // transition to Running so the overmind can resume.
+                    let ws_ref = task.context.custom.get("workflow_state")
+                        .and_then(|v| serde_json::from_value::<WorkflowState>(v.clone()).ok());
+                    tracing::warn!(
+                        "Startup reconciliation: stale Validating task {} ('{}') has non-terminal workflow_state {:?} — transitioning to Running (stale {}s)",
+                        task.id, task.title, ws_ref, elapsed.num_seconds()
+                    );
+                    if let Some(ref cb) = cb {
+                        let envelope = CommandEnvelope::new(
+                            CommandSource::System,
+                            DomainCommand::Task(TaskCommand::ForceTransition {
+                                task_id: task.id,
+                                new_status: TaskStatus::Running,
+                                reason: format!("Startup reconciliation: stale Validating with workflow_state {:?} — resuming as Running", ws_ref),
+                            }),
+                        );
+                        match cb.dispatch(envelope).await {
+                            Ok(_) => { corrections += 1; }
+                            Err(e) => {
+                                tracing::warn!("CommandBus failed to reconcile task {}, falling back to direct write: {}", task.id, e);
+                                let mut task = task.clone();
+                                task.status = TaskStatus::Running;
+                                if let Err(e) = self.task_repo.update(&task).await {
+                                    tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                                } else {
+                                    corrections += 1;
+                                }
+                            }
+                        }
+                    } else {
+                        let mut task = task.clone();
+                        task.status = TaskStatus::Running;
+                        if let Err(e) = self.task_repo.update(&task).await {
+                            tracing::warn!("Failed to reconcile task {}: {}", task.id, e);
+                        } else {
+                            corrections += 1;
+                        }
+                    }
+                }
+
+                _ => {
+                    // Not stale, no inconsistency — leave alone
+                    tracing::debug!(
+                        "Startup reconciliation: Validating task {} ('{}') is not stale — leaving alone",
+                        task.id, task.title
+                    );
                 }
             }
         }

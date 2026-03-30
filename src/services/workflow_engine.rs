@@ -19,6 +19,52 @@ use crate::services::event_bus::{EventBus, EventCategory, EventPayload, EventSev
 use crate::services::event_factory;
 use crate::services::task_service::TaskService;
 
+/// Validate that a TaskStatus is consistent with a WorkflowState.
+///
+/// Returns `Ok(())` if the pairing is valid, or `Err(description)` if not.
+/// This is purely for observability — callers should log warnings, not crash.
+fn validate_state_consistency(
+    task_status: TaskStatus,
+    workflow_state: &WorkflowState,
+) -> Result<(), String> {
+    match (task_status, workflow_state) {
+        // Validating is only valid with Verifying
+        (TaskStatus::Validating, WorkflowState::Verifying { .. }) => Ok(()),
+        (TaskStatus::Validating, ws) => Err(format!(
+            "TaskStatus::Validating is only valid with WorkflowState::Verifying, got {:?}",
+            ws
+        )),
+
+        // Running is valid with active workflow states
+        (TaskStatus::Running, WorkflowState::PhaseRunning { .. })
+        | (TaskStatus::Running, WorkflowState::FanningOut { .. })
+        | (TaskStatus::Running, WorkflowState::Aggregating { .. })
+        | (TaskStatus::Running, WorkflowState::PhaseReady { .. })
+        | (TaskStatus::Running, WorkflowState::PhaseGate { .. }) => Ok(()),
+        (TaskStatus::Running, ws) => Err(format!(
+            "TaskStatus::Running is only valid with PhaseRunning/FanningOut/Aggregating/PhaseReady/PhaseGate, got {:?}",
+            ws
+        )),
+
+        // Terminal TaskStatus is compatible with terminal WorkflowState or any
+        // state (workflow may not have caught up yet)
+        (TaskStatus::Complete, _)
+        | (TaskStatus::Failed, _)
+        | (TaskStatus::Canceled, _) => Ok(()),
+
+        // Pending/Ready/Blocked are compatible with Pending workflow state
+        (TaskStatus::Pending, WorkflowState::Pending { .. })
+        | (TaskStatus::Ready, WorkflowState::Pending { .. })
+        | (TaskStatus::Blocked, WorkflowState::Pending { .. }) => Ok(()),
+        (TaskStatus::Pending, ws)
+        | (TaskStatus::Ready, ws)
+        | (TaskStatus::Blocked, ws) => Err(format!(
+            "TaskStatus::Pending/Ready/Blocked is only valid with WorkflowState::Pending, got {:?}",
+            ws
+        )),
+    }
+}
+
 /// Whether a phase name is a gate phase.
 ///
 /// Gate phases park at `PhaseGate` and require an overmind verdict.
@@ -107,7 +153,43 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
     /// Write workflow state to task context and persist via TaskService
     /// (with retry-on-conflict).
     async fn write_state(&self, task_id: Uuid, state: &WorkflowState) -> DomainResult<()> {
-        self.task_service.update_workflow_state(task_id, state).await
+        self.task_service.update_workflow_state(task_id, state).await?;
+
+        // Post-condition: validate state consistency
+        self.check_state_consistency(task_id, state).await;
+
+        Ok(())
+    }
+
+    /// Load the task's current TaskStatus and validate it against the given WorkflowState.
+    /// Logs a warning on inconsistency but never errors.
+    async fn check_state_consistency(&self, task_id: Uuid, workflow_state: &WorkflowState) {
+        match self.task_repo.get(task_id).await {
+            Ok(Some(task)) => {
+                if let Err(msg) = validate_state_consistency(task.status, workflow_state) {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        task_status = %task.status,
+                        workflow_state = ?workflow_state,
+                        "State consistency invariant violated: {}",
+                        msg
+                    );
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    "State consistency check: task not found"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "State consistency check: failed to load task"
+                );
+            }
+        }
     }
 
     // ========================================================================
@@ -196,6 +278,17 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         let (workflow_name, next_index) = match &state {
             WorkflowState::Pending { workflow_name } => (workflow_name.clone(), 0),
             WorkflowState::PhaseReady { .. } => {
+                // Auto-correct: if TaskStatus is Validating while WorkflowState is
+                // PhaseReady, the task got stuck in an inconsistent state (validation
+                // deadlock). Correct TaskStatus to Running so the workflow can proceed.
+                if task.status == TaskStatus::Validating {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        "State inconsistency detected: TaskStatus::Validating with WorkflowState::PhaseReady — \
+                         auto-correcting TaskStatus to Running"
+                    );
+                    let _ = self.task_service.transition_to_running(task_id).await;
+                }
                 return Err(DomainError::ValidationFailed(format!(
                     "Task {} is already in PhaseReady — call fan_out to create subtasks",
                     task_id
@@ -1809,5 +1902,91 @@ mod tests {
             }
         }
         assert!(found_failed, "WorkflowPhaseFailed event should have been emitted");
+    }
+
+    // --- validate_state_consistency tests (Fix 1 / Fix 8) ---
+
+    #[test]
+    fn test_validate_state_consistency_catches_validating_plus_phase_ready() {
+        let ws = WorkflowState::PhaseReady {
+            workflow_name: "code".to_string(),
+            phase_index: 0,
+            phase_name: "implement".to_string(),
+        };
+        let result = validate_state_consistency(TaskStatus::Validating, &ws);
+        assert!(result.is_err(), "Validating + PhaseReady should be inconsistent");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("Validating") && msg.contains("Verifying"),
+            "Error should mention Validating/Verifying, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_validate_state_consistency_accepts_valid_combinations() {
+        // Running + PhaseReady → Ok
+        assert!(
+            validate_state_consistency(
+                TaskStatus::Running,
+                &WorkflowState::PhaseReady {
+                    workflow_name: "code".to_string(),
+                    phase_index: 0,
+                    phase_name: "implement".to_string(),
+                },
+            ).is_ok(),
+            "Running + PhaseReady should be valid"
+        );
+
+        // Running + PhaseRunning → Ok
+        assert!(
+            validate_state_consistency(
+                TaskStatus::Running,
+                &WorkflowState::PhaseRunning {
+                    workflow_name: "code".to_string(),
+                    phase_index: 0,
+                    phase_name: "implement".to_string(),
+                    subtask_ids: vec![],
+                },
+            ).is_ok(),
+            "Running + PhaseRunning should be valid"
+        );
+
+        // Validating + Verifying → Ok
+        assert!(
+            validate_state_consistency(
+                TaskStatus::Validating,
+                &WorkflowState::Verifying {
+                    workflow_name: "code".to_string(),
+                    phase_index: 0,
+                    phase_name: "implement".to_string(),
+                    subtask_ids: vec![],
+                    retry_count: 0,
+                },
+            ).is_ok(),
+            "Validating + Verifying should be valid"
+        );
+
+        // Complete + Completed → Ok
+        assert!(
+            validate_state_consistency(
+                TaskStatus::Complete,
+                &WorkflowState::Completed {
+                    workflow_name: "code".to_string(),
+                },
+            ).is_ok(),
+            "Complete + Completed should be valid"
+        );
+
+        // Pending + Pending → Ok
+        assert!(
+            validate_state_consistency(
+                TaskStatus::Pending,
+                &WorkflowState::Pending {
+                    workflow_name: "code".to_string(),
+                },
+            ).is_ok(),
+            "Pending + Pending should be valid"
+        );
     }
 }

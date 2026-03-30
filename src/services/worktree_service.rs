@@ -75,6 +75,23 @@ impl From<HashMap<WorktreeStatus, u64>> for WorktreeStats {
     }
 }
 
+/// Check whether an 'origin' remote is configured for the repository at `repo_path`.
+///
+/// Runs `git remote get-url origin` and returns `true` if it succeeds.
+/// This is a synchronous (blocking) check intended for startup/init paths.
+pub fn check_remote_available(repo_path: &Path) -> bool {
+    match std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        Ok(output) => output.status.success(),
+        Err(_) => false,
+    }
+}
+
 pub struct WorktreeService<W: WorktreeRepository> {
     repo: Arc<W>,
     config: WorktreeConfig,

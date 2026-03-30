@@ -85,6 +85,25 @@ async fn sync_with_remote(repo_path: &Path, base_ref: &str) -> bool {
 /// fetches and rebases once, then retries. Returns `true` if push succeeded.
 async fn push_with_retry(repo_path: &Path, base_ref: &str, max_retries: u32) -> bool {
     use tokio::process::Command;
+
+    // Early exit: check if 'origin' remote exists before entering the retry loop.
+    match Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_path)
+        .output()
+        .await
+    {
+        Ok(output) if !output.status.success() => {
+            tracing::warn!("No 'origin' remote configured — skipping push");
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to check for 'origin' remote — skipping push");
+            return false;
+        }
+        _ => {} // origin exists, proceed
+    }
+
     for attempt in 0..=max_retries {
         let push = Command::new("git")
             .args(["push", "origin", base_ref])
@@ -1141,7 +1160,55 @@ where
     }
 
     let root_id = find_root_ancestor_id(triggering_task_id, &*task_repo).await;
-    let root_task = task_repo.get(root_id).await.ok()??;
+    let mut root_task = task_repo.get(root_id).await.ok()??;
+
+    // Fix 3: Recover root tasks stuck in Validating with inconsistent workflow state
+    if root_task.status == TaskStatus::Validating {
+        use crate::domain::models::workflow_state::WorkflowState;
+
+        let workflow_state = root_task.context.custom.get("workflow_state")
+            .and_then(|v| serde_json::from_value::<WorkflowState>(v.clone()).ok());
+
+        match &workflow_state {
+            Some(WorkflowState::Completed { .. }) => {
+                tracing::warn!(
+                    root_task_id = %root_id,
+                    "try_auto_ship: recovering deadlock — Validating+Completed, force-completing root task"
+                );
+                let _ = root_task.transition_to(TaskStatus::Complete);
+                let _ = task_repo.update(&root_task).await;
+                // Reload after update
+                root_task = task_repo.get(root_id).await.ok()??;
+            }
+            Some(WorkflowState::Failed { .. }) | Some(WorkflowState::Rejected { .. }) => {
+                tracing::warn!(
+                    root_task_id = %root_id,
+                    workflow_state = ?workflow_state,
+                    "try_auto_ship: recovering deadlock — Validating+Failed/Rejected, force-failing root task"
+                );
+                let _ = root_task.transition_to(TaskStatus::Failed);
+                let _ = task_repo.update(&root_task).await;
+                root_task = task_repo.get(root_id).await.ok()??;
+            }
+            Some(WorkflowState::PhaseReady { .. }) => {
+                tracing::warn!(
+                    root_task_id = %root_id,
+                    "try_auto_ship: recovering deadlock — Validating+PhaseReady, force-failing root task"
+                );
+                let _ = root_task.transition_to(TaskStatus::Failed);
+                let _ = task_repo.update(&root_task).await;
+                root_task = task_repo.get(root_id).await.ok()??;
+            }
+            Some(WorkflowState::Verifying { .. }) => {
+                // Verification genuinely in progress — do not interfere
+                return None;
+            }
+            _ => {
+                // No workflow state or other active state — let normal validation proceed
+                return None;
+            }
+        }
+    }
 
     // Root must be terminal
     if !root_task.is_terminal() {
@@ -1152,6 +1219,62 @@ where
             "try_auto_ship called but root task is not terminal"
         );
         return None;
+    }
+
+    // Fix 3b: Recover descendant tasks stuck in Validating with inconsistent workflow state
+    {
+        use crate::domain::models::workflow_state::WorkflowState;
+
+        let mut queue = vec![root_id];
+        while let Some(parent_id) = queue.pop() {
+            if let Ok(subtasks) = task_repo.get_subtasks(parent_id).await {
+                for mut st in subtasks {
+                    queue.push(st.id);
+                    if st.status != TaskStatus::Validating {
+                        continue;
+                    }
+
+                    let workflow_state = st.context.custom.get("workflow_state")
+                        .and_then(|v| serde_json::from_value::<WorkflowState>(v.clone()).ok());
+
+                    match &workflow_state {
+                        Some(WorkflowState::PhaseReady { .. }) | Some(WorkflowState::PhaseGate { .. }) => {
+                            tracing::warn!(
+                                descendant_task_id = %st.id,
+                                workflow_state = ?workflow_state,
+                                "try_auto_ship: recovering descendant deadlock — Validating+{:?}, force-failing",
+                                workflow_state.as_ref().unwrap(),
+                            );
+                            let _ = st.transition_to(TaskStatus::Failed);
+                            let _ = task_repo.update(&st).await;
+                        }
+                        Some(WorkflowState::Completed { .. }) => {
+                            tracing::warn!(
+                                descendant_task_id = %st.id,
+                                "try_auto_ship: recovering descendant deadlock — Validating+Completed, force-completing"
+                            );
+                            let _ = st.transition_to(TaskStatus::Complete);
+                            let _ = task_repo.update(&st).await;
+                        }
+                        Some(WorkflowState::Failed { .. }) | Some(WorkflowState::Rejected { .. }) => {
+                            tracing::warn!(
+                                descendant_task_id = %st.id,
+                                workflow_state = ?workflow_state,
+                                "try_auto_ship: recovering descendant deadlock — Validating+Failed/Rejected, force-failing"
+                            );
+                            let _ = st.transition_to(TaskStatus::Failed);
+                            let _ = task_repo.update(&st).await;
+                        }
+                        Some(WorkflowState::Verifying { .. }) => {
+                            // Verification genuinely in progress — leave alone
+                        }
+                        _ => {
+                            // No workflow state or other active state — leave alone
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // All descendants must be terminal

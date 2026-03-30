@@ -96,6 +96,10 @@ pub struct LimitsConfig {
     pub max_concurrent_tasks: u32,
     pub max_retries: u32,
     pub task_timeout_secs: u64,
+    /// Tasks stuck in Validating longer than this are considered stale (seconds).
+    /// Shorter than Running timeout because Validating should resolve quickly.
+    /// Default: 1800 (30 minutes).
+    pub stale_validating_timeout_secs: u64,
 }
 
 impl Default for LimitsConfig {
@@ -107,6 +111,7 @@ impl Default for LimitsConfig {
             max_concurrent_tasks: 5,
             max_retries: 3,
             task_timeout_secs: 300,
+            stale_validating_timeout_secs: 1800,
         }
     }
 }
