@@ -22,6 +22,9 @@ pub struct WorktreeConfig {
     pub default_base_ref: String,
     /// Whether to auto-cleanup merged worktrees.
     pub auto_cleanup: bool,
+    /// Whether to fetch from remote before creating worktrees.
+    /// Default: true. Set to false for local-only / offline development.
+    pub fetch_on_sync: bool,
 }
 
 impl Default for WorktreeConfig {
@@ -31,6 +34,7 @@ impl Default for WorktreeConfig {
             repo_path: PathBuf::from("."),
             default_base_ref: "main".to_string(),
             auto_cleanup: true,
+            fetch_on_sync: true,
         }
     }
 }
@@ -74,11 +78,16 @@ impl From<HashMap<WorktreeStatus, u64>> for WorktreeStats {
 pub struct WorktreeService<W: WorktreeRepository> {
     repo: Arc<W>,
     config: WorktreeConfig,
+    last_fetch: Arc<tokio::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 impl<W: WorktreeRepository> WorktreeService<W> {
     pub fn new(repo: Arc<W>, config: WorktreeConfig) -> Self {
-        Self { repo, config }
+        Self {
+            repo,
+            config,
+            last_fetch: Arc::new(tokio::sync::Mutex::new(None)),
+        }
     }
 
     /// Create a new worktree for a task.
@@ -107,12 +116,64 @@ impl<W: WorktreeRepository> WorktreeService<W> {
         // always produce safe paths, but we verify anyway).
         self.validate_worktree_path(&path)?;
 
+        // Fetch latest base ref so worktree branches from current remote state.
+        // Debounce: skip if we fetched within the last 10 seconds (batch creation).
+        let fetch_succeeded = if self.config.fetch_on_sync {
+            let should_fetch = {
+                let mut last = self.last_fetch.lock().await;
+                match *last {
+                    Some(t) if t.elapsed().as_secs() < 10 => false,
+                    _ => { *last = Some(std::time::Instant::now()); true }
+                }
+            };
+            if should_fetch {
+                match Command::new("git")
+                    .args(["fetch", "origin", base])
+                    .current_dir(&self.config.repo_path)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .await
+                {
+                    Ok(o) if o.status.success() => {
+                        tracing::debug!(base_ref = base, "fetched latest remote state before worktree creation");
+                        true
+                    }
+                    Ok(o) => {
+                        tracing::warn!(
+                            base_ref = base,
+                            stderr = %String::from_utf8_lossy(&o.stderr),
+                            "fetch before worktree creation failed — using local ref"
+                        );
+                        false
+                    }
+                    Err(e) => {
+                        tracing::warn!(base_ref = base, error = %e, "fetch command failed — using local ref");
+                        false
+                    }
+                }
+            } else {
+                // Debounced — assume recent fetch is still valid
+                true
+            }
+        } else {
+            false
+        };
+
+        // Use origin/<base> when fetch succeeded so the worktree starts from the
+        // latest remote state rather than the (potentially stale) local branch.
+        let effective_base = if fetch_succeeded {
+            format!("origin/{}", base)
+        } else {
+            base.to_string()
+        };
+
         // Create worktree record in creating state
         let mut worktree = Worktree::new(task_id, &path, &branch, base);
         self.repo.create(&worktree).await?;
 
         // Actually create the git worktree
-        match self.git_create_worktree(&path, &branch, base).await {
+        match self.git_create_worktree(&path, &branch, &effective_base).await {
             Ok(()) => {
                 worktree.activate();
                 self.repo.update(&worktree).await?;

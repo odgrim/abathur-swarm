@@ -95,6 +95,11 @@ pub struct SwarmConfig {
     /// that a large backlog of external issues does not overwhelm the swarm.
     /// Default: 1.
     pub max_pending_ingestion_tasks: usize,
+
+    /// Whether to fetch from remote before merge operations and worktree creation,
+    /// and push to remote after auto-ship merges to the base branch.
+    /// Default: true. Set to false for local-only / offline development.
+    pub fetch_on_sync: bool,
 }
 
 /// Configurable polling intervals (seconds) for all scheduled handlers.
@@ -381,6 +386,7 @@ impl Default for SwarmConfig {
             dangerously_skip_permissions: false,
             overmind_max_turns: None,
             max_pending_ingestion_tasks: 1,
+            fetch_on_sync: true,
         }
     }
 }

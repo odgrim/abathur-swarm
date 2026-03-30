@@ -251,7 +251,12 @@ pub async fn execute(args: WorktreeArgs, json_mode: bool) -> Result<()> {
         .context("Failed to initialize database. Run 'abathur init' first.")?;
 
     let repo = Arc::new(SqliteWorktreeRepository::new(pool.clone()));
-    let config = WorktreeConfig::default();
+    let config = WorktreeConfig {
+        // Manual CLI worktree operations don't sync with remote;
+        // the swarm orchestrator handles sync via its own config.
+        fetch_on_sync: false,
+        ..WorktreeConfig::default()
+    };
     let service = WorktreeService::new(repo, config);
 
     match args.command {

@@ -718,6 +718,7 @@ where
             repo_path: self.config.repo_path.clone(),
             default_base_ref: self.config.default_base_ref.clone(),
             auto_cleanup: true,
+            fetch_on_sync: self.config.fetch_on_sync,
         };
 
         let worktree_service = WorktreeService::new(

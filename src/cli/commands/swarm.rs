@@ -718,6 +718,7 @@ async fn run_swarm_foreground(
         polling: app_config.polling,
         use_worktrees: if no_worktrees { false } else { app_config.worktrees.enabled },
         overmind_max_turns: Some(app_config.overmind.max_turns),
+        fetch_on_sync: app_config.worktrees.fetch_on_sync,
         ..Default::default()
     };
 
@@ -794,6 +795,51 @@ async fn run_swarm_foreground(
             crate::services::budget_tracker::BudgetTracker::new(tracker_config, event_bus.clone())
         );
         orchestrator.with_budget_tracker(tracker)
+    };
+
+    // Wire up quiet-window scheduling from [scheduling] + [[quiet_windows]] config
+    let orchestrator = if app_config.scheduling.quiet_hours_enabled {
+        let qw_repo = Arc::new(
+            crate::adapters::sqlite::SqliteQuietWindowRepository::new(pool.clone()),
+        );
+        // Seed config-defined windows into the database (upsert by name)
+        for wc in &app_config.quiet_windows {
+            let tz = wc.timezone.as_deref()
+                .unwrap_or(&app_config.scheduling.default_timezone);
+            let desc = wc.description.as_deref().unwrap_or("");
+            use crate::domain::ports::QuietWindowRepository;
+            match qw_repo.get_by_name(&wc.name).await {
+                Ok(Some(mut existing)) => {
+                    existing.start_cron = wc.start_cron.clone();
+                    existing.end_cron = wc.end_cron.clone();
+                    existing.timezone = tz.to_string();
+                    existing.description = desc.to_string();
+                    if let Err(e) = qw_repo.update(&existing).await {
+                        tracing::warn!(name = %wc.name, error = %e, "Failed to update quiet window from config");
+                    }
+                }
+                Ok(None) => {
+                    let window = crate::domain::models::quiet_window::QuietWindow::new(
+                        &wc.name, desc, &wc.start_cron, &wc.end_cron, tz,
+                    );
+                    if let Err(e) = qw_repo.create(&window).await {
+                        tracing::warn!(name = %wc.name, error = %e, "Failed to create quiet window from config");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(name = %wc.name, error = %e, "Failed to check quiet window");
+                }
+            }
+        }
+        let cws = Arc::new(
+            crate::services::cost_window_service::CostWindowService::new(qw_repo),
+        );
+        if let Err(e) = cws.reload_windows().await {
+            tracing::warn!(error = %e, "Failed to load quiet windows into cache");
+        }
+        orchestrator.with_cost_window_service(cws)
+    } else {
+        orchestrator
     };
 
     // Wire federation if enabled in config.

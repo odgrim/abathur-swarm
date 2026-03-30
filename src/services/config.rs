@@ -56,6 +56,9 @@ pub struct Config {
     /// Cost-control scheduling configuration (quiet hours).
     #[serde(default)]
     pub scheduling: SchedulingConfig,
+    /// Quiet window definitions loaded from config file.
+    #[serde(default)]
+    pub quiet_windows: Vec<QuietWindowConfig>,
 }
 
 impl Default for Config {
@@ -78,6 +81,7 @@ impl Default for Config {
             default_workflow: default_workflow_name(),
             workflows: Vec::new(),
             scheduling: SchedulingConfig::default(),
+            quiet_windows: Vec::new(),
         }
     }
 }
@@ -245,6 +249,9 @@ pub struct WorktreeConfig {
     pub max_age_hours: u64,
     pub enabled: bool,
     pub branch_prefix: String,
+    /// Whether to fetch from remote before creating worktrees and merging.
+    /// Default: true. Set to false for local-only / offline development.
+    pub fetch_on_sync: bool,
 }
 
 impl Default for WorktreeConfig {
@@ -255,6 +262,7 @@ impl Default for WorktreeConfig {
             max_age_hours: 168,
             enabled: true,
             branch_prefix: "abathur/task".to_string(),
+            fetch_on_sync: true,
         }
     }
 }

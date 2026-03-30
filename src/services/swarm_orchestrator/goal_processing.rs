@@ -732,6 +732,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                 || !self.config.dangerously_skip_permissions;
             let repo_path = self.config.repo_path.clone();
             let default_base_ref = self.config.default_base_ref.clone();
+            let fetch_on_sync = self.config.fetch_on_sync;
             let require_commits = agent_can_write && !is_read_only_role;
             // Clone output_delivery so it can be moved into the spawn block.
             let output_delivery_for_spawn = task_output_delivery.clone();
@@ -1065,6 +1066,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                         intent_satisfied,
                                         output_delivery.clone(),
                                         merge_request_repo.clone(),
+                                        fetch_on_sync,
                                     ).await;
                                 }
 
@@ -1699,6 +1701,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     false, // intent_satisfied: no convergence verification on this path
                                     output_delivery.clone(),
                                     merge_request_repo.clone(),
+                                    fetch_on_sync,
                                 ).await;
 
                                 if let Err(e) = workflow_result {

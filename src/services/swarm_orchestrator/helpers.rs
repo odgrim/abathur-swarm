@@ -52,6 +52,95 @@ pub fn remove_transient_artifacts(worktree_path: &str) -> Vec<String> {
     removed
 }
 
+/// Fetch the latest state of a ref from origin.
+///
+/// Returns `true` on success, `false` on failure (network, no remote, etc.).
+/// On failure, logs a warning — callers should proceed with stale local state
+/// rather than blocking the swarm.
+async fn sync_with_remote(repo_path: &Path, base_ref: &str) -> bool {
+    use tokio::process::Command;
+    match Command::new("git")
+        .args(["fetch", "origin", base_ref])
+        .current_dir(repo_path)
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            tracing::warn!(
+                base_ref,
+                stderr = %String::from_utf8_lossy(&output.stderr),
+                "git fetch origin failed — proceeding with stale local state"
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!(base_ref, error = %e, "git fetch command failed — proceeding with stale local state");
+            false
+        }
+    }
+}
+
+/// Push the local base ref to remote. On rejection (remote advanced),
+/// fetches and rebases once, then retries. Returns `true` if push succeeded.
+async fn push_with_retry(repo_path: &Path, base_ref: &str, max_retries: u32) -> bool {
+    use tokio::process::Command;
+    for attempt in 0..=max_retries {
+        let push = Command::new("git")
+            .args(["push", "origin", base_ref])
+            .current_dir(repo_path)
+            .output()
+            .await;
+        match push {
+            Ok(output) if output.status.success() => return true,
+            Ok(output) if attempt < max_retries => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::warn!(attempt, base_ref, %stderr, "git push rejected, fetching and rebasing");
+                // Fetch latest
+                let _ = Command::new("git")
+                    .args(["fetch", "origin", base_ref])
+                    .current_dir(repo_path)
+                    .output()
+                    .await;
+                // Rebase local commits on top of remote
+                let rebase = Command::new("git")
+                    .args(["rebase", &format!("origin/{}", base_ref)])
+                    .current_dir(repo_path)
+                    .output()
+                    .await;
+                if let Ok(r) = &rebase {
+                    if !r.status.success() {
+                        tracing::error!(
+                            base_ref,
+                            stderr = %String::from_utf8_lossy(&r.stderr),
+                            "rebase onto origin/{} failed — aborting push retry", base_ref
+                        );
+                        let _ = Command::new("git")
+                            .args(["rebase", "--abort"])
+                            .current_dir(repo_path)
+                            .output()
+                            .await;
+                        return false;
+                    }
+                }
+            }
+            Ok(output) => {
+                tracing::error!(
+                    base_ref,
+                    stderr = %String::from_utf8_lossy(&output.stderr),
+                    "git push failed after retries"
+                );
+                return false;
+            }
+            Err(e) => {
+                tracing::error!(base_ref, error = %e, "git push command failed");
+                return false;
+            }
+        }
+    }
+    false
+}
+
 /// Auto-commit any uncommitted changes in a worktree as a safety net.
 /// Returns true if a commit was made, false if the worktree was clean.
 pub async fn auto_commit_worktree(worktree_path: &str, task_id: Uuid) -> bool {
@@ -334,6 +423,7 @@ pub async fn run_post_completion_workflow<G, T, W>(
     intent_satisfied: bool,
     output_delivery: OutputDelivery,
     merge_request_repo: Option<Arc<dyn MergeRequestRepository>>,
+    fetch_on_sync: bool,
 ) -> DomainResult<()>
 where
     G: GoalRepository + 'static,
@@ -718,7 +808,7 @@ where
             try_auto_ship(
                 task_id, task_repo.clone(), worktree_repo.clone(),
                 event_tx, audit_log, repo_path, default_base_ref,
-                output_delivery.clone(),
+                output_delivery.clone(), fetch_on_sync,
             ).await;
 
             return Ok(()); // Skip normal per-task PR/merge flow
@@ -731,7 +821,7 @@ where
             try_auto_ship(
                 task_id, task_repo.clone(), worktree_repo.clone(),
                 event_tx, audit_log, repo_path, default_base_ref,
-                output_delivery.clone(),
+                output_delivery.clone(), fetch_on_sync,
             ).await;
             return Ok(());
         }
@@ -1031,6 +1121,7 @@ async fn try_auto_ship<T, W>(
     repo_path: &std::path::Path,
     default_base_ref: &str,
     output_delivery: OutputDelivery,
+    fetch_on_sync: bool,
 ) -> Option<String>
 where
     T: TaskRepository + 'static,
@@ -1100,6 +1191,55 @@ where
         repo_path,
     )
     .await;
+
+    // Sync local base ref with remote before merging so the squash merge
+    // targets the latest remote state and the subsequent push is clean.
+    if fetch_on_sync {
+        use tokio::process::Command as TokioCommand;
+        if sync_with_remote(repo_path, default_base_ref).await {
+            // Checkout the base branch and fast-forward to match remote
+            let _ = TokioCommand::new("git")
+                .args(["checkout", default_base_ref])
+                .current_dir(repo_path)
+                .output()
+                .await;
+            let ff = TokioCommand::new("git")
+                .args(["merge", "--ff-only", &format!("origin/{}", default_base_ref)])
+                .current_dir(repo_path)
+                .output()
+                .await;
+            if let Ok(output) = &ff {
+                if !output.status.success() {
+                    // Local main has diverged from remote (previous auto-ship push failed).
+                    // Rebase local commits onto remote to recover.
+                    tracing::warn!(
+                        root_task_id = %root_id,
+                        "local {} diverged from remote — rebasing to recover", default_base_ref
+                    );
+                    let rebase = TokioCommand::new("git")
+                        .args(["rebase", &format!("origin/{}", default_base_ref)])
+                        .current_dir(repo_path)
+                        .output()
+                        .await;
+                    if let Ok(r) = &rebase {
+                        if !r.status.success() {
+                            tracing::error!(
+                                root_task_id = %root_id,
+                                stderr = %String::from_utf8_lossy(&r.stderr),
+                                "rebase onto origin/{} failed — auto-ship aborted", default_base_ref
+                            );
+                            let _ = TokioCommand::new("git")
+                                .args(["rebase", "--abort"])
+                                .current_dir(repo_path)
+                                .output()
+                                .await;
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Check feature branch has commits ahead of base
     let has_commits = {
@@ -1248,6 +1388,21 @@ where
             return None;
         }
     };
+
+    // Push merged base ref to remote so subsequent auto-ships and worktree
+    // creations see the latest state.
+    if fetch_on_sync {
+        if !push_with_retry(repo_path, default_base_ref, 2).await {
+            tracing::error!(
+                root_task_id = %root_id,
+                commit_sha = %commit_sha,
+                "auto-ship committed locally but push to remote failed — \
+                 next auto-ship will attempt to rebase and push"
+            );
+            // Don't return None — the local commit is valid and the push
+            // will be retried when the next auto-ship syncs.
+        }
+    }
 
     let _ = event_tx.send(SwarmEvent::TaskMerged {
         task_id: root_id,
