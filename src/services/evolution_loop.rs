@@ -2141,4 +2141,182 @@ mod tests {
             "Should still emit Reverted event even without agent_repo"
         );
     }
+
+    #[tokio::test]
+    async fn test_get_all_stats_returns_all_templates() {
+        let evolution = EvolutionLoop::with_default_config();
+
+        evolution
+            .record_execution(make_execution("agent-a", 1, TaskOutcome::Success))
+            .await;
+        evolution
+            .record_execution(make_execution("agent-b", 1, TaskOutcome::Failure))
+            .await;
+        evolution
+            .record_execution(make_execution("agent-c", 2, TaskOutcome::Success))
+            .await;
+
+        let all_stats = evolution.get_all_stats().await;
+        assert_eq!(all_stats.len(), 3);
+
+        let names: Vec<String> = all_stats.iter().map(|s| s.template_name.clone()).collect();
+        assert!(names.contains(&"agent-a".to_string()));
+        assert!(names.contains(&"agent-b".to_string()));
+        assert!(names.contains(&"agent-c".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_all_stats_empty_when_no_executions() {
+        let evolution = EvolutionLoop::with_default_config();
+        let all_stats = evolution.get_all_stats().await;
+        assert!(all_stats.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_events_returns_reverse_chronological() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // Record a single agent's goal violation and evaluate
+        evolution
+            .record_execution(make_execution("agent-first", 1, TaskOutcome::GoalViolation))
+            .await;
+        evolution.evaluate().await;
+
+        let events = evolution.get_events(None).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].template_name, "agent-first");
+
+        // Now record a second agent and evaluate again
+        evolution
+            .record_execution(make_execution("agent-second", 1, TaskOutcome::GoalViolation))
+            .await;
+        evolution.evaluate().await;
+
+        let all_events = evolution.get_events(None).await;
+        // Multiple events from both evaluations — verify reverse chronological order
+        assert!(all_events.len() >= 2);
+
+        // Most recent event should be last appended (reversed = first returned)
+        // The last evaluate produced events for agent-second (and possibly agent-first again)
+        // Just verify ordering: each event's occurred_at should be >= the next
+        for window in all_events.windows(2) {
+            assert!(
+                window[0].occurred_at >= window[1].occurred_at,
+                "Events should be in reverse chronological order"
+            );
+        }
+
+        // Test with limit — should return only the most recent event(s)
+        let limited = evolution.get_events(Some(1)).await;
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].occurred_at, all_events[0].occurred_at);
+    }
+
+    #[tokio::test]
+    async fn test_get_templates_needing_attention_sorted_by_severity() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            refinement_threshold: 0.80,
+            major_refinement_threshold: 0.40,
+            major_refinement_min_tasks: 1,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // Agent with minor issue (below refinement_threshold but above major)
+        evolution
+            .record_execution(make_execution("minor-agent", 1, TaskOutcome::Success))
+            .await;
+        evolution
+            .record_execution(make_execution("minor-agent", 1, TaskOutcome::Failure))
+            .await;
+
+        // Agent with goal violation (immediate severity)
+        evolution
+            .record_execution(make_execution("immediate-agent", 1, TaskOutcome::GoalViolation))
+            .await;
+
+        evolution.evaluate().await;
+
+        let attention = evolution.get_templates_needing_attention().await;
+        assert!(attention.len() >= 2);
+
+        // Immediate should come before Minor
+        let immediate_pos = attention
+            .iter()
+            .position(|(name, _)| name == "immediate-agent");
+        let minor_pos = attention
+            .iter()
+            .position(|(name, _)| name == "minor-agent");
+
+        if let (Some(imm), Some(min)) = (immediate_pos, minor_pos) {
+            assert!(imm < min, "Immediate severity should sort before Minor");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_templates_needing_attention_excludes_non_pending() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            refinement_threshold: 0.80,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // Create a refinement
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+        evolution.evaluate().await;
+
+        // Verify it shows up
+        let attention = evolution.get_templates_needing_attention().await;
+        assert_eq!(attention.len(), 1);
+
+        // Start and complete the refinement
+        let pending = evolution.get_pending_refinements().await;
+        let request_id = pending[0].id;
+        evolution.start_refinement(request_id).await;
+        evolution.complete_refinement(request_id, true).await;
+
+        // Should no longer need attention (Completed is not Pending)
+        let attention = evolution.get_templates_needing_attention().await;
+        assert!(
+            attention.is_empty(),
+            "Completed refinements should not appear in needing-attention list"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clear_resets_all_state() {
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 1,
+            refinement_threshold: 0.80,
+            ..Default::default()
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // Populate state
+        evolution
+            .record_execution(make_execution("test-agent", 1, TaskOutcome::Failure))
+            .await;
+        evolution.evaluate().await;
+
+        // Verify state is populated
+        assert!(!evolution.get_all_stats().await.is_empty());
+        assert!(!evolution.get_events(None).await.is_empty());
+        assert!(!evolution.get_pending_refinements().await.is_empty());
+
+        // Clear
+        evolution.clear().await;
+
+        // Verify all state is reset
+        assert!(evolution.get_all_stats().await.is_empty());
+        assert!(evolution.get_events(None).await.is_empty());
+        assert!(evolution.get_pending_refinements().await.is_empty());
+    }
 }

@@ -1120,4 +1120,125 @@ mod tests {
         });
         assert!(!OverseerCluster::has_blocking_failures(&signals));
     }
+
+    // -- all_passing_relative edge cases ------------------------------------
+
+    #[test]
+    fn test_all_passing_relative_false_when_lint_exceeds_baseline() {
+        let signals = OverseerSignals {
+            test_results: Some(TestResults {
+                passed: 10, failed: 0, skipped: 0, total: 10,
+                regression_count: 0, failing_test_names: vec![],
+            }),
+            type_check: Some(TypeCheckResult { clean: true, error_count: 0, errors: vec![] }),
+            lint_results: Some(LintResults { error_count: 20, warning_count: 0, errors: vec![] }),
+            build_result: Some(BuildResult { success: true, error_count: 0, errors: vec![] }),
+            security_scan: None,
+            custom_checks: vec![],
+        };
+        // Lint errors (20) exceed baseline (10) — should fail
+        assert!(!signals.all_passing_relative(10));
+        // Lint errors (20) at baseline (20) — should pass
+        assert!(signals.all_passing_relative(20));
+    }
+
+    #[test]
+    fn test_all_passing_relative_false_on_build_failure() {
+        let mut signals = OverseerSignals::empty();
+        signals.build_result = Some(BuildResult {
+            success: false,
+            error_count: 3,
+            errors: vec!["link error".into()],
+        });
+        // Build failure should cause all_passing_relative to return false
+        // regardless of lint baseline
+        assert!(!signals.all_passing_relative(100));
+    }
+
+    #[test]
+    fn test_all_passing_relative_false_on_critical_vulnerability() {
+        let mut signals = OverseerSignals::empty();
+        signals.security_scan = Some(SecurityScanResult {
+            critical_count: 1,
+            high_count: 0,
+            medium_count: 0,
+            findings: vec!["CVE-2025-0001".into()],
+        });
+        // Critical vulnerability should cause all_passing_relative to fail
+        assert!(!signals.all_passing_relative(100));
+    }
+
+    // -- merge edge cases ---------------------------------------------------
+
+    #[test]
+    fn test_merge_moderate_wins_when_cheap_is_none() {
+        let cheap = OverseerSignals::empty();
+
+        let moderate = OverseerSignals {
+            test_results: Some(TestResults {
+                passed: 5, failed: 1, skipped: 0, total: 6,
+                regression_count: 0, failing_test_names: vec!["test_foo".into()],
+            }),
+            type_check: None,
+            lint_results: Some(LintResults { error_count: 3, warning_count: 1, errors: vec![] }),
+            build_result: Some(BuildResult { success: true, error_count: 0, errors: vec![] }),
+            security_scan: None,
+            custom_checks: vec![],
+        };
+
+        let expensive = OverseerSignals {
+            test_results: Some(TestResults {
+                passed: 50, failed: 0, skipped: 0, total: 50,
+                regression_count: 0, failing_test_names: vec![],
+            }),
+            type_check: None,
+            lint_results: None,
+            build_result: None,
+            security_scan: None,
+            custom_checks: vec![],
+        };
+
+        let merged = OverseerSignals::merge(cheap, moderate, expensive);
+
+        // moderate wins for test_results (cheap was None)
+        assert_eq!(merged.test_results.as_ref().unwrap().total, 6);
+        // moderate wins for lint_results
+        assert_eq!(merged.lint_results.as_ref().unwrap().error_count, 3);
+        // moderate wins for build_result
+        assert!(merged.build_result.as_ref().unwrap().success);
+        // expensive test_results ignored because moderate already provided them
+        assert_eq!(merged.test_results.as_ref().unwrap().failed, 1);
+    }
+
+    // -- error_count partial signals ----------------------------------------
+
+    #[test]
+    fn test_error_count_partial_signals() {
+        // Only lint_results present (build and type_check absent)
+        let mut signals = OverseerSignals::empty();
+        signals.lint_results = Some(LintResults {
+            error_count: 7,
+            warning_count: 15,
+            errors: vec![],
+        });
+        assert_eq!(signals.error_count(), 7);
+
+        // Only type_check present
+        let mut signals2 = OverseerSignals::empty();
+        signals2.type_check = Some(TypeCheckResult {
+            clean: false,
+            error_count: 4,
+            errors: vec![],
+        });
+        assert_eq!(signals2.error_count(), 4);
+
+        // Only build_result present
+        let mut signals3 = OverseerSignals::empty();
+        signals3.build_result = Some(BuildResult {
+            success: false,
+            error_count: 2,
+            errors: vec![],
+        });
+        assert_eq!(signals3.error_count(), 2);
+    }
 }

@@ -150,3 +150,75 @@ pub struct TaskDecomposition {
     /// IDs of subtasks that must complete before this one can start.
     pub dependencies: Vec<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_convergence_outcome_variants_constructible() {
+        // Verify all ConvergenceOutcome variants can be constructed
+        let converged = ConvergenceOutcome::Converged {
+            trajectory_id: "traj-1".to_string(),
+            final_observation_sequence: 5,
+        };
+        assert!(matches!(converged, ConvergenceOutcome::Converged { .. }));
+
+        let exhausted = ConvergenceOutcome::Exhausted {
+            trajectory_id: "traj-2".to_string(),
+            best_observation_sequence: Some(3),
+        };
+        assert!(matches!(exhausted, ConvergenceOutcome::Exhausted { .. }));
+
+        let exhausted_none = ConvergenceOutcome::Exhausted {
+            trajectory_id: "traj-3".to_string(),
+            best_observation_sequence: None,
+        };
+        assert!(matches!(exhausted_none, ConvergenceOutcome::Exhausted { best_observation_sequence: None, .. }));
+
+        let trapped = ConvergenceOutcome::Trapped {
+            trajectory_id: "traj-4".to_string(),
+            attractor_type: AttractorType::LimitCycle { period: 2, cycle_signatures: vec![] },
+        };
+        assert!(matches!(trapped, ConvergenceOutcome::Trapped { .. }));
+
+        let decomposed = ConvergenceOutcome::Decomposed {
+            parent_trajectory_id: "traj-5".to_string(),
+            child_trajectory_ids: vec!["child-1".to_string(), "child-2".to_string()],
+        };
+        assert!(matches!(decomposed, ConvergenceOutcome::Decomposed { .. }));
+
+        let denied = ConvergenceOutcome::BudgetDenied {
+            trajectory_id: "traj-6".to_string(),
+        };
+        assert!(matches!(denied, ConvergenceOutcome::BudgetDenied { .. }));
+    }
+
+    #[test]
+    fn test_loop_control_variants_constructible() {
+        // Verify all LoopControl variants can be constructed and matched
+        let variants = vec![
+            LoopControl::Continue,
+            LoopControl::IntentCheck,
+            LoopControl::Exhausted,
+            LoopControl::Trapped,
+            LoopControl::RequestExtension,
+            LoopControl::Decompose,
+            LoopControl::OverseerConverged,
+        ];
+
+        assert_eq!(variants.len(), 7);
+
+        assert!(matches!(variants[0], LoopControl::Continue));
+        assert!(matches!(variants[1], LoopControl::IntentCheck));
+        assert!(matches!(variants[2], LoopControl::Exhausted));
+        assert!(matches!(variants[3], LoopControl::Trapped));
+        assert!(matches!(variants[4], LoopControl::RequestExtension));
+        assert!(matches!(variants[5], LoopControl::Decompose));
+        assert!(matches!(variants[6], LoopControl::OverseerConverged));
+    }
+}
