@@ -1,2 +1,12 @@
 [polling]
 goal_convergence_check_interval_secs = 14400
+
+[scheduling]
+quiet_hours_enabled = true
+default_timezone = "America/Los_Angeles"
+
+[[quiet_windows]]
+name = "workday"
+start_cron = "0 5 * * *"
+end_cron = "0 18 * * *"
+description = "Pause during normal working hours (5am–6pm)"

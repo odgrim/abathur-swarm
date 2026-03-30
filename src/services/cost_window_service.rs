@@ -8,6 +8,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use tokio::sync::RwLock;
 
 use crate::domain::models::quiet_window::{QuietWindow, QuietWindowStatus};
@@ -110,11 +111,22 @@ impl CostWindowService {
             }
         };
 
-        // Convert `now` to the window's timezone for evaluation, then back to UTC
-        // for comparison. The cron crate works with chrono DateTime directly.
-        // We look backwards from `now` to find the last fire times.
-        let last_start = last_fire_before(&start_schedule, now);
-        let last_end = last_fire_before(&end_schedule, now);
+        // Convert `now` to the window's timezone so that cron expressions like
+        // "0 5 * * *" are evaluated in the configured timezone, not UTC.
+        let tz: Tz = match window.timezone.parse() {
+            Ok(tz) => tz,
+            Err(_) => {
+                tracing::warn!(
+                    window_name = %window.name,
+                    timezone = %window.timezone,
+                    "invalid timezone, falling back to UTC"
+                );
+                chrono_tz::UTC
+            }
+        };
+        let now_in_tz = now.with_timezone(&tz);
+        let last_start = last_fire_before_tz(&start_schedule, now_in_tz);
+        let last_end = last_fire_before_tz(&end_schedule, now_in_tz);
 
         match (last_start, last_end) {
             (Some(ls), Some(le)) => ls > le,
@@ -152,14 +164,17 @@ fn normalize_cron_5to7(expr: &str) -> String {
     }
 }
 
-/// Find the most recent fire time of a cron schedule strictly before `before`.
+/// Find the most recent fire time of a cron schedule strictly before `before`,
+/// evaluated in the given timezone.
 ///
 /// The `cron` crate only provides `after()` iterators, so we search backwards
-/// by iterating from a reasonable past start point. We look back up to 7 days
+/// by iterating from a reasonable past start point. We look back up to 8 days
 /// which covers all reasonable cron patterns (weekly is the longest period).
-fn last_fire_before(schedule: &cron::Schedule, before: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let search_start = before - chrono::Duration::days(8);
-    // Iterate forward from search_start and find the last one before `before`.
+fn last_fire_before_tz<T: chrono::TimeZone>(
+    schedule: &cron::Schedule,
+    before: DateTime<T>,
+) -> Option<DateTime<T>> {
+    let search_start = before.clone() - chrono::Duration::days(8);
     let mut last = None;
     for fire_time in schedule.after(&search_start) {
         if fire_time >= before {
@@ -169,6 +184,7 @@ fn last_fire_before(schedule: &cron::Schedule, before: DateTime<Utc>) -> Option<
     }
     last
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -183,16 +199,52 @@ mod tests {
     }
 
     #[test]
-    fn test_last_fire_before() {
+    fn test_last_fire_before_tz() {
         // Cron: every hour at minute 0 → "0 0 * * * * *"
         let schedule = cron::Schedule::from_str("0 0 * * * * *").unwrap();
         // At 14:30 UTC, last fire should be 14:00
         let now = Utc.with_ymd_and_hms(2026, 3, 28, 14, 30, 0).unwrap();
-        let last = last_fire_before(&schedule, now);
+        let last = last_fire_before_tz(&schedule, now);
         assert!(last.is_some());
         let last = last.unwrap();
         assert_eq!(last.hour(), 14);
         assert_eq!(last.minute(), 0);
+    }
+
+    #[test]
+    fn test_timezone_aware_quiet_window() {
+        // Regression test: quiet window with America/Los_Angeles timezone
+        // should evaluate cron in that timezone, not UTC.
+        //
+        // Window: 5am-6pm Pacific (suppress during daytime)
+        let window = QuietWindow::new(
+            "peak",
+            "Suppress during peak hours",
+            "0 5 * * *",
+            "0 18 * * *",
+            "America/Los_Angeles",
+        );
+
+        let service = CostWindowService {
+            repo: Arc::new(NullQuietWindowRepo),
+            windows: RwLock::new(vec![]),
+        };
+
+        // 10:30pm PDT = 5:30am UTC next day
+        // This is OUTSIDE the quiet window (nighttime in Pacific)
+        let night_pdt = Utc.with_ymd_and_hms(2026, 3, 30, 5, 30, 0).unwrap();
+        assert!(
+            !service.is_inside_window(&window, night_pdt),
+            "10:30pm PDT should be outside the 5am-6pm Pacific quiet window"
+        );
+
+        // 12:00pm PDT = 7:00pm UTC
+        // This is INSIDE the quiet window (midday in Pacific)
+        let midday_pdt = Utc.with_ymd_and_hms(2026, 3, 30, 19, 0, 0).unwrap();
+        assert!(
+            service.is_inside_window(&window, midday_pdt),
+            "12:00pm PDT should be inside the 5am-6pm Pacific quiet window"
+        );
     }
 
     #[test]
