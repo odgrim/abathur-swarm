@@ -1989,4 +1989,297 @@ mod tests {
             "Pending + Pending should be valid"
         );
     }
+
+    // --- advance() tests ---
+
+    #[tokio::test]
+    async fn test_advance_from_pending_succeeds() {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let task_service = TaskService::new(task_repo.clone());
+        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+
+        // Create a task in Running state with Pending workflow state
+        let mut task = Task::with_title("Advance pending", "test");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task_repo.create(&task).await.unwrap();
+
+        let ws = WorkflowState::Pending {
+            workflow_name: "code".to_string(),
+        };
+        engine.write_state(task.id, &ws).await.unwrap();
+
+        let result = engine.advance(task.id).await;
+        assert!(result.is_ok(), "advance from Pending should succeed: {:?}", result.err());
+
+        match result.unwrap() {
+            AdvanceResult::PhaseReady { phase_index, phase_name } => {
+                assert_eq!(phase_index, 0);
+                assert_eq!(phase_name, "research");
+            }
+            other => panic!("Expected PhaseReady, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_advance_from_phase_gate_moves_to_next_phase() {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let task_service = TaskService::new(task_repo.clone());
+        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+
+        let mut task = Task::with_title("Advance gate", "test");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task_repo.create(&task).await.unwrap();
+
+        // PhaseGate at index 0 should advance to index 1 (plan)
+        let ws = WorkflowState::PhaseGate {
+            workflow_name: "code".to_string(),
+            phase_index: 0,
+            phase_name: "research".to_string(),
+        };
+        engine.write_state(task.id, &ws).await.unwrap();
+
+        let result = engine.advance(task.id).await;
+        assert!(result.is_ok(), "advance from PhaseGate should succeed: {:?}", result.err());
+
+        match result.unwrap() {
+            AdvanceResult::PhaseReady { phase_index, phase_name } => {
+                assert_eq!(phase_index, 1);
+                assert_eq!(phase_name, "plan");
+            }
+            other => panic!("Expected PhaseReady {{ phase_index: 1 }}, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_advance_from_phase_ready_returns_error() {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let task_service = TaskService::new(task_repo.clone());
+        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+
+        let mut task = Task::with_title("Advance ready", "test");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task_repo.create(&task).await.unwrap();
+
+        let ws = WorkflowState::PhaseReady {
+            workflow_name: "code".to_string(),
+            phase_index: 0,
+            phase_name: "research".to_string(),
+        };
+        engine.write_state(task.id, &ws).await.unwrap();
+
+        let result = engine.advance(task.id).await;
+        assert!(result.is_err(), "advance from PhaseReady should fail");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("already in PhaseReady"),
+            "Error should mention PhaseReady, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_advance_from_phase_running_with_active_subtasks_fails() {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let task_service = TaskService::new(task_repo.clone());
+        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+
+        let mut task = Task::with_title("Advance running", "test");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task_repo.create(&task).await.unwrap();
+
+        // Create a running subtask
+        let mut subtask = Task::with_title("Running subtask", "work");
+        subtask.parent_id = Some(task.id);
+        subtask.source = TaskSource::SubtaskOf(task.id);
+        subtask.transition_to(TaskStatus::Ready).unwrap();
+        subtask.transition_to(TaskStatus::Running).unwrap();
+        task_repo.create(&subtask).await.unwrap();
+
+        let ws = WorkflowState::PhaseRunning {
+            workflow_name: "code".to_string(),
+            phase_index: 0,
+            phase_name: "research".to_string(),
+            subtask_ids: vec![subtask.id],
+        };
+        engine.write_state(task.id, &ws).await.unwrap();
+
+        let result = engine.advance(task.id).await;
+        assert!(result.is_err(), "advance with active subtasks should fail");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("still running"),
+            "Error should mention still running, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_advance_nonexistent_task_returns_not_found() {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let task_service = TaskService::new(task_repo.clone());
+        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+
+        let random_id = Uuid::new_v4();
+        let result = engine.advance(random_id).await;
+        assert!(result.is_err(), "advance on nonexistent task should fail");
+        match result.unwrap_err() {
+            DomainError::TaskNotFound(id) => assert_eq!(id, random_id),
+            other => panic!("Expected TaskNotFound, got: {:?}", other),
+        }
+    }
+
+    // --- fan_out() tests ---
+
+    #[tokio::test]
+    async fn test_fan_out_creates_subtasks() {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let task_service = TaskService::new(task_repo.clone());
+        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+
+        let mut task = Task::with_title("Fan out parent", "test");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task_repo.create(&task).await.unwrap();
+
+        let ws = WorkflowState::PhaseReady {
+            workflow_name: "code".to_string(),
+            phase_index: 2,
+            phase_name: "implement".to_string(),
+        };
+        engine.write_state(task.id, &ws).await.unwrap();
+
+        let slices = vec![
+            FanOutSlice {
+                description: "Slice A".to_string(),
+                agent: Some("rust-implementer".to_string()),
+                context: Default::default(),
+            },
+            FanOutSlice {
+                description: "Slice B".to_string(),
+                agent: Some("rust-implementer".to_string()),
+                context: Default::default(),
+            },
+        ];
+
+        let result = engine.fan_out(task.id, slices).await;
+        assert!(result.is_ok(), "fan_out should succeed: {:?}", result.err());
+
+        let fan_out_result = result.unwrap();
+        assert_eq!(fan_out_result.subtask_ids.len(), 2);
+        assert_eq!(fan_out_result.phase_index, 2);
+        assert_eq!(fan_out_result.phase_name, "implement");
+
+        // Verify subtasks exist in the repo
+        for sub_id in &fan_out_result.subtask_ids {
+            let sub = task_repo.get(*sub_id).await.unwrap().unwrap();
+            assert_eq!(sub.parent_id, Some(task.id));
+            assert_eq!(sub.status, TaskStatus::Ready);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fan_out_empty_slices_returns_error() {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let task_service = TaskService::new(task_repo.clone());
+        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+
+        let mut task = Task::with_title("Fan out empty", "test");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task_repo.create(&task).await.unwrap();
+
+        let result = engine.fan_out(task.id, vec![]).await;
+        assert!(result.is_err(), "fan_out with empty slices should fail");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("at least one slice"),
+            "Error should mention at least one slice, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fan_out_missing_agent_returns_error() {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let task_service = TaskService::new(task_repo.clone());
+        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+
+        let mut task = Task::with_title("Fan out no agent", "test");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task_repo.create(&task).await.unwrap();
+
+        let slices = vec![FanOutSlice {
+            description: "No agent slice".to_string(),
+            agent: None,
+            context: Default::default(),
+        }];
+
+        let result = engine.fan_out(task.id, slices).await;
+        assert!(result.is_err(), "fan_out without agent should fail");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("missing required `agent`"),
+            "Error should mention missing agent, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fan_out_wrong_state_returns_error() {
+        let pool = create_migrated_test_pool().await.unwrap();
+        let task_repo = Arc::new(SqliteTaskRepository::new(pool));
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let task_service = TaskService::new(task_repo.clone());
+        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+
+        let mut task = Task::with_title("Fan out wrong state", "test");
+        task.transition_to(TaskStatus::Ready).unwrap();
+        task.transition_to(TaskStatus::Running).unwrap();
+        task_repo.create(&task).await.unwrap();
+
+        // Set to PhaseRunning instead of PhaseReady
+        let ws = WorkflowState::PhaseRunning {
+            workflow_name: "code".to_string(),
+            phase_index: 0,
+            phase_name: "research".to_string(),
+            subtask_ids: vec![],
+        };
+        engine.write_state(task.id, &ws).await.unwrap();
+
+        let slices = vec![FanOutSlice {
+            description: "Slice".to_string(),
+            agent: Some("rust-implementer".to_string()),
+            context: Default::default(),
+        }];
+
+        let result = engine.fan_out(task.id, slices).await;
+        assert!(result.is_err(), "fan_out from PhaseRunning should fail");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("call advance()"),
+            "Error should mention calling advance, got: {}",
+            err_msg
+        );
+    }
 }
