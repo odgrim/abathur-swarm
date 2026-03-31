@@ -2241,4 +2241,115 @@ mod tests {
             "should return None when verification errors out"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // apply_sla_pressure tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_sla_pressure_critical() {
+        let hints = vec!["sla:critical".to_string()];
+        let mut policy = ConvergencePolicy::default();
+
+        apply_sla_pressure(&hints, &mut policy);
+
+        assert!(
+            (policy.acceptance_threshold - 0.80).abs() < f64::EPSILON,
+            "critical SLA should lower acceptance_threshold to 0.80, got {}",
+            policy.acceptance_threshold
+        );
+        assert!(
+            policy.partial_acceptance,
+            "critical SLA should enable partial_acceptance"
+        );
+        assert!(
+            (policy.partial_threshold - 0.50).abs() < f64::EPSILON,
+            "critical SLA should lower partial_threshold to 0.50, got {}",
+            policy.partial_threshold
+        );
+        assert!(
+            policy.skip_expensive_overseers,
+            "critical SLA should enable skip_expensive_overseers"
+        );
+    }
+
+    #[test]
+    fn test_apply_sla_pressure_warning() {
+        let hints = vec!["sla:warning".to_string()];
+        let mut policy = ConvergencePolicy::default();
+
+        apply_sla_pressure(&hints, &mut policy);
+
+        assert!(
+            (policy.acceptance_threshold - 0.85).abs() < f64::EPSILON,
+            "warning SLA should lower acceptance_threshold to 0.85, got {}",
+            policy.acceptance_threshold
+        );
+        assert!(
+            policy.partial_acceptance,
+            "warning SLA should enable partial_acceptance"
+        );
+        assert!(
+            (policy.partial_threshold - 0.60).abs() < f64::EPSILON,
+            "warning SLA should lower partial_threshold to 0.60, got {}",
+            policy.partial_threshold
+        );
+        assert!(
+            !policy.skip_expensive_overseers,
+            "warning SLA should NOT enable skip_expensive_overseers"
+        );
+    }
+
+    #[test]
+    fn test_apply_sla_pressure_no_hint() {
+        let hints: Vec<String> = vec![];
+        let mut policy = ConvergencePolicy::default();
+        let original = policy.clone();
+
+        apply_sla_pressure(&hints, &mut policy);
+
+        assert!(
+            (policy.acceptance_threshold - original.acceptance_threshold).abs() < f64::EPSILON,
+            "no SLA hint should leave acceptance_threshold unchanged"
+        );
+        assert_eq!(
+            policy.partial_acceptance, original.partial_acceptance,
+            "no SLA hint should leave partial_acceptance unchanged"
+        );
+        assert!(
+            (policy.partial_threshold - original.partial_threshold).abs() < f64::EPSILON,
+            "no SLA hint should leave partial_threshold unchanged"
+        );
+        assert_eq!(
+            policy.skip_expensive_overseers, original.skip_expensive_overseers,
+            "no SLA hint should leave skip_expensive_overseers unchanged"
+        );
+    }
+
+    #[test]
+    fn test_apply_sla_pressure_critical_preserves_lower_thresholds() {
+        let hints = vec!["sla:critical".to_string()];
+        let mut policy = ConvergencePolicy {
+            acceptance_threshold: 0.70, // already below 0.80
+            partial_threshold: 0.40,    // already below 0.50
+            ..ConvergencePolicy::default()
+        };
+
+        apply_sla_pressure(&hints, &mut policy);
+
+        assert!(
+            (policy.acceptance_threshold - 0.70).abs() < f64::EPSILON,
+            ".min() semantics should preserve already-lower acceptance_threshold 0.70, got {}",
+            policy.acceptance_threshold
+        );
+        assert!(
+            (policy.partial_threshold - 0.40).abs() < f64::EPSILON,
+            ".min() semantics should preserve already-lower partial_threshold 0.40, got {}",
+            policy.partial_threshold
+        );
+        assert!(
+            policy.skip_expensive_overseers,
+            "critical SLA should still enable skip_expensive_overseers"
+        );
+    }
 }

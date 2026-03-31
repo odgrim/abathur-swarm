@@ -2319,4 +2319,267 @@ mod tests {
         assert!(evolution.get_events(None).await.is_empty());
         assert!(evolution.get_pending_refinements().await.is_empty());
     }
+
+    // ── MockRefinementRepo for persistence tests ──
+
+    /// A mock `RefinementRepository` backed by in-memory `Arc<Mutex<Vec<...>>>` collections.
+    struct MockRefinementRepo {
+        requests: std::sync::Mutex<Vec<RefinementRequest>>,
+        stats: std::sync::Mutex<Vec<TemplateStats>>,
+        version_changes: std::sync::Mutex<Vec<VersionChangeRecord>>,
+    }
+
+    impl MockRefinementRepo {
+        fn new() -> Self {
+            Self {
+                requests: std::sync::Mutex::new(Vec::new()),
+                stats: std::sync::Mutex::new(Vec::new()),
+                version_changes: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RefinementRepository for MockRefinementRepo {
+        async fn create(
+            &self,
+            request: &RefinementRequest,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(())
+        }
+
+        async fn get_pending(
+            &self,
+        ) -> Result<Vec<RefinementRequest>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.status == RefinementStatus::Pending)
+                .cloned()
+                .collect())
+        }
+
+        async fn update_status(
+            &self,
+            id: Uuid,
+            status: RefinementStatus,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let mut reqs = self.requests.lock().unwrap();
+            if let Some(r) = reqs.iter_mut().find(|r| r.id == id) {
+                r.status = status;
+            }
+            Ok(())
+        }
+
+        async fn reset_in_progress_to_pending(
+            &self,
+        ) -> Result<Vec<RefinementRequest>, Box<dyn std::error::Error + Send + Sync>> {
+            let mut reqs = self.requests.lock().unwrap();
+            let mut recovered = Vec::new();
+            for r in reqs.iter_mut() {
+                if r.status == RefinementStatus::InProgress {
+                    r.status = RefinementStatus::Pending;
+                    recovered.push(r.clone());
+                }
+            }
+            Ok(recovered)
+        }
+
+        async fn load_all_stats(
+            &self,
+        ) -> Result<Vec<TemplateStats>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.stats.lock().unwrap().clone())
+        }
+
+        async fn load_version_changes(
+            &self,
+        ) -> Result<Vec<VersionChangeRecord>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(self.version_changes.lock().unwrap().clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_persisted_state_restores_stats() {
+        let repo = Arc::new(MockRefinementRepo::new());
+        {
+            let mut stats = repo.stats.lock().unwrap();
+            let mut s = TemplateStats::new("persisted-agent".to_string(), 3);
+            s.total_tasks = 10;
+            s.successful_tasks = 7;
+            s.success_rate = 0.7;
+            stats.push(s);
+        }
+
+        let evolution =
+            EvolutionLoop::new(EvolutionConfig::default()).with_repo(repo as Arc<dyn RefinementRepository>);
+        evolution.load_persisted_state().await;
+
+        let all = evolution.get_all_stats().await;
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].template_name, "persisted-agent");
+        assert_eq!(all[0].total_tasks, 10);
+        assert_eq!(all[0].template_version, 3);
+    }
+
+    #[tokio::test]
+    async fn test_load_persisted_state_or_insert_semantics() {
+        // In-memory stats should take precedence over repo stats.
+        let repo = Arc::new(MockRefinementRepo::new());
+        {
+            let mut stats = repo.stats.lock().unwrap();
+            let mut s = TemplateStats::new("agent-x".to_string(), 1);
+            s.total_tasks = 50;
+            s.successful_tasks = 25;
+            s.success_rate = 0.5;
+            stats.push(s);
+        }
+
+        let evolution =
+            EvolutionLoop::new(EvolutionConfig::default()).with_repo(repo as Arc<dyn RefinementRepository>);
+
+        // Record an execution first (populates in-memory stats for "agent-x")
+        evolution
+            .record_execution(make_execution("agent-x", 1, TaskOutcome::Success))
+            .await;
+
+        // Now load persisted state — should NOT overwrite the in-memory entry
+        evolution.load_persisted_state().await;
+
+        let stats = evolution.get_stats("agent-x").await.unwrap();
+        assert_eq!(
+            stats.total_tasks, 1,
+            "in-memory stats (1 task) must take precedence over repo stats (50 tasks)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_persisted_state_restores_version_changes() {
+        let repo = Arc::new(MockRefinementRepo::new());
+        {
+            let mut changes = repo.version_changes.lock().unwrap();
+            let prev_stats = TemplateStats::new("vc-agent".to_string(), 1);
+            changes.push(VersionChangeRecord {
+                template_name: "vc-agent".to_string(),
+                from_version: 1,
+                to_version: 2,
+                previous_stats: prev_stats,
+                changed_at: Utc::now() - Duration::hours(1),
+            });
+        }
+
+        let evolution =
+            EvolutionLoop::new(EvolutionConfig::default()).with_repo(repo as Arc<dyn RefinementRepository>);
+        evolution.load_persisted_state().await;
+
+        // Verify that previous_version_stats were restored
+        let state = evolution.state.read().await;
+        assert!(
+            state.previous_version_stats.contains_key("vc-agent"),
+            "version change should restore previous_version_stats"
+        );
+        assert_eq!(
+            state.previous_version_stats["vc-agent"].template_version, 1,
+            "previous stats should be for version 1"
+        );
+        assert!(
+            state.version_change_times.contains_key("vc-agent"),
+            "version change should restore version_change_times"
+        );
+        assert_eq!(
+            state.version_change_times["vc-agent"].0, 2,
+            "version_change_times should record to_version=2"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recover_in_progress_refinements() {
+        let repo = Arc::new(MockRefinementRepo::new());
+        let request_id = Uuid::new_v4();
+        {
+            let mut reqs = repo.requests.lock().unwrap();
+            reqs.push(RefinementRequest {
+                id: request_id,
+                template_name: "recover-agent".to_string(),
+                template_version: 1,
+                severity: RefinementSeverity::Minor,
+                trigger: EvolutionTrigger::LowSuccessRate,
+                stats: TemplateStats::new("recover-agent".to_string(), 1),
+                failed_task_ids: vec![],
+                created_at: Utc::now(),
+                status: RefinementStatus::InProgress,
+            });
+        }
+
+        let evolution =
+            EvolutionLoop::new(EvolutionConfig::default()).with_repo(repo.clone() as Arc<dyn RefinementRepository>);
+        evolution.recover_in_progress_refinements().await;
+
+        // The request should have been reset to Pending in the repo
+        let repo_reqs = repo.requests.lock().unwrap();
+        assert_eq!(repo_reqs[0].status, RefinementStatus::Pending);
+        drop(repo_reqs);
+
+        // And loaded into the in-memory queue
+        let pending = evolution.get_pending_refinements().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, request_id);
+        assert_eq!(pending[0].status, RefinementStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn test_load_from_repo_dedup() {
+        let repo = Arc::new(MockRefinementRepo::new());
+        let shared_id = Uuid::new_v4();
+        let request = RefinementRequest {
+            id: shared_id,
+            template_name: "dedup-agent".to_string(),
+            template_version: 1,
+            severity: RefinementSeverity::Minor,
+            trigger: EvolutionTrigger::LowSuccessRate,
+            stats: TemplateStats::new("dedup-agent".to_string(), 1),
+            failed_task_ids: vec![],
+            created_at: Utc::now(),
+            status: RefinementStatus::Pending,
+        };
+        {
+            repo.requests.lock().unwrap().push(request.clone());
+        }
+
+        let evolution =
+            EvolutionLoop::new(EvolutionConfig::default()).with_repo(repo as Arc<dyn RefinementRepository>);
+
+        // Manually insert the same request into in-memory queue first
+        {
+            let mut state = evolution.state.write().await;
+            state.refinement_queue.push(request);
+        }
+
+        // load_from_repo should NOT duplicate
+        evolution.load_from_repo().await;
+
+        let pending = evolution.get_pending_refinements().await;
+        assert_eq!(
+            pending.len(),
+            1,
+            "duplicate IDs from repo must not create duplicates in queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_persisted_state_no_repo_is_noop() {
+        // No repo attached — should not panic and leave state empty
+        let evolution = EvolutionLoop::with_default_config();
+        evolution.load_persisted_state().await;
+
+        let all = evolution.get_all_stats().await;
+        assert!(all.is_empty(), "no repo means no stats loaded");
+
+        // Also test recover_in_progress_refinements with no repo
+        evolution.recover_in_progress_refinements().await;
+        let pending = evolution.get_pending_refinements().await;
+        assert!(pending.is_empty(), "no repo means no refinements recovered");
+    }
 }

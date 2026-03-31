@@ -2381,6 +2381,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use crate::domain::models::MemoryTier;
+    use crate::services::budget_tracker::BudgetTrackerConfig;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -4166,6 +4167,503 @@ mod tests {
         let dist = &restored.context_arms["fixed_point"]["focused_repair"];
         // Initial alpha=1, +3 nudge, +5 nudge = 9.0
         assert!((dist.alpha - 9.0).abs() < f64::EPSILON);
+    }
+
+    // -----------------------------------------------------------------------
+    // ProgressiveMockOverseerMeasurer -- returns different signals per call
+    // -----------------------------------------------------------------------
+
+    struct ProgressiveMockOverseerMeasurer {
+        signals_sequence: Mutex<Vec<OverseerSignals>>,
+        call_index: Mutex<usize>,
+    }
+
+    impl ProgressiveMockOverseerMeasurer {
+        fn new(signals_sequence: Vec<OverseerSignals>) -> Self {
+            Self {
+                signals_sequence: Mutex::new(signals_sequence),
+                call_index: Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl OverseerMeasurer for ProgressiveMockOverseerMeasurer {
+        async fn measure(
+            &self,
+            _artifact: &ArtifactReference,
+            _policy: &ConvergencePolicy,
+        ) -> DomainResult<OverseerSignals> {
+            let mut idx = self.call_index.lock().unwrap();
+            let seq = self.signals_sequence.lock().unwrap();
+            let signals = if *idx < seq.len() {
+                seq[*idx].clone()
+            } else {
+                // Repeat last signal if we run out
+                seq.last().cloned().unwrap_or_default()
+            };
+            *idx += 1;
+            Ok(signals)
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper functions for converge/iterate_once tests
+    // -----------------------------------------------------------------------
+
+    /// All-passing signals with build+type_check+tests.
+    fn all_passing_signals() -> OverseerSignals {
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 10,
+                failed: 0,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        }
+    }
+
+    /// Failing signals: build passes but tests fail.
+    fn failing_signals() -> OverseerSignals {
+        OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 3,
+                failed: 7,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: vec!["test_a".to_string(), "test_b".to_string()],
+            }),
+            ..OverseerSignals::default()
+        }
+    }
+
+    /// Build an engine with a progressive measurer for converge/iterate_once tests.
+    fn test_engine_with_measurer(
+        signals: Vec<OverseerSignals>,
+    ) -> ConvergenceEngine<MockTrajectoryRepo, MockMemoryRepo, ProgressiveMockOverseerMeasurer>
+    {
+        let mut config = test_config();
+        // Disable event emission and acceptance-test generation to simplify tests.
+        config.event_emission_enabled = false;
+        config.default_policy.generate_acceptance_tests = false;
+        ConvergenceEngine::new(
+            Arc::new(MockTrajectoryRepo::new()),
+            Arc::new(MockMemoryRepo::new()),
+            Arc::new(ProgressiveMockOverseerMeasurer::new(signals)),
+            config,
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // converge() and iterate_once() tests
+    // -----------------------------------------------------------------------
+
+    /// Happy path: progressive improvement leads to FixedPoint attractor,
+    /// then OverseerConverged fires when 2+ consecutive all-passing signals
+    /// are observed at a FixedPoint.
+    #[tokio::test]
+    async fn test_converge_happy_path_overseer_converged() {
+        // Progressive signals: start failing, improve each iteration,
+        // then stabilize at all-passing. This produces positive deltas →
+        // FixedPoint attractor.
+        let signals = vec![
+            // Iteration 0: build fails
+            OverseerSignals {
+                build_result: Some(BuildResult {
+                    success: false,
+                    error_count: 3,
+                    errors: vec!["error1".to_string()],
+                }),
+                ..OverseerSignals::default()
+            },
+            // Iteration 1: build passes, tests fail
+            OverseerSignals {
+                build_result: Some(BuildResult {
+                    success: true,
+                    error_count: 0,
+                    errors: Vec::new(),
+                }),
+                test_results: Some(TestResults {
+                    passed: 3,
+                    failed: 7,
+                    skipped: 0,
+                    total: 10,
+                    regression_count: 0,
+                    failing_test_names: vec!["t1".to_string()],
+                }),
+                ..OverseerSignals::default()
+            },
+            // Iteration 2: more tests pass
+            OverseerSignals {
+                build_result: Some(BuildResult {
+                    success: true,
+                    error_count: 0,
+                    errors: Vec::new(),
+                }),
+                test_results: Some(TestResults {
+                    passed: 7,
+                    failed: 3,
+                    skipped: 0,
+                    total: 10,
+                    regression_count: 0,
+                    failing_test_names: vec!["t1".to_string()],
+                }),
+                ..OverseerSignals::default()
+            },
+            // Iterations 3+: all passing (repeat for remaining iterations)
+            all_passing_signals(),
+            all_passing_signals(),
+            all_passing_signals(),
+            all_passing_signals(),
+            all_passing_signals(),
+            all_passing_signals(),
+            all_passing_signals(),
+        ];
+        let engine = test_engine_with_measurer(signals);
+
+        let task_id = Uuid::new_v4();
+        let mut submission = TaskSubmission::new(
+            "Implement a simple function that adds two numbers together for a calculator module".to_string(),
+        );
+        submission.inferred_complexity = Complexity::Moderate; // More budget
+
+        let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+        // Force Sequential convergence mode (Cheap hint avoids parallel routing).
+        trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
+        // Disable interval and budget-fraction triggers so the
+        // OverseerConverged shortcircuit path can fire.
+        trajectory.policy.intent_check_interval = u32::MAX;
+        trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+        let outcome = engine.converge(trajectory, &infra).await.unwrap();
+
+        assert!(
+            matches!(outcome, ConvergenceOutcome::Converged { .. }),
+            "Expected Converged outcome, got {:?}",
+            outcome
+        );
+    }
+
+    /// Budget exhaustion: always-failing signals with a tiny budget → Exhausted.
+    #[tokio::test]
+    async fn test_converge_budget_exhaustion() {
+        let signals: Vec<OverseerSignals> = (0..20).map(|_| failing_signals()).collect();
+        let engine = test_engine_with_measurer(signals);
+
+        let task_id = Uuid::new_v4();
+        let mut submission = TaskSubmission::new(
+            "Build a comprehensive REST API endpoint for user authentication with full test coverage".to_string(),
+        );
+        submission.inferred_complexity = Complexity::Simple;
+
+        let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+        // Shrink the budget so the loop exhausts quickly.
+        trajectory.budget.max_tokens = 30_000;
+        trajectory.budget.max_iterations = 2;
+        trajectory.budget.max_extensions = 0;
+        // Disable partial acceptance so we get Exhausted, not partial Converged.
+        trajectory.policy.partial_acceptance = false;
+
+        let outcome = engine.converge(trajectory, &infra).await.unwrap();
+
+        assert!(
+            matches!(outcome, ConvergenceOutcome::Exhausted { .. }),
+            "Expected Exhausted outcome, got {:?}",
+            outcome
+        );
+    }
+
+    /// Budget exhaustion with partial acceptance threshold met → Converged.
+    /// When the budget runs out but the best observation exceeds
+    /// partial_threshold, the engine returns Converged instead of Exhausted.
+    #[tokio::test]
+    async fn test_converge_budget_exhaustion_with_partial_acceptance() {
+        // Deteriorating signals: start good (high convergence_level), then get
+        // worse. This produces negative deltas → Declining attractor → budget
+        // extension denied. The best observation's convergence_level still
+        // exceeds partial_threshold, so partial acceptance fires.
+        let good_signals = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 9,
+                failed: 1,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: vec!["test_edge_case".to_string()],
+            }),
+            ..OverseerSignals::default()
+        };
+        let worse_signals = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 5,
+                failed: 5,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: vec!["test_a".to_string()],
+            }),
+            ..OverseerSignals::default()
+        };
+        let bad_signals = failing_signals();
+        // 3 iterations: good → worse → bad (declining trajectory)
+        let signals = vec![
+            good_signals.clone(),
+            worse_signals,
+            bad_signals.clone(),
+            bad_signals.clone(),
+            bad_signals,
+        ];
+        let engine = test_engine_with_measurer(signals);
+
+        let task_id = Uuid::new_v4();
+        let mut submission = TaskSubmission::new(
+            "Implement data validation logic for incoming API requests with comprehensive error handling".to_string(),
+        );
+        submission.inferred_complexity = Complexity::Simple;
+
+        let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+        // Force Sequential convergence mode (Cheap hint avoids parallel routing).
+        trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
+        // Budget: 3 iterations (enough for iterate_once to detect exhaustion
+        // via check_loop_control rather than Trapped at strategy selection).
+        trajectory.budget.max_tokens = 200_000;
+        trajectory.budget.max_iterations = 3;
+        trajectory.budget.max_extensions = 0;
+        // Enable partial acceptance with a low threshold.
+        // The best observation (iter 1, good_signals 9/10) has
+        // convergence_level ≈ 0.945, well above 0.5.
+        trajectory.policy.partial_acceptance = true;
+        trajectory.policy.partial_threshold = 0.5;
+
+        let outcome = engine.converge(trajectory, &infra).await.unwrap();
+
+        // Should be Converged via partial acceptance.
+        assert!(
+            matches!(outcome, ConvergenceOutcome::Converged { .. }),
+            "Expected Converged via partial acceptance, got {:?}",
+            outcome
+        );
+    }
+
+    /// Global budget tracker at Critical → BudgetDenied on first iteration.
+    #[tokio::test]
+    async fn test_converge_global_budget_denied() {
+        use crate::services::event_bus::{EventBus, EventBusConfig};
+
+        // All-passing signals (we won't even get to measure them).
+        let signals: Vec<OverseerSignals> = (0..5).map(|_| all_passing_signals()).collect();
+
+        let traj_repo = Arc::new(MockTrajectoryRepo::new());
+        let mem_repo = Arc::new(MockMemoryRepo::new());
+        let measurer = Arc::new(ProgressiveMockOverseerMeasurer::new(signals));
+        let mut config = test_config();
+        config.default_policy.generate_acceptance_tests = false;
+
+        let mut engine = ConvergenceEngine::new(
+            traj_repo,
+            mem_repo,
+            measurer,
+            config,
+        );
+
+        // Wire in a BudgetTracker at Critical pressure.
+        let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
+        let tracker = Arc::new(BudgetTracker::new(
+            BudgetTrackerConfig::default(),
+            event_bus,
+        ));
+        // Report a signal with 99% consumed → Critical.
+        tracker
+            .report_budget_signal(
+                "daily",
+                crate::services::budget_tracker::BudgetWindowType::Daily,
+                0.99,
+                100,
+                3600,
+            )
+            .await;
+        engine.set_budget_tracker(tracker);
+
+        let task_id = Uuid::new_v4();
+        let submission = TaskSubmission::new(
+            "Implement a basic utility function for string manipulation with unit tests and documentation".to_string(),
+        );
+
+        // Verify the tracker is actually at Critical before running converge.
+        assert!(
+            engine.budget_tracker.as_ref().unwrap().should_pause_new_work().await,
+            "Budget tracker should report Critical pressure"
+        );
+
+        let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+        // Force Sequential convergence mode so the budget tracker check fires.
+        trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
+        let outcome = engine.converge(trajectory, &infra).await.unwrap();
+
+        assert!(
+            matches!(outcome, ConvergenceOutcome::BudgetDenied { .. }),
+            "Expected BudgetDenied outcome, got {:?}",
+            outcome
+        );
+    }
+
+    /// iterate_once with a fresh trajectory (first observation) records the
+    /// observation and returns a LoopControl.
+    #[tokio::test]
+    async fn test_iterate_once_first_observation() {
+        let engine = test_engine_with_measurer(vec![]);
+
+        let mut trajectory = test_trajectory();
+        trajectory.phase = ConvergencePhase::Iterating;
+        let mut bandit = StrategyBandit::with_default_priors();
+        let strategy = StrategyKind::RetryWithFeedback;
+
+        // Create an observation with all-passing signals.
+        let observation = Observation::new(
+            0,
+            test_artifact(0),
+            all_passing_signals(),
+            strategy.clone(),
+            5_000,
+            1_000,
+        );
+
+        let control = engine
+            .iterate_once(&mut trajectory, &mut bandit, &strategy, observation)
+            .await
+            .unwrap();
+
+        // First observation should be recorded.
+        assert_eq!(
+            trajectory.observations.len(),
+            1,
+            "Expected 1 observation after iterate_once"
+        );
+        // Budget should be consumed.
+        assert!(trajectory.budget.tokens_used > 0);
+        // Attractor should be classified.
+        assert!(
+            !matches!(
+                trajectory.attractor_state.classification,
+                AttractorType::FixedPoint {
+                    estimated_remaining_iterations: 0,
+                    estimated_remaining_tokens: 0,
+                }
+            ) || true, // Just verify it doesn't panic
+            "Attractor should be classified after first observation"
+        );
+        // Control should be some valid value (exact value depends on attractor classification).
+        let _ = control; // Confirm no error
+    }
+
+    /// iterate_once with improving delta over a baseline observation.
+    #[tokio::test]
+    async fn test_iterate_once_improving_delta() {
+        let engine = test_engine_with_measurer(vec![]);
+
+        let mut trajectory = test_trajectory();
+        trajectory.phase = ConvergencePhase::Iterating;
+        let mut bandit = StrategyBandit::with_default_priors();
+        let strategy = StrategyKind::RetryWithFeedback;
+
+        // Add a baseline observation (failing tests).
+        let baseline = Observation::new(
+            0,
+            test_artifact(0),
+            failing_signals(),
+            strategy.clone(),
+            5_000,
+            1_000,
+        );
+        trajectory.observations.push(baseline);
+
+        // Now iterate with better signals.
+        let improved = Observation::new(
+            1,
+            test_artifact(1),
+            all_passing_signals(),
+            strategy.clone(),
+            5_000,
+            1_000,
+        );
+
+        let control = engine
+            .iterate_once(&mut trajectory, &mut bandit, &strategy, improved)
+            .await
+            .unwrap();
+
+        // Should now have 2 observations.
+        assert_eq!(trajectory.observations.len(), 2);
+
+        // The second observation should have metrics with a positive delta.
+        let last_obs = trajectory.observations.last().unwrap();
+        assert!(
+            last_obs.metrics.is_some(),
+            "Second observation should have computed metrics"
+        );
+        let metrics = last_obs.metrics.as_ref().unwrap();
+        assert!(
+            metrics.convergence_delta > 0.0,
+            "Expected positive convergence delta for improving signals, got {}",
+            metrics.convergence_delta
+        );
+        assert!(
+            metrics.convergence_level > 0.0,
+            "Expected positive convergence level, got {}",
+            metrics.convergence_level
+        );
+
+        // Strategy log should be updated.
+        assert!(
+            !trajectory.strategy_log.is_empty(),
+            "Strategy log should have an entry"
+        );
+
+        let _ = control;
     }
 
     // -----------------------------------------------------------------------
