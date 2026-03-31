@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/human-cerebrate"]
+
 [package]
 name = "abathur"
 version = "0.8.0"

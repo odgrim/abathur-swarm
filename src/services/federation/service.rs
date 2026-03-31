@@ -184,6 +184,98 @@ impl FederationHttpClient {
         Ok(())
     }
 
+    /// Send a task result to the parent overmind.
+    pub async fn send_result(
+        &self,
+        url: &str,
+        result: &FederationResult,
+    ) -> Result<(), String> {
+        let result_url = format!("{}/federation/result", url.trim_end_matches('/'));
+        let resp = self
+            .client
+            .post(&result_url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "federation/result",
+                "id": 1,
+                "params": result
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("Result request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("Result returned status {}", resp.status()));
+        }
+        Ok(())
+    }
+
+    /// Send a progress update to the parent overmind.
+    pub async fn send_progress(
+        &self,
+        url: &str,
+        task_id: Uuid,
+        cerebrate_id: &str,
+        phase: &str,
+        progress_pct: f64,
+        summary: &str,
+    ) -> Result<(), String> {
+        let progress_url = format!("{}/federation/progress", url.trim_end_matches('/'));
+        let resp = self
+            .client
+            .post(&progress_url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "federation/progress",
+                "id": 1,
+                "params": {
+                    "task_id": task_id,
+                    "cerebrate_id": cerebrate_id,
+                    "phase": phase,
+                    "progress_pct": progress_pct,
+                    "summary": summary
+                }
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("Progress request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("Progress returned status {}", resp.status()));
+        }
+        Ok(())
+    }
+
+    /// Send a task acceptance notification to the parent overmind.
+    pub async fn send_accept(
+        &self,
+        url: &str,
+        task_id: Uuid,
+        cerebrate_id: &str,
+    ) -> Result<(), String> {
+        let accept_url = format!("{}/federation/accept", url.trim_end_matches('/'));
+        let resp = self
+            .client
+            .post(&accept_url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "federation/accept",
+                "id": 1,
+                "params": {
+                    "task_id": task_id,
+                    "cerebrate_id": cerebrate_id
+                }
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("Accept request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("Accept returned status {}", resp.status()));
+        }
+        Ok(())
+    }
+
     /// Send a reconcile request to exchange in-flight task IDs.
     pub async fn reconcile(
         &self,
