@@ -81,6 +81,177 @@ async fn sync_with_remote(repo_path: &Path, base_ref: &str) -> bool {
     }
 }
 
+/// Resolve the actual `.git` directory for a working tree path.
+///
+/// For regular repos this returns `<path>/.git`. For git worktrees it follows the
+/// indirection file to the real git directory. Uses `git rev-parse --git-dir` so it
+/// handles both cases uniformly.
+async fn git_dir_for(path: &Path) -> Option<std::path::PathBuf> {
+    use tokio::process::Command;
+    Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(path)
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let p = std::path::PathBuf::from(p);
+            if p.is_absolute() { p } else { path.join(p) }
+        })
+}
+
+/// Ensure the git working directory at `repo_path` is in a clean state.
+///
+/// Aborts any in-progress merge, rebase, or cherry-pick, then discards all staged
+/// and unstaged changes. Returns `true` if the working directory is confirmed clean
+/// afterwards, `false` if recovery failed (caller should abort).
+///
+/// This is safe to call on the shared repo working directory because it is only used
+/// by the auto-ship pipeline — no active development happens there.
+async fn ensure_clean_working_dir(repo_path: &Path) -> bool {
+    use tokio::process::Command;
+
+    let git_dir = match git_dir_for(repo_path).await {
+        Some(d) => d,
+        None => {
+            tracing::error!(path = %repo_path.display(), "ensure_clean_working_dir: not a git repo");
+            return false;
+        }
+    };
+
+    // 1. Abort in-progress merge
+    if git_dir.join("MERGE_HEAD").exists() {
+        tracing::warn!(path = %repo_path.display(), "ensure_clean_working_dir: aborting in-progress merge");
+        let result = Command::new("git")
+            .args(["merge", "--abort"])
+            .current_dir(repo_path)
+            .output()
+            .await;
+        match &result {
+            Ok(o) if !o.status.success() => {
+                tracing::error!(
+                    stderr = %String::from_utf8_lossy(&o.stderr),
+                    "ensure_clean_working_dir: merge --abort failed"
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "ensure_clean_working_dir: failed to run merge --abort");
+            }
+            _ => {}
+        }
+    }
+
+    // 2. Abort in-progress rebase
+    if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+        tracing::warn!(path = %repo_path.display(), "ensure_clean_working_dir: aborting in-progress rebase");
+        let result = Command::new("git")
+            .args(["rebase", "--abort"])
+            .current_dir(repo_path)
+            .output()
+            .await;
+        match &result {
+            Ok(o) if !o.status.success() => {
+                tracing::error!(
+                    stderr = %String::from_utf8_lossy(&o.stderr),
+                    "ensure_clean_working_dir: rebase --abort failed"
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "ensure_clean_working_dir: failed to run rebase --abort");
+            }
+            _ => {}
+        }
+    }
+
+    // 3. Abort in-progress cherry-pick
+    if git_dir.join("CHERRY_PICK_HEAD").exists() {
+        tracing::warn!(path = %repo_path.display(), "ensure_clean_working_dir: aborting in-progress cherry-pick");
+        let result = Command::new("git")
+            .args(["cherry-pick", "--abort"])
+            .current_dir(repo_path)
+            .output()
+            .await;
+        match &result {
+            Ok(o) if !o.status.success() => {
+                tracing::error!(
+                    stderr = %String::from_utf8_lossy(&o.stderr),
+                    "ensure_clean_working_dir: cherry-pick --abort failed"
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "ensure_clean_working_dir: failed to run cherry-pick --abort");
+            }
+            _ => {}
+        }
+    }
+
+    // 4. Check for dirty state
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo_path)
+        .output()
+        .await;
+
+    let is_dirty = match &status {
+        Ok(o) if o.status.success() => {
+            !String::from_utf8_lossy(&o.stdout).trim().is_empty()
+        }
+        _ => true, // assume dirty if we can't check
+    };
+
+    if is_dirty {
+        tracing::warn!(path = %repo_path.display(), "ensure_clean_working_dir: working directory is dirty — resetting");
+
+        // Reset staged and unstaged changes
+        let _ = Command::new("git")
+            .args(["reset", "--hard", "HEAD"])
+            .current_dir(repo_path)
+            .output()
+            .await;
+    }
+
+    // 5. Verify clean state
+    let verify = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo_path)
+        .output()
+        .await;
+
+    match verify {
+        Ok(o) if o.status.success() => {
+            let output = String::from_utf8_lossy(&o.stdout);
+            if output.trim().is_empty() {
+                true
+            } else {
+                tracing::error!(
+                    path = %repo_path.display(),
+                    remaining = %output.trim(),
+                    "ensure_clean_working_dir: working directory still dirty after cleanup"
+                );
+                false
+            }
+        }
+        Ok(o) => {
+            tracing::error!(
+                path = %repo_path.display(),
+                stderr = %String::from_utf8_lossy(&o.stderr),
+                "ensure_clean_working_dir: git status failed after cleanup"
+            );
+            false
+        }
+        Err(e) => {
+            tracing::error!(
+                path = %repo_path.display(),
+                error = %e,
+                "ensure_clean_working_dir: failed to run git status after cleanup"
+            );
+            false
+        }
+    }
+}
+
 /// Push the local base ref to remote. On rejection (remote advanced),
 /// fetches and rebases once, then retries. Returns `true` if push succeeded.
 async fn push_with_retry(repo_path: &Path, base_ref: &str, max_retries: u32) -> bool {
@@ -134,11 +305,28 @@ async fn push_with_retry(repo_path: &Path, base_ref: &str, max_retries: u32) -> 
                             stderr = %String::from_utf8_lossy(&r.stderr),
                             "rebase onto origin/{} failed — aborting push retry", base_ref
                         );
-                        let _ = Command::new("git")
+                        let abort_result = Command::new("git")
                             .args(["rebase", "--abort"])
                             .current_dir(repo_path)
                             .output()
                             .await;
+                        match &abort_result {
+                            Ok(o) if !o.status.success() => {
+                                tracing::error!(
+                                    base_ref,
+                                    stderr = %String::from_utf8_lossy(&o.stderr),
+                                    "push_with_retry: rebase --abort itself failed"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    base_ref,
+                                    error = %e,
+                                    "push_with_retry: failed to run rebase --abort"
+                                );
+                            }
+                            _ => {}
+                        }
                         return false;
                     }
                 }
@@ -1151,6 +1339,16 @@ where
     static SHIP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = SHIP_LOCK.lock().await;
 
+    // Pre-flight: ensure the shared working directory is clean before starting.
+    // A previous auto-ship may have left dirty state if its cleanup was incomplete.
+    if !ensure_clean_working_dir(repo_path).await {
+        tracing::error!(
+            triggering_task_id = %triggering_task_id,
+            "try_auto_ship: unable to recover clean working directory — aborting"
+        );
+        return None;
+    }
+
     if output_delivery == OutputDelivery::MemoryOnly {
         tracing::debug!(
             triggering_task_id = %triggering_task_id,
@@ -1321,18 +1519,42 @@ where
         use tokio::process::Command as TokioCommand;
         if sync_with_remote(repo_path, default_base_ref).await {
             // Checkout the base branch and fast-forward to match remote
-            let _ = TokioCommand::new("git")
+            let checkout_sync = TokioCommand::new("git")
                 .args(["checkout", default_base_ref])
                 .current_dir(repo_path)
                 .output()
                 .await;
+            match &checkout_sync {
+                Ok(o) if !o.status.success() => {
+                    tracing::warn!(
+                        root_task_id = %root_id,
+                        stderr = %String::from_utf8_lossy(&o.stderr),
+                        "git checkout {} during sync failed", default_base_ref
+                    );
+                    ensure_clean_working_dir(repo_path).await;
+                    return None;
+                }
+                Err(e) => {
+                    tracing::warn!(root_task_id = %root_id, "git checkout {} during sync failed: {}", default_base_ref, e);
+                    ensure_clean_working_dir(repo_path).await;
+                    return None;
+                }
+                _ => {}
+            }
             let ff = TokioCommand::new("git")
                 .args(["merge", "--ff-only", &format!("origin/{}", default_base_ref)])
                 .current_dir(repo_path)
                 .output()
                 .await;
-            if let Ok(output) = &ff {
-                if !output.status.success() {
+            match &ff {
+                Err(e) => {
+                    tracing::warn!(
+                        root_task_id = %root_id,
+                        error = %e,
+                        "git merge --ff-only command failed during sync"
+                    );
+                }
+                Ok(output) if !output.status.success() => {
                     // Local main has diverged from remote (previous auto-ship push failed).
                     // Rebase local commits onto remote to recover.
                     tracing::warn!(
@@ -1344,22 +1566,29 @@ where
                         .current_dir(repo_path)
                         .output()
                         .await;
-                    if let Ok(r) = &rebase {
-                        if !r.status.success() {
+                    match &rebase {
+                        Ok(r) if !r.status.success() => {
                             tracing::error!(
                                 root_task_id = %root_id,
                                 stderr = %String::from_utf8_lossy(&r.stderr),
                                 "rebase onto origin/{} failed — auto-ship aborted", default_base_ref
                             );
-                            let _ = TokioCommand::new("git")
-                                .args(["rebase", "--abort"])
-                                .current_dir(repo_path)
-                                .output()
-                                .await;
+                            ensure_clean_working_dir(repo_path).await;
                             return None;
                         }
+                        Err(e) => {
+                            tracing::error!(
+                                root_task_id = %root_id,
+                                error = %e,
+                                "git rebase command failed — auto-ship aborted"
+                            );
+                            ensure_clean_working_dir(repo_path).await;
+                            return None;
+                        }
+                        _ => {}
                     }
                 }
+                _ => {} // ff-only succeeded, nothing to do
             }
         }
     }
@@ -1429,6 +1658,7 @@ where
     match &checkout_output {
         Err(e) => {
             tracing::warn!(root_task_id = %root_id, "git checkout {} failed: {}", default_base_ref, e);
+            ensure_clean_working_dir(repo_path).await;
             return None;
         }
         Ok(o) if !o.status.success() => {
@@ -1437,6 +1667,7 @@ where
                 stderr = %String::from_utf8_lossy(&o.stderr),
                 "git checkout {} failed", default_base_ref
             );
+            ensure_clean_working_dir(repo_path).await;
             return None;
         }
         _ => {}
@@ -1460,16 +1691,12 @@ where
                 stderr = %String::from_utf8_lossy(&output.stderr),
                 "git merge --squash failed for auto-ship"
             );
-            // Abort the merge to leave the repo in a clean state
-            let _ = TokioCommand::new("git")
-                .args(["merge", "--abort"])
-                .current_dir(repo_path)
-                .output()
-                .await;
+            ensure_clean_working_dir(repo_path).await;
             return None;
         }
         Err(e) => {
             tracing::warn!(root_task_id = %root_id, "git merge --squash command failed: {}", e);
+            ensure_clean_working_dir(repo_path).await;
             return None;
         }
     }
@@ -1498,16 +1725,12 @@ where
                 stderr = %String::from_utf8_lossy(&output.stderr),
                 "git commit after squash merge failed"
             );
-            // Reset to clean state
-            let _ = TokioCommand::new("git")
-                .args(["reset", "--hard", "HEAD"])
-                .current_dir(repo_path)
-                .output()
-                .await;
+            ensure_clean_working_dir(repo_path).await;
             return None;
         }
         Err(e) => {
             tracing::warn!(root_task_id = %root_id, "git commit command failed: {}", e);
+            ensure_clean_working_dir(repo_path).await;
             return None;
         }
     };
@@ -1636,12 +1859,14 @@ async fn collect_descendant_work<T: TaskRepository, W: WorktreeRepository>(
                         root_wt.branch,
                         stderr
                     );
-                    // Abort the failed merge to leave the worktree clean
-                    let _ = Command::new("git")
-                        .args(["merge", "--abort"])
-                        .current_dir(&root_wt.path)
-                        .output()
-                        .await;
+                    if !ensure_clean_working_dir(Path::new(&root_wt.path)).await {
+                        tracing::error!(
+                            task_id = %st.id,
+                            worktree = %root_wt.path,
+                            "collect_descendant_work: failed to clean worktree after merge failure — stopping"
+                        );
+                        return;
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1649,6 +1874,14 @@ async fn collect_descendant_work<T: TaskRepository, W: WorktreeRepository>(
                         st.id,
                         e
                     );
+                    if !ensure_clean_working_dir(Path::new(&root_wt.path)).await {
+                        tracing::error!(
+                            task_id = %st.id,
+                            worktree = %root_wt.path,
+                            "collect_descendant_work: failed to clean worktree after command failure — stopping"
+                        );
+                        return;
+                    }
                 }
             }
         }
@@ -1791,5 +2024,156 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let removed = remove_transient_artifacts(dir.path().to_str().unwrap());
         assert!(removed.is_empty());
+    }
+
+    /// Helper: create a temp git repo with an initial commit.
+    fn init_test_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        std::fs::write(p.join("file.txt"), "initial").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        dir
+    }
+
+    /// Helper: check `git status --porcelain` is empty.
+    fn is_clean(path: &Path) -> bool {
+        let out = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().is_empty()
+    }
+
+    #[tokio::test]
+    async fn ensure_clean_recovers_from_unstaged_changes() {
+        let dir = init_test_repo();
+        let p = dir.path();
+        std::fs::write(p.join("file.txt"), "modified").unwrap();
+        assert!(!is_clean(p));
+
+        let result = ensure_clean_working_dir(p).await;
+        assert!(result);
+        assert!(is_clean(p));
+    }
+
+    #[tokio::test]
+    async fn ensure_clean_recovers_from_staged_changes() {
+        let dir = init_test_repo();
+        let p = dir.path();
+        std::fs::write(p.join("file.txt"), "modified").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "file.txt"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        assert!(!is_clean(p));
+
+        let result = ensure_clean_working_dir(p).await;
+        assert!(result);
+        assert!(is_clean(p));
+    }
+
+    #[tokio::test]
+    async fn ensure_clean_recovers_from_merge_conflict() {
+        let dir = init_test_repo();
+        let p = dir.path();
+
+        // Create a branch with conflicting changes
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "conflict-branch"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        std::fs::write(p.join("file.txt"), "branch-content").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "branch change"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+
+        // Go back to main and make conflicting change
+        std::process::Command::new("git")
+            .args(["checkout", "master"])
+            .current_dir(p)
+            .output()
+            .unwrap()
+            .status
+            .success()
+            .then_some(())
+            .or_else(|| {
+                std::process::Command::new("git")
+                    .args(["checkout", "main"])
+                    .current_dir(p)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+                    .then_some(())
+            });
+        std::fs::write(p.join("file.txt"), "main-content").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "main change"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+
+        // Try to merge — this should conflict
+        let merge = std::process::Command::new("git")
+            .args(["merge", "conflict-branch"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        assert!(!merge.status.success());
+        assert!(!is_clean(p));
+
+        let result = ensure_clean_working_dir(p).await;
+        assert!(result);
+        assert!(is_clean(p));
+    }
+
+    #[tokio::test]
+    async fn ensure_clean_noop_on_clean_repo() {
+        let dir = init_test_repo();
+        let p = dir.path();
+        assert!(is_clean(p));
+
+        let result = ensure_clean_working_dir(p).await;
+        assert!(result);
+        assert!(is_clean(p));
     }
 }

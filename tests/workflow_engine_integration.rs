@@ -1471,3 +1471,68 @@ async fn test_provide_verdict_approve_mid_workflow() {
         other => panic!("Expected PhaseReady at validation, got {:?}", other),
     }
 }
+
+// ============================================================================
+// Test: handle_phase_complete transitions gate phase to PhaseGate
+// ============================================================================
+
+#[tokio::test]
+async fn test_handle_phase_complete_transitions_to_gate() {
+    let (service, engine, repo, _) = setup().await;
+    let task = submit_root_task(&service, "PhaseGate transition test").await;
+    service.claim_task(task.id, "overmind").await.unwrap();
+
+    // Create a subtask that represents review work
+    let review_subtask = Task::with_title("review subtask", "review the implementation");
+    let mut review = review_subtask;
+    review.parent_id = Some(task.id);
+    review.source = TaskSource::SubtaskOf(task.id);
+    let _ = review.transition_to(TaskStatus::Ready);
+    repo.create(&review).await.unwrap();
+
+    // Claim and complete the review subtask
+    let mut review_task = repo.get(review.id).await.unwrap().unwrap();
+    let _ = review_task.transition_to(TaskStatus::Running);
+    repo.update(&review_task).await.unwrap();
+    let mut review_task = repo.get(review.id).await.unwrap().unwrap();
+    let _ = review_task.transition_to(TaskStatus::Complete);
+    review_task.completed_at = Some(chrono::Utc::now());
+    repo.update(&review_task).await.unwrap();
+
+    // Set workflow state to PhaseRunning at review phase (index 3, a gate phase)
+    let phase_state = WorkflowState::PhaseRunning {
+        workflow_name: "code".to_string(),
+        phase_index: 3,
+        phase_name: "review".to_string(),
+        subtask_ids: vec![review.id],
+    };
+    let mut parent = repo.get(task.id).await.unwrap().unwrap();
+    parent.context.custom.insert(
+        "workflow_state".to_string(),
+        serde_json::to_value(&phase_state).unwrap(),
+    );
+    parent.updated_at = chrono::Utc::now();
+    repo.update(&parent).await.unwrap();
+
+    // Handle phase completion — review is a gate phase, should transition to PhaseGate
+    engine
+        .handle_phase_complete(task.id, review.id)
+        .await
+        .unwrap();
+
+    // State should be PhaseGate with phase_name='review'
+    let reloaded = repo.get(task.id).await.unwrap().unwrap();
+    let ws: WorkflowState =
+        serde_json::from_value(reloaded.context.custom["workflow_state"].clone()).unwrap();
+    match ws {
+        WorkflowState::PhaseGate {
+            phase_index,
+            phase_name,
+            ..
+        } => {
+            assert_eq!(phase_index, 3, "Should be PhaseGate at phase 3 (review)");
+            assert_eq!(phase_name, "review");
+        }
+        other => panic!("Expected PhaseGate, got {:?}", other),
+    }
+}

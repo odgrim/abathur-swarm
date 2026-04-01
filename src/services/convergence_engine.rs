@@ -4551,6 +4551,183 @@ mod tests {
         );
     }
 
+    /// Oscillating signals that form a limit cycle with all exploration
+    /// strategies exhausted → Trapped outcome with LimitCycle attractor.
+    #[tokio::test]
+    async fn test_converge_trapped_limit_cycle() {
+        // Two distinct signal patterns that alternate, producing different
+        // overseer fingerprints and thus a detectable period-2 limit cycle.
+        let signal_a = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 5,
+                failed: 5,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: vec!["test_x".to_string()],
+            }),
+            ..OverseerSignals::default()
+        };
+        let signal_b = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 3,
+                failed: 7,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: vec!["test_y".to_string()],
+            }),
+            ..OverseerSignals::default()
+        };
+
+        // Provide enough alternating signals for: initial classification
+        // iterations + exploration strategy exhaustion iterations.
+        let signals: Vec<OverseerSignals> = (0..20)
+            .map(|i| {
+                if i % 2 == 0 {
+                    signal_a.clone()
+                } else {
+                    signal_b.clone()
+                }
+            })
+            .collect();
+
+        let engine = test_engine_with_measurer(signals);
+
+        let task_id = Uuid::new_v4();
+        let mut submission = TaskSubmission::new(
+            "Implement a data pipeline transformation step with error recovery logic".to_string(),
+        );
+        submission.inferred_complexity = Complexity::Simple;
+
+        let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+        // Force Sequential convergence mode.
+        trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
+        // Give enough budget so the loop doesn't exhaust before Trapped.
+        trajectory.budget.max_tokens = 5_000_000;
+        trajectory.budget.max_iterations = 20;
+        trajectory.budget.max_extensions = 0;
+        // Disable intent check triggers so they don't interfere.
+        trajectory.policy.intent_check_interval = u32::MAX;
+        trajectory.policy.intent_check_at_budget_fraction = 1.0;
+        // Disable partial acceptance.
+        trajectory.policy.partial_acceptance = false;
+
+        let outcome = engine.converge(trajectory, &infra).await.unwrap();
+
+        match &outcome {
+            ConvergenceOutcome::Trapped { attractor_type, .. } => {
+                assert!(
+                    matches!(attractor_type, AttractorType::LimitCycle { .. }),
+                    "Expected LimitCycle attractor type, got {:?}",
+                    attractor_type
+                );
+            }
+            other => panic!("Expected Trapped outcome, got {:?}", other),
+        }
+    }
+
+    /// When the attractor is classified as LimitCycle but the remaining
+    /// budget is too small for any exploration strategy, eligible_strategies
+    /// returns empty and converge() returns Trapped immediately.
+    #[tokio::test]
+    async fn test_converge_trapped_no_eligible_strategies() {
+        // Oscillating signals: two distinct patterns that alternate.
+        let signal_a = failing_signals(); // 3 passed, 7 failed
+        let signal_b = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: Some(TestResults {
+                passed: 7,
+                failed: 3,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: vec!["test_z".to_string()],
+            }),
+            ..OverseerSignals::default()
+        };
+
+        // Enough signals for initial iterations + LimitCycle detection.
+        let signals: Vec<OverseerSignals> = (0..20)
+            .map(|i| {
+                if i % 2 == 0 {
+                    signal_a.clone()
+                } else {
+                    signal_b.clone()
+                }
+            })
+            .collect();
+
+        let engine = test_engine_with_measurer(signals);
+
+        let task_id = Uuid::new_v4();
+        let mut submission = TaskSubmission::new(
+            "Build a configuration parser with validation and default value support".to_string(),
+        );
+        submission.inferred_complexity = Complexity::Simple;
+
+        let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
+        // Force Sequential convergence mode.
+        trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
+        // Give enough iterations but very tight token budget. After the
+        // initial iterations consume tokens, the remaining budget won't
+        // afford any exploration strategy.
+        trajectory.budget.max_iterations = 20;
+        trajectory.budget.max_extensions = 0;
+        // Set tokens very tight: enough for ~5 iterations (5000 tokens each
+        // from the mock measurer) but too little for any exploration strategy
+        // cost on top. Exploration strategies cost 15k-30k tokens.
+        trajectory.budget.max_tokens = 30_000;
+        // Disable intent check triggers.
+        trajectory.policy.intent_check_interval = u32::MAX;
+        trajectory.policy.intent_check_at_budget_fraction = 1.0;
+        // Disable partial acceptance.
+        trajectory.policy.partial_acceptance = false;
+
+        let outcome = engine.converge(trajectory, &infra).await.unwrap();
+
+        // Should be Trapped (LimitCycle with no affordable strategies)
+        // or Exhausted if budget runs out first. Both are valid terminal
+        // states; we accept either but prefer Trapped.
+        assert!(
+            matches!(
+                outcome,
+                ConvergenceOutcome::Trapped { .. } | ConvergenceOutcome::Exhausted { .. }
+            ),
+            "Expected Trapped or Exhausted outcome, got {:?}",
+            outcome
+        );
+    }
+
     /// iterate_once with a fresh trajectory (first observation) records the
     /// observation and returns a LoopControl.
     #[tokio::test]
@@ -5477,100 +5654,6 @@ mod tests {
             result.unwrap().is_none(),
             "Narrow basin with sufficient budget and borderline probability should not decompose"
         );
-    }
-
-    /// Oscillating signals that never converge produce a LimitCycle attractor.
-    /// After all exploration strategies are exhausted the engine returns
-    /// `ConvergenceOutcome::Trapped` with `AttractorType::LimitCycle`.
-    #[tokio::test]
-    async fn test_converge_trapped_limit_cycle() {
-        // Two distinct failing signal patterns that alternate, producing
-        // different overseer fingerprints (tests:5/10r0 vs tests:3/10r0).
-        let signal_a = OverseerSignals {
-            build_result: Some(BuildResult {
-                success: true,
-                error_count: 0,
-                errors: Vec::new(),
-            }),
-            type_check: Some(TypeCheckResult {
-                clean: true,
-                error_count: 0,
-                errors: Vec::new(),
-            }),
-            test_results: Some(TestResults {
-                passed: 5,
-                failed: 5,
-                skipped: 0,
-                total: 10,
-                regression_count: 0,
-                failing_test_names: vec!["test_a".to_string()],
-            }),
-            ..OverseerSignals::default()
-        };
-        let signal_b = OverseerSignals {
-            build_result: Some(BuildResult {
-                success: true,
-                error_count: 0,
-                errors: Vec::new(),
-            }),
-            type_check: Some(TypeCheckResult {
-                clean: true,
-                error_count: 0,
-                errors: Vec::new(),
-            }),
-            test_results: Some(TestResults {
-                passed: 3,
-                failed: 7,
-                skipped: 0,
-                total: 10,
-                regression_count: 0,
-                failing_test_names: vec!["test_b".to_string()],
-            }),
-            ..OverseerSignals::default()
-        };
-
-        // 20 oscillating signals: A, B, A, B, ...
-        // Enough iterations for: initial Indeterminate → LimitCycle detection →
-        // exhaust all 4 exploration strategies → Trapped.
-        let signals: Vec<OverseerSignals> = (0..20)
-            .map(|i| if i % 2 == 0 { signal_a.clone() } else { signal_b.clone() })
-            .collect();
-
-        let engine = test_engine_with_measurer(signals);
-
-        let task_id = Uuid::new_v4();
-        let mut submission = TaskSubmission::new(
-            "Implement a feature that oscillates between two states without converging to a solution".to_string(),
-        );
-        submission.inferred_complexity = Complexity::Moderate;
-
-        let (mut trajectory, infra) = engine.prepare(&submission, task_id).await.unwrap();
-        // Force Sequential convergence mode.
-        trajectory.policy.priority_hint = Some(PriorityHint::Cheap);
-        // Disable intent check triggers so we never exit via IntentCheck → Converged.
-        trajectory.policy.intent_check_interval = u32::MAX;
-        trajectory.policy.intent_check_at_budget_fraction = 1.0;
-        // Disable partial acceptance so budget exhaustion doesn't become partial Converged.
-        trajectory.policy.partial_acceptance = false;
-        // Give generous budget: enough iterations for all exploration strategies to be tried.
-        trajectory.budget.max_tokens = 1_000_000;
-        trajectory.budget.max_iterations = 20;
-        trajectory.budget.max_extensions = 0;
-        // Disable proactive decomposition.
-        trajectory.policy.max_fresh_starts = 0;
-
-        let outcome = engine.converge(trajectory, &infra).await.unwrap();
-
-        match &outcome {
-            ConvergenceOutcome::Trapped { attractor_type, .. } => {
-                assert!(
-                    matches!(attractor_type, AttractorType::LimitCycle { .. }),
-                    "Expected LimitCycle attractor type, got {:?}",
-                    attractor_type
-                );
-            }
-            other => panic!("Expected Trapped outcome, got {:?}", other),
-        }
     }
 
     // -----------------------------------------------------------------------

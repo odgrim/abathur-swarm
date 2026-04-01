@@ -8809,6 +8809,29 @@ impl<G: GoalRepository + 'static, T: TaskRepository + 'static>
                     return Ok(Reaction::None);
                 }
 
+        // Circuit breaker: if the last 3 convergence check tasks all failed,
+        // skip creating a new one until the cycle is broken by manual intervention
+        // or a successful check.
+        {
+            let mut recent_convergence: Vec<&Task> = completed
+                .iter()
+                .chain(failed.iter())
+                .filter(|t| t.title.starts_with("Goal Convergence Check"))
+                .collect();
+            recent_convergence.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            let last_three: Vec<&Task> = recent_convergence.into_iter().take(3).collect();
+            if last_three.len() == 3
+                && last_three
+                    .iter()
+                    .all(|t| t.status == TaskStatus::Failed)
+            {
+                tracing::warn!(
+                    "GoalConvergenceCheckHandler: circuit breaker triggered — last 3 convergence checks failed, skipping"
+                );
+                return Ok(Reaction::None);
+            }
+        }
+
         // Build idempotency key.
         // Budget-triggered checks get a unique key per timestamp to bypass the 4-hour window.
         let now = chrono::Utc::now();
@@ -11527,5 +11550,103 @@ mod goal_convergence_check_handler_tests {
         assert!(desc.contains("# Goal Convergence Check"), "Description should contain header");
         assert!(desc.contains("## Active Goals"), "Description should contain Active Goals section");
         assert!(desc.contains("## Current Task Statistics"), "Description should contain statistics");
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_skips_after_consecutive_failures() {
+        let (handler, goal_repo, task_repo) = setup_convergence_handler().await;
+
+        // Insert a goal so the handler doesn't skip due to empty goals
+        let goal = Goal::new("Circuit Breaker Test Goal", "Testing circuit breaker")
+            .with_priority(GoalPriority::Normal);
+        goal_repo.create(&goal).await.unwrap();
+
+        // Create 3 failed convergence check tasks
+        for i in 0..3 {
+            let mut task = Task::new(&format!(
+                "Goal Convergence Check — {} active goal(s)",
+                i + 1
+            ));
+            task.description = "Failed convergence check".to_string();
+            task.transition_to(TaskStatus::Ready).unwrap();
+            task.transition_to(TaskStatus::Running).unwrap();
+            task.transition_to(TaskStatus::Failed).unwrap();
+            task_repo.create(&task).await.unwrap();
+        }
+
+        let event = make_convergence_check_event();
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(
+            matches!(reaction, Reaction::None),
+            "Circuit breaker should prevent new task creation after 3 consecutive failures"
+        );
+
+        // Verify no new tasks were created (only the 3 failed ones exist)
+        let ready = task_repo.list_by_status(TaskStatus::Ready).await.unwrap();
+        assert!(
+            ready.is_empty(),
+            "No new task should be created when circuit breaker is tripped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_resets_after_success() {
+        let (handler, goal_repo, task_repo) = setup_convergence_handler().await;
+
+        // Insert a goal so the handler doesn't skip due to empty goals
+        let goal = Goal::new("Circuit Breaker Reset Test", "Testing circuit breaker reset")
+            .with_priority(GoalPriority::Normal);
+        goal_repo.create(&goal).await.unwrap();
+
+        // Create 2 failed convergence check tasks
+        for i in 0..2 {
+            let mut task = Task::new(&format!(
+                "Goal Convergence Check — {} active goal(s)",
+                i + 1
+            ));
+            task.description = "Failed convergence check".to_string();
+            task.transition_to(TaskStatus::Ready).unwrap();
+            task.transition_to(TaskStatus::Running).unwrap();
+            task.transition_to(TaskStatus::Failed).unwrap();
+            task_repo.create(&task).await.unwrap();
+        }
+
+        // Create 1 successful convergence check task (most recent)
+        let mut success_task =
+            Task::new("Goal Convergence Check — 1 active goal(s)");
+        success_task.description = "Successful convergence check".to_string();
+        success_task.transition_to(TaskStatus::Ready).unwrap();
+        success_task.transition_to(TaskStatus::Running).unwrap();
+        success_task.transition_to(TaskStatus::Complete).unwrap();
+        task_repo.create(&success_task).await.unwrap();
+
+        let event = make_convergence_check_event();
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(
+            matches!(reaction, Reaction::None),
+            "Handler should return Reaction::None on success"
+        );
+
+        // Verify a new task was created (the successful check broke the circuit)
+        let ready = task_repo.list_by_status(TaskStatus::Ready).await.unwrap();
+        assert_eq!(
+            ready.len(),
+            1,
+            "A new convergence check task should be created when circuit breaker is not tripped"
+        );
+        assert!(
+            ready[0].title.starts_with("Goal Convergence Check"),
+            "New task should be a convergence check"
+        );
     }
 }
