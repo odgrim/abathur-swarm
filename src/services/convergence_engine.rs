@@ -1040,7 +1040,7 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                     .measure_artifact(&artifact, &strategy, &sample)
                     .await?;
                 observation.tokens_used = tokens_used;
-                let _control = self
+                let control = self
                     .iterate_once(
                         &mut sample,
                         &mut bandit,
@@ -1048,6 +1048,20 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                         observation,
                     )
                     .await?;
+
+                if matches!(control, LoopControl::OverseerConverged) {
+                    let final_seq = sample
+                        .observations
+                        .last()
+                        .map(|o| o.sequence)
+                        .unwrap_or(0);
+                    let outcome = ConvergenceOutcome::Converged {
+                        trajectory_id: sample.id.to_string(),
+                        final_observation_sequence: final_seq,
+                    };
+                    self.finalize(&mut sample, &outcome, &bandit).await?;
+                    return Ok(outcome);
+                }
             }
 
             trajectories.push(sample);
@@ -1099,28 +1113,6 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                     all_exhausted = false;
                 }
             }
-            let best_converged: Option<usize> = None;
-
-            // If a trajectory converged, finalize and return.
-            if let Some(idx) = best_converged {
-                let final_seq = trajectories[idx]
-                    .observations
-                    .last()
-                    .map(|o| o.sequence)
-                    .unwrap_or(0);
-                let outcome = ConvergenceOutcome::Converged {
-                    trajectory_id: trajectories[idx].id.to_string(),
-                    final_observation_sequence: final_seq,
-                };
-                self.finalize(
-                    &mut trajectories[idx],
-                    &outcome,
-                    &bandits[idx],
-                )
-                .await?;
-                return Ok(outcome);
-            }
-
             // If all active trajectories exhausted budgets, pick the best.
             if all_exhausted {
                 let best_idx = (0..n)
@@ -1206,9 +1198,23 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
                 .measure_artifact(&artifact, &strategy, traj)
                 .await?;
             observation.tokens_used = tokens_used;
-            let _control = self
+            let control = self
                 .iterate_once(traj, bandit, &strategy, observation)
                 .await?;
+
+            if matches!(control, LoopControl::OverseerConverged) {
+                let final_seq = traj
+                    .observations
+                    .last()
+                    .map(|o| o.sequence)
+                    .unwrap_or(0);
+                let outcome = ConvergenceOutcome::Converged {
+                    trajectory_id: traj.id.to_string(),
+                    final_observation_sequence: final_seq,
+                };
+                self.finalize(traj, &outcome, bandit).await?;
+                return Ok(outcome);
+            }
 
             // Update per-trajectory Thompson Sampling scores.
             let latest_delta = traj.latest_convergence_delta();
@@ -5923,6 +5929,111 @@ mod tests {
         assert!(
             matches!(outcome, ConvergenceOutcome::Exhausted { .. }),
             "Expected Exhausted outcome after divergent filtering, got {:?}",
+            outcome
+        );
+    }
+
+    /// Happy path for converge_parallel: a single trajectory progresses from
+    /// failing signals to all-passing, triggering OverseerConverged via the
+    /// FixedPoint + 2 consecutive all-passing shortcircuit.
+    ///
+    /// This test validates the fix for the bug where `let _control = self.iterate_once(...)`
+    /// discarded the LoopControl, making OverseerConverged unreachable in the
+    /// parallel codepath.
+    #[tokio::test]
+    async fn test_converge_parallel_happy_path_one_converges() {
+        // With Moderate complexity, base max_iterations = 8.
+        // Scaled by 1/1 (sample_count=1) → 8 iterations for the single trajectory.
+        // Phase 1: 1 iteration (signals[0]).
+        // Phase 2: up to 7 remaining iterations.
+        //
+        // Signal progression:
+        //   [0] build fails → convergence_level low
+        //   [1] build passes, 3/10 tests → improvement (positive delta)
+        //   [2] 7/10 tests → improvement (positive delta) → FixedPoint likely
+        //   [3] all passing → first all-passing at FixedPoint
+        //   [4] all passing → second consecutive all-passing → OverseerConverged!
+        //   [5..] extra all-passing in case more iterations run
+        let signals = vec![
+            // Signal 0: build fails
+            OverseerSignals {
+                build_result: Some(BuildResult {
+                    success: false,
+                    error_count: 3,
+                    errors: vec!["error1".to_string()],
+                }),
+                ..OverseerSignals::default()
+            },
+            // Signal 1: build passes, few tests pass
+            OverseerSignals {
+                build_result: Some(BuildResult {
+                    success: true,
+                    error_count: 0,
+                    errors: Vec::new(),
+                }),
+                type_check: Some(TypeCheckResult {
+                    clean: true,
+                    error_count: 0,
+                    errors: Vec::new(),
+                }),
+                test_results: Some(TestResults {
+                    passed: 3,
+                    failed: 7,
+                    skipped: 0,
+                    total: 10,
+                    regression_count: 0,
+                    failing_test_names: vec!["t1".to_string()],
+                }),
+                ..OverseerSignals::default()
+            },
+            // Signal 2: more tests pass
+            OverseerSignals {
+                build_result: Some(BuildResult {
+                    success: true,
+                    error_count: 0,
+                    errors: Vec::new(),
+                }),
+                type_check: Some(TypeCheckResult {
+                    clean: true,
+                    error_count: 0,
+                    errors: Vec::new(),
+                }),
+                test_results: Some(TestResults {
+                    passed: 7,
+                    failed: 3,
+                    skipped: 0,
+                    total: 10,
+                    regression_count: 0,
+                    failing_test_names: vec!["t1".to_string()],
+                }),
+                ..OverseerSignals::default()
+            },
+            // Signals 3+: all passing — triggers OverseerConverged after 2 consecutive
+            all_passing_signals(),
+            all_passing_signals(),
+            all_passing_signals(),
+            all_passing_signals(),
+            all_passing_signals(),
+            all_passing_signals(),
+            all_passing_signals(),
+        ];
+
+        let engine = test_engine_with_measurer(signals);
+
+        let task_id = Uuid::new_v4();
+        let mut submission = TaskSubmission::new(
+            "Implement a simple function to test parallel convergence happy path".to_string(),
+        );
+        submission.inferred_complexity = Complexity::Moderate;
+
+        let outcome = engine
+            .converge_parallel(&submission, 1, task_id)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(outcome, ConvergenceOutcome::Converged { .. }),
+            "Expected Converged outcome from parallel happy path, got {:?}",
             outcome
         );
     }
