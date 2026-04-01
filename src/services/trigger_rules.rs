@@ -777,16 +777,35 @@ impl TriggerRuleEngine {
                             },
                         };
 
+                        // Override FailTask error messages with the actual deadline used
+                        let override_fail_error = |cmd: &SerializableDomainCommand| -> SerializableDomainCommand {
+                            if let SerializableDomainCommand::FailTask { task_id, .. } = cmd {
+                                let minutes = expired.deadline_secs / 60;
+                                let agent_info = expired.agent_type.as_deref().unwrap_or("unknown");
+                                SerializableDomainCommand::FailTask {
+                                    task_id: *task_id,
+                                    error: format!(
+                                        "Task claimed but not completed within {} minutes (agent_type: {}) — timed out",
+                                        minutes, agent_info
+                                    ),
+                                }
+                            } else {
+                                cmd.clone()
+                            }
+                        };
+
                         match &rule.action {
                             TriggerAction::EmitEvent { payload, category, severity } => {
                                 reactions.push(self.build_event(payload, *category, *severity, &synthetic));
                             }
                             TriggerAction::IssueCommand { command } => {
-                                self.dispatch_command(command, &rule.name, Some(&synthetic)).await;
+                                let cmd = override_fail_error(command);
+                                self.dispatch_command(&cmd, &rule.name, Some(&synthetic)).await;
                             }
                             TriggerAction::EmitAndCommand { payload, category, severity, command } => {
                                 reactions.push(self.build_event(payload, *category, *severity, &synthetic));
-                                self.dispatch_command(command, &rule.name, Some(&synthetic)).await;
+                                let cmd = override_fail_error(command);
+                                self.dispatch_command(&cmd, &rule.name, Some(&synthetic)).await;
                             }
                         }
 
@@ -1247,17 +1266,20 @@ pub fn builtin_trigger_rules() -> Vec<TriggerRule> {
             TriggerAction::IssueCommand {
                 command: SerializableDomainCommand::FailTask {
                     task_id: None, // resolved from absence timer's source event
-                    error: "Task claimed but not completed within 30 minutes — timed out".to_string(),
+                    error: "Task claimed but not completed within configured deadline — timed out".to_string(),
                 },
             },
         )
-        .with_description("Fail task when claimed but not completed within 30 minutes so retry handlers kick in")
+        .with_description("Fail task when claimed but not completed within configured deadline so retry handlers kick in")
         .with_condition(TriggerCondition::Absence {
             trigger_type: "TaskClaimed".to_string(),
             expected_type: "TaskCompleted".to_string(),
             deadline_secs: 1800,
             agent_type_deadline_overrides: Some(HashMap::from([
                 ("overmind".to_string(), 7200),
+                ("rust-implementer".to_string(), 3600),
+                ("rust-planner".to_string(), 3600),
+                ("rust-researcher".to_string(), 3600),
             ])),
         }),
 
@@ -1539,6 +1561,9 @@ mod tests {
                 assert_eq!(*deadline_secs, 1800);
                 let overrides = agent_type_deadline_overrides.as_ref().unwrap();
                 assert_eq!(overrides.get("overmind"), Some(&7200));
+                assert_eq!(overrides.get("rust-implementer"), Some(&3600));
+                assert_eq!(overrides.get("rust-planner"), Some(&3600));
+                assert_eq!(overrides.get("rust-researcher"), Some(&3600));
             }
             _ => panic!("Expected Absence condition on task-completion-timeout rule"),
         }
@@ -1581,5 +1606,35 @@ mod tests {
         };
         assert_eq!(timer.agent_type.as_deref(), Some("overmind"));
         assert_eq!(timer.deadline_secs, 7200);
+    }
+
+    #[test]
+    fn test_dynamic_fail_error_message_formatting() {
+        // Verify that the dynamic error message includes the actual deadline and agent type
+        let format_error = |deadline_secs: u64, agent_type: Option<&str>| -> String {
+            let minutes = deadline_secs / 60;
+            let agent_info = agent_type.unwrap_or("unknown");
+            format!(
+                "Task claimed but not completed within {} minutes (agent_type: {}) — timed out",
+                minutes, agent_info
+            )
+        };
+
+        assert_eq!(
+            format_error(1800, Some("default-agent")),
+            "Task claimed but not completed within 30 minutes (agent_type: default-agent) — timed out"
+        );
+        assert_eq!(
+            format_error(3600, Some("rust-implementer")),
+            "Task claimed but not completed within 60 minutes (agent_type: rust-implementer) — timed out"
+        );
+        assert_eq!(
+            format_error(7200, Some("overmind")),
+            "Task claimed but not completed within 120 minutes (agent_type: overmind) — timed out"
+        );
+        assert_eq!(
+            format_error(1800, None),
+            "Task claimed but not completed within 30 minutes (agent_type: unknown) — timed out"
+        );
     }
 }
