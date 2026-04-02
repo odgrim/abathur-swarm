@@ -11649,4 +11649,53 @@ mod goal_convergence_check_handler_tests {
             "New task should be a convergence check"
         );
     }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_proceeds_with_fewer_than_three_tasks() {
+        let (handler, goal_repo, task_repo) = setup_convergence_handler().await;
+
+        // Insert a goal so the handler doesn't skip due to empty goals
+        let goal = Goal::new("Circuit Breaker Fewer Test", "Testing circuit breaker with <3 failures")
+            .with_priority(GoalPriority::Normal);
+        goal_repo.create(&goal).await.unwrap();
+
+        // Create only 2 failed convergence check tasks (below the threshold of 3)
+        for i in 0..2 {
+            let mut task = Task::new(&format!(
+                "Goal Convergence Check — {} active goal(s)",
+                i + 1
+            ));
+            task.description = "Failed convergence check".to_string();
+            task.transition_to(TaskStatus::Ready).unwrap();
+            task.transition_to(TaskStatus::Running).unwrap();
+            task.transition_to(TaskStatus::Failed).unwrap();
+            task_repo.create(&task).await.unwrap();
+        }
+
+        let event = make_convergence_check_event();
+        let ctx = HandlerContext {
+            chain_depth: 0,
+            correlation_id: None,
+        };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        // Handler always returns Reaction::None, but with only 2 failures
+        // (below the circuit breaker threshold of 3), it should still create a new task
+        assert!(
+            matches!(reaction, Reaction::None),
+            "Handler should return Reaction::None"
+        );
+
+        // Verify a new task was created since the circuit breaker was not tripped
+        let ready = task_repo.list_by_status(TaskStatus::Ready).await.unwrap();
+        assert_eq!(
+            ready.len(),
+            1,
+            "A new convergence check task should be created when circuit breaker is not tripped"
+        );
+        assert!(
+            ready[0].title.starts_with("Goal Convergence Check"),
+            "New task should be a convergence check"
+        );
+    }
 }
