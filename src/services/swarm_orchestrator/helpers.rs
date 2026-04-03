@@ -2167,6 +2167,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_clean_recovers_from_in_progress_rebase() {
+        let dir = init_test_repo();
+        let p = dir.path();
+
+        // Create a branch with a commit that will conflict during rebase
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "rebase-branch"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        std::fs::write(p.join("file.txt"), "rebase-branch-content").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "rebase branch change"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+
+        // Go back to main/master and make a conflicting commit
+        std::process::Command::new("git")
+            .args(["checkout", "master"])
+            .current_dir(p)
+            .output()
+            .unwrap()
+            .status
+            .success()
+            .then_some(())
+            .or_else(|| {
+                std::process::Command::new("git")
+                    .args(["checkout", "main"])
+                    .current_dir(p)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+                    .then_some(())
+            });
+        std::fs::write(p.join("file.txt"), "main-content-for-rebase").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "main change for rebase"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+
+        // Determine the default branch name
+        let default_branch = if p.join(".git/refs/heads/master").exists() {
+            "master"
+        } else {
+            "main"
+        };
+
+        // Switch to the rebase branch and attempt rebase onto default branch — should conflict
+        std::process::Command::new("git")
+            .args(["checkout", "rebase-branch"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        let rebase = std::process::Command::new("git")
+            .args(["rebase", default_branch])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        assert!(!rebase.status.success());
+
+        // Verify rebase is in progress (git version dependent: rebase-merge or rebase-apply)
+        let git_dir = p.join(".git");
+        assert!(
+            git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists(),
+            "Expected rebase-merge or rebase-apply directory to exist during in-progress rebase"
+        );
+        assert!(!is_clean(p));
+
+        // ensure_clean_working_dir should abort the rebase and restore clean state
+        let result = ensure_clean_working_dir(p).await;
+        assert!(result);
+        assert!(is_clean(p));
+    }
+
+    #[tokio::test]
     async fn ensure_clean_noop_on_clean_repo() {
         let dir = init_test_repo();
         let p = dir.path();
@@ -2175,5 +2263,89 @@ mod tests {
         let result = ensure_clean_working_dir(p).await;
         assert!(result);
         assert!(is_clean(p));
+    }
+
+    #[tokio::test]
+    async fn ensure_clean_recovers_from_in_progress_rebase() {
+        let dir = init_test_repo();
+        let p = dir.path();
+
+        // Determine the default branch name (master or main)
+        let branch_output = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        let default_branch = String::from_utf8_lossy(&branch_output.stdout)
+            .trim()
+            .to_string();
+
+        // Create a branch with a conflicting change
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "rebase-branch"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        std::fs::write(p.join("file.txt"), "rebase-branch-content").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "rebase branch change"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+
+        // Go back to default branch and make a conflicting change
+        let checkout = std::process::Command::new("git")
+            .args(["checkout", &default_branch])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        assert!(checkout.status.success(), "failed to checkout default branch");
+        std::fs::write(p.join("file.txt"), "main-content-for-rebase").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "main change for rebase"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+
+        // Switch to the rebase branch and try to rebase onto default — this should conflict
+        std::process::Command::new("git")
+            .args(["checkout", "rebase-branch"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        let rebase = std::process::Command::new("git")
+            .args(["rebase", &default_branch])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        assert!(!rebase.status.success(), "expected rebase conflict");
+
+        // Verify we are in a rebase state (rebase-merge or rebase-apply dir exists)
+        let git_dir = p.join(".git");
+        assert!(
+            git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists(),
+            "expected rebase-merge or rebase-apply directory to exist"
+        );
+
+        // ensure_clean_working_dir should abort the rebase and clean up
+        let result = ensure_clean_working_dir(p).await;
+        assert!(result);
+        assert!(is_clean(p));
+
+        // Verify the rebase state directories are gone
+        assert!(
+            !git_dir.join("rebase-merge").exists() && !git_dir.join("rebase-apply").exists(),
+            "rebase state directories should be cleaned up"
+        );
     }
 }
