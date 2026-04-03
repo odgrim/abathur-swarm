@@ -2326,6 +2326,174 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // run_convergent_execution happy-path test
+    // -----------------------------------------------------------------------
+
+    /// Minimal mock TaskRepository for convergent execution tests.
+    /// Only `get()` and `update()` have real logic; all other methods
+    /// return Ok defaults.
+    struct MockTaskRepo {
+        tasks: Mutex<std::collections::HashMap<Uuid, Task>>,
+    }
+
+    impl MockTaskRepo {
+        fn new() -> Self {
+            Self {
+                tasks: Mutex::new(std::collections::HashMap::new()),
+            }
+        }
+
+        fn insert(&self, task: &Task) {
+            self.tasks.lock().unwrap().insert(task.id, task.clone());
+        }
+    }
+
+    #[async_trait]
+    impl crate::domain::ports::TaskRepository for MockTaskRepo {
+        async fn create(&self, task: &Task) -> DomainResult<()> {
+            self.tasks.lock().unwrap().insert(task.id, task.clone());
+            Ok(())
+        }
+        async fn get(&self, id: Uuid) -> DomainResult<Option<Task>> {
+            Ok(self.tasks.lock().unwrap().get(&id).cloned())
+        }
+        async fn update(&self, task: &Task) -> DomainResult<()> {
+            self.tasks.lock().unwrap().insert(task.id, task.clone());
+            Ok(())
+        }
+        async fn delete(&self, _id: Uuid) -> DomainResult<()> { Ok(()) }
+        async fn list(&self, _filter: crate::domain::ports::task_repository::TaskFilter) -> DomainResult<Vec<Task>> { Ok(vec![]) }
+        async fn list_by_status(&self, _status: crate::domain::models::TaskStatus) -> DomainResult<Vec<Task>> { Ok(vec![]) }
+        async fn get_subtasks(&self, _parent_id: Uuid) -> DomainResult<Vec<Task>> { Ok(vec![]) }
+        async fn get_ready_tasks(&self, _limit: usize) -> DomainResult<Vec<Task>> { Ok(vec![]) }
+        async fn get_by_agent(&self, _agent_type: &str) -> DomainResult<Vec<Task>> { Ok(vec![]) }
+        async fn get_dependencies(&self, _task_id: Uuid) -> DomainResult<Vec<Task>> { Ok(vec![]) }
+        async fn get_dependents(&self, _task_id: Uuid) -> DomainResult<Vec<Task>> { Ok(vec![]) }
+        async fn add_dependency(&self, _task_id: Uuid, _depends_on: Uuid) -> DomainResult<()> { Ok(()) }
+        async fn remove_dependency(&self, _task_id: Uuid, _depends_on: Uuid) -> DomainResult<()> { Ok(()) }
+        async fn count_descendants(&self, _task_id: Uuid) -> DomainResult<u64> { Ok(0) }
+        async fn get_by_idempotency_key(&self, _key: &str) -> DomainResult<Option<Task>> { Ok(None) }
+        async fn list_by_source(&self, _source_type: &str) -> DomainResult<Vec<Task>> { Ok(vec![]) }
+        async fn count_by_status(&self) -> DomainResult<std::collections::HashMap<crate::domain::models::TaskStatus, u64>> { Ok(std::collections::HashMap::new()) }
+        async fn claim_task_atomic(&self, _task_id: Uuid, _agent_type: &str) -> DomainResult<Option<Task>> { Ok(None) }
+        async fn get_parent_id(&self, _task_id: Uuid) -> DomainResult<Option<Uuid>> { Ok(None) }
+        async fn calculate_depth(&self, _task_id: Uuid) -> DomainResult<u32> { Ok(0) }
+        async fn find_root_task_id(&self, _task_id: Uuid) -> DomainResult<Uuid> { Ok(Uuid::nil()) }
+        async fn count_children(&self, _task_id: Uuid) -> DomainResult<u32> { Ok(0) }
+    }
+
+    #[tokio::test]
+    async fn run_convergent_execution_happy_path_converges() {
+        use crate::adapters::substrates::MockSubstrate;
+        use crate::domain::models::convergence::{
+            BuildResult, OverseerSignals, TestResults, TypeCheckResult,
+        };
+        use crate::services::convergence_engine::test_support::*;
+        use crate::services::convergence_engine::ConvergenceEngine;
+
+        // 1. Set up git repo for worktree path
+        let (_dir, path) = setup_git_repo().await;
+
+        // 2. Create task (no trajectory_id = new execution path)
+        let task = make_task();
+
+        // 3. Shared trajectory repo so we can inspect after execution
+        let trajectory_repo = Arc::new(MockTrajectoryRepo::new());
+        let memory_repo = Arc::new(MockMemoryRepo::new());
+
+        // High-quality overseer signals: build passes, all tests pass, no lint errors
+        let signals = OverseerSignals {
+            test_results: Some(TestResults {
+                passed: 10,
+                failed: 0,
+                skipped: 0,
+                total: 10,
+                regression_count: 0,
+                failing_test_names: Vec::new(),
+            }),
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            ..OverseerSignals::default()
+        };
+        let overseer = Arc::new(MockOverseerMeasurer::with_signals(signals));
+
+        // Build engine manually with shared Arc repos
+        let engine = ConvergenceEngine::new(
+            Arc::clone(&trajectory_repo),
+            Arc::clone(&memory_repo),
+            Arc::clone(&overseer),
+            test_config(),
+        );
+
+        // 4. Task repo for persisting trajectory linkage
+        let task_repo = Arc::new(MockTaskRepo::new());
+        task_repo.insert(&task);
+
+        // 5. Mock substrate
+        let substrate: Arc<dyn crate::domain::ports::Substrate> =
+            Arc::new(MockSubstrate::new());
+
+        // 6. Intent verifier that returns Satisfied
+        let intent_verifier: Arc<dyn ConvergentIntentVerifier> =
+            Arc::new(MockIntentVerifier::satisfied());
+
+        let event_bus = make_event_bus();
+        let cancellation_token = CancellationToken::new();
+
+        // 7. Call run_convergent_execution
+        let outcome = run_convergent_execution(
+            &task,
+            None, // no goal_id
+            &substrate,
+            &task_repo,
+            &trajectory_repo,
+            &engine,
+            &event_bus,
+            "test-agent",
+            "You are a test agent",
+            Some(&path),
+            10,
+            cancellation_token,
+            None, // no deadline
+            intent_verifier,
+        )
+        .await
+        .expect("run_convergent_execution should succeed");
+
+        // 8. Assert outcome is Converged
+        assert!(
+            matches!(outcome, ConvergentOutcome::Converged),
+            "Expected Converged outcome, got {:?}",
+            outcome
+        );
+
+        // 9. Verify trajectory was persisted
+        let stored = trajectory_repo.trajectories.lock().unwrap();
+        assert!(
+            !stored.is_empty(),
+            "Expected at least one trajectory to be persisted"
+        );
+
+        // 10. Verify task got trajectory_id set
+        let updated_task = task_repo.tasks.lock().unwrap().get(&task.id).cloned();
+        assert!(
+            updated_task
+                .as_ref()
+                .and_then(|t| t.trajectory_id)
+                .is_some(),
+            "Expected task to have trajectory_id set after execution"
+        );
+    }
+
     #[test]
     fn test_apply_sla_pressure_critical_preserves_lower_thresholds() {
         let hints = vec!["sla:critical".to_string()];

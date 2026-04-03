@@ -2383,11 +2383,10 @@ impl<T: TrajectoryRepository, M: MemoryRepository, O: OverseerMeasurer>
 // ===========================================================================
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
     use async_trait::async_trait;
     use crate::domain::models::MemoryTier;
-    use crate::services::budget_tracker::BudgetTrackerConfig;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -2395,12 +2394,12 @@ mod tests {
     // Mock TrajectoryRepository
     // -----------------------------------------------------------------------
 
-    struct MockTrajectoryRepo {
-        trajectories: Mutex<HashMap<String, Trajectory>>,
+    pub struct MockTrajectoryRepo {
+        pub trajectories: Mutex<HashMap<String, Trajectory>>,
     }
 
     impl MockTrajectoryRepo {
-        fn new() -> Self {
+        pub fn new() -> Self {
             Self {
                 trajectories: Mutex::new(HashMap::new()),
             }
@@ -2483,12 +2482,12 @@ mod tests {
     // Mock MemoryRepository
     // -----------------------------------------------------------------------
 
-    struct MockMemoryRepo {
-        memories: Mutex<Vec<Memory>>,
+    pub struct MockMemoryRepo {
+        pub memories: Mutex<Vec<Memory>>,
     }
 
     impl MockMemoryRepo {
-        fn new() -> Self {
+        pub fn new() -> Self {
             Self {
                 memories: Mutex::new(Vec::new()),
             }
@@ -2600,18 +2599,18 @@ mod tests {
     // Mock OverseerMeasurer
     // -----------------------------------------------------------------------
 
-    struct MockOverseerMeasurer {
+    pub struct MockOverseerMeasurer {
         signals: Mutex<OverseerSignals>,
     }
 
     impl MockOverseerMeasurer {
-        fn new() -> Self {
+        pub fn new() -> Self {
             Self {
                 signals: Mutex::new(OverseerSignals::default()),
             }
         }
 
-        fn with_signals(signals: OverseerSignals) -> Self {
+        pub fn with_signals(signals: OverseerSignals) -> Self {
             Self {
                 signals: Mutex::new(signals),
             }
@@ -2633,7 +2632,7 @@ mod tests {
     // Test helpers
     // -----------------------------------------------------------------------
 
-    fn test_config() -> ConvergenceEngineConfig {
+    pub fn test_config() -> ConvergenceEngineConfig {
         ConvergenceEngineConfig {
             default_policy: ConvergencePolicy::default(),
             max_parallel_trajectories: 3,
@@ -2643,7 +2642,7 @@ mod tests {
         }
     }
 
-    fn test_engine(
+    pub fn build_test_engine(
     ) -> ConvergenceEngine<MockTrajectoryRepo, MockMemoryRepo, MockOverseerMeasurer> {
         ConvergenceEngine::new(
             Arc::new(MockTrajectoryRepo::new()),
@@ -2651,6 +2650,20 @@ mod tests {
             Arc::new(MockOverseerMeasurer::new()),
             test_config(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::test_support::*;
+    use crate::domain::models::MemoryTier;
+    use crate::services::budget_tracker::BudgetTrackerConfig;
+    use std::sync::Mutex;
+
+    fn test_engine(
+    ) -> ConvergenceEngine<MockTrajectoryRepo, MockMemoryRepo, MockOverseerMeasurer> {
+        build_test_engine()
     }
 
     fn test_spec() -> SpecificationEvolution {
