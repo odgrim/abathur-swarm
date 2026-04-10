@@ -96,6 +96,13 @@ pub struct WorkflowPhase {
     /// if verification fails (up to `max_verification_retries`).
     #[serde(default)]
     pub verify: bool,
+    /// Whether this phase is a gate phase.
+    ///
+    /// Gate phases park at `PhaseGate` after completion and require an
+    /// overmind verdict before proceeding to the next phase. Typically used
+    /// for triage, validation, and review phases.
+    #[serde(default)]
+    pub gate: bool,
 }
 
 /// A workflow template defining the phase sequence for task execution.
@@ -146,6 +153,7 @@ impl WorkflowTemplate {
                     read_only: true,
                     dependency: PhaseDependency::Root,
                     verify: false,
+                    gate: false,
                 },
                 WorkflowPhase {
                     name: "plan".to_string(),
@@ -155,6 +163,7 @@ impl WorkflowTemplate {
                     read_only: true,
                     dependency: PhaseDependency::Sequential,
                     verify: false,
+                    gate: false,
                 },
                 WorkflowPhase {
                     name: "implement".to_string(),
@@ -164,6 +173,7 @@ impl WorkflowTemplate {
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
                     verify: true,
+                    gate: false,
                 },
                 WorkflowPhase {
                     name: "review".to_string(),
@@ -173,6 +183,7 @@ impl WorkflowTemplate {
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
                     verify: false,
+                    gate: true,
                 },
             ],
             workspace_kind: WorkspaceKind::Worktree,
@@ -201,6 +212,7 @@ impl WorkflowTemplate {
                     read_only: true,
                     dependency: PhaseDependency::Root,
                     verify: false,
+                    gate: false,
                 },
                 WorkflowPhase {
                     name: "analyze".to_string(),
@@ -210,6 +222,7 @@ impl WorkflowTemplate {
                     read_only: true,
                     dependency: PhaseDependency::Sequential,
                     verify: false,
+                    gate: false,
                 },
                 WorkflowPhase {
                     name: "synthesize".to_string(),
@@ -219,6 +232,7 @@ impl WorkflowTemplate {
                     read_only: true,
                     dependency: PhaseDependency::Sequential,
                     verify: false,
+                    gate: false,
                 },
             ],
             workspace_kind: WorkspaceKind::None,
@@ -246,6 +260,7 @@ impl WorkflowTemplate {
                     read_only: true,
                     dependency: PhaseDependency::Root,
                     verify: false,
+                    gate: false,
                 },
                 WorkflowPhase {
                     name: "write".to_string(),
@@ -255,6 +270,7 @@ impl WorkflowTemplate {
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
                     verify: true,
+                    gate: false,
                 },
                 WorkflowPhase {
                     name: "review".to_string(),
@@ -264,6 +280,7 @@ impl WorkflowTemplate {
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
                     verify: false,
+                    gate: true,
                 },
             ],
             workspace_kind: WorkspaceKind::Worktree,
@@ -292,6 +309,7 @@ impl WorkflowTemplate {
                     read_only: true,
                     dependency: PhaseDependency::Root,
                     verify: false,
+                    gate: true,
                 },
             ],
             workspace_kind: WorkspaceKind::None,
@@ -337,6 +355,7 @@ impl WorkflowTemplate {
                 read_only: true,
                 dependency: PhaseDependency::Root,
                 verify: false,
+                gate: true,
             }],
             workspace_kind: WorkspaceKind::None,
             tool_grants: vec!["memory".to_string()],
@@ -382,6 +401,7 @@ impl WorkflowTemplate {
                     read_only: true,
                     dependency: PhaseDependency::Root,
                     verify: false,
+                    gate: true,
                 },
                 WorkflowPhase {
                     name: "validation".to_string(),
@@ -404,6 +424,7 @@ impl WorkflowTemplate {
                     read_only: true,
                     dependency: PhaseDependency::Sequential,
                     verify: false,
+                    gate: true,
                 },
                 WorkflowPhase {
                     name: "research".to_string(),
@@ -420,6 +441,7 @@ impl WorkflowTemplate {
                     read_only: true,
                     dependency: PhaseDependency::Sequential,
                     verify: false,
+                    gate: false,
                 },
                 WorkflowPhase {
                     name: "plan".to_string(),
@@ -436,6 +458,7 @@ impl WorkflowTemplate {
                     read_only: true,
                     dependency: PhaseDependency::Sequential,
                     verify: false,
+                    gate: false,
                 },
                 WorkflowPhase {
                     name: "implement".to_string(),
@@ -454,6 +477,7 @@ impl WorkflowTemplate {
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
                     verify: true,
+                    gate: false,
                 },
                 WorkflowPhase {
                     name: "review".to_string(),
@@ -472,6 +496,7 @@ impl WorkflowTemplate {
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
                     verify: false,
+                    gate: true,
                 },
             ],
             workspace_kind: WorkspaceKind::Worktree,
@@ -528,6 +553,45 @@ impl WorkflowTemplate {
         }
 
         Ok(())
+    }
+
+    /// Serialize this workflow template to YAML.
+    pub fn to_yaml(&self) -> Result<String, String> {
+        serde_yaml::to_string(self).map_err(|e| format!("Failed to serialize workflow to YAML: {}", e))
+    }
+
+    /// Load workflow templates from YAML files in a directory.
+    ///
+    /// Reads all `*.yaml` and `*.yml` files from the given directory path.
+    /// Returns an empty map if the directory does not exist (graceful fallback).
+    /// Returns an error only if the directory exists but a file cannot be parsed.
+    pub fn load_from_directory(dir: impl AsRef<std::path::Path>) -> Result<std::collections::HashMap<String, Self>, String> {
+        let dir = dir.as_ref();
+        if !dir.exists() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| format!("Failed to read workflow directory '{}': {}", dir.display(), e))?;
+
+        let mut templates = std::collections::HashMap::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+            let path = entry.path();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "yaml" && ext != "yml" {
+                continue;
+            }
+
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| format!("Failed to read '{}': {}", path.display(), e))?;
+            let template: Self = serde_yaml::from_str(&content)
+                .map_err(|e| format!("Failed to parse '{}': {}", path.display(), e))?;
+            template.validate()?;
+            templates.insert(template.name.clone(), template);
+        }
+
+        Ok(templates)
     }
 
     /// Returns all built-in workflow templates keyed by name.
@@ -591,6 +655,7 @@ mod tests {
                 read_only: false,
                 dependency: PhaseDependency::Root,
                 verify: false,
+                gate: false,
             }],
             ..Default::default()
         };
@@ -621,6 +686,7 @@ mod tests {
                 read_only: false,
                 dependency: PhaseDependency::Root,
                 verify: false,
+                gate: false,
             }],
             ..Default::default()
         };
@@ -642,6 +708,7 @@ mod tests {
                 read_only: false,
                 dependency: PhaseDependency::Root,
                 verify: false,
+                gate: false,
             }],
             ..Default::default()
         };
@@ -685,6 +752,7 @@ mod tests {
                     read_only: true,
                     dependency: PhaseDependency::Root,
                     verify: false,
+                    gate: false,
                 },
                 WorkflowPhase {
                     name: "write-docs".to_string(),
@@ -694,6 +762,7 @@ mod tests {
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
                     verify: false,
+                    gate: false,
                 },
             ],
             ..Default::default()
@@ -752,6 +821,7 @@ mod tests {
                 read_only: false,
                 verify: false,
                 dependency: PhaseDependency::Root,
+                gate: false,
             }],
             tool_grants: vec!["not_a_real_tool".to_string()],
             ..Default::default()
@@ -814,5 +884,78 @@ mod tests {
                 panic!("Built-in template '{}' failed validation: {}", name, e);
             });
         }
+    }
+
+    #[test]
+    fn test_yaml_roundtrip_all_builtins() {
+        let templates = WorkflowTemplate::builtin_templates();
+        for (name, original) in &templates {
+            let yaml = original.to_yaml().unwrap_or_else(|e| {
+                panic!("Failed to serialize '{}' to YAML: {}", name, e);
+            });
+            let deserialized: WorkflowTemplate = serde_yaml::from_str(&yaml).unwrap_or_else(|e| {
+                panic!("Failed to deserialize '{}' from YAML: {}", name, e);
+            });
+            assert_eq!(
+                original, &deserialized,
+                "YAML round-trip failed for workflow '{}'",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_load_from_directory_missing_dir() {
+        let result = WorkflowTemplate::load_from_directory("/nonexistent/path/to/workflows");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_load_from_directory_with_files() {
+        let dir = std::env::temp_dir().join("abathur_test_workflows");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let wf = WorkflowTemplate::default_code_workflow();
+        let yaml = wf.to_yaml().unwrap();
+        std::fs::write(dir.join("code.yaml"), &yaml).unwrap();
+
+        let loaded = WorkflowTemplate::load_from_directory(&dir).unwrap();
+        assert!(loaded.contains_key("code"));
+        assert_eq!(loaded["code"], wf);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_gate_field_defaults_false() {
+        // Ensure gate defaults to false when missing from YAML/JSON
+        let yaml = r#"
+name: test
+description: test
+role: tester
+tools:
+  - read
+"#;
+        let phase: WorkflowPhase = serde_yaml::from_str(yaml).unwrap();
+        assert!(!phase.gate);
+    }
+
+    #[test]
+    fn test_builtin_gate_phases() {
+        let code = WorkflowTemplate::default_code_workflow();
+        assert!(!code.phases[0].gate); // research
+        assert!(!code.phases[1].gate); // plan
+        assert!(!code.phases[2].gate); // implement
+        assert!(code.phases[3].gate);  // review
+
+        let ext = WorkflowTemplate::external_workflow();
+        assert!(ext.phases[0].gate);   // triage
+        assert!(ext.phases[1].gate);   // validation
+        assert!(!ext.phases[2].gate);  // research
+        assert!(!ext.phases[3].gate);  // plan
+        assert!(!ext.phases[4].gate);  // implement
+        assert!(ext.phases[5].gate);   // review
     }
 }

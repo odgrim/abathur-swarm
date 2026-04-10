@@ -1,0 +1,58 @@
+name: code
+description: 'Standard 4-phase code workflow: research, plan, implement, review'
+phases:
+- name: research
+  description: Explore the codebase, understand existing patterns, identify files that need to change
+  role: Read-only research agent that explores codebases and reports findings
+  tools:
+  - read
+  - glob
+  - grep
+  read_only: true
+  dependency: root
+  verify: false
+  gate: false
+- name: plan
+  description: Draft a concrete implementation plan based on research findings
+  role: Domain-specific planning agent that designs implementation approach
+  tools:
+  - read
+  - glob
+  - grep
+  - memory
+  read_only: true
+  dependency: sequential
+  verify: false
+  gate: false
+- name: implement
+  description: Execute the implementation plan with specific code changes
+  role: Implementation specialist that writes clean, idiomatic code
+  tools:
+  - read
+  - write
+  - edit
+  - shell
+  - glob
+  - grep
+  - memory
+  read_only: false
+  dependency: sequential
+  verify: true
+  gate: false
+- name: review
+  description: Review for correctness, edge cases, test coverage, and adherence to the plan
+  role: Code review specialist that validates implementation quality
+  tools:
+  - read
+  - glob
+  - grep
+  - shell
+  - memory
+  read_only: false
+  dependency: sequential
+  verify: false
+  gate: true
+workspace_kind: worktree
+tool_grants: []
+output_delivery: pull_request
+max_verification_retries: 2

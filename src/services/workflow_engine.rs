@@ -65,10 +65,24 @@ fn validate_state_consistency(
     }
 }
 
-/// Whether a phase name is a gate phase.
+/// Whether a phase is a gate phase.
 ///
 /// Gate phases park at `PhaseGate` and require an overmind verdict.
-fn is_gate_phase(phase_name: &str) -> bool {
+/// Checks the `gate` field on the phase in the workflow template.
+/// Falls back to hardcoded name matching if the template or phase is
+/// not found (backward compatibility for in-flight workflows).
+fn is_gate_phase(
+    templates: &std::collections::HashMap<String, WorkflowTemplate>,
+    workflow_name: &str,
+    phase_index: usize,
+    phase_name: &str,
+) -> bool {
+    if let Some(template) = templates.get(workflow_name)
+        && let Some(phase) = template.phases.get(phase_index)
+    {
+        return phase.gate;
+    }
+    // Fallback for backward compatibility
     matches!(phase_name, "triage" | "validation" | "review")
 }
 
@@ -128,6 +142,51 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             templates: WorkflowTemplate::builtin_templates(),
             verification_enabled,
         }
+    }
+
+    /// Merge additional workflow templates into this engine.
+    ///
+    /// Supplied templates take precedence over built-in templates with the
+    /// same name. This allows YAML and user-defined workflows to override
+    /// built-in defaults while keeping the remaining builtins as fallbacks.
+    pub fn with_templates(mut self, extra: std::collections::HashMap<String, WorkflowTemplate>) -> Self {
+        self.templates.extend(extra);
+        self
+    }
+
+    /// Create a workflow engine that includes YAML and inline user-defined
+    /// templates loaded from the current configuration.
+    ///
+    /// Resolution order mirrors `Config::resolve_workflow`: inline workflows
+    /// override YAML workflows, which override built-in templates.
+    pub fn new_with_config(
+        task_repo: Arc<T>,
+        task_service: TaskService<T>,
+        event_bus: Arc<EventBus>,
+        verification_enabled: bool,
+    ) -> Self {
+        let config = crate::services::config::Config::load().unwrap_or_default();
+        let mut templates = WorkflowTemplate::builtin_templates();
+        // Layer on YAML workflows (overrides builtins).
+        templates.extend(config.load_yaml_workflows());
+        // Layer on inline workflows (highest priority).
+        for wf in &config.workflows {
+            templates.insert(wf.name.clone(), wf.clone());
+        }
+        Self {
+            task_repo,
+            task_service,
+            event_bus,
+            templates,
+            verification_enabled,
+        }
+    }
+
+    /// Returns the names of all workflow templates known to this engine.
+    pub fn available_workflow_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.templates.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Look up the workflow template by name.
@@ -502,9 +561,9 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
                     );
                     self.fail_workflow_phase(
                         parent_task_id,
-                        &workflow_name,
+                        workflow_name,
                         *phase_index,
-                        &phase_name,
+                        phase_name,
                         &error_msg,
                     ).await?;
                     return Ok(());
@@ -653,7 +712,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         }
 
         // Is this a gate phase?
-        if is_gate_phase(&phase_name) {
+        if is_gate_phase(&self.templates, &workflow_name, phase_index, &phase_name) {
             let gate_state = WorkflowState::PhaseGate {
                 workflow_name: workflow_name.clone(),
                 phase_index,
@@ -806,7 +865,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             let _ = self.task_service.transition_to_running(parent_task_id).await?;
 
             // Verification passed — proceed
-            if is_gate_phase(&phase_name) {
+            if is_gate_phase(&self.templates, &workflow_name, phase_index, &phase_name) {
                 let gate_state = WorkflowState::PhaseGate {
                     workflow_name: workflow_name.clone(),
                     phase_index,
@@ -1697,11 +1756,21 @@ mod tests {
 
     #[test]
     fn test_is_gate_phase() {
-        assert!(is_gate_phase("triage"));
-        assert!(is_gate_phase("validation"));
-        assert!(is_gate_phase("review"));
-        assert!(!is_gate_phase("implement"));
-        assert!(!is_gate_phase("research"));
+        let templates = WorkflowTemplate::builtin_templates();
+        // External workflow: triage (idx 0) and validation (idx 1) are gates
+        assert!(is_gate_phase(&templates, "external", 0, "triage"));
+        assert!(is_gate_phase(&templates, "external", 1, "validation"));
+        // External workflow: review (idx 5) is a gate
+        assert!(is_gate_phase(&templates, "external", 5, "review"));
+        // Code workflow: review (idx 3) is a gate
+        assert!(is_gate_phase(&templates, "code", 3, "review"));
+        // Code workflow: implement (idx 2) is NOT a gate
+        assert!(!is_gate_phase(&templates, "code", 2, "implement"));
+        // Code workflow: research (idx 0) is NOT a gate
+        assert!(!is_gate_phase(&templates, "code", 0, "research"));
+        // Fallback for unknown workflow
+        assert!(is_gate_phase(&templates, "unknown", 0, "review"));
+        assert!(!is_gate_phase(&templates, "unknown", 0, "implement"));
     }
 
     #[tokio::test]

@@ -1,0 +1,45 @@
+name: docs
+description: 'Documentation workflow: research the subject, write docs, review for clarity and accuracy. Delivers output as a pull request.'
+phases:
+- name: research
+  description: Explore the codebase to understand the subject that needs to be documented
+  role: Read-only research agent that understands APIs, modules, and usage patterns
+  tools:
+  - read
+  - glob
+  - grep
+  - memory
+  read_only: true
+  dependency: root
+  verify: false
+  gate: false
+- name: write
+  description: Write clear, accurate documentation based on research findings
+  role: Technical writer that produces clear, accurate documentation
+  tools:
+  - read
+  - write
+  - edit
+  - glob
+  - grep
+  - memory
+  read_only: false
+  dependency: sequential
+  verify: true
+  gate: false
+- name: review
+  description: Review documentation for clarity, accuracy, and completeness
+  role: Documentation reviewer that validates content quality and technical accuracy
+  tools:
+  - read
+  - glob
+  - grep
+  - memory
+  read_only: false
+  dependency: sequential
+  verify: false
+  gate: true
+workspace_kind: worktree
+tool_grants: []
+output_delivery: pull_request
+max_verification_retries: 2

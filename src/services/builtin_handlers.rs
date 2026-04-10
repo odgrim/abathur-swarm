@@ -6179,7 +6179,7 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowSubtaskCompletionHand
         // Delegate to workflow engine (via TaskService for all mutations).
         // Idempotent — safe to call twice for same subtask (e.g. from dual TaskCompleted events).
         let task_service = crate::services::task_service::TaskService::new(self.task_repo.clone());
-        let engine = crate::services::workflow_engine::WorkflowEngine::new(
+        let engine = crate::services::workflow_engine::WorkflowEngine::new_with_config(
             self.task_repo.clone(),
             task_service,
             self.event_bus.clone(),
@@ -6389,7 +6389,7 @@ impl<T: TaskRepository + 'static> EventHandler for WorkflowVerificationHandler<T
 
             // Feed result back to workflow engine (via TaskService for all mutations)
             let task_service = crate::services::task_service::TaskService::new(task_repo.clone());
-            let engine = crate::services::workflow_engine::WorkflowEngine::new(
+            let engine = crate::services::workflow_engine::WorkflowEngine::new_with_config(
                 task_repo,
                 task_service,
                 event_bus,

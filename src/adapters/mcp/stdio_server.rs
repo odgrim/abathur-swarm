@@ -203,7 +203,7 @@ where
                     "type": "object",
                     "properties": {
                         "task_id": { "type": "string", "description": "UUID of the task to change the workflow spine for" },
-                        "workflow_name": { "type": "string", "enum": ["code", "analysis", "docs", "review", "external"], "description": "Name of the workflow spine to switch to" }
+                        "workflow_name": { "type": "string", "description": "Name of the workflow spine to switch to (e.g. code, analysis, docs, review, pr-review, external, or any custom workflow)" }
                     },
                     "required": ["task_id", "workflow_name"]
                 }
@@ -1299,7 +1299,7 @@ where
             .and_then(|v| v.as_str())
             .ok_or("Missing required field: workflow_name")?;
 
-        let engine = crate::services::workflow_engine::WorkflowEngine::new(
+        let engine = crate::services::workflow_engine::WorkflowEngine::new_with_config(
             self.task_service.repo().clone(),
             self.task_service.clone(),
             self.event_bus.clone().unwrap_or_else(|| {

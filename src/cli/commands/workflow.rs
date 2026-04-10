@@ -6,6 +6,7 @@ use clap::{Args, Subcommand};
 use crate::cli::display::{
     list_table, output, render_list, truncate_ellipsis, CommandOutput,
 };
+use crate::domain::models::workflow_template::WorkflowTemplate;
 use crate::services::config::Config;
 
 #[derive(Args, Debug)]
@@ -25,6 +26,20 @@ pub enum WorkflowCommands {
     },
     /// Validate all configured workflow templates
     Validate,
+    /// Export a workflow template to YAML
+    Export {
+        /// Workflow name to export
+        name: String,
+        /// Output directory (defaults to configured workflows_dir)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Export all built-in workflow templates to YAML
+    ExportAll {
+        /// Output directory (defaults to configured workflows_dir)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 // ── Output structs ──────────────────────────────────────────────────────
@@ -166,6 +181,8 @@ pub async fn execute(args: WorkflowArgs, json_mode: bool) -> Result<()> {
         WorkflowCommands::List => list_workflows(json_mode),
         WorkflowCommands::Show { name } => show_workflow(&name, json_mode),
         WorkflowCommands::Validate => validate_workflows(json_mode),
+        WorkflowCommands::Export { name, output } => export_workflow(&name, output.as_deref(), json_mode),
+        WorkflowCommands::ExportAll { output } => export_all_workflows(output.as_deref(), json_mode),
     }
 }
 
@@ -175,11 +192,14 @@ fn list_workflows(json_mode: bool) -> Result<()> {
 
     let available = config.available_workflows();
 
+    let yaml_workflows = config.load_yaml_workflows();
     let workflows: Vec<WorkflowSummary> = available
         .into_iter()
         .map(|(name, description, phase_count, is_default)| {
             let source = if config.workflows.iter().any(|wf| wf.name == name) {
                 "abathur.toml".to_string()
+            } else if yaml_workflows.contains_key(&name) {
+                "yaml".to_string()
             } else {
                 "built-in".to_string()
             };
@@ -237,16 +257,35 @@ fn validate_workflows(json_mode: bool) -> Result<()> {
 
     let mut results = Vec::new();
 
-    // Validate the built-in "code" workflow
-    let code_wf = crate::domain::models::workflow_template::WorkflowTemplate::default_code_workflow();
-    let valid = code_wf.validate();
-    results.push(ValidationResult {
-        name: code_wf.name,
-        valid: valid.is_ok(),
-        error: valid.err(),
-    });
+    // Validate all built-in workflows.
+    let builtins = WorkflowTemplate::builtin_templates();
+    let mut builtin_names: Vec<&String> = builtins.keys().collect();
+    builtin_names.sort();
+    for name in builtin_names {
+        let wf = &builtins[name];
+        let valid = wf.validate();
+        results.push(ValidationResult {
+            name: wf.name.clone(),
+            valid: valid.is_ok(),
+            error: valid.err(),
+        });
+    }
 
-    // Validate each user-defined workflow
+    // Validate YAML workflows.
+    let yaml_workflows = config.load_yaml_workflows();
+    let mut yaml_names: Vec<&String> = yaml_workflows.keys().collect();
+    yaml_names.sort();
+    for name in yaml_names {
+        let wf = &yaml_workflows[name];
+        let valid = wf.validate();
+        results.push(ValidationResult {
+            name: wf.name.clone(),
+            valid: valid.is_ok(),
+            error: valid.err(),
+        });
+    }
+
+    // Validate each inline user-defined workflow.
     for wf in &config.workflows {
         let valid = wf.validate();
         results.push(ValidationResult {
@@ -258,6 +297,96 @@ fn validate_workflows(json_mode: bool) -> Result<()> {
 
     let all_valid = results.iter().all(|r| r.valid);
     let out = ValidateOutput { results, all_valid };
+    output(&out, json_mode);
+    Ok(())
+}
+
+// ── Export commands ─────────────────────────────────────────────────────
+
+#[derive(Debug, serde::Serialize)]
+struct ExportOutput {
+    workflow: String,
+    path: String,
+}
+
+impl CommandOutput for ExportOutput {
+    fn to_human(&self) -> String {
+        format!("Exported workflow '{}' to {}", self.workflow, self.path)
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ExportAllOutput {
+    exported: Vec<ExportOutput>,
+}
+
+impl CommandOutput for ExportAllOutput {
+    fn to_human(&self) -> String {
+        if self.exported.is_empty() {
+            return "No workflows exported.".to_string();
+        }
+        let mut lines = vec![format!("Exported {} workflows:", self.exported.len())];
+        for e in &self.exported {
+            lines.push(format!("  {} -> {}", e.workflow, e.path));
+        }
+        lines.join("\n")
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_default()
+    }
+}
+
+fn write_workflow_yaml(wf: &WorkflowTemplate, dir: &str) -> Result<String> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("Failed to create directory: {}", dir))?;
+    let yaml = wf.to_yaml().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let path = std::path::Path::new(dir).join(format!("{}.yaml", wf.name));
+    std::fs::write(&path, &yaml)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(path.display().to_string())
+}
+
+fn export_workflow(name: &str, output_dir: Option<&str>, json_mode: bool) -> Result<()> {
+    let config = Config::load().context("Failed to load configuration")?;
+    let dir = output_dir.unwrap_or(&config.workflows_dir);
+
+    let wf = config
+        .resolve_workflow(name)
+        .ok_or_else(|| anyhow::anyhow!("Workflow '{}' not found", name))?;
+
+    let path = write_workflow_yaml(&wf, dir)?;
+    let out = ExportOutput {
+        workflow: wf.name,
+        path,
+    };
+    output(&out, json_mode);
+    Ok(())
+}
+
+fn export_all_workflows(output_dir: Option<&str>, json_mode: bool) -> Result<()> {
+    let config = Config::load().context("Failed to load configuration")?;
+    let dir = output_dir.unwrap_or(&config.workflows_dir);
+
+    let templates = WorkflowTemplate::builtin_templates();
+    let mut exported = Vec::new();
+
+    let mut names: Vec<&String> = templates.keys().collect();
+    names.sort();
+    for name in names {
+        let wf = &templates[name];
+        let path = write_workflow_yaml(wf, dir)?;
+        exported.push(ExportOutput {
+            workflow: wf.name.clone(),
+            path,
+        });
+    }
+
+    let out = ExportAllOutput { exported };
     output(&out, json_mode);
     Ok(())
 }

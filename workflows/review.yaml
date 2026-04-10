@@ -1,0 +1,21 @@
+name: review
+description: Single-phase code review workflow. Produces a review report stored in swarm memory; no git changes are made.
+phases:
+- name: review
+  description: Review code for correctness, edge cases, security, and test coverage
+  role: Code review specialist that validates implementation quality and identifies issues
+  tools:
+  - read
+  - glob
+  - grep
+  - shell
+  - memory
+  read_only: true
+  dependency: root
+  verify: false
+  gate: true
+workspace_kind: none
+tool_grants:
+- memory
+output_delivery: memory_only
+max_verification_retries: 2

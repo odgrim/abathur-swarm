@@ -1799,6 +1799,7 @@ mod tests {
                     read_only: true,
                     dependency: PhaseDependency::Root,
                     verify: false,
+                    gate: false,
                 },
                 WorkflowPhase {
                     name: "write-docs".to_string(),
@@ -1812,6 +1813,7 @@ mod tests {
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
                     verify: false,
+                    gate: false,
                 },
             ],
             ..WorkflowTemplate::default()
@@ -1842,6 +1844,7 @@ mod tests {
                     read_only: true,
                     dependency: PhaseDependency::Root,
                     verify: false,
+                    gate: false,
                 },
                 WorkflowPhase {
                     name: "implement".to_string(),
@@ -1851,6 +1854,7 @@ mod tests {
                     read_only: false,
                     dependency: PhaseDependency::Sequential,
                     verify: true,
+                    gate: false,
                 },
                 WorkflowPhase {
                     name: "review".to_string(),
@@ -1860,6 +1864,7 @@ mod tests {
                     read_only: true,
                     dependency: PhaseDependency::Sequential,
                     verify: false,
+                    gate: true,
                 },
             ],
             ..WorkflowTemplate::default()

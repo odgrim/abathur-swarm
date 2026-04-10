@@ -1,0 +1,42 @@
+name: analysis
+description: 'Read-only 3-phase analysis workflow: research, analyze, synthesize. Findings are stored in swarm memory with no git changes.'
+phases:
+- name: research
+  description: Explore the codebase and collect raw data about the subject area
+  role: Read-only research agent that maps codebase structure and dependencies
+  tools:
+  - read
+  - glob
+  - grep
+  - memory
+  read_only: true
+  dependency: root
+  verify: false
+  gate: false
+- name: analyze
+  description: Analyze collected research to identify patterns, issues, and opportunities
+  role: Analysis specialist that interprets research findings and draws conclusions
+  tools:
+  - read
+  - glob
+  - grep
+  - memory
+  read_only: true
+  dependency: sequential
+  verify: false
+  gate: false
+- name: synthesize
+  description: Synthesize analysis into actionable insights and store in swarm memory
+  role: Synthesis specialist that produces structured, reusable conclusions
+  tools:
+  - read
+  - memory
+  read_only: true
+  dependency: sequential
+  verify: false
+  gate: false
+workspace_kind: none
+tool_grants:
+- memory
+output_delivery: memory_only
+max_verification_retries: 2

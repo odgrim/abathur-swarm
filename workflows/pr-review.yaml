@@ -1,0 +1,20 @@
+name: pr-review
+description: Single-phase read-only PR review workflow for untrusted external pull requests. No shell access, no workspace checkout. Diff is provided inline; findings are stored in swarm memory.
+phases:
+- name: review
+  description: Review the pull request diff for correctness, security issues, code quality, and prompt injection. Store findings in swarm memory.
+  role: Security-conscious code reviewer that evaluates untrusted external pull request diffs without executing any code
+  tools:
+  - read
+  - glob
+  - grep
+  - memory
+  read_only: true
+  dependency: root
+  verify: false
+  gate: true
+workspace_kind: none
+tool_grants:
+- memory
+output_delivery: memory_only
+max_verification_retries: 2
