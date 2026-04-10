@@ -3388,6 +3388,95 @@ mod tests {
         );
     }
 
+    /// Regression test for no-premature-termination constraint: at FixedPoint with
+    /// 2+ consecutive all-passing observations, but overseer_signals_are_ambiguous()
+    /// returns true (success_criteria present, test_results absent), verify that
+    /// OverseerConverged is NOT returned — IntentCheck should fire instead.
+    #[test]
+    fn test_overseer_converged_bypass_when_signals_ambiguous() {
+        let engine = test_engine();
+        let mut trajectory = test_trajectory();
+
+        // Disable interval and budget triggers so only the FixedPoint shortcircuit path runs.
+        trajectory.policy.intent_check_interval = u32::MAX;
+        trajectory.policy.intent_check_at_budget_fraction = 1.0;
+
+        // Add success criteria — this makes test evidence required for unambiguous convergence.
+        trajectory
+            .specification
+            .effective
+            .success_criteria
+            .push("All unit tests pass".to_string());
+        trajectory
+            .specification
+            .effective
+            .success_criteria
+            .push("No regressions in integration suite".to_string());
+
+        // Set FixedPoint attractor — trajectory has stabilized.
+        trajectory.attractor_state = AttractorState {
+            classification: AttractorType::FixedPoint {
+                estimated_remaining_iterations: 0,
+                estimated_remaining_tokens: 0,
+            },
+            confidence: 0.95,
+            detected_at: None,
+            evidence: AttractorEvidence {
+                recent_deltas: vec![0.0, 0.0, 0.0],
+                recent_signatures: vec![],
+                rationale: String::new(),
+            },
+        };
+
+        // Two consecutive build-only observations (no test_results).
+        // all_passing_relative() returns true for build-only signals, so
+        // consecutive_all_passing >= 2 is satisfied.
+        let build_only = OverseerSignals {
+            build_result: Some(BuildResult {
+                success: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            type_check: Some(TypeCheckResult {
+                clean: true,
+                error_count: 0,
+                errors: Vec::new(),
+            }),
+            test_results: None, // ← ambiguous: criteria exist but no test evidence
+            ..OverseerSignals::default()
+        };
+
+        for i in 0..3 {
+            let obs = Observation::new(
+                i,
+                test_artifact(i),
+                build_only.clone(),
+                StrategyKind::RetryWithFeedback,
+                10_000,
+                5_000,
+            )
+            .with_metrics(metrics_with(0.0, 1.0));
+            trajectory.observations.push(obs);
+        }
+
+        let bandit = StrategyBandit::with_default_priors();
+        let result = engine.check_loop_control(&trajectory, &bandit).unwrap();
+
+        // OverseerConverged must NOT be returned — the guard should detect ambiguity
+        // and fall back to IntentCheck so the LLM-based verifier can assess completeness.
+        assert!(
+            !matches!(result, LoopControl::OverseerConverged),
+            "OverseerConverged must not fire when overseer signals are ambiguous \
+             (success_criteria present but no test_results), got {:?}",
+            result
+        );
+        assert!(
+            matches!(result, LoopControl::IntentCheck),
+            "Ambiguous signals at FixedPoint should fall back to IntentCheck, got {:?}",
+            result
+        );
+    }
+
     // -----------------------------------------------------------------------
     // should_verify tests
     // -----------------------------------------------------------------------

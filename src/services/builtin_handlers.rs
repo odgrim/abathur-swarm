@@ -10950,6 +10950,50 @@ mod goal_stagnation_detector_tests {
         let reaction = handler.handle(&event, &ctx).await.unwrap();
         assert!(matches!(reaction, Reaction::None), "Non-ScheduledEventFired should return None");
     }
+
+    #[tokio::test]
+    async fn test_stagnation_dedup_expires_after_window() {
+        let repo = setup_goal_repo().await;
+        // Stall threshold = 1 second — alert fires immediately for old goals,
+        // and the dedup window also expires after 1 second.
+        let handler = GoalStagnationDetectorHandler::new(repo.clone(), 1);
+
+        let mut goal = Goal::new("Dedup Expiry Goal", "Tests that dedup window expires")
+            .with_priority(GoalPriority::High);
+        goal.created_at = chrono::Utc::now() - chrono::Duration::seconds(200);
+        repo.create(&goal).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let event = make_stall_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        // First call: should emit escalation
+        let reaction1 = handler.handle(&event, &ctx).await.unwrap();
+        assert!(
+            matches!(reaction1, Reaction::EmitEvents(_)),
+            "First call should emit escalation"
+        );
+
+        // Second call immediately: should be deduped
+        let reaction2 = handler.handle(&event, &ctx).await.unwrap();
+        assert!(
+            matches!(reaction2, Reaction::None),
+            "Immediate second call should be deduped"
+        );
+
+        // Wait for the dedup window to expire. The dedup check uses
+        // `num_seconds() > threshold_secs` (strictly greater), and num_seconds()
+        // truncates, so we need > 1 full second past the threshold (i.e. > 2s total).
+        tokio::time::sleep(std::time::Duration::from_millis(2050)).await;
+
+        // Third call after dedup window expires: should re-emit escalation
+        let reaction3 = handler.handle(&event, &ctx).await.unwrap();
+        assert!(
+            matches!(reaction3, Reaction::EmitEvents(_)),
+            "Call after dedup window expires should re-emit escalation"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -11696,6 +11740,59 @@ mod goal_convergence_check_handler_tests {
         assert!(
             ready[0].title.starts_with("Goal Convergence Check"),
             "New task should be a convergence check"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_budget_gate_pauses_convergence_check() {
+        let (handler, goal_repo, task_repo) = setup_convergence_handler().await;
+
+        // Insert a goal so the handler proceeds past the "no goals" early return
+        let goal = Goal::new("Budget Gate Test Goal", "Testing budget gate")
+            .with_priority(GoalPriority::Normal);
+        goal_repo.create(&goal).await.unwrap();
+
+        // Create a BudgetTracker with critical pressure so should_pause_new_work() = true
+        let event_bus = Arc::new(crate::services::EventBus::new(crate::services::EventBusConfig {
+            persist_events: false,
+            ..Default::default()
+        }));
+        let tracker = Arc::new(crate::services::budget_tracker::BudgetTracker::new(
+            crate::services::budget_tracker::BudgetTrackerConfig::default(),
+            event_bus,
+        ));
+        // Push pressure to Critical by reporting a window with >= 95% consumed
+        tracker
+            .report_budget_signal(
+                "daily",
+                crate::services::budget_tracker::BudgetWindowType::Daily,
+                0.98,  // 98% consumed → Critical
+                500,
+                3600,
+            )
+            .await;
+        assert!(
+            tracker.should_pause_new_work().await,
+            "Tracker should signal pause at Critical pressure"
+        );
+
+        // Attach the budget tracker to the handler
+        let handler = handler.with_budget_tracker(tracker);
+
+        let event = make_convergence_check_event();
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let reaction = handler.handle(&event, &ctx).await.unwrap();
+        assert!(
+            matches!(reaction, Reaction::None),
+            "Budget gate should cause handler to return Reaction::None"
+        );
+
+        // Verify no convergence task was created
+        let ready = task_repo.list_by_status(TaskStatus::Ready).await.unwrap();
+        assert!(
+            ready.is_empty(),
+            "No task should be created when budget pressure is critical"
         );
     }
 }
