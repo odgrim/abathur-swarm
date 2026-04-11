@@ -66,6 +66,9 @@ pub enum MemoryCommands {
         /// Filter by tier
         #[arg(short, long)]
         tier: Option<String>,
+        /// Filter by type (fact, code, decision, error, pattern, reference, context)
+        #[arg(long = "type")]
+        memory_type: Option<String>,
         /// Maximum results
         #[arg(short, long, default_value = "20")]
         limit: usize,
@@ -337,10 +340,11 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
             output(&out, json_mode);
         }
 
-        MemoryCommands::List { namespace, tier, limit } => {
+        MemoryCommands::List { namespace, tier, memory_type, limit } => {
             let query = MemoryQuery {
                 namespace,
                 tier: tier.as_ref().and_then(|t| MemoryTier::from_str(t)),
+                memory_type: memory_type.as_ref().and_then(|t| MemoryType::from_str(t)),
                 limit: Some(limit),
                 ..Default::default()
             };
@@ -414,5 +418,60 @@ pub async fn execute(args: MemoryArgs, json_mode: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Wrapper to parse MemoryArgs from CLI tokens.
+    #[derive(Parser, Debug)]
+    struct Cli {
+        #[command(subcommand)]
+        command: MemoryCommands,
+    }
+
+    #[test]
+    fn parse_list_with_type_flag() {
+        let cli = Cli::parse_from(["memory", "list", "--type", "decision"]);
+        match cli.command {
+            MemoryCommands::List { memory_type, .. } => {
+                assert_eq!(memory_type.as_deref(), Some("decision"));
+            }
+            _ => panic!("Expected List command"),
+        }
+    }
+
+    #[test]
+    fn parse_list_without_type_flag() {
+        let cli = Cli::parse_from(["memory", "list"]);
+        match cli.command {
+            MemoryCommands::List { memory_type, .. } => {
+                assert!(memory_type.is_none());
+            }
+            _ => panic!("Expected List command"),
+        }
+    }
+
+    #[test]
+    fn parse_list_with_all_filters() {
+        let cli = Cli::parse_from([
+            "memory", "list",
+            "--namespace", "test-ns",
+            "--tier", "semantic",
+            "--type", "error",
+            "--limit", "5",
+        ]);
+        match cli.command {
+            MemoryCommands::List { namespace, tier, memory_type, limit } => {
+                assert_eq!(namespace.as_deref(), Some("test-ns"));
+                assert_eq!(tier.as_deref(), Some("semantic"));
+                assert_eq!(memory_type.as_deref(), Some("error"));
+                assert_eq!(limit, 5);
+            }
+            _ => panic!("Expected List command"),
+        }
+    }
 }
 

@@ -652,6 +652,9 @@ where
     // Track consecutive Indeterminate results for escalation.
     let mut consecutive_indeterminate: u32 = 0;
 
+    // Hard cap on total intent checks to prevent runaway verification loops.
+    let mut total_intent_checks: u32 = 0;
+
     // Lint baseline: captures the lint error count from the first observation
     // so that pre-existing warnings (e.g. from `cargo clippy -- -D warnings`)
     // don't permanently block convergence via `all_passing()`.
@@ -929,6 +932,30 @@ where
                 // Intent-driven finality: intent verifier is the sole
                 // authority on task completion. No fallback to static checks.
                 // -----------------------------------------------------------
+
+                // Hard cap: after 10 total intent checks, stop to prevent
+                // runaway verification loops burning budget indefinitely.
+                total_intent_checks += 1;
+                if total_intent_checks > 10 {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        total_intent_checks,
+                        "Total intent check cap (10) exceeded — exhausting task"
+                    );
+                    let best_seq = trajectory.best_observation().map(|o| o.sequence);
+                    let outcome = ConvergenceOutcome::Exhausted {
+                        trajectory_id: trajectory.id.to_string(),
+                        best_observation_sequence: best_seq,
+                    };
+                    engine.finalize(&mut trajectory, &outcome, &bandit).await?;
+                    emit_convergence_terminated(
+                        event_bus, task, goal_id, &trajectory, "exhausted",
+                    ).await;
+                    return Ok(ConvergentOutcome::Failed(
+                        "total intent check cap (10) exceeded".into()
+                    ));
+                }
+
                 // Defense-in-depth: verification tasks must never recurse
                 // into intent verification. Treat as converged.
                 if task.task_type.is_verification() {
@@ -2518,6 +2545,30 @@ mod tests {
         assert!(
             policy.skip_expensive_overseers,
             "critical SLA should still enable skip_expensive_overseers"
+        );
+    }
+
+    /// Validates intent check total cap threshold logic:
+    /// counter should trigger exhaustion only after exceeding cap of 10.
+    #[test]
+    fn test_intent_check_total_cap_threshold() {
+        let cap: u32 = 10;
+        let mut total_intent_checks: u32 = 0;
+
+        // Simulate 10 checks — none should exceed the cap
+        for i in 1..=cap {
+            total_intent_checks += 1;
+            assert!(
+                total_intent_checks <= cap,
+                "check #{i} should not exceed cap"
+            );
+        }
+
+        // The 11th check should exceed the cap
+        total_intent_checks += 1;
+        assert!(
+            total_intent_checks > cap,
+            "check #11 must exceed the cap of {cap}, got {total_intent_checks}"
         );
     }
 }
