@@ -11795,4 +11795,68 @@ mod goal_convergence_check_handler_tests {
             "No task should be created when budget pressure is critical"
         );
     }
+
+    #[tokio::test]
+    async fn test_budget_trigger_bypasses_budget_gate() {
+        let (handler, goal_repo, task_repo) = setup_convergence_handler().await;
+
+        // Insert a goal so the handler proceeds past the "no goals" early return
+        let goal = Goal::new("Budget Trigger Test Goal", "Testing budget trigger bypass")
+            .with_priority(GoalPriority::Normal);
+        goal_repo.create(&goal).await.unwrap();
+
+        // Create a BudgetTracker with critical pressure so should_pause_new_work() = true
+        let event_bus = Arc::new(crate::services::EventBus::new(crate::services::EventBusConfig {
+            persist_events: false,
+            ..Default::default()
+        }));
+        let tracker = Arc::new(crate::services::budget_tracker::BudgetTracker::new(
+            crate::services::budget_tracker::BudgetTrackerConfig::default(),
+            event_bus,
+        ));
+        // Push pressure to Critical by reporting a window with >= 95% consumed
+        tracker
+            .report_budget_signal(
+                "daily",
+                crate::services::budget_tracker::BudgetWindowType::Daily,
+                0.98,  // 98% consumed → Critical
+                500,
+                3600,
+            )
+            .await;
+        assert!(
+            tracker.should_pause_new_work().await,
+            "Tracker should signal pause at Critical pressure"
+        );
+
+        // Attach the budget tracker to the handler
+        let handler = handler.with_budget_tracker(tracker);
+
+        // Use the budget-trigger event name — this should bypass the budget gate
+        let event = UnifiedEvent {
+            id: EventId::new(),
+            sequence: SequenceNumber(0),
+            timestamp: chrono::Utc::now(),
+            severity: EventSeverity::Info,
+            category: EventCategory::Scheduler,
+            goal_id: None,
+            task_id: None,
+            correlation_id: None,
+            source_process_id: None,
+            payload: EventPayload::ScheduledEventFired {
+                schedule_id: uuid::Uuid::new_v4(),
+                name: "goal-convergence-check:budget-trigger".to_string(),
+            },
+        };
+        let ctx = HandlerContext { chain_depth: 0, correlation_id: None };
+
+        let _reaction = handler.handle(&event, &ctx).await.unwrap();
+
+        // Verify a convergence task WAS created despite critical budget pressure
+        let ready = task_repo.list_by_status(TaskStatus::Ready).await.unwrap();
+        assert!(
+            !ready.is_empty(),
+            "A task should be created when event is a budget-trigger, even at critical pressure"
+        );
+    }
 }

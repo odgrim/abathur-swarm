@@ -1395,4 +1395,117 @@ mod tests {
         // Only ArchitectReview remains (not used at all)
         assert!(has_kind(&cands_large, "architect_review"));
     }
+
+    // --- StrategyBandit reliability tests ---
+
+    #[test]
+    fn test_bandit_select_returns_valid_strategy() {
+        let bandit = StrategyBandit::with_default_priors();
+        let policy = ConvergencePolicy::default();
+        let attractor = AttractorType::FixedPoint {
+            estimated_remaining_iterations: 3,
+            estimated_remaining_tokens: 50_000,
+        };
+        let eligible = vec![
+            StrategyKind::RetryWithFeedback,
+            StrategyKind::FocusedRepair,
+            StrategyKind::IncrementalRefinement,
+        ];
+
+        let eligible_names: Vec<&str> = eligible.iter().map(|s| s.kind_name()).collect();
+        for _ in 0..20 {
+            let selected = bandit.select(&attractor, &eligible, &policy);
+            assert!(
+                eligible_names.contains(&selected.kind_name()),
+                "select() returned '{}' which is not in the eligible set",
+                selected.kind_name()
+            );
+        }
+    }
+
+    #[test]
+    fn test_bandit_update_success_increases_alpha() {
+        let mut bandit = StrategyBandit::new();
+        let strategy = StrategyKind::FocusedRepair;
+        let attractor = AttractorType::FixedPoint {
+            estimated_remaining_iterations: 3,
+            estimated_remaining_tokens: 50_000,
+        };
+
+        // Build an observation with convergence_delta = 0.5 (> STRATEGY_SUCCESS_THRESHOLD → Success)
+        let obs = Observation::new(
+            1,
+            ArtifactReference::default(),
+            OverseerSignals::default(),
+            strategy.clone(),
+            1000,
+            500,
+        )
+        .with_metrics(ObservationMetrics {
+            convergence_delta: 0.5,
+            ..ObservationMetrics::default()
+        });
+
+        // Record alpha before update
+        let key = attractor_type_name(&attractor);
+        let alpha_before = bandit
+            .context_arms
+            .get(&key)
+            .and_then(|m| m.get(strategy.kind_name()))
+            .map(|d| d.alpha)
+            .unwrap_or(1.0); // uniform prior
+
+        bandit.update(&strategy, &attractor, &obs);
+
+        let alpha_after = bandit.context_arms[&key][strategy.kind_name()].alpha;
+        assert!(
+            (alpha_after - (alpha_before + 1.0)).abs() < f64::EPSILON,
+            "Success should increase alpha by 1.0: before={}, after={}",
+            alpha_before,
+            alpha_after
+        );
+    }
+
+    #[test]
+    fn test_bandit_update_failure_increases_beta() {
+        let mut bandit = StrategyBandit::new();
+        let strategy = StrategyKind::FocusedRepair;
+        let attractor = AttractorType::FixedPoint {
+            estimated_remaining_iterations: 3,
+            estimated_remaining_tokens: 50_000,
+        };
+
+        // Build an observation with convergence_delta = -0.5 (< -STRATEGY_SUCCESS_THRESHOLD → Failure)
+        let obs = Observation::new(
+            1,
+            ArtifactReference::default(),
+            OverseerSignals::default(),
+            strategy.clone(),
+            1000,
+            500,
+        )
+        .with_metrics(ObservationMetrics {
+            convergence_delta: -0.5,
+            ..ObservationMetrics::default()
+        });
+
+        // Record beta before update
+        let key = attractor_type_name(&attractor);
+        let beta_before = bandit
+            .context_arms
+            .get(&key)
+            .and_then(|m| m.get(strategy.kind_name()))
+            .map(|d| d.beta)
+            .unwrap_or(1.0); // uniform prior
+
+        bandit.update(&strategy, &attractor, &obs);
+
+        let beta_after = bandit.context_arms[&key][strategy.kind_name()].beta;
+        assert!(
+            (beta_after - (beta_before + 1.0)).abs() < f64::EPSILON,
+            "Failure should increase beta by 1.0: before={}, after={}",
+            beta_before,
+            beta_after
+        );
+    }
 }

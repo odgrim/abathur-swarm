@@ -1693,4 +1693,85 @@ mod tests {
             deprecated.metadata.tags
         );
     }
+
+    #[tokio::test]
+    async fn test_episodic_to_semantic_promotion_blocked_by_insufficient_accessors() {
+        let service = setup_service().await
+            .with_decay_config(DecayConfig {
+                promote_to_episodic_threshold: 3,
+                promote_to_episodic_distinct_accessors: 2,
+                promote_to_semantic_threshold: 10,
+                promote_to_semantic_distinct_accessors: 3,
+                ..Default::default()
+            });
+
+        // Create an Episodic-tier memory directly
+        let (mem, _) = service.store(
+            "episodic_stuck".to_string(),
+            "This memory should stay episodic because it lacks distinct accessors for semantic promotion.".to_string(),
+            "test".to_string(),
+            MemoryTier::Episodic,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        // Access 12+ times from only 2 distinct accessors (below semantic threshold of 3)
+        let accessor_a = AccessorId::agent("agent-alpha");
+        let accessor_b = AccessorId::agent("agent-beta");
+        for _ in 0..7 {
+            service.recall(mem.id, accessor_a.clone()).await.unwrap();
+        }
+        for _ in 0..6 {
+            service.recall(mem.id, accessor_b.clone()).await.unwrap();
+        }
+
+        let (result, _) = service.recall(mem.id, accessor_a.clone()).await.unwrap();
+        let result = result.unwrap();
+        assert_eq!(
+            result.tier,
+            MemoryTier::Episodic,
+            "Memory should stay Episodic when distinct accessors ({}) < semantic threshold (3)",
+            result.distinct_accessor_count()
+        );
+        assert!(result.access_count >= 12, "Access count should be high: {}", result.access_count);
+        assert_eq!(result.distinct_accessor_count(), 2, "Only 2 distinct accessors");
+    }
+
+    #[tokio::test]
+    async fn test_load_context_with_budget_empty_when_below_min_score() {
+        let service = setup_service().await;
+
+        // Store memories about a specific topic
+        service.store(
+            "rust_borrow_checker".to_string(),
+            "The Rust borrow checker ensures memory safety at compile time through ownership rules.".to_string(),
+            "test".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        service.store(
+            "rust_lifetimes".to_string(),
+            "Lifetimes in Rust annotate how long references are valid to prevent dangling pointers.".to_string(),
+            "test".to_string(),
+            MemoryTier::Working,
+            MemoryType::Fact,
+            None,
+        ).await.unwrap();
+
+        // Query for a completely unrelated topic with generous budget
+        let results = service.load_context_with_budget(
+            "underwater basket weaving techniques for beginners",
+            Some("test"),
+            10000, // Very generous budget
+            RelevanceWeights::default(),
+        ).await.unwrap();
+
+        assert!(
+            results.is_empty(),
+            "Unrelated query should return empty results due to min_score filter, got {} results",
+            results.len()
+        );
+    }
 }
