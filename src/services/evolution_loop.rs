@@ -2582,4 +2582,102 @@ mod tests {
         let pending = evolution.get_pending_refinements().await;
         assert!(pending.is_empty(), "no repo means no refinements recovered");
     }
+
+    #[test]
+    fn test_evolution_config_default_values() {
+        let config = EvolutionConfig::default();
+        assert_eq!(config.min_tasks_for_evaluation, 5);
+        assert!((config.refinement_threshold - 0.60).abs() < f64::EPSILON);
+        assert!((config.major_refinement_threshold - 0.40).abs() < f64::EPSILON);
+        assert_eq!(config.major_refinement_min_tasks, 10);
+        assert_eq!(config.regression_detection_window_hours, 24);
+        assert_eq!(config.regression_min_tasks, 3);
+        assert!((config.regression_threshold - 0.15).abs() < f64::EPSILON);
+        assert!(config.auto_revert_enabled);
+        assert_eq!(config.stale_refinement_timeout_hours, 48);
+    }
+
+    #[tokio::test]
+    async fn test_template_stats_average_computation() {
+        let mut stats = TemplateStats::new("avg-test".to_string(), 1);
+
+        // First execution: 10 turns, 1000 tokens
+        let exec1 = TaskExecution {
+            task_id: Uuid::new_v4(),
+            template_name: "avg-test".to_string(),
+            template_version: 1,
+            outcome: TaskOutcome::Success,
+            executed_at: Utc::now(),
+            turns_used: 10,
+            tokens_used: 1000,
+            downstream_tasks: vec![],
+        };
+        stats.update(&exec1);
+        assert!((stats.avg_turns - 10.0).abs() < f64::EPSILON);
+        assert!((stats.avg_tokens - 1000.0).abs() < f64::EPSILON);
+        assert_eq!(stats.total_tasks, 1);
+
+        // Second execution: 20 turns, 3000 tokens → averages become 15.0 and 2000.0
+        let exec2 = TaskExecution {
+            task_id: Uuid::new_v4(),
+            template_name: "avg-test".to_string(),
+            template_version: 1,
+            outcome: TaskOutcome::Success,
+            executed_at: Utc::now(),
+            turns_used: 20,
+            tokens_used: 3000,
+            downstream_tasks: vec![],
+        };
+        stats.update(&exec2);
+        assert!((stats.avg_turns - 15.0).abs() < f64::EPSILON);
+        assert!((stats.avg_tokens - 2000.0).abs() < f64::EPSILON);
+        assert_eq!(stats.total_tasks, 2);
+
+        // Third execution: 30 turns, 5000 tokens → averages become 20.0 and 3000.0
+        let exec3 = TaskExecution {
+            task_id: Uuid::new_v4(),
+            template_name: "avg-test".to_string(),
+            template_version: 1,
+            outcome: TaskOutcome::Failure,
+            executed_at: Utc::now(),
+            turns_used: 30,
+            tokens_used: 5000,
+            downstream_tasks: vec![],
+        };
+        stats.update(&exec3);
+        assert!((stats.avg_turns - 20.0).abs() < f64::EPSILON);
+        assert!((stats.avg_tokens - 3000.0).abs() < f64::EPSILON);
+        assert_eq!(stats.total_tasks, 3);
+        assert_eq!(stats.successful_tasks, 2);
+        assert_eq!(stats.failed_tasks, 1);
+    }
+
+    #[test]
+    fn test_refinement_request_new_defaults() {
+        let stats = TemplateStats::new("req-test".to_string(), 3);
+        let failed_ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+        let before = Utc::now();
+
+        let request = RefinementRequest::new(
+            "req-test".to_string(),
+            3,
+            RefinementSeverity::Major,
+            EvolutionTrigger::LowSuccessRate,
+            stats,
+            failed_ids.clone(),
+        );
+
+        let after = Utc::now();
+
+        assert_eq!(request.template_name, "req-test");
+        assert_eq!(request.template_version, 3);
+        assert_eq!(request.severity, RefinementSeverity::Major);
+        assert_eq!(request.trigger, EvolutionTrigger::LowSuccessRate);
+        assert_eq!(request.status, RefinementStatus::Pending);
+        assert_eq!(request.failed_task_ids.len(), 2);
+        assert_eq!(request.failed_task_ids, failed_ids);
+        assert!(request.created_at >= before && request.created_at <= after);
+        // id must be a valid non-nil UUID
+        assert_ne!(request.id, Uuid::nil());
+    }
 }
