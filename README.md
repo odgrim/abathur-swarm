@@ -53,6 +53,7 @@ abathur init
 This creates:
 - `.abathur/` directory for the database, worktrees, and logs
 - `.claude/` directory with MCP server configuration
+- `workflows/` directory scaffolded with the default workflow YAML templates (`code`, `analysis`, `docs`, `review`, `pr-review`, `external`)
 
 Set a goal (goals are convergent and guide work, they don't complete):
 
@@ -86,8 +87,9 @@ abathur mcp            Run MCP servers for agent access to infrastructure
 abathur trigger        Manage trigger rules for event-driven automation
 abathur schedule       Manage periodic task schedules
 abathur event          Query and inspect the event store
-abathur workflow       Manage workflow templates
+abathur workflow       List, show, validate, and export workflow templates
 abathur adapter        Manage adapter plugins
+abathur cron           Quick cron schedule management (shorthand for `schedule --cron`)
 ```
 
 All commands support `--json` for machine-readable output and `--config <path>` to override the default `abathur.toml`.
@@ -186,6 +188,19 @@ Agent tiers:
 - **Architect**: Analyzes tasks, designs execution topology, creates new agents (Overmind)
 - **Specialist**: Domain expertise (security, performance, databases)
 - **Worker**: Task execution (code implementation, tests, docs, refactoring)
+
+## Workflows
+
+Workflow templates define the phases a task moves through (e.g. research → plan → implement → review), the role and tool grants for each phase, and how phases depend on one another. YAML files in the `workflows/` directory are the source of truth — `abathur init` scaffolds six defaults (`code`, `analysis`, `docs`, `review`, `pr-review`, `external`) that you can edit or extend.
+
+```
+abathur workflow list            List available workflows and their source
+abathur workflow show <name>     Show phases, tools, and settings for a workflow
+abathur workflow validate        Validate every configured workflow template
+abathur workflow export <name>   Write a workflow template out to YAML
+```
+
+The default workflow applied to new tasks is controlled by `default_workflow` in `abathur.toml` (or `ABATHUR_DEFAULT_WORKFLOW`). Per-task overrides are available at submission time.
 
 ## Two-stage merge queue
 
