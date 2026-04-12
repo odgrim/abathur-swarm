@@ -692,13 +692,23 @@ async fn run_swarm_foreground(
         }
     };
 
-    // Resolve workflow template from config file
-    let workflow_template = if let Some(wf_name) = workflow {
-        let wf = app_config.resolve_workflow(wf_name)
-            .ok_or_else(|| anyhow::anyhow!("Workflow '{}' not found", wf_name))?;
+    // Resolve the workflow template for this swarm. An explicit --workflow flag
+    // wins; otherwise fall back to `config.default_workflow`. Both must resolve
+    // against inline workflows or YAML files in `workflows_dir` — there are no
+    // hardcoded fallbacks. A missing workflow is a hard error that points the
+    // user at `abathur init` to scaffold defaults.
+    let workflow_template = {
+        let name = workflow.unwrap_or(app_config.default_workflow.as_str());
+        let wf = app_config.resolve_workflow(name).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Workflow '{}' not found. Run `abathur init` to scaffold the default \
+                 workflow YAMLs, or set `workflows_dir` in abathur.toml to point at a \
+                 directory that contains them (currently: '{}').",
+                name,
+                app_config.workflows_dir,
+            )
+        })?;
         Some(wf)
-    } else {
-        None
     };
 
     // Collect all workflow templates so the Overmind can route tasks to the right spine.

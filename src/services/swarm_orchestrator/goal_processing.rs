@@ -40,6 +40,7 @@ use super::SwarmOrchestrator;
 async fn replay_gate_rejection_event(
     task: &Task,
     event_bus: &crate::services::event_bus::EventBus,
+    workflows: &[WorkflowTemplate],
 ) {
     let state = match task.context.custom.get("workflow_state")
         .and_then(|v| serde_json::from_value::<WorkflowState>(v.clone()).ok())
@@ -49,8 +50,9 @@ async fn replay_gate_rejection_event(
     };
 
     if let WorkflowState::Rejected { workflow_name, phase_index, reason } = state {
-        let phase_name = WorkflowTemplate::builtin_templates()
-            .get(&workflow_name)
+        let phase_name = workflows
+            .iter()
+            .find(|t| t.name == workflow_name)
             .and_then(|t| t.phases.get(phase_index))
             .map(|p| p.name.clone())
             .unwrap_or_else(|| format!("phase_{}", phase_index));
@@ -492,13 +494,13 @@ where
             )).await;
 
             // Resolve workflow template for this task to determine workspace kind and
-            // output delivery mode. SwarmConfig.workflow_template is set at startup
-            // from the resolved config; None falls back to the built-in code workflow.
+            // output delivery mode. SwarmConfig.workflow_template is populated at
+            // startup from the resolved config; see `cli::commands::swarm`.
             let task_workflow = self
                 .config
                 .workflow_template
                 .clone()
-                .unwrap_or_else(WorkflowTemplate::default_code_workflow);
+                .expect("workflow_template must be resolved at swarm startup");
             let task_workspace_kind = task_workflow.workspace_kind;
             let task_output_delivery = task_workflow.output_delivery.clone();
 
@@ -679,6 +681,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
             let worktree_repo = self.worktree_repo.clone();
             let event_tx = event_tx.clone();
             let event_bus = self.event_bus.clone();
+            let all_workflows = self.config.all_workflows.clone();
             let command_bus = self.command_bus.read().await.clone();
             // Role-aware max_turns defaults — the ceiling should be 2-3x
             // typical usage so agents aren't cut short on complex tasks.
@@ -1667,7 +1670,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                 // AdapterLifecycleSyncHandler can close/comment on the
                                 // external issue. The original event was published on the
                                 // MCP session's local bus which has no handlers.
-                                replay_gate_rejection_event(&completed_task, &event_bus).await;
+                                replay_gate_rejection_event(&completed_task, &event_bus, &all_workflows).await;
                             }
 
                             // Record success with circuit breaker
@@ -1787,7 +1790,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     error = %error_msg,
                                     "Skipping task failure — already terminal (completed via MCP)"
                                 );
-                                replay_gate_rejection_event(&completed_task, &event_bus).await;
+                                replay_gate_rejection_event(&completed_task, &event_bus, &all_workflows).await;
                                 false
                             } else if is_max_turns_auto_completable(&error_msg) {
                                 // Agent exhausted max_turns but its last output says "completed".
@@ -1995,7 +1998,7 @@ NEVER use these Claude Code built-in tools — they bypass Abathur's orchestrati
                                     error = %error_msg,
                                     "Skipping task failure — already terminal (completed via MCP)"
                                 );
-                                replay_gate_rejection_event(&completed_task, &event_bus).await;
+                                replay_gate_rejection_event(&completed_task, &event_bus, &all_workflows).await;
                             } else {
                                 // Fail task via CommandBus (transitions + journals event)
                                 if let Some(ref cb) = command_bus {

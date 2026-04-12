@@ -9,11 +9,23 @@ use std::sync::Arc;
 use abathur::adapters::sqlite::{create_migrated_test_pool, SqliteTaskRepository};
 use abathur::domain::models::task::{Task, TaskSource, TaskStatus, TaskType};
 use abathur::domain::models::workflow_state::{FanOutSlice, WorkflowState};
+use abathur::domain::models::workflow_template::{WorkflowTemplate, DEFAULT_WORKFLOW_YAMLS};
 use abathur::domain::models::TaskPriority;
 use abathur::domain::ports::TaskRepository;
 use abathur::services::event_bus::{EventBus, EventBusConfig};
 use abathur::services::task_service::TaskService;
 use abathur::services::workflow_engine::{AdvanceResult, WorkflowEngine};
+
+/// Load the embedded default workflow YAMLs into a name→template map.
+fn embedded_workflows() -> std::collections::HashMap<String, WorkflowTemplate> {
+    DEFAULT_WORKFLOW_YAMLS
+        .iter()
+        .map(|(name, yaml)| {
+            let tpl: WorkflowTemplate = serde_yaml::from_str(yaml).expect("YAML parses");
+            (name.to_string(), tpl)
+        })
+        .collect()
+}
 
 /// Create a TaskService + WorkflowEngine pair for testing.
 async fn setup() -> (
@@ -26,7 +38,8 @@ async fn setup() -> (
     let task_repo = Arc::new(SqliteTaskRepository::new(pool));
     let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
     let task_service = TaskService::new(task_repo.clone()).with_event_bus(event_bus.clone());
-    let engine = WorkflowEngine::new(task_repo.clone(), task_service.clone(), event_bus.clone(), true);
+    let engine = WorkflowEngine::new(task_repo.clone(), task_service.clone(), event_bus.clone(), true)
+        .with_templates(embedded_workflows());
     (task_service, engine, task_repo, event_bus)
 }
 

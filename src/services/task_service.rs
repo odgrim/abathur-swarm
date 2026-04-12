@@ -589,27 +589,26 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         // --- Auto-enroll in workflow ---
-        // Resolve via Config so YAML-loaded and inline user workflows participate
-        // alongside built-ins (resolution order: inline > YAML > builtin).
+        // Resolve via Config: inline workflows take precedence over YAML workflows
+        // loaded from `workflows_dir`. There are no hardcoded fallbacks — if the
+        // default workflow can't be resolved, reject the task with a remediation
+        // hint rather than creating it unenrolled.
         let config = crate::services::config::Config::load().unwrap_or_default();
         if let Some(wf_name) = Self::infer_workflow_name(&task, &config.default_workflow) {
-            // Validate that the inferred workflow name corresponds to a real template.
-            // If not, skip enrollment and log a warning rather than creating a task
-            // that will fail later when advance() calls get_template().
-            if config.resolve_workflow(&wf_name).is_some() {
-                task.routing_hints.workflow_name = Some(wf_name.clone());
-                let wf_state = WorkflowState::Pending {
-                    workflow_name: wf_name.clone(),
-                };
-                if let Ok(val) = serde_json::to_value(&wf_state) {
-                    task.context.custom.insert("workflow_state".to_string(), val);
-                }
-            } else {
-                tracing::warn!(
-                    task_id = %task.id,
-                    workflow_name = %wf_name,
-                    "Skipping workflow auto-enrollment: unknown template"
-                );
+            if config.resolve_workflow(&wf_name).is_none() {
+                return Err(DomainError::ValidationFailed(format!(
+                    "Workflow '{}' not found. Run `abathur init` to scaffold the \
+                     default workflow YAMLs, or set `workflows_dir` in abathur.toml \
+                     to point at a directory that contains them (currently: '{}').",
+                    wf_name, config.workflows_dir,
+                )));
+            }
+            task.routing_hints.workflow_name = Some(wf_name.clone());
+            let wf_state = WorkflowState::Pending {
+                workflow_name: wf_name.clone(),
+            };
+            if let Ok(val) = serde_json::to_value(&wf_state) {
+                task.context.custom.insert("workflow_state".to_string(), val);
             }
         }
 

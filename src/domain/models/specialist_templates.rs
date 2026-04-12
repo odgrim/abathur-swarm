@@ -1593,7 +1593,16 @@ Call `task_update_status` with "completed".
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::workflow_template::WorkflowPhase;
+    use crate::domain::models::workflow_template::{WorkflowPhase, DEFAULT_WORKFLOW_YAMLS};
+
+    /// Parse the embedded `code` workflow YAML for use as a test fixture.
+    fn code_workflow_fixture() -> WorkflowTemplate {
+        let (_, yaml) = DEFAULT_WORKFLOW_YAMLS
+            .iter()
+            .find(|(n, _)| *n == "code")
+            .expect("`code` workflow must be embedded");
+        serde_yaml::from_str(yaml).expect("embedded code.yaml parses")
+    }
 
     #[test]
     fn test_create_baseline_agents() {
@@ -1710,7 +1719,7 @@ mod tests {
         assert!(!overmind.has_tool("grep"), "overmind should not have grep tool");
 
         // Also verify with workflow-generated overmind
-        let wf = WorkflowTemplate::default_code_workflow();
+        let wf = code_workflow_fixture();
         let wf_overmind = create_overmind_with_workflow(Some(&wf), None);
         assert!(!wf_overmind.has_tool("read"), "workflow overmind should not have read tool");
         assert!(!wf_overmind.has_tool("glob"), "workflow overmind should not have glob tool");
@@ -1751,7 +1760,7 @@ mod tests {
 
     #[test]
     fn test_generate_overmind_prompt_with_default_workflow() {
-        let wf = WorkflowTemplate::default_code_workflow();
+        let wf = code_workflow_fixture();
         let prompt = generate_overmind_prompt(&wf);
 
         // Should contain prefix content
@@ -1776,7 +1785,7 @@ mod tests {
 
     #[test]
     fn test_generate_overmind_prompt_fan_out_heuristic() {
-        let wf = WorkflowTemplate::default_code_workflow();
+        let wf = code_workflow_fixture();
         let prompt = generate_overmind_prompt(&wf);
 
         // Dynamic path should contain fan-out heuristic for read-only root phases
@@ -1880,7 +1889,7 @@ mod tests {
 
     #[test]
     fn test_create_overmind_with_workflow_uses_dynamic_prompt() {
-        let wf = WorkflowTemplate::default_code_workflow();
+        let wf = code_workflow_fixture();
         let overmind = create_overmind_with_workflow(Some(&wf), None);
 
         // Dynamic prompt should differ from static prompt (different formatting)

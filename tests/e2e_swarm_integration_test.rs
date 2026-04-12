@@ -43,6 +43,7 @@ use abathur::domain::models::{
     AccessorId, AgentConstraint, AgentTier, Goal, GoalConstraint, GoalPriority, GoalStatus, MemoryTier,
     MemoryType, Task, TaskDag, TaskPriority, TaskSource, TaskStatus, ToolCapability,
 };
+use abathur::domain::models::workflow_template::{WorkflowTemplate, DEFAULT_WORKFLOW_YAMLS};
 use abathur::domain::ports::{
     AgentRepository, GoalRepository, MemoryRepository, NullMemoryRepository, Substrate,
     TaskFilter, TaskRepository,
@@ -52,6 +53,15 @@ use abathur::services::{
     GoalService, MemoryService, SwarmConfig, SwarmOrchestrator,
     TaskExecution, TaskOutcome, TaskService,
 };
+
+/// Load the embedded `code` workflow YAML for use as a test fixture.
+fn code_workflow_fixture() -> WorkflowTemplate {
+    let (_, yaml) = DEFAULT_WORKFLOW_YAMLS
+        .iter()
+        .find(|(n, _)| *n == "code")
+        .expect("`code` workflow must be embedded");
+    serde_yaml::from_str(yaml).expect("embedded code.yaml parses")
+}
 
 /// Helper to set up all test repositories with in-memory SQLite.
 async fn setup_test_environment() -> (
@@ -1035,6 +1045,7 @@ async fn test_swarm_orchestrator_goal_execution() {
     config.use_worktrees = false;
     config.use_llm_decomposition = false;
     config.track_evolution = true;
+    config.workflow_template = Some(code_workflow_fixture());
 
     let event_bus = Arc::new(abathur::services::EventBus::new(abathur::services::EventBusConfig::default()));
     let event_reactor = Arc::new(abathur::services::EventReactor::new(event_bus.clone(), abathur::services::ReactorConfig::default()));

@@ -192,16 +192,13 @@ fn list_workflows(json_mode: bool) -> Result<()> {
 
     let available = config.available_workflows();
 
-    let yaml_workflows = config.load_yaml_workflows();
     let workflows: Vec<WorkflowSummary> = available
         .into_iter()
         .map(|(name, description, phase_count, is_default)| {
             let source = if config.workflows.iter().any(|wf| wf.name == name) {
                 "abathur.toml".to_string()
-            } else if yaml_workflows.contains_key(&name) {
-                "yaml".to_string()
             } else {
-                "built-in".to_string()
+                "yaml".to_string()
             };
             WorkflowSummary {
                 name,
@@ -258,10 +255,9 @@ fn validate_workflows(json_mode: bool) -> Result<()> {
     let mut results = Vec::new();
 
     // Resolve the effective template for each known workflow name (inline >
-    // YAML > builtin) so each name is validated exactly once against the
-    // source that will actually be used at runtime.
+    // YAML) so each name is validated exactly once against the source that
+    // will actually be used at runtime.
     let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    names.extend(WorkflowTemplate::builtin_templates().into_keys());
     names.extend(config.load_yaml_workflows().into_keys());
     names.extend(config.workflows.iter().map(|wf| wf.name.clone()));
 
@@ -353,18 +349,21 @@ fn export_all_workflows(output_dir: Option<&str>, json_mode: bool) -> Result<()>
     let config = Config::load().context("Failed to load configuration")?;
     let dir = output_dir.unwrap_or(&config.workflows_dir);
 
-    let templates = WorkflowTemplate::builtin_templates();
     let mut exported = Vec::new();
-
-    let mut names: Vec<&String> = templates.keys().collect();
+    let mut names: Vec<String> = config
+        .available_workflows()
+        .into_iter()
+        .map(|(name, _, _, _)| name)
+        .collect();
     names.sort();
-    for name in names {
-        let wf = &templates[name];
-        let path = write_workflow_yaml(wf, dir)?;
-        exported.push(ExportOutput {
-            workflow: wf.name.clone(),
-            path,
-        });
+    for name in &names {
+        if let Some(wf) = config.resolve_workflow(name) {
+            let path = write_workflow_yaml(&wf, dir)?;
+            exported.push(ExportOutput {
+                workflow: wf.name,
+                path,
+            });
+        }
     }
 
     let out = ExportAllOutput { exported };

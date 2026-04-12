@@ -683,20 +683,27 @@ impl Config {
             }
         }
 
-        // Verify default_workflow references a known workflow (user-defined, YAML, or built-in).
-        let builtin_names = ["code", "analysis", "docs", "review", "pr-review", "external"];
+        // Verify default_workflow references a known workflow (inline or YAML).
         let yaml_workflows = self.load_yaml_workflows();
-        if !builtin_names.contains(&self.default_workflow.as_str())
-            && !self.workflows.iter().any(|wf| wf.name == self.default_workflow)
+        if !self.workflows.iter().any(|wf| wf.name == self.default_workflow)
             && !yaml_workflows.contains_key(&self.default_workflow)
         {
+            let known = {
+                let mut names: Vec<&str> = yaml_workflows.keys().map(String::as_str).collect();
+                names.extend(self.workflows.iter().map(|wf| wf.name.as_str()));
+                names.sort();
+                names.dedup();
+                names.join(", ")
+            };
             return Err(ConfigError::ValidationError {
                 field: "default_workflow".to_string(),
                 reason: format!(
-                    "default workflow '{}' not found in defined workflows, YAML workflows, \
-                     or built-in workflows (built-ins: {})",
-                    self.default_workflow,
-                    builtin_names.join(", "),
+                    "default workflow '{}' not found. Known workflows: [{}]. \
+                     Run `abathur init` to scaffold the default YAML workflows, \
+                     or point `workflows_dir` at a directory that contains them \
+                     (currently: '{}'). Inline workflows may also be declared via \
+                     `[[workflows]]` in abathur.toml.",
+                    self.default_workflow, known, self.workflows_dir,
                 ),
             });
         }
@@ -722,87 +729,40 @@ impl Config {
     /// Resolution order (first match wins):
     /// 1. Inline user-defined workflows (from `[[workflows]]` in config)
     /// 2. YAML workflow files (from `workflows_dir`)
-    /// 3. Built-in workflows (code, analysis, docs, review, pr-review, external)
     pub fn resolve_workflow(&self, name: &str) -> Option<WorkflowTemplate> {
-        // 1. Check inline user-defined workflows.
         if let Some(wf) = self.workflows.iter().find(|wf| wf.name == name) {
             return Some(wf.clone());
         }
-
-        // 2. Check YAML workflow files.
-        let yaml_workflows = self.load_yaml_workflows();
-        if let Some(wf) = yaml_workflows.get(name) {
-            return Some(wf.clone());
-        }
-
-        // 3. Fall back to built-in workflows.
-        match name {
-            "code" => Some(WorkflowTemplate::default_code_workflow()),
-            "analysis" => Some(WorkflowTemplate::analysis_workflow()),
-            "docs" => Some(WorkflowTemplate::docs_workflow()),
-            "review" => Some(WorkflowTemplate::review_only_workflow()),
-            "pr-review" => Some(WorkflowTemplate::pr_review_workflow()),
-            "external" => Some(WorkflowTemplate::external_workflow()),
-            _ => None,
-        }
+        self.load_yaml_workflows().remove(name)
     }
 
-    /// Returns the default workflow template.
-    pub fn default_workflow_template(&self) -> WorkflowTemplate {
-        self.resolve_workflow(&self.default_workflow)
-            .unwrap_or_else(WorkflowTemplate::default_code_workflow)
+    /// Returns the default workflow template, or an error explaining how to
+    /// install one when `default_workflow` cannot be resolved.
+    pub fn default_workflow_template(&self) -> Result<WorkflowTemplate, ConfigError> {
+        self.resolve_workflow(&self.default_workflow).ok_or_else(|| {
+            ConfigError::ValidationError {
+                field: "default_workflow".to_string(),
+                reason: format!(
+                    "default workflow '{}' could not be resolved from inline \
+                     workflows or YAML files in '{}'. Run `abathur init` to \
+                     scaffold the default workflow YAMLs, or set `workflows_dir` \
+                     in abathur.toml to point at an existing workflow directory.",
+                    self.default_workflow, self.workflows_dir,
+                ),
+            }
+        })
     }
 
     /// Returns available workflows as (name, description, phase_count, is_default).
     ///
-    /// Lists all built-in workflows followed by user-defined workflows.
-    /// A built-in workflow is omitted from the built-in list if the user has
-    /// defined a workflow with the same name (user definition takes precedence).
+    /// Lists YAML workflows (from `workflows_dir`) and inline user-defined
+    /// workflows. Inline workflows shadow YAML workflows with the same name.
     pub fn available_workflows(&self) -> Vec<(String, String, usize, bool)> {
         let mut workflows = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        // Collect names of user-defined and YAML workflows for shadowing check.
         let yaml_workflows = self.load_yaml_workflows();
 
-        // Add each built-in workflow unless shadowed by user-defined or YAML.
-        type BuiltinEntry = (&'static str, fn() -> WorkflowTemplate);
-        let builtins: [BuiltinEntry; 6] = [
-            ("code",      WorkflowTemplate::default_code_workflow),
-            ("analysis",  WorkflowTemplate::analysis_workflow),
-            ("docs",      WorkflowTemplate::docs_workflow),
-            ("review",    WorkflowTemplate::review_only_workflow),
-            ("pr-review", WorkflowTemplate::pr_review_workflow),
-            ("external",  WorkflowTemplate::external_workflow),
-        ];
-        for (name, constructor) in &builtins {
-            if !self.workflows.iter().any(|wf| wf.name == *name)
-                && !yaml_workflows.contains_key(*name)
-            {
-                let builtin = constructor();
-                seen.insert(builtin.name.clone());
-                workflows.push((
-                    builtin.name.clone(),
-                    builtin.description.clone(),
-                    builtin.phases.len(),
-                    self.default_workflow == *name,
-                ));
-            }
-        }
-
-        // Add YAML workflows (unless shadowed by inline user-defined).
-        for (name, wf) in &yaml_workflows {
-            if !self.workflows.iter().any(|uw| uw.name == *name) && seen.insert(name.clone()) {
-                workflows.push((
-                    wf.name.clone(),
-                    wf.description.clone(),
-                    wf.phases.len(),
-                    self.default_workflow == *name,
-                ));
-            }
-        }
-
-        // Add inline user-defined workflows (highest priority).
         for wf in &self.workflows {
             if seen.insert(wf.name.clone()) {
                 workflows.push((
@@ -810,6 +770,20 @@ impl Config {
                     wf.description.clone(),
                     wf.phases.len(),
                     self.default_workflow == wf.name,
+                ));
+            }
+        }
+
+        let mut yaml_names: Vec<&String> = yaml_workflows.keys().collect();
+        yaml_names.sort();
+        for name in yaml_names {
+            if seen.insert(name.clone()) {
+                let wf = &yaml_workflows[name];
+                workflows.push((
+                    wf.name.clone(),
+                    wf.description.clone(),
+                    wf.phases.len(),
+                    self.default_workflow == *name,
                 ));
             }
         }

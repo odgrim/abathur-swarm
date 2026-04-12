@@ -18,6 +18,7 @@ use tempfile::TempDir;
 use abathur::adapters::sqlite::{initialize_database, SqliteTaskRepository};
 use abathur::domain::models::task::{Task, TaskStatus};
 use abathur::domain::models::workflow_state::{FanOutSlice, GateVerdict, WorkflowState};
+use abathur::domain::models::workflow_template::WorkflowTemplate;
 use abathur::domain::ports::TaskRepository;
 use abathur::services::event_bus::{EventBus, EventBusConfig};
 use abathur::services::task_service::TaskService;
@@ -84,7 +85,12 @@ mod harness {
         let repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(repo.clone()).with_event_bus(event_bus.clone());
-        let engine = WorkflowEngine::new(repo.clone(), task_service.clone(), event_bus, true);
+        // `abathur init` has scaffolded the default workflow YAMLs into
+        // `<tempdir>/workflows/`; load them so the engine resolves "code" etc.
+        let templates = WorkflowTemplate::load_from_directory(dir.join("workflows"))
+            .expect("workflow YAMLs scaffolded by `abathur init` must load");
+        let engine = WorkflowEngine::new(repo.clone(), task_service.clone(), event_bus, true)
+            .with_templates(templates);
         (task_service, engine, repo)
     }
 

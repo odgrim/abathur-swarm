@@ -7,6 +7,8 @@ use tokio::fs;
 
 use crate::adapters::sqlite::initialize_database;
 use crate::cli::output::{output, CommandOutput};
+use crate::domain::models::workflow_template::DEFAULT_WORKFLOW_YAMLS;
+use crate::services::config::Config;
 use crate::ABATHUR_ALLOWED_TOOLS;
 
 #[derive(Args, Debug)]
@@ -28,6 +30,8 @@ pub struct InitOutput {
     pub directories_created: Vec<String>,
     pub database_initialized: bool,
     pub agents_copied: usize,
+    pub workflows_written: Vec<String>,
+    pub workflows_skipped: Vec<String>,
 }
 
 impl CommandOutput for InitOutput {
@@ -44,6 +48,18 @@ impl CommandOutput for InitOutput {
         }
         if self.agents_copied > 0 {
             lines.push(format!("\nCopied {} baseline agent(s)", self.agents_copied));
+        }
+        if !self.workflows_written.is_empty() {
+            lines.push("\nScaffolded workflows:".to_string());
+            for wf in &self.workflows_written {
+                lines.push(format!("  - {}", wf));
+            }
+        }
+        if !self.workflows_skipped.is_empty() {
+            lines.push("\nSkipped existing workflow files:".to_string());
+            for wf in &self.workflows_skipped {
+                lines.push(format!("  - {}", wf));
+            }
         }
         lines.join("\n")
     }
@@ -72,6 +88,8 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
             directories_created: vec![],
             database_initialized: false,
             agents_copied: 0,
+            workflows_written: vec![],
+            workflows_skipped: vec![],
         };
         output(&output_data, json_mode);
         return Ok(());
@@ -108,6 +126,16 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
     // Merge abathur MCP config into .claude/settings.json
     merge_claude_settings(&target_path).await.context("Failed to merge .claude/settings.json")?;
 
+    // Scaffold default workflow YAMLs (skip any that already exist).
+    let workflows_subdir = Config::default().workflows_dir;
+    let workflows_dir = target_path.join(&workflows_subdir);
+    let (workflows_written, workflows_skipped) =
+        scaffold_default_workflows(&workflows_dir).await
+            .with_context(|| format!("Failed to scaffold workflows in {:?}", workflows_dir))?;
+    for wf in &workflows_skipped {
+        tracing::info!(workflow = %wf, "skipped existing workflow file");
+    }
+
     let output_data = InitOutput {
         success: true,
         message: if args.force {
@@ -119,10 +147,34 @@ pub async fn execute(args: InitArgs, json_mode: bool) -> Result<()> {
         directories_created,
         database_initialized: true,
         agents_copied: 0,
+        workflows_written,
+        workflows_skipped,
     };
 
     output(&output_data, json_mode);
     Ok(())
+}
+
+/// Write each embedded default workflow YAML into `dir` unless a file with the
+/// same name is already there. Returns `(written, skipped)` filenames.
+async fn scaffold_default_workflows(dir: &Path) -> Result<(Vec<String>, Vec<String>)> {
+    fs::create_dir_all(dir).await
+        .with_context(|| format!("Failed to create workflows directory {:?}", dir))?;
+
+    let mut written = Vec::new();
+    let mut skipped = Vec::new();
+    for (name, contents) in DEFAULT_WORKFLOW_YAMLS {
+        let filename = format!("{name}.yaml");
+        let path = dir.join(&filename);
+        if path.exists() {
+            skipped.push(filename);
+            continue;
+        }
+        fs::write(&path, contents).await
+            .with_context(|| format!("Failed to write {:?}", path))?;
+        written.push(filename);
+    }
+    Ok((written, skipped))
 }
 
 

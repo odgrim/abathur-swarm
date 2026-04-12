@@ -139,26 +139,27 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
             task_repo,
             task_service,
             event_bus,
-            templates: WorkflowTemplate::builtin_templates(),
+            templates: std::collections::HashMap::new(),
             verification_enabled,
         }
     }
 
     /// Merge additional workflow templates into this engine.
     ///
-    /// Supplied templates take precedence over built-in templates with the
-    /// same name. This allows YAML and user-defined workflows to override
-    /// built-in defaults while keeping the remaining builtins as fallbacks.
+    /// Supplied templates take precedence over any already loaded with the
+    /// same name.
     pub fn with_templates(mut self, extra: std::collections::HashMap<String, WorkflowTemplate>) -> Self {
         self.templates.extend(extra);
         self
     }
 
-    /// Create a workflow engine that includes YAML and inline user-defined
-    /// templates loaded from the current configuration.
+    /// Create a workflow engine seeded with YAML and inline workflow templates
+    /// loaded from the current configuration.
     ///
-    /// Resolution order mirrors `Config::resolve_workflow`: inline workflows
-    /// override YAML workflows, which override built-in templates.
+    /// Resolution mirrors `Config::resolve_workflow`: inline workflows override
+    /// YAML workflows from `workflows_dir`. If no matching workflows are found,
+    /// the engine will reject tasks whose template name cannot be resolved;
+    /// run `abathur init` to scaffold the default YAML workflows.
     pub fn new_with_config(
         task_repo: Arc<T>,
         task_service: TaskService<T>,
@@ -166,10 +167,7 @@ impl<T: TaskRepository + 'static> WorkflowEngine<T> {
         verification_enabled: bool,
     ) -> Self {
         let config = crate::services::config::Config::load().unwrap_or_default();
-        let mut templates = WorkflowTemplate::builtin_templates();
-        // Layer on YAML workflows (overrides builtins).
-        templates.extend(config.load_yaml_workflows());
-        // Layer on inline workflows (highest priority).
+        let mut templates = config.load_yaml_workflows();
         for wf in &config.workflows {
             templates.insert(wf.name.clone(), wf.clone());
         }
@@ -1752,11 +1750,34 @@ mod tests {
     use crate::adapters::sqlite::{
         create_migrated_test_pool, task_repository::SqliteTaskRepository,
     };
+    use crate::domain::models::workflow_template::DEFAULT_WORKFLOW_YAMLS;
     use crate::services::event_bus::{EventBus, EventBusConfig};
+
+    /// Load the embedded default workflow YAMLs into a name→template map.
+    fn default_templates() -> std::collections::HashMap<String, WorkflowTemplate> {
+        DEFAULT_WORKFLOW_YAMLS
+            .iter()
+            .map(|(name, yaml)| {
+                let tpl: WorkflowTemplate = serde_yaml::from_str(yaml).expect("YAML parses");
+                (name.to_string(), tpl)
+            })
+            .collect()
+    }
+
+    /// Construct a `WorkflowEngine` preloaded with the default workflow templates.
+    fn test_engine(
+        task_repo: Arc<SqliteTaskRepository>,
+        task_service: TaskService<SqliteTaskRepository>,
+        event_bus: Arc<EventBus>,
+        verification_enabled: bool,
+    ) -> WorkflowEngine<SqliteTaskRepository> {
+        WorkflowEngine::new(task_repo, task_service, event_bus, verification_enabled)
+            .with_templates(default_templates())
+    }
 
     #[test]
     fn test_is_gate_phase() {
-        let templates = WorkflowTemplate::builtin_templates();
+        let templates = default_templates();
         // External workflow: triage (idx 0) and validation (idx 1) are gates
         assert!(is_gate_phase(&templates, "external", 0, "triage"));
         assert!(is_gate_phase(&templates, "external", 1, "validation"));
@@ -1781,7 +1802,7 @@ mod tests {
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
 
         let task_service = TaskService::new(task_repo.clone());
-        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+        let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
 
         // Create a parent task enrolled in a workflow, in Running state
         let mut parent = Task::with_title("Parent workflow task", "Do work");
@@ -1856,7 +1877,7 @@ mod tests {
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
 
         let task_service = TaskService::new(task_repo.clone());
-        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+        let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
 
         // Create parent task in Running state
         let mut parent = Task::with_title("Parent workflow task", "Do work");
@@ -1918,7 +1939,7 @@ mod tests {
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
 
         let task_service = TaskService::new(task_repo.clone());
-        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+        let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
 
         // Create parent task in Running state
         let mut parent = Task::with_title("Parent workflow task", "Do work");
@@ -2067,7 +2088,7 @@ mod tests {
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
-        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+        let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
 
         // Create a task in Running status with Pending workflow state
         let mut task = Task::with_title("Advance pending test", "desc");
@@ -2097,7 +2118,7 @@ mod tests {
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
-        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+        let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
 
         let mut task = Task::with_title("Advance gate test", "desc");
         task.transition_to(TaskStatus::Ready).unwrap();
@@ -2128,7 +2149,7 @@ mod tests {
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
-        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+        let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
 
         let mut task = Task::with_title("Advance ready test", "desc");
         task.transition_to(TaskStatus::Ready).unwrap();
@@ -2158,7 +2179,7 @@ mod tests {
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
-        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+        let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
 
         // Create parent task
         let mut parent = Task::with_title("Advance running test", "desc");
@@ -2199,7 +2220,7 @@ mod tests {
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
-        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+        let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
 
         let fake_id = Uuid::new_v4();
         let result = engine.advance(fake_id).await;
@@ -2220,7 +2241,7 @@ mod tests {
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
-        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+        let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
 
         // Create parent in PhaseReady
         let mut task = Task::with_title("Fan out test", "desc");
@@ -2262,7 +2283,7 @@ mod tests {
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
-        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+        let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
 
         let fake_id = Uuid::new_v4();
         let result = engine.fan_out(fake_id, vec![]).await;
@@ -2283,7 +2304,7 @@ mod tests {
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
-        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+        let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
 
         let fake_id = Uuid::new_v4();
         let slices = vec![FanOutSlice {
@@ -2310,7 +2331,7 @@ mod tests {
         let task_repo = Arc::new(SqliteTaskRepository::new(pool));
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(task_repo.clone());
-        let engine = WorkflowEngine::new(task_repo.clone(), task_service, event_bus.clone(), false);
+        let engine = test_engine(task_repo.clone(), task_service, event_bus.clone(), false);
 
         // Create parent in PhaseRunning (not PhaseReady)
         let mut task = Task::with_title("Fan out wrong state", "desc");
