@@ -571,6 +571,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_warning_threshold_equal_to_max_failures_skips_warning() {
+        // When warning_threshold == max_consecutive_failures, the daemon should
+        // stop with TooManyFailures WITHOUT ever emitting FailureThresholdWarning.
+        // The warning fires at `consecutive_failures == warning_threshold` but the
+        // stop check (`>= max_consecutive_failures`) is evaluated first in the loop,
+        // so the daemon exits before reaching the warning branch.
+        let config = DecayDaemonConfig {
+            maintenance_interval: Duration::from_millis(50),
+            run_on_startup: false,
+            max_consecutive_failures: 3,
+            warning_threshold: 3, // equal to max
+            verbose: false,
+        };
+        let (daemon, _repo) = make_daemon(true, config);
+
+        let handle = daemon.handle();
+        let mut rx = daemon.run().await;
+
+        let mut saw_warning = false;
+        let mut stop_reason = None;
+
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                match &event {
+                    DecayDaemonEvent::FailureThresholdWarning { .. } => {
+                        saw_warning = true;
+                    }
+                    DecayDaemonEvent::Stopped { reason } => {
+                        stop_reason = Some(reason.clone());
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok(), "Test timed out waiting for daemon to stop");
+        assert!(
+            !saw_warning,
+            "FailureThresholdWarning should NOT fire when warning_threshold == max_consecutive_failures"
+        );
+        assert_eq!(
+            stop_reason,
+            Some(StopReason::TooManyFailures),
+            "Daemon should still stop with TooManyFailures"
+        );
+
+        let status = handle.status().await;
+        assert!(!status.running);
+        assert_eq!(status.consecutive_failures, 3);
+    }
+
+    #[tokio::test]
     async fn test_successful_run_resets_failure_counter() {
         // Config: warning_threshold=2, max=5
         let config = DecayDaemonConfig {

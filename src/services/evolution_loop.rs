@@ -1688,6 +1688,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_auto_revert_only_applies_to_regression_trigger() {
+        // auto_revert_enabled=true, but the trigger is LowSuccessRate (not Regression).
+        // The action must be FlaggedForRefinement, NOT Reverted.
+        let config = EvolutionConfig {
+            min_tasks_for_evaluation: 3,
+            regression_min_tasks: 3,
+            regression_threshold: 0.15,
+            regression_detection_window_hours: 24,
+            auto_revert_enabled: true,
+            refinement_threshold: 0.70,
+            major_refinement_threshold: 0.01,
+            major_refinement_min_tasks: 100,
+            stale_refinement_timeout_hours: 48,
+        };
+        let evolution = EvolutionLoop::new(config);
+
+        // All executions on the same version → no regression possible.
+        // 1 success + 2 failures on v1 → 33% success rate, below refinement_threshold (0.70).
+        evolution
+            .record_execution(make_execution("guard-agent", 1, TaskOutcome::Success))
+            .await;
+        for _ in 0..2 {
+            evolution
+                .record_execution(make_execution("guard-agent", 1, TaskOutcome::Failure))
+                .await;
+        }
+
+        let events = evolution.evaluate().await;
+
+        // There should be an event for this agent, and it must NOT be Reverted.
+        let agent_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.template_name == "guard-agent")
+            .collect();
+        assert!(
+            !agent_events.is_empty(),
+            "Expected at least one evolution event for guard-agent; got none"
+        );
+        for ev in &agent_events {
+            assert!(
+                !matches!(ev.action_taken, EvolutionAction::Reverted { .. }),
+                "LowSuccessRate trigger should NOT produce Reverted action; got {:?}",
+                ev.action_taken
+            );
+            assert!(
+                matches!(
+                    ev.action_taken,
+                    EvolutionAction::FlaggedForRefinement { .. }
+                ),
+                "LowSuccessRate trigger should produce FlaggedForRefinement; got {:?}",
+                ev.action_taken
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_regression_window_expiry() {
         let config = EvolutionConfig {
             min_tasks_for_evaluation: 3,

@@ -1019,4 +1019,53 @@ mod tests {
         // Values: [1k, 2k, ..., 99k, 500k] — index 94 = 95_000
         assert_eq!(p95, 95_000);
     }
+
+    #[test]
+    fn test_p95_with_exactly_min_samples() {
+        let mut tracker = BudgetCalibrationTracker::default();
+        // MIN_SAMPLES_FOR_P95 is 5 — exactly 5 samples should yield Some.
+        let values = [10_000u64, 20_000, 30_000, 40_000, 50_000];
+        for v in values {
+            tracker.record_completion(Complexity::Simple, v);
+        }
+        assert_eq!(tracker.sample_count(Complexity::Simple), 5);
+        let p95 = tracker.p95_for_tier(Complexity::Simple);
+        assert!(p95.is_some(), "p95 must be Some with exactly MIN_SAMPLES_FOR_P95 samples");
+
+        // With 4 samples it should be None.
+        let mut tracker2 = BudgetCalibrationTracker::default();
+        for v in &values[..4] {
+            tracker2.record_completion(Complexity::Moderate, *v);
+        }
+        assert_eq!(tracker2.p95_for_tier(Complexity::Moderate), None);
+    }
+
+    #[test]
+    fn test_calibration_alerts_multiple_tiers_exceed() {
+        let mut tracker = BudgetCalibrationTracker::default();
+
+        // Simple budget = 150_000, 20% threshold → 180_000. Push P95 above.
+        for _ in 0..10 {
+            tracker.record_completion(Complexity::Simple, 200_000);
+        }
+
+        // Moderate budget = 400_000, 20% threshold → 480_000. Push P95 above.
+        for _ in 0..10 {
+            tracker.record_completion(Complexity::Moderate, 600_000);
+        }
+
+        // Complex budget = 1_000_000, 20% threshold → 1_200_000. Push P95 above.
+        for _ in 0..10 {
+            tracker.record_completion(Complexity::Complex, 1_500_000);
+        }
+
+        let alerts = tracker.calibration_alerts();
+        // All three tiers must appear.
+        assert_eq!(alerts.len(), 3, "expected alerts for all three exceeding tiers");
+
+        let tiers: Vec<Complexity> = alerts.iter().map(|a| a.tier).collect();
+        assert!(tiers.contains(&Complexity::Simple), "missing Simple alert");
+        assert!(tiers.contains(&Complexity::Moderate), "missing Moderate alert");
+        assert!(tiers.contains(&Complexity::Complex), "missing Complex alert");
+    }
 }
