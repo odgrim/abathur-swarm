@@ -101,6 +101,9 @@ Examples:
         /// Filter by task type (standard, verification, research, review)
         #[arg(long = "type")]
         task_type: Option<String>,
+        /// Filter by parent task ID
+        #[arg(long)]
+        parent: Option<String>,
         /// Show only ready tasks
         #[arg(long)]
         ready: bool,
@@ -618,7 +621,12 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
             output(&out, json_mode);
         }
 
-        TaskCommands::List { status, priority, agent, task_type, ready, limit } => {
+        TaskCommands::List { status, priority, agent, task_type, ready, parent, limit } => {
+            let parent_id = match parent {
+                Some(ref p) => Some(resolve_task_id(&pool, p).await?),
+                None => None,
+            };
+
             let tasks = if ready {
                 service.get_ready_tasks(limit).await?
             } else {
@@ -626,7 +634,7 @@ pub async fn execute(args: TaskArgs, json_mode: bool) -> Result<()> {
                     status: status.as_ref().and_then(|s| TaskStatus::from_str(s)),
                     priority: priority.as_ref().and_then(|p| TaskPriority::from_str(p)),
                     agent_type: agent,
-                    parent_id: None,
+                    parent_id,
                     task_type: task_type.as_ref().and_then(|t| TaskType::from_str(t)),
                     limit: Some(limit),
                     created_before: None,

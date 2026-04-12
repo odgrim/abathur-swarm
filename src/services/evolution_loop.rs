@@ -2736,4 +2736,16 @@ mod tests {
         // id must be a valid non-nil UUID
         assert_ne!(request.id, Uuid::nil());
     }
+
+    #[tokio::test]
+    async fn test_complete_refinement_nonexistent_id_is_noop() {
+        let evolution = EvolutionLoop::new(EvolutionConfig::default());
+
+        // Completing a non-existent refinement should not panic or create entries
+        evolution.complete_refinement(Uuid::new_v4(), true).await;
+        evolution.complete_refinement(Uuid::new_v4(), false).await;
+
+        let pending = evolution.get_pending_refinements().await;
+        assert!(pending.is_empty(), "No refinement entries should exist");
+    }
 }
