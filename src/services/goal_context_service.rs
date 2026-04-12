@@ -171,9 +171,13 @@ impl<G: GoalRepository> GoalContextService<G> {
         }
 
         // Security
+        let token_is_security = text.contains("token")
+            && !text.contains("token budget")
+            && !text.contains("token limit")
+            && !text.contains("token count");
         if agent.contains("security") || text.contains("auth") || text.contains("encrypt")
             || text.contains("vulnerab") || text.contains("permission") || text.contains("credential")
-            || text.contains("token") || text.contains("secret")
+            || token_is_security || text.contains("secret") || text.contains("jwt")
         {
             domains.push("security".to_string());
         }
@@ -194,9 +198,13 @@ impl<G: GoalRepository> GoalContextService<G> {
         }
 
         // Backend
+        let server_is_backend = text.contains("server")
+            && !text.contains("mcp server")
+            && !text.contains("language server")
+            && !text.contains("lsp server");
         if agent.contains("backend") || text.contains("api") || text.contains("endpoint")
             || text.contains("database") || text.contains("query") || text.contains("migration")
-            || text.contains("server")
+            || server_is_backend
         {
             domains.push("backend".to_string());
         }
@@ -544,6 +552,50 @@ mod tests {
         assert!(
             domains.contains(&"convergence".to_string()),
             "Case-insensitive match should find convergence domain"
+        );
+    }
+
+    #[test]
+    fn test_infer_domains_token_budget_not_security() {
+        // "token budget" is a memory/resource concept, not a security concept
+        let task = make_task("Optimize token budget allocation", "Reduce token count for context loading");
+        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        assert!(
+            !domains.contains(&"security".to_string()),
+            "Token budget/count should not trigger security domain"
+        );
+    }
+
+    #[test]
+    fn test_infer_domains_mcp_server_not_backend() {
+        // "mcp server" and "language server" are tooling, not backend services
+        let task = make_task("Configure mcp server instructions", "Update language server protocol settings");
+        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        assert!(
+            !domains.contains(&"backend".to_string()),
+            "MCP server / language server should not trigger backend domain"
+        );
+    }
+
+    #[test]
+    fn test_infer_domains_auth_token_still_security() {
+        // "auth token" should still match security via both "auth" and "token"
+        let task = make_task("Rotate auth token", "Refresh expired JWT credentials");
+        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        assert!(
+            domains.contains(&"security".to_string()),
+            "Auth token / JWT should still trigger security domain"
+        );
+    }
+
+    #[test]
+    fn test_infer_domains_api_server_still_backend() {
+        // "api server" should still match backend via both "api" and "server"
+        let task = make_task("Deploy api server", "Scale the REST server instances");
+        let domains = GoalContextService::<crate::adapters::sqlite::goal_repository::SqliteGoalRepository>::infer_task_domains(&task);
+        assert!(
+            domains.contains(&"backend".to_string()),
+            "API server / REST server should still trigger backend domain"
         );
     }
 
