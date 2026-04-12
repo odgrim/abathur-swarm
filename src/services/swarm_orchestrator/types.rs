@@ -70,8 +70,10 @@ pub struct SwarmConfig {
     /// When None, the classification heuristic decides.
     pub default_execution_mode: Option<crate::domain::models::ExecutionMode>,
 
-    /// Optional workflow template used for workspace provisioning (workspace kind,
-    /// output delivery). Falls back to the built-in code workflow when `None`.
+    /// Workflow template used for workspace provisioning (workspace kind,
+    /// output delivery). Populated at swarm startup by resolving the configured
+    /// `default_workflow` (or `--workflow`) against inline and YAML workflows.
+    /// Consumers `.expect()` this to be `Some` once the swarm is running.
     pub workflow_template: Option<WorkflowTemplate>,
 
     /// All configured workflow spines made available to the Overmind.

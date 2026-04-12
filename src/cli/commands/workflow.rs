@@ -34,7 +34,7 @@ pub enum WorkflowCommands {
         #[arg(short, long)]
         output: Option<String>,
     },
-    /// Export all built-in workflow templates to YAML
+    /// Export all configured workflow templates to YAML
     ExportAll {
         /// Output directory (defaults to configured workflows_dir)
         #[arg(short, long)]

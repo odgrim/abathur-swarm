@@ -149,8 +149,10 @@ max_agents_critical = 1
 
 # ─── Default workflow ─────────────────────────────────────────────────────────
 
-# Built-in workflows: "code", "analysis", "docs", "review"
-# Override with ABATHUR_DEFAULT_WORKFLOW env var
+# Default workflows scaffolded by `abathur init` into ./workflows:
+# "code", "analysis", "docs", "review", "pr-review", "external".
+# Edit those YAML files or add your own under `workflows_dir` to customize.
+# Override with ABATHUR_DEFAULT_WORKFLOW env var.
 default_workflow = "code"
 
 # ─── Federation (cross-swarm delegation) ─────────────────────────────────────

@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_templates_includes_pr_review() {
+    fn test_default_workflows_include_pr_review() {
         let templates = embedded_workflows();
         assert!(templates.contains_key("pr-review"));
     }
@@ -528,21 +528,21 @@ mod tests {
     }
 
     #[test]
-    fn test_all_builtin_templates_validate() {
+    fn test_all_default_workflows_validate() {
         let templates = embedded_workflows();
         assert!(
             !templates.is_empty(),
-            "builtin_templates() must return at least one template"
+            "DEFAULT_WORKFLOW_YAMLS must contain at least one template"
         );
         for (name, template) in &templates {
             template.validate().unwrap_or_else(|e| {
-                panic!("Built-in template '{}' failed validation: {}", name, e);
+                panic!("Default workflow '{}' failed validation: {}", name, e);
             });
         }
     }
 
     #[test]
-    fn test_yaml_roundtrip_all_builtins() {
+    fn test_yaml_roundtrip_all_defaults() {
         let templates = embedded_workflows();
         for (name, original) in &templates {
             let yaml = original.to_yaml().unwrap_or_else(|e| {
@@ -598,7 +598,7 @@ tools:
     }
 
     #[test]
-    fn test_builtin_gate_phases() {
+    fn test_default_workflow_gate_phases() {
         let code = embedded_workflow("code");
         assert!(!code.phases[0].gate); // research
         assert!(!code.phases[1].gate); // plan
