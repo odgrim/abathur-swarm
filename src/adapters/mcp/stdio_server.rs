@@ -1086,7 +1086,7 @@ where
         let task_id = uuid::Uuid::parse_str(task_id_str)
             .map_err(|e| format!("Invalid task_id: {}", e))?;
 
-        let engine = crate::services::workflow_engine::WorkflowEngine::new(
+        let engine = crate::services::workflow_engine::WorkflowEngine::new_with_config(
             self.task_service.repo().clone(),
             self.task_service.clone(),
             self.event_bus.clone().unwrap_or_else(|| {
@@ -1124,7 +1124,7 @@ where
         let task_id = uuid::Uuid::parse_str(task_id_str)
             .map_err(|e| format!("Invalid task_id: {}", e))?;
 
-        let engine = crate::services::workflow_engine::WorkflowEngine::new(
+        let engine = crate::services::workflow_engine::WorkflowEngine::new_with_config(
             self.task_service.repo().clone(),
             self.task_service.clone(),
             self.event_bus.clone().unwrap_or_else(|| {
@@ -1178,7 +1178,7 @@ where
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let engine = crate::services::workflow_engine::WorkflowEngine::new(
+        let engine = crate::services::workflow_engine::WorkflowEngine::new_with_config(
             self.task_service.repo().clone(),
             self.task_service.clone(),
             self.event_bus.clone().unwrap_or_else(|| {
@@ -1232,7 +1232,7 @@ where
             serde_json::from_value(slices_value.clone())
                 .map_err(|e| format!("Invalid slices: {}", e))?;
 
-        let engine = crate::services::workflow_engine::WorkflowEngine::new(
+        let engine = crate::services::workflow_engine::WorkflowEngine::new_with_config(
             self.task_service.repo().clone(),
             self.task_service.clone(),
             self.event_bus.clone().unwrap_or_else(|| {

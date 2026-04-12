@@ -168,7 +168,10 @@ impl<T: TaskRepository> TaskService<T> {
     ///
     /// Returns `None` for tasks that should NOT be enrolled (verification tasks,
     /// review tasks, tasks already part of a workflow phase, non-root subtasks).
-    fn infer_workflow_name(task: &Task) -> Option<String> {
+    ///
+    /// `default_workflow` is the workflow name used for root tasks without an
+    /// explicit routing hint (typically `config.default_workflow`).
+    fn infer_workflow_name(task: &Task, default_workflow: &str) -> Option<String> {
         // Adapter-sourced tasks -> "external" (triage-first)
         if let TaskSource::Adapter(_) = &task.source {
             return Some("external".to_string());
@@ -189,9 +192,9 @@ impl<T: TaskRepository> TaskService<T> {
             return Some(name.clone());
         }
 
-        // Root tasks (no parent) default to "code"
+        // Root tasks (no parent) use the configured default workflow
         if task.parent_id.is_none() {
-            return Some("code".to_string());
+            return Some(default_workflow.to_string());
         }
 
         // Other subtasks are not enrolled
@@ -586,12 +589,14 @@ impl<T: TaskRepository> TaskService<T> {
         }
 
         // --- Auto-enroll in workflow ---
-        if let Some(wf_name) = Self::infer_workflow_name(&task) {
+        // Resolve via Config so YAML-loaded and inline user workflows participate
+        // alongside built-ins (resolution order: inline > YAML > builtin).
+        let config = crate::services::config::Config::load().unwrap_or_default();
+        if let Some(wf_name) = Self::infer_workflow_name(&task, &config.default_workflow) {
             // Validate that the inferred workflow name corresponds to a real template.
             // If not, skip enrollment and log a warning rather than creating a task
             // that will fail later when advance() calls get_template().
-            let templates = crate::domain::models::workflow_template::WorkflowTemplate::builtin_templates();
-            if templates.contains_key(&wf_name) {
+            if config.resolve_workflow(&wf_name).is_some() {
                 task.routing_hints.workflow_name = Some(wf_name.clone());
                 let wf_state = WorkflowState::Pending {
                     workflow_name: wf_name.clone(),

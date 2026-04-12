@@ -257,42 +257,23 @@ fn validate_workflows(json_mode: bool) -> Result<()> {
 
     let mut results = Vec::new();
 
-    // Validate all built-in workflows.
-    let builtins = WorkflowTemplate::builtin_templates();
-    let mut builtin_names: Vec<&String> = builtins.keys().collect();
-    builtin_names.sort();
-    for name in builtin_names {
-        let wf = &builtins[name];
-        let valid = wf.validate();
-        results.push(ValidationResult {
-            name: wf.name.clone(),
-            valid: valid.is_ok(),
-            error: valid.err(),
-        });
-    }
+    // Resolve the effective template for each known workflow name (inline >
+    // YAML > builtin) so each name is validated exactly once against the
+    // source that will actually be used at runtime.
+    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    names.extend(WorkflowTemplate::builtin_templates().into_keys());
+    names.extend(config.load_yaml_workflows().into_keys());
+    names.extend(config.workflows.iter().map(|wf| wf.name.clone()));
 
-    // Validate YAML workflows.
-    let yaml_workflows = config.load_yaml_workflows();
-    let mut yaml_names: Vec<&String> = yaml_workflows.keys().collect();
-    yaml_names.sort();
-    for name in yaml_names {
-        let wf = &yaml_workflows[name];
-        let valid = wf.validate();
-        results.push(ValidationResult {
-            name: wf.name.clone(),
-            valid: valid.is_ok(),
-            error: valid.err(),
-        });
-    }
-
-    // Validate each inline user-defined workflow.
-    for wf in &config.workflows {
-        let valid = wf.validate();
-        results.push(ValidationResult {
-            name: wf.name.clone(),
-            valid: valid.is_ok(),
-            error: valid.err(),
-        });
+    for name in names {
+        if let Some(wf) = config.resolve_workflow(&name) {
+            let valid = wf.validate();
+            results.push(ValidationResult {
+                name: wf.name.clone(),
+                valid: valid.is_ok(),
+                error: valid.err(),
+            });
+        }
     }
 
     let all_valid = results.iter().all(|r| r.valid);
