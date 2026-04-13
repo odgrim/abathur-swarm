@@ -53,7 +53,7 @@ abathur init
 This creates:
 - `.abathur/` directory for the database, worktrees, and logs
 - `.claude/` directory with MCP server configuration
-- `workflows/` directory scaffolded with the default workflow YAML templates (`code`, `analysis`, `docs`, `review`, `pr-review`, `external`)
+- `.abathur/workflows/` directory scaffolded with the default workflow YAML templates (`code`, `analysis`, `docs`, `review`, `pr-review`, `external`)
 
 Set a goal (goals are convergent and guide work, they don't complete):
 
@@ -191,7 +191,7 @@ Agent tiers:
 
 ## Workflows
 
-Workflow templates define the phases a task moves through (e.g. research → plan → implement → review), the role and tool grants for each phase, and how phases depend on one another. YAML files in the `workflows/` directory are the source of truth — `abathur init` scaffolds six defaults (`code`, `analysis`, `docs`, `review`, `pr-review`, `external`) that you can edit or extend.
+Workflow templates define the phases a task moves through (e.g. research → plan → implement → review), the role and tool grants for each phase, and how phases depend on one another. YAML files in the `.abathur/workflows/` directory are the source of truth — `abathur init` scaffolds six defaults (`code`, `analysis`, `docs`, `review`, `pr-review`, `external`) that you can edit or extend.
 
 ```
 abathur workflow list            List available workflows and their source

@@ -25,7 +25,7 @@ fn default_workflow_name() -> String {
 
 /// Default directory for YAML workflow definitions.
 fn default_workflows_dir() -> String {
-    "workflows".to_string()
+    ".abathur/workflows".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,7 +59,7 @@ pub struct Config {
     #[serde(default)]
     pub workflows: Vec<WorkflowTemplate>,
     /// Directory containing YAML workflow definitions.
-    /// Defaults to "workflows". Set to empty string to disable.
+    /// Defaults to ".abathur/workflows". Set to empty string to disable.
     #[serde(default = "default_workflows_dir")]
     pub workflows_dir: String,
     /// Cost-control scheduling configuration (quiet hours).

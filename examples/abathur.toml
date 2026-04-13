@@ -149,7 +149,7 @@ max_agents_critical = 1
 
 # ─── Default workflow ─────────────────────────────────────────────────────────
 
-# Default workflows scaffolded by `abathur init` into ./workflows:
+# Default workflows scaffolded by `abathur init` into ./.abathur/workflows:
 # "code", "analysis", "docs", "review", "pr-review", "external".
 # Edit those YAML files or add your own under `workflows_dir` to customize.
 # Override with ABATHUR_DEFAULT_WORKFLOW env var.

@@ -1,9 +1,11 @@
 design_docs
 
-# Runtime - ignore .abathur directory except for hooks
+# Runtime - ignore .abathur directory except for hooks and workflows
 .abathur/*
 !.abathur/hooks/
 !.abathur/hooks.yaml
+!.abathur/workflows/
+!.abathur/workflows/**
 .abathur/worktrees/
 *.db
 *.db-shm

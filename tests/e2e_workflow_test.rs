@@ -86,8 +86,8 @@ mod harness {
         let event_bus = Arc::new(EventBus::new(EventBusConfig::default()));
         let task_service = TaskService::new(repo.clone()).with_event_bus(event_bus.clone());
         // `abathur init` has scaffolded the default workflow YAMLs into
-        // `<tempdir>/workflows/`; load them so the engine resolves "code" etc.
-        let templates = WorkflowTemplate::load_from_directory(dir.join("workflows"))
+        // `<tempdir>/.abathur/workflows/`; load them so the engine resolves "code" etc.
+        let templates = WorkflowTemplate::load_from_directory(dir.join(".abathur/workflows"))
             .expect("workflow YAMLs scaffolded by `abathur init` must load");
         let engine = WorkflowEngine::new(repo.clone(), task_service.clone(), event_bus, true)
             .with_templates(templates);

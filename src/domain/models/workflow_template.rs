@@ -139,17 +139,18 @@ fn default_max_verification_retries() -> u32 {
 
 /// Default workflow YAML definitions embedded at compile time.
 ///
-/// Used by `abathur init` to scaffold a starter `workflows/` directory and by
-/// tests to load a known set of templates. At runtime, workflows are loaded
-/// exclusively from the `workflows_dir` configured in `abathur.toml` (or the
-/// default `workflows/`); these embedded strings are never read by the engine.
+/// Used by `abathur init` to scaffold a starter `.abathur/workflows/` directory
+/// and by tests to load a known set of templates. At runtime, workflows are
+/// loaded exclusively from the `workflows_dir` configured in `abathur.toml`
+/// (or the default `.abathur/workflows/`); these embedded strings are never
+/// read by the engine.
 pub const DEFAULT_WORKFLOW_YAMLS: &[(&str, &str)] = &[
-    ("code", include_str!("../../../workflows/code.yaml")),
-    ("analysis", include_str!("../../../workflows/analysis.yaml")),
-    ("docs", include_str!("../../../workflows/docs.yaml")),
-    ("review", include_str!("../../../workflows/review.yaml")),
-    ("pr-review", include_str!("../../../workflows/pr-review.yaml")),
-    ("external", include_str!("../../../workflows/external.yaml")),
+    ("code", include_str!("../../../.abathur/workflows/code.yaml")),
+    ("analysis", include_str!("../../../.abathur/workflows/analysis.yaml")),
+    ("docs", include_str!("../../../.abathur/workflows/docs.yaml")),
+    ("review", include_str!("../../../.abathur/workflows/review.yaml")),
+    ("pr-review", include_str!("../../../.abathur/workflows/pr-review.yaml")),
+    ("external", include_str!("../../../.abathur/workflows/external.yaml")),
 ];
 
 impl WorkflowTemplate {
