@@ -7,6 +7,6 @@ default_timezone = "America/Los_Angeles"
 
 [[quiet_windows]]
 name = "workday"
-start_cron = "0 5 * * 1-5"
-end_cron = "0 18 * * 1-5"
+start_cron = "0 5 * * 2-6"
+end_cron = "0 18 * * 2-6"
 description = "Pause during normal working hours (5am–6pm, Mon–Fri)"
